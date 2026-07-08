@@ -46,6 +46,17 @@ docker exec vibeic-eda yosys --version
 docker exec vibeic-eda openroad -version
 ```
 
+**Using it with the Vibe-IC plugin (identity bind-mount required).** Flows that write
+into the container from the host — the plugin's phase-3 place-&-route step does an in-container
+`cd <host_project_path>` — need the project tree mounted at the **same path** inside the
+container, or you get `cd: No such file or directory`. Start it with an identity mount:
+```bash
+docker run -d --name vibeic-eda \
+  -v "$PWD:$PWD" -w "$PWD" \
+  vibeic/vibeic-eda:0.2.5 --skip sleep infinity
+# then point the MCP at it:  EDA_CONTAINER=vibeic-eda
+```
+
 **Interactive desktop (VNC / noVNC in the browser):**
 ```bash
 docker run -d --name vibeic-eda \
