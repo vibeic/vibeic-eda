@@ -1,0 +1,4 @@
+# The Dockerfile builds everything via `git clone` — the build context needs nothing
+# but the Dockerfile itself. Exclude docs/CI so the context stays tiny.
+*
+!Dockerfile

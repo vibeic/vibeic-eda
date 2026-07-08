@@ -1,0 +1,90 @@
+name: release
+
+# Build vibeic-eda from source (SHA-pinned forks) and push to Docker Hub + GHCR.
+#
+# Trigger: push a semver tag (e.g. `v0.2.5`) or run manually.
+#
+# NOTE on the runner: a full from-source build produces a ~26 GB image and takes 1-2 h.
+# GitHub-hosted runners (14 GB disk, 6 h) CANNOT build this. Use a SELF-HOSTED runner with
+# the label `vibeic-builder` (>= 60 GB free disk, >= 8 cores, docker + buildx). Register one
+# under the vibeic org: Settings -> Actions -> Runners.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build/push (e.g. 0.2.5), no leading v"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: vibeic-eda
+  PLATFORMS: linux/amd64          # add ,linux/arm64 once the base publishes an arm64 tag
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, vibeic-builder]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write               # GHCR push via GITHUB_TOKEN
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version: $V"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          provenance: false
+          tags: |
+            vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            vibeic/${{ env.IMAGE }}:latest
+            ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ghcr.io/vibeic/${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.title=vibeic-eda
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Smoke test the pushed image
+        run: |
+          docker pull vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+          docker run --rm vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }} \
+            bash -lc 'yosys --version && openroad -version && iverilog -V | head -1 && netgen -batch quit'
