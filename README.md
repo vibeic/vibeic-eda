@@ -80,6 +80,19 @@ docker run -it --rm -v "$PWD:/foss/designs/work" -w /foss/designs/work \
 Tools live at the same paths as the iic-osic-tools base (`/foss/tools/bin/...`), so any
 flow written for iic-osic-tools runs unchanged — it just gets the fixed binaries.
 
+**Upgrade a running container to a new image version:** a container is pinned to the
+image ID its tag resolved to at creation, so pulling a newer image does NOT update it —
+the container must be recreated. [`restart-eda.sh`](./restart-eda.sh) does that safely:
+it clones the existing container's mounts / cmd / user / workdir onto the new image,
+refuses to interrupt an in-flight EDA job (override with `FORCE=1`), and verifies the
+image ID after the swap. Run it as your normal user (not root/sudo).
+```bash
+./restart-eda.sh              # recreate on the PINNED version from ./VERSION
+./restart-eda.sh 0.2.11       # or any explicit tag / full image ref
+```
+The no-argument default is deliberately the pinned `VERSION`, never a floating
+`latest` — a stale local `latest` would silently hand you an outdated toolchain.
+
 ---
 
 ## What's inside
