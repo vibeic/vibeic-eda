@@ -48,6 +48,15 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Building version: $V"
 
+      - name: Version-sync guard (VERSION + install docs must match the release tag)
+        run: |
+          python3 sync_image_version.py --check
+          FILE_V="$(python3 sync_image_version.py --print)"
+          if [ "$FILE_V" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "::error::VERSION file ($FILE_V) != release tag (${{ steps.ver.outputs.version }}). Run './sync_image_version.py --set ${{ steps.ver.outputs.version }}' and commit before tagging." >&2
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -83,8 +92,14 @@ jobs:
             org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Smoke test the pushed image
+      - name: Smoke test the pushed image (bare docker exec — no login shell)
         run: |
-          docker pull vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-          docker run --rm vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }} \
-            bash -lc 'yosys --version && openroad -version && iverilog -V | head -1 && netgen -batch quit'
+          IMG=vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+          docker pull "$IMG"
+          C=$(docker run -d "$IMG" --skip sleep infinity)
+          # Bare (non-login) exec must resolve every tool — this is the 0.2.12 PATH fix.
+          docker exec "$C" yosys --version
+          docker exec "$C" openroad -version
+          docker exec "$C" iverilog -V | head -1
+          docker exec "$C" netgen -batch quit
+          docker rm -f "$C"

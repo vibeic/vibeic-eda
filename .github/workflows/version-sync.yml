@@ -1,0 +1,17 @@
+name: image-version-sync
+
+# Fool-proof gate: the image tag `vibeic-eda:X.Y.Z` referenced in the install docs
+# must equal the VERSION source of truth. Runs on every push / PR (fast, no docker),
+# so a doc that didn't get bumped fails BEFORE anyone tries to pull a stale tag.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install-doc tags == VERSION
+        run: python3 sync_image_version.py --check
