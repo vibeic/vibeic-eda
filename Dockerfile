@@ -220,3 +220,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && chmod -R a+rX /opt/vibeic-forks
 # restore the base's non-root runtime user
 USER 1000
+
+# --- bare `docker exec` PATH (vibeic enhancement over stock iic-osic-tools) ---
+# The stock base only puts /foss/tools/* on PATH via /etc/profile.d/iic-osic-tools-setup.sh,
+# which runs for LOGIN shells only. A non-login `docker exec <c> <tool>` (and
+# `docker exec <c> bash -c '<tool>'`, the idiom the Vibe-IC MCP uses) therefore could not
+# resolve yosys/openroad/sta/... ("executable file not found in $PATH") — including the bare
+# `docker exec vibeic-eda yosys --version` in this repo's README Quick Start. Bake the tool
+# dirs into a global ENV PATH so tools resolve WITHOUT a login shell or a per-command export.
+# Additive only (login shells still re-prepend via profile.d — harmless duplicate).
+ENV PATH=/headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/foss/tools/kactus2:/foss/tools/klayout:/foss/tools/osic-multitool:${PATH}
