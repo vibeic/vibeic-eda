@@ -31,7 +31,7 @@ RUN git clone https://github.com/vibeic/OpenROAD.git /src \
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS yosys-builder
-ARG YOSYS_REF=d83a4e16c42fcbef8588e1bf1ea401e98074d448  # rebased onto v0.67 (synth.cc conflict resolved) — gatekeeper 2026-07-13
+ARG YOSYS_REF=d83a4e16c42fcbef8588e1bf1ea401e98074d448  # pinned; branch vibeic/synth-fixes-v0.67 (rebased onto v0.67, synth.cc resolved 2026-07-13)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
       libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
