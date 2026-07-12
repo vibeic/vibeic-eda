@@ -64,7 +64,7 @@ RUN git clone https://github.com/vibeic/ngspice.git /ngspice \
 #   netgen: property-error verdict, portless guard, -auto-global, -nopower, black-box match
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS lvs-builder
-ARG MAGIC_REF=5aea4c245e22bd7b738f87b60289415db4b60e07  # pinned; branch vibeic/lvs-fidelity
+ARG MAGIC_REF=9f91cd2487d61bbc7120b4c1371a3612986d6ddd  # pinned; branch vibeic/lvs-fidelity-8.3.675 (rebased onto 8.3.675 clean, 2026-07-13)
 ARG NETGEN_REF=b7d4138b6407d86107868efd5896644b4f81e535  # pinned; branch vibeic/lvs-fidelity
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git m4 tcl-dev tk-dev libx11-dev libcairo2-dev libncurses-dev ca-certificates \
