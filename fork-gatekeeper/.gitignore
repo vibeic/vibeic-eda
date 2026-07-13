@@ -1,0 +1,6 @@
+# fork-gatekeeper runtime state — regenerated on every tick, never committed
+reports/
+ledger/
+__pycache__/
+*.pyc
+last_build_result.json
