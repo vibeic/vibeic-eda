@@ -1,0 +1,18 @@
+{
+  "_comment": "The vibeic org's forked open-source EDA tools + their upstream sources. Discovered from the vibeic GitHub org (fork=true, parent recorded). This is the registry the fork-gatekeeper tracks.",
+  "org": "vibeic",
+  "forks": [
+    {"tool": "OpenROAD",        "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop", "upstream": "The-OpenROAD-Project/OpenROAD"},
+    {"tool": "yosys",           "role": "synthesis / tech-mapping / optimization",                     "upstream": "YosysHQ/yosys"},
+    {"tool": "klayout",         "role": "DRC / layout-edit / GDS streamout / extraction",              "upstream": "KLayout/klayout"},
+    {"tool": "magic",           "role": "DRC / layout-edit / extraction",                              "upstream": "RTimothyEdwards/magic"},
+    {"tool": "netgen",          "role": "LVS",                                                         "upstream": "RTimothyEdwards/netgen"},
+    {"tool": "iverilog",        "role": "RTL simulation",                                              "upstream": "steveicarus/iverilog"},
+    {"tool": "verilator",       "role": "RTL simulation (lint / fast sim)",                            "upstream": "verilator/verilator"},
+    {"tool": "ngspice",         "role": "analog / mixed-signal SPICE",                                 "upstream": "danchitnis/ngspice-sf-mirror"},
+    {"tool": "sby",             "role": "formal (SymbiYosys)",                                         "upstream": "YosysHQ/sby"},
+    {"tool": "cocotb",          "role": "Python cosim testbench",                                      "upstream": "cocotb/cocotb"},
+    {"tool": "cocotb-coverage", "role": "coverage for cocotb",                                         "upstream": "mciepluc/cocotb-coverage"},
+    {"tool": "pyuvm",           "role": "UVM in Python",                                               "upstream": "pyuvm/pyuvm"}
+  ]
+}

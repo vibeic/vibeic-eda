@@ -1,0 +1,10 @@
+{
+  "_comment": "Wires option B's green gate. image_build.cmd rebases each candidate's vibeic branch onto its new upstream release, bumps the vibeic-eda Dockerfile ARG, docker-builds the image, and smoke-regresses it. GK_MODE=verify (default, staged) proves the build without touching production; set GK_MODE=promote to auto ff-branch + push image on green. Owner staged rollout: verify green first, then flip to promote.",
+  "image_build": {
+    "cmd": "bash /home/reyerchu/eda-fork-gatekeeper/build_and_regress.sh",
+    "cwd": "/home/reyerchu/eda-fork-gatekeeper",
+    "mode": "verify",
+    "timeout": 21600,
+    "result": "/home/reyerchu/eda-fork-gatekeeper/last_build_result.json"
+  }
+}
