@@ -88,9 +88,9 @@ FOOTER = """<footer>
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
-.fork-kpi{background:var(--bg-card,#fff);border:1px solid var(--border,#232a33);border-radius:14px;padding:1.1rem 1.25rem}
-.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--accent,#1a56db);word-break:break-all}
-.fork-kpi .l{font-size:.8rem;color:var(--text-muted,#6b7684);margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
+.fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
+.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:#f5f8fb;word-break:break-all}
+.fork-kpi .l{font-size:.8rem;color:#9fb0c0;margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
 .fork-table{width:100%;border-collapse:collapse;font-size:.92rem;margin-top:1rem}
 .fork-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted,#6b7684);font-weight:600;padding:.6rem .7rem;border-bottom:1px solid var(--border,#232a33)}
 .fork-table td{padding:.7rem .7rem;border-bottom:1px solid var(--border,#232a33);vertical-align:middle}
