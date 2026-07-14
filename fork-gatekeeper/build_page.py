@@ -192,7 +192,7 @@ const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
   const lastCheck = REPORT ? (REPORT.date||"") : "—";
   const kpis = [
     [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
-    ["vibeic-eda:"+imageVer, {en:"Current image",zh:"目前 image"}],
+    ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     [totalPatches, {en:"Patches carried",zh:"揹著的補丁"}],
     [withNewRel, {en:"Tools with a new release",zh:"有新 release 的工具"}],
     [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
