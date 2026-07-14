@@ -88,19 +88,19 @@ FOOTER = """<footer>
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
-.fork-kpi{background:var(--surface,#12161c);border:1px solid var(--border,#232a33);border-radius:14px;padding:1.1rem 1.25rem}
-.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
-.fork-kpi .l{font-size:.8rem;color:var(--muted,#8b98a5);margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
+.fork-kpi{background:var(--bg-card,#fff);border:1px solid var(--border,#232a33);border-radius:14px;padding:1.1rem 1.25rem}
+.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--accent,#1a56db);word-break:break-all}
+.fork-kpi .l{font-size:.8rem;color:var(--text-muted,#6b7684);margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
 .fork-table{width:100%;border-collapse:collapse;font-size:.92rem;margin-top:1rem}
-.fork-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#8b98a5);font-weight:600;padding:.6rem .7rem;border-bottom:1px solid var(--border,#232a33)}
+.fork-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted,#6b7684);font-weight:600;padding:.6rem .7rem;border-bottom:1px solid var(--border,#232a33)}
 .fork-table td{padding:.7rem .7rem;border-bottom:1px solid var(--border,#232a33);vertical-align:middle}
 .fork-table tr.trow{cursor:pointer;transition:background .12s}
 .fork-table tr.trow:hover{background:rgba(120,150,180,.06)}
 .fork-tool{font-weight:650}
-.fork-tool .role{display:block;font-size:.74rem;color:var(--muted,#8b98a5);font-weight:400;margin-top:.15rem}
+.fork-tool .role{display:block;font-size:.74rem;color:var(--text-muted,#6b7684);font-weight:400;margin-top:.15rem}
 .fork-mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.82rem}
 .pilln{display:inline-block;min-width:1.9rem;text-align:center;font-family:ui-monospace,monospace;font-size:.8rem;font-weight:700;padding:.12rem .5rem;border-radius:20px}
-.pilln.zero{color:var(--muted,#8b98a5);background:transparent;border:1px solid var(--border,#232a33)}
+.pilln.zero{color:var(--text-muted,#6b7684);background:transparent;border:1px solid var(--border,#232a33)}
 .pilln.behind{color:#fff;background:#c07d1e}
 .pilln.ahead{color:#fff;background:#2f8f6b}
 .fork-detail{background:rgba(120,150,180,.05)}
@@ -108,12 +108,12 @@ STYLE = """<style>
 .fork-detail .inner{padding:1rem 1.2rem;display:none}
 .fork-detail.open .inner{display:block}
 .fork-detail h5{margin:.2rem 0 .5rem;font-size:.85rem}
-.fork-commit{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--muted,#8b98a5);padding:.2rem 0;display:flex;gap:.6rem}
+.fork-commit{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--text-muted,#6b7684);padding:.2rem 0;display:flex;gap:.6rem}
 .fork-commit a{color:inherit;text-decoration:none;border-bottom:1px dotted currentColor}
 .fork-commit .sha{color:#63a8ea;flex:none}
 .fork-verd{font-family:ui-monospace,monospace;font-size:.78rem}
-.fork-verd.MERGED{color:#2f8f6b}.fork-verd.DEFERRED{color:#c07d1e}.fork-verd.SKIP{color:var(--muted,#8b98a5)}.fork-verd.CLEAN{color:#63a8ea}
-.fork-caption{color:var(--muted,#8b98a5);font-size:.85rem;margin:.4rem 0 0}
+.fork-verd.MERGED{color:#2f8f6b}.fork-verd.DEFERRED{color:#c07d1e}.fork-verd.SKIP{color:var(--text-muted,#6b7684)}.fork-verd.CLEAN{color:#63a8ea}
+.fork-caption{color:var(--text-muted,#6b7684);font-size:.85rem;margin:.4rem 0 0}
 .fork-scroll{overflow-x:auto}
 @media(max-width:760px){.fork-hide-sm{display:none}}
 </style>"""
@@ -204,10 +204,10 @@ const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
     const ahead = d.ahead||0;
     const newRel = d.behind_releases||0;
     const last = (d.sync_log&&d.sync_log.length)?d.sync_log[d.sync_log.length-1]:null;
-    const verd = last ? `<span class="fork-verd ${esc(last.verdict||'')}">${esc(last.verdict||'')}</span> <span style="color:var(--muted,#8b98a5)">${esc((last.date||'').slice(0,10))}</span>` : '<span style="color:var(--muted,#8b98a5)">—</span>';
+    const verd = last ? `<span class="fork-verd ${esc(last.verdict||'')}">${esc(last.verdict||'')}</span> <span style="color:var(--text-muted,#6b7684)">${esc((last.date||'').slice(0,10))}</span>` : '<span style="color:var(--text-muted,#6b7684)">—</span>';
     const pin = d.integrated
-      ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--muted,#8b98a5);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}`
-      : `<span style="color:var(--muted,#8b98a5)" data-en="not layered" data-zh="未納入">not layered</span>`;
+      ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}`
+      : `<span style="color:var(--text-muted,#6b7684)" data-en="not layered" data-zh="未納入">not layered</span>`;
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
