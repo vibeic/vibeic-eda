@@ -135,8 +135,21 @@ def tick() -> dict:
                 rep = assess_release.assess(led["tool"])
                 assessments[led["tool"]] = rep
                 (adir / f"{date}-{led['tool']}.md").write_text(assess_release.render_md(rep))
+                (adir / f"{date}-{led['tool']}.json").write_text(json.dumps(rep, ensure_ascii=False))
             except Exception as e:  # noqa: BLE001 — assessment must never break the tick
                 print(f"  [assess] {led['tool']} error (ignored): {e}")
+
+    # Phase 3: open a cherry-pick MERGE PR (deterministic; holds token) for the clearly-safe
+    # commits — real upstream commits, human-reviewed, never auto-merged, never force-push.
+    # Opt-in (GK_MERGE_PR), off by default. Never breaks the tick.
+    if assessments and os.environ.get("GK_MERGE_PR") in ("1", "true", "yes"):
+        try:
+            import prepare_merge_pr
+            for r in prepare_merge_pr.prepare(assessments, date):
+                print(f"  [merge-pr] {r.get('tool'):16} {r.get('status')} "
+                      f"{r.get('url') or r.get('note') or ''}"[:110])
+        except Exception as e:  # noqa: BLE001
+            print(f"  [merge-pr] error (ignored): {e}")
 
     # LEGACY blind-rebase harness (rebase our branch onto the WHOLE release + build). Retired
     # as the default by the selective-merge pivot; kept for reference, runs ONLY if explicitly
