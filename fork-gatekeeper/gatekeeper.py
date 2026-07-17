@@ -34,18 +34,27 @@ ONLY if the new image is green.
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-HERE = Path(__file__).parent
-LEDGER = HERE / "ledger"
-REPORTS = HERE / "reports"
-REG_CFG = HERE / "regression.json"
+HERE = Path(__file__).parent          # the (version-controlled) source location
+# Runtime state lives OUTSIDE the source tree so the checked-in copy can run in-place
+# without dirtying the repo. Override with GK_STATE_DIR; defaults to the user cache.
+STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+LEDGER = STATE / "ledger"
+REPORTS = STATE / "reports"
+REG_CFG = HERE / "regression.json"    # config ships WITH the source
 sys.path.insert(0, str(HERE))
 import discover_forks as disc  # noqa: E402
 import build_page  # noqa: E402
+try:
+    import pr_notify  # opens a vibe-ic PR on actionable ticks (replaced email)
+except Exception:  # noqa: BLE001
+    pr_notify = None
 
 
 def _now_date() -> str:
@@ -69,12 +78,13 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
     """Run the integration harness (rebase → build → smoke → gated promote). Returns a
     per-candidate {tool: {status, detail, sha}} map read from GK_RESULT."""
     import os as _os
-    cmd, cwd = cfg.get("cmd"), cfg.get("cwd")
-    result_path = cfg.get("result", str(HERE / "last_build_result.json"))
+    cmd, cwd = cfg.get("cmd"), cfg.get("cwd") or str(HERE)   # run the harness from the source dir
+    result_path = cfg.get("result", str(STATE / "last_build_result.json"))
     if not cmd:
         return {}
     env = {**_os.environ,
            "GK_RESULT": result_path,
+           "GK_STATE_DIR": str(STATE),
            "GK_MODE": _os.environ.get("GK_MODE", cfg.get("mode", "verify")),
            "VIBEIC_CANDIDATES": json.dumps(
                [{"tool": c["tool"], "arg": c.get("dockerfile_arg"), "branch": c.get("vibeic_branch"),
@@ -134,11 +144,14 @@ def tick() -> dict:
             if s == "promoted":
                 entry["verdict"], entry["merged_release"] = "MERGED", latest
                 entry["note"] = f"integrated {latest} + image pushed: {detail}"
+            elif s == "promote_failed":
+                entry["verdict"] = "DEFERRED"
+                entry["note"] = f"promote attempted for {latest} but FAILED (nothing shipped) — {detail}"
             elif s == "built_green":
                 entry["verdict"] = "DEFERRED"
                 entry["note"] = (f"rebased onto {latest} + image build VERIFIED GREEN — enable "
                                  f"GK_MODE=promote to auto-merge + push. {detail}")
-            else:  # rebase_conflict / tag_missing / built_red / worktree_fail / no_clone
+            else:  # rebase_conflict / tag_missing / built_red / worktree_fail / no_clone / no_vibeic_branch
                 entry["verdict"] = "DEFERRED"
                 entry["note"] = f"{s} → target {latest}: {detail}"
         elif not cfg:
@@ -156,8 +169,17 @@ def tick() -> dict:
         print(f"  {tool:16} {entry['verdict']:11} {entry['note'][:78]}")
 
     REPORTS.mkdir(parents=True, exist_ok=True)
+    # the ledgers were seeded BEFORE promote; a successful promote ships a NEW image
+    # version, so surface the actually-shipped version (parsed from the 'promoted' note)
+    # in the report header instead of the stale pre-bump one.
+    img_ver = leds and next(iter(leds.values())).get("image_version")
+    for r in results:
+        if r.get("verdict") == "MERGED":
+            m = re.search(r"vibeic-eda:([0-9]+\.[0-9]+\.[0-9]+)", r.get("note", "") or "")
+            if m:
+                img_ver = m.group(1)
     summary = {"date": date, "generated_at": _now_iso(),
-               "image_version": leds and next(iter(leds.values())).get("image_version"),
+               "image_version": img_ver,
                "counts": {v: sum(1 for r in results if r["verdict"] == v)
                           for v in ("MERGED", "DEFERRED", "CLEAN", "NOT_LAYERED")},
                "results": results}
@@ -167,7 +189,29 @@ def tick() -> dict:
         build_page.build(build_page.DEFAULT_OUT)
     except Exception as e:
         print(f"  (page rebuild failed: {e})")
+    _maybe_notify(summary)
     return summary
+
+
+def _maybe_notify(summary: dict):
+    """On an actionable day — a MERGED promote, or a new upstream release that FAILED to
+    integrate (DEFERRED with new_releases>0, needs a human) — open a PR on vibe-ic
+    recording it (MERGED bumps the vibeic-eda doc pins + a sync-log row; a failure files a
+    backlog row). All-CLEAN days do nothing (no PR noise). Never raises — a PR hiccup must
+    not break the tick."""
+    if pr_notify is None:
+        return
+    c = summary["counts"]
+    actionable = c.get("MERGED", 0) > 0 or any(
+        r["verdict"] == "DEFERRED" and (r.get("new_releases") or 0) > 0
+        for r in summary["results"])
+    if not actionable:
+        return
+    try:
+        ok, detail = pr_notify.open_pr(summary, _report_md(summary))
+        print(f"  [notify] {'PR: ' if ok else 'skip: '}{detail}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [notify] error (ignored): {e}")
 
 
 def _report_md(s: dict) -> str:

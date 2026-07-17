@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-HERE = Path(__file__).parent
-LEDGER = HERE / "ledger"
+HERE = Path(__file__).parent          # version-controlled source
+STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 FORKS = json.loads((HERE / "FORKS.json").read_text())["forks"]
 ORG = "vibeic"
 EDA_REPO = "vibeic/vibeic-eda"

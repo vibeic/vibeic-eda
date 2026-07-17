@@ -13,8 +13,13 @@ set -uo pipefail
 export PATH="${HOME}/.local/bin:/home/reyerchu/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin"
 export HOME="${HOME:-/home/reyerchu}"
 
-DIR="/home/reyerchu/eda-fork-gatekeeper"
-LOG_DIR="${HOME}/.cache/eda-fork-gatekeeper"
+# SOURCE (version-controlled, canonical) is this script's own directory — so the cron
+# runs whatever is checked into vibeic-eda/fork-gatekeeper/, no separate deployed copy
+# to drift. RUNTIME STATE (ledgers, reports, locks, logs) lives in the cache dir,
+# OUTSIDE the source tree, so running in place never dirties the repo.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GK_STATE_DIR="${GK_STATE_DIR:-${HOME}/.cache/eda-fork-gatekeeper}"
+LOG_DIR="${GK_STATE_DIR}"
 LOCK="${LOG_DIR}/tick.lock"
 LOG="${LOG_DIR}/tick.log"
 mkdir -p "${LOG_DIR}"

@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-HERE = Path(__file__).parent
-LEDGER = HERE / "ledger"
-REPORTS = HERE / "reports"
-DEFAULT_OUT = Path("/home/reyerchu/vibeic.ai/eda-forks.html")
+HERE = Path(__file__).parent          # version-controlled source
+STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+LEDGER = STATE / "ledger"             # runtime state — outside the source tree
+REPORTS = STATE / "reports"
+DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or "/home/reyerchu/vibeic.ai/eda-forks.html")
 
 
 def _load_ledgers() -> list[dict]:
