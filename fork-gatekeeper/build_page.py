@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,27 @@ STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 REPORTS = STATE / "reports"
 DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or "/home/reyerchu/vibeic.ai/eda-forks.html")
+
+# --- NDA redaction at the publish boundary (BINDING) ---------------------------
+# The ledgers are seeded from the forks' own commit messages, some of which name a
+# commercial NDA foundry / process. That name must NEVER reach the public page, no
+# matter what the ledger or commit text says. This build step is the single choke
+# point where ledger data becomes a public artifact, so we sanitize the emitted
+# HTML here — defense-in-depth, so a future commit message can't re-leak it.
+# (Order matters: replace the specific compound tokens before the bare name.)
+_NDA_SUBS = [
+    (re.compile(r"real-HP18E80-deck", re.I), "real-commercial-PDK-deck"),
+    (re.compile(r"real-HP18E80", re.I), "real-commercial-PDK"),
+    (re.compile(r"HP18E80", re.I), "a commercial 180nm NDA PDK"),
+    (re.compile(r"Key ?Foundry", re.I), "a commercial foundry"),
+    (re.compile(r"\bm18e80\w*", re.I), "commercial-180nm-pdk"),
+]
+
+
+def _redact_nda(s: str) -> str:
+    for pat, rep in _NDA_SUBS:
+        s = pat.sub(rep, s)
+    return s
 
 
 def _load_ledgers() -> list[dict]:
@@ -87,6 +109,43 @@ FOOTER = """<footer>
         <div class="footer-bottom"><p>&copy; 2026 vibeic.ai. <span data-en="All rights reserved." data-zh="保留所有權利。">All rights reserved.</span> | <a href="/privacy.html" data-en="Privacy" data-zh="隱私政策">Privacy</a> | <a href="/terms.html" data-en="Terms" data-zh="服務條款">Terms</a> | <a href="/disclaimer.html" data-en="Disclaimer" data-zh="免責聲明">Disclaimer</a></p></div>
     </div>
 </footer>"""
+
+# Static (non-data-driven) section: an honest commercial-gap self-assessment, from a
+# top-down survey of all 12 forks vs the leading commercial suites. Persists across
+# every regeneration because it lives in the template, not the ledger.
+GAP = """<section>
+    <div class="fork-wrap">
+        <div class="section-header" style="text-align:left">
+            <p class="eyebrow" data-en="Honest self-assessment" data-zh="誠實自評">Honest self-assessment</p>
+            <h2 data-en="What our forks can't do yet — vs commercial EDA" data-zh="我們的 fork 還做不到什麼 — 對照商用 EDA">What our forks can't do yet — vs commercial EDA</h2>
+            <p data-en="We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all 12 forks produced a prioritized ~63-item enhancement backlog. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust." data-zh="我們擁有核心引擎，缺的是上面那層簽核 + 方法學。我們對三大廠（Synopsys／Cadence／Siemens EDA，加上 Ansys／Keysight／Empyrean）做了系統化調查，對照全部 12 個 fork，整理出一份排序過、約 63 項的強化 backlog。最高槓桿的單一項目是 field-solver 級、耦合感知的寄生萃取（PEX）：它是串擾／SI timing、動態 IR-drop、電遷移、點對點可靠性的前置條件 — 一個拱心石解鎖橫跨兩個工具的約五個下游簽核功能。我們公開這份差距；對能力天花板誠實，正是我們贏得信任的方式。">We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all 12 forks produced a prioritized ~63-item enhancement backlog. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust.</p>
+        </div>
+
+        <div class="fork-scroll">
+        <table class="fork-table">
+            <thead><tr>
+                <th data-en="Fork" data-zh="Fork">Fork</th>
+                <th data-en="Commercial equivalent" data-zh="商用對標">Commercial equivalent</th>
+                <th data-en="Headline gap — what it can't do yet" data-zh="主要差距 — 還做不到什麼">Headline gap — what it can't do yet</th>
+            </tr></thead>
+            <tbody>
+                <tr><td class="fork-tool">OpenROAD</td><td class="fork-mono">Innovus · Tempus · Voltus / ICC2 · PrimeTime · RedHawk / Aprisa</td><td data-en="No crosstalk/SI timing, no coupling-aware SPEF, static-only IR (no dynamic/DvD), no EM, MCMM stuck at one mode, no UPF, no physical-aware signoff-ECO" data-zh="無串擾/SI timing、無耦合感知 SPEF、只有靜態 IR（無動態/DvD）、無 EM、MCMM 卡在單一 mode、無 UPF、無 physical-aware signoff-ECO">No crosstalk/SI timing, no coupling-aware SPEF, static-only IR (no dynamic/DvD), no EM, MCMM stuck at one mode, no UPF, no physical-aware signoff-ECO</td></tr>
+                <tr><td class="fork-tool">yosys</td><td class="fork-mono">Design Compiler NXT · Fusion / Genus / Oasys-RTL</td><td data-en="Simplistic single-value delay (no real NLDM/CCS), no physical-aware synthesis, no DesignWare-grade datapath, no multi-Vth leakage opt, no ASIC DFT scan insertion" data-zh="單值延遲模型（無真正 NLDM/CCS）、無 physical-aware synthesis、無 DesignWare 級 datapath、無 multi-Vth 漏電優化、無 ASIC DFT scan 插入">Simplistic single-value delay (no real NLDM/CCS), no physical-aware synthesis, no DesignWare-grade datapath, no multi-Vth leakage opt, no ASIC DFT scan insertion</td></tr>
+                <tr><td class="fork-tool">klayout</td><td class="fork-mono">Calibre nmDRC / IC Validator / Pegasus</td><td data-en="No field-solver PEX, no PERC reliability, no multi-patterning decomposition, no equation-based DRC engine, no smart/timing-aware fill, single-host DRC (no hyperscale cluster)" data-zh="無 field-solver PEX、無 PERC 可靠性、無 multi-patterning 分解、無 equation-based DRC 引擎、無 smart/timing-aware fill、單機 DRC（無 hyperscale 叢集）">No field-solver PEX, no PERC reliability, no multi-patterning decomposition, no equation-based DRC engine, no smart/timing-aware fill, single-host DRC (no hyperscale cluster)</td></tr>
+                <tr><td class="fork-tool">magic</td><td class="fork-mono">Calibre xACT-3D / StarRC / Quantus</td><td data-en="Rule/table-based extraction only — no 3D field solver, no coupling-cap signoff SPEF, no golden correlation" data-zh="只有 rule/table-based 萃取 — 無 3D field solver、無耦合電容簽核 SPEF、無 golden 相關性">Rule/table-based extraction only — no 3D field solver, no coupling-cap signoff SPEF, no golden correlation</td></tr>
+                <tr><td class="fork-tool">netgen</td><td class="fork-mono">Calibre nmLVS · PERC / IC Validator LVS</td><td data-en="Bus-heavy designs need manual normalization; zero PERC layer (voltage-aware DRC / ESD / latch-up / point-to-point)" data-zh="bus-heavy 設計需手動正規化；PERC 層完全沒有（voltage-aware DRC / ESD / latch-up / 點對點）">Bus-heavy designs need manual normalization; zero PERC layer (voltage-aware DRC / ESD / latch-up / point-to-point)</td></tr>
+                <tr><td class="fork-tool">ngspice</td><td class="fork-mono">Spectre X · RF · FMC / PrimeSim / AFS / ADS / ALPS</td><td data-en="No native mismatch Monte-Carlo, no high-sigma, weaker convergence, no RF steady-state (PSS/HB/PNoise), no aging/EM, no FastSPICE/GPU" data-zh="無原生 mismatch Monte-Carlo、無 high-sigma、收斂較弱、無 RF 穩態（PSS/HB/PNoise）、無 aging/EM、無 FastSPICE/GPU">No native mismatch Monte-Carlo, no high-sigma, weaker convergence, no RF steady-state (PSS/HB/PNoise), no aging/EM, no FastSPICE/GPU</td></tr>
+                <tr><td class="fork-tool">iverilog</td><td class="fork-mono">VCS / Xcelium / Questa</td><td data-en="Partial SystemVerilog, no constrained-random/UVM, no functional-coverage database, no full SVA (its true 4-state + SDF gate-level sim is a genuine asset)" data-zh="SystemVerilog 不完整、無 constrained-random/UVM、無功能覆蓋率資料庫、無完整 SVA（但其真 4-state + SDF gate-level 模擬是真正的資產）">Partial SystemVerilog, no constrained-random/UVM, no functional-coverage database, no full SVA (its true 4-state + SDF gate-level sim is a genuine asset)</td></tr>
+                <tr><td class="fork-tool">verilator</td><td class="fork-mono">VCS · VC SpyGlass / Xcelium / Questa</td><td data-en="Mostly 2-state (no X-propagation), ignores SDF/timing, partial constrained-random, no production UVM, no UCIS coverage merge, no CDC/RDC" data-zh="幾乎 2-state（無 X-propagation）、忽略 SDF/timing、constrained-random 部分、無 production UVM、無 UCIS 覆蓋合併、無 CDC/RDC">Mostly 2-state (no X-propagation), ignores SDF/timing, partial constrained-random, no production UVM, no UCIS coverage merge, no CDC/RDC</td></tr>
+                <tr><td class="fork-tool">sby / eqy</td><td class="fork-mono">JasperGold / VC Formal / Formality · Conformal</td><td data-en="Core BMC/induction engine only — none of the formal apps (CSR, connectivity, SEC, security, unreachability-coverage, superlint); eqy has no synthesis-guidance ingest and is weak on retiming, so it is not yet a trustworthy tape-out LEC" data-zh="只有核心 BMC/induction 引擎 — 沒有任何 formal app（CSR、connectivity、SEC、security、unreachability 覆蓋、superlint）；eqy 無合成 guidance 匯入、retiming 弱，尚不足以當 tapeout LEC">Core BMC/induction engine only — none of the formal apps (CSR, connectivity, SEC, security, unreachability-coverage, superlint); eqy has no synthesis-guidance ingest and is weak on retiming, so it is not yet a trustworthy tape-out LEC</td></tr>
+                <tr><td class="fork-tool">cocotb</td><td class="fork-mono">UVM on VCS/Xcelium/Questa + vManager / Verdi Coverage</td><td data-en="No verification management, no UCIS coverage merge/rank/trend, weaker constraint solver, no protocol VIP libraries" data-zh="無 verification management、無 UCIS 覆蓋合併/排名/趨勢、約束求解器較弱、無 protocol VIP 函式庫">No verification management, no UCIS coverage merge/rank/trend, weaker constraint solver, no protocol VIP libraries</td></tr>
+                <tr><td class="fork-tool">pyuvm</td><td class="fork-mono">SystemVerilog UVM + VIP libraries (Synopsys / Cadence / Siemens)</td><td data-en="Register abstraction layer (RAL) under development, no protocol VIP (AXI/PCIe/DDR/…), slower constraint solver, no portable stimulus" data-zh="RAL（register abstraction layer）開發中、無 protocol VIP（AXI/PCIe/DDR/…）、約束求解器較慢、無 portable stimulus">Register abstraction layer (RAL) under development, no protocol VIP (AXI/PCIe/DDR/…), slower constraint solver, no portable stimulus</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="fork-caption" data-en="Do-first spine: (Tier 0) field-solver PEX — the keystone; then (Tier 1, all P0) the signoff-integrity cluster (SI timing → dynamic IR → EM), the reliability layer (PERC), equivalence + formal sign-off (LEC/SEC + formal apps), verification methodology (constrained-random → SVA → coverage merge → UVM), synthesis QoR + DFT, and analog signoff (mismatch Monte-Carlo, high-sigma, hardened convergence). Advanced-node items (multi-patterning coloring, POCV/LVF, CCS/ECSM, GPU FastSPICE) are honestly deferred for a 180nm-class flow." data-zh="先做的主脊：（Tier 0）field-solver PEX — 拱心石；接著（Tier 1，全 P0）簽核完整性群組（SI timing → 動態 IR → EM）、可靠性層（PERC）、等價 + formal 簽核（LEC/SEC + formal apps）、驗證方法學（constrained-random → SVA → 覆蓋合併 → UVM）、合成 QoR + DFT，以及類比簽核（mismatch Monte-Carlo、high-sigma、強化收斂）。進階節點項目（multi-patterning coloring、POCV/LVF、CCS/ECSM、GPU FastSPICE）對 180nm 級流程誠實地延後。">Do-first spine: (Tier 0) field-solver PEX — the keystone; then (Tier 1, all P0) the signoff-integrity cluster (SI timing → dynamic IR → EM), the reliability layer (PERC), equivalence + formal sign-off (LEC/SEC + formal apps), verification methodology (constrained-random → SVA → coverage merge → UVM), synthesis QoR + DFT, and analog signoff (mismatch Monte-Carlo, high-sigma, hardened convergence). Advanced-node items (multi-patterning coloring, POCV/LVF, CCS/ECSM, GPU FastSPICE) are honestly deferred for a 180nm-class flow.</p>
+    </div>
+</section>"""
 
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
@@ -180,6 +239,8 @@ __NAV__
     </div>
 </section>
 
+__GAP__
+
 __FOOTER__
 
 <script>
@@ -259,7 +320,9 @@ def build(out: Path):
     report = _latest_report()
     data = json.dumps(ledgers, ensure_ascii=False)
     html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", NAV).replace("__FOOTER__", FOOTER)
+            .replace("__GAP__", GAP)
             .replace("__DATA__", data).replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
+    html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
     out.write_text(html)
     print(f"wrote {out}  ({len(html)//1024} KB, {len(ledgers)} tools)")
 
