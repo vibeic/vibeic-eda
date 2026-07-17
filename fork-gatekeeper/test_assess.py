@@ -84,6 +84,33 @@ def test_render_md_clean_and_error():
     assert "assessment error" in A.render_md({"tool": "yosys", "error": "boom"})
 
 
+def test_our_patch_files_unknown_on_error_fails_safe():
+    # gh error → None (UNKNOWN), never set() — so the conflict gate can't read it as "no overlap"
+    orig = A._gh
+    try:
+        A._gh = lambda path: {"_err": "403 rate limit"}
+        assert A.our_patch_files("YosysHQ/yosys", "main", "deadbeef", "yosys") is None
+        # and the assess() touch rule: unknown our_files (None) OR unknown commit files → touches=True
+        our_files, cf = None, {"foo.cc"}
+        touches = True if (our_files is None or cf is None) else bool(our_files & cf)
+        assert touches is True
+        assert A._clearly_safe({"category": "bugfix", "risk": "low", "relevant": True,
+                                "recommend": "adopt"}, touches, True) is False   # cannot be auto-safe
+    finally:
+        A._gh = orig
+
+
+def test_gh_never_raises():
+    import subprocess as _sp
+    orig = _sp.run
+    try:
+        _sp.run = lambda *a, **k: (_ for _ in ()).throw(OSError("gh not found"))
+        r = A._gh("repos/x/y")
+        assert isinstance(r, dict) and r.get("_err"), "OSError → _err, not a raise"
+    finally:
+        _sp.run = orig
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0

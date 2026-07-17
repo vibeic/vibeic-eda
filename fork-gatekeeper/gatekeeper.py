@@ -236,22 +236,28 @@ def _maybe_notify(summary: dict, assessments: dict | None = None):
     if pr_notify is None:
         return
     c = summary["counts"]
-    has_assess = bool(assessments) and any(
-        (a.get("commit_count") or 0) > 0 for a in assessments.values())
-    actionable = c.get("MERGED", 0) > 0 or has_assess or any(
-        r["verdict"] == "DEFERRED" and (r.get("new_releases") or 0) > 0
-        for r in summary["results"])
-    if not actionable:
-        return
+    assessments = assessments or {}
+    # forks the ASSESSMENT PR covers: any assessed behind fork — with commits OR an
+    # enumerate error (a new release we couldn't even read still needs surfacing).
+    assess_tools = {t for t, a in assessments.items()
+                    if (a.get("commit_count") or 0) > 0 or a.get("error")}
+    # the SYNC/BACKLOG PR covers MERGED doc-bumps + any DEFERRED-with-new-release fork the
+    # assessment PR did NOT already carry (e.g. assess_release import failed entirely).
+    uncovered = any(r["verdict"] == "DEFERRED" and (r.get("new_releases") or 0) > 0
+                    and r["tool"] not in assess_tools for r in summary["results"])
+    outcomes = []
     try:
-        if has_assess and hasattr(pr_notify, "open_assessment_pr"):
-            ok, detail = pr_notify.open_assessment_pr(summary, assessments,
-                                                      {t: assess_release.render_md(a)
-                                                       for t, a in assessments.items()}
-                                                      if assess_release else {})
-        else:
-            ok, detail = pr_notify.open_pr(summary, _report_md(summary))
-        print(f"  [notify] {'PR: ' if ok else 'skip: '}{detail}")
+        if assess_tools and hasattr(pr_notify, "open_assessment_pr"):
+            subset = {t: assessments[t] for t in assess_tools}
+            rendered = ({t: assess_release.render_md(a) for t, a in subset.items()}
+                        if assess_release else {})
+            outcomes.append(("assess",) + tuple(pr_notify.open_assessment_pr(summary, subset, rendered)))
+        if c.get("MERGED", 0) > 0 or uncovered:
+            outcomes.append(("sync",) + tuple(pr_notify.open_pr(summary, _report_md(summary))))
+        if not outcomes:
+            return
+        for kind, ok, detail in outcomes:
+            print(f"  [notify:{kind}] {'PR: ' if ok else 'skip: '}{detail}")
     except Exception as e:  # noqa: BLE001
         print(f"  [notify] error (ignored): {e}")
 

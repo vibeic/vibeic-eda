@@ -48,10 +48,16 @@ MAX_COMMITS = int(os.environ.get("GK_ASSESS_MAX_COMMITS", "80"))   # cap the LLM
 
 # ── deterministic layer (no LLM) ──────────────────────────────────────────────
 def _gh(path: str):
-    r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-                       capture_output=True, text=True, timeout=90)
+    """gh api → parsed JSON, or {'_err': ...} on ANY failure. Never raises — a missing
+    `gh`, a timeout, or empty stderr must degrade to the _err path callers handle, so
+    assess() keeps its never-raises contract."""
+    try:
+        r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
+                           capture_output=True, text=True, timeout=90)
+    except (subprocess.SubprocessError, OSError) as e:
+        return {"_err": f"{e.__class__.__name__}"}
     if r.returncode != 0:
-        return {"_err": (r.stderr.strip().splitlines()[-1][:160] if r.stderr else "gh error")}
+        return {"_err": (r.stderr.strip().splitlines() or ["gh error"])[-1][:160]}
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError:
@@ -81,13 +87,15 @@ def upstream_commits(upstream: str, base_ref: str, new_ref: str) -> list[dict]:
     return out, sorted(files_by)          # (commits, aggregate_changed_files)
 
 
-def our_patch_files(upstream: str, up_branch: str, our_ref: str, tool: str) -> set[str]:
+def our_patch_files(upstream: str, up_branch: str, our_ref: str, tool: str) -> set[str] | None:
     """Files our carried patches touch (upstream_default...our_pinned_ref). A new upstream
-    commit touching any of these needs care — it may collide with our enhancement."""
+    commit touching any of these needs care — it may collide with our enhancement. Returns
+    None (UNKNOWN, not "no overlap") on a gh error, so the conflict gate fails SAFE: an
+    errored lookup must never read as "touches nothing" and let a colliding commit pass."""
     up_owner = upstream.split("/")[0]
     cmp = _gh(f"repos/vibeic/{tool}/compare/{up_owner}:{up_branch}...{our_ref}")
     if cmp.get("_err"):
-        return set()
+        return None
     return {f.get("filename") for f in (cmp.get("files") or []) if f.get("filename")}
 
 
@@ -240,7 +248,9 @@ def assess(tool: str) -> dict:
         clean = None
         if cand:
             cf = _commit_files(upstream, c["sha_full"])
-            touches = bool(our_files & cf) if cf is not None else True   # unknown → assume yes (safe)
+            # UNKNOWN on EITHER side (our patch files errored → None, or this commit's files
+            # errored → None) must read as "assume overlap" so the conflict gate fails safe.
+            touches = True if (our_files is None or cf is None) else bool(our_files & cf)
             clean = clean_cherrypick(tool, our_ref, c["sha_full"]) if our_ref else None
         row = {**c, **{k: cls.get(k) for k in
                        ("category", "summary", "relevant", "risk", "reproduce", "recommend")},
@@ -254,7 +264,8 @@ def assess(tool: str) -> dict:
 
     return {"tool": tool, "status": "assessed", "upstream": upstream,
             "base_release": base_ref, "latest": new_ref,
-            "our_ref": (our_ref or "")[:12], "our_patch_files": len(our_files),
+            "our_ref": (our_ref or "")[:12],
+            "our_patch_files": (len(our_files) if our_files is not None else None),
             "commit_count": len(commits), "aggregate_files": len(agg_files),
             "clearly_safe": safe, "commits": assessed}
 
@@ -277,7 +288,8 @@ def render_md(rep: dict) -> str:
         return f"### {tool}: {rep['status']} — nothing to assess.\n"
     L = [f"## {tool} — selective-merge assessment",
          f"Range **{rep['base_release']} → {rep['latest']}** · {rep['commit_count']} upstream "
-         f"commit(s) · our branch carries patches over {rep['our_patch_files']} file(s).",
+         f"commit(s) · our branch carries patches over "
+         f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
          f"**Clearly-safe to auto-adopt: {len(rep['clearly_safe'])}** · "
          f"**needs human decision: {rep['commit_count'] - len(rep['clearly_safe'])}**", "",
          "| sha | cat | risk | rel | conflict | clean-pick | rec | decision | summary |",

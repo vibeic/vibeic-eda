@@ -168,9 +168,12 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
     that tallies, per tool, how many upstream commits are clearly-safe vs need a human
     decision. This is a review request (adopt selectively), NOT an auto-merge. Same
     worktree-isolated, dupe-guarded, never-raises discipline as open_pr."""
-    tools = sorted(t for t, a in (assessments or {}).items() if (a.get("commit_count") or 0) > 0)
+    # include forks with commits AND forks whose enumeration ERRORED (a new release we
+    # couldn't read still needs surfacing — it must never silently vanish from every PR).
+    tools = sorted(t for t, a in (assessments or {}).items()
+                   if (a.get("commit_count") or 0) > 0 or a.get("error"))
     if not tools:
-        return (False, "no assessments with commits — no PR")
+        return (False, "no assessments to file — no PR")
     if not REPO.is_dir():
         return (False, f"vibe-ic clone not found at {REPO}")
 
@@ -202,6 +205,10 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
         for t in tools:
             (adir / f"{date}-{t}.md").write_text(rendered.get(t) or f"## {t}\n(no render)\n")
             a = assessments[t]
+            if a.get("error"):
+                tally.append(f"- **{t}**: could not enumerate the new release — {a['error']} "
+                             f"(needs manual review)")
+                continue
             cc, safe = a.get("commit_count", 0), len(a.get("clearly_safe") or [])
             tally.append(f"- **{t}**: {cc} upstream commit(s) {a.get('base_release')} → "
                          f"{a.get('latest')} — {safe} clearly-safe, {cc - safe} need review")
