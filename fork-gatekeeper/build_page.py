@@ -58,6 +58,7 @@ NAV = """<nav>
             <a href="/evaluation.html" data-en="Evaluation" data-zh="驗證">Evaluation</a>
             <a href="/platform.html" data-en="Platform" data-zh="開放平台">Platform</a>
             <a href="/eda-forks.html" class="active" data-en="EDA Forks" data-zh="工具追蹤">EDA Forks</a>
+            <a href="/manual.html" data-en="Manual" data-zh="使用手冊">Manual</a>
             <a href="https://github.com/vibeic/vibe-ic" target="_blank" class="btn-nav">GitHub</a>
             <div class="lang-switch">
                 <button class="lang-btn active" onclick="setLang('en')">EN</button>
