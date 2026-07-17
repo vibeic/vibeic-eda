@@ -41,47 +41,9 @@ if [ -z "${TOKEN}" ]; then
 fi
 export GH_TOKEN="${TOKEN}"
 
-# EXECUTOR mode. DISARMED by default (python = the deterministic assess→PR flow). The
-# capability-separated Claude DECIDER is opt-in (GK_EXECUTOR=claude): a review found that an
-# unattended bypassPermissions agent holding an org-write token while it reads UNTRUSTED
-# upstream commit text is a critical prompt-injection / exfiltration hole. So here Claude only
-# DECIDES (adopt/skip/defer) — in a process with the token STRIPPED, tools restricted to
-# read + a single decision-file write, and its working root limited to the state dir (no repo,
-# no shell, no push). A deterministic executor then RE-VALIDATES every decision against the
-# trusted assessment before anything is acted on. Claude has judgment, never the keys.
-GK_EXECUTOR="${GK_EXECUTOR:-python}"
-GK_SHIP="${GK_SHIP:-prepare}"; export GK_SHIP
-DATE="$(date +%F)"
+log "[start] eda-fork gatekeeper tick"
 cd "${DIR}" || exit 2
-log "[start] eda-fork gatekeeper tick (executor=${GK_EXECUTOR}, ship=${GK_SHIP})"
-
-# PHASE 1 (deterministic, holds token): refresh ledgers, assess upstream commits per behind
-# fork, write the daily report + regenerate the page + open the human-review assessment PR.
-python3 gatekeeper.py >>"${LOG}" 2>&1; rc=$?
-
-# PHASE 2 (Claude DECIDER) + PHASE 3 (deterministic validator) — only when opted in AND there
-# are assessments to decide on. On a clean day nothing here runs.
-if [ "${GK_EXECUTOR}" = "claude" ] && command -v claude >/dev/null 2>&1 \
-   && ls "${GK_STATE_DIR}/reports/assessments/${DATE}-"*.json >/dev/null 2>&1; then
-    mkdir -p "${GK_STATE_DIR}/decisions"
-    log "[phase2] decider — token STRIPPED, tools=Read/Grep/Glob/Write, root=state dir only"
-    DECIDER_MISSION="$(cat "${DIR}/DECIDER.md")
----
-Today is ${DATE}. GK_STATE_DIR=${GK_STATE_DIR}. Read the assessment JSON(s) at ${GK_STATE_DIR}/reports/assessments/${DATE}-*.json and write your decisions to ${GK_STATE_DIR}/decisions/${DATE}.json. That is the only file you write."
-    # SECURITY (capability separation): strip every git credential from the decider's env; give
-    # it NO shell (no Bash → cannot run env/printenv/curl/gh/git); restrict its filesystem root
-    # to the state dir (assessments in, decisions out) — NOT the fork clones or the image repo;
-    # bound its runtime. It reads untrusted upstream text with no keys and no way to act.
-    env -u GH_TOKEN -u GITHUB_TOKEN timeout 900 claude -p "${DECIDER_MISSION}" \
-        --permission-mode default \
-        --allowedTools "Read" "Grep" "Glob" "Write" \
-        --add-dir "${GK_STATE_DIR}" >>"${LOG}" 2>&1 || log "[phase2] decider exit non-zero (ignored)"
-    # PHASE 3 (deterministic, holds token): RE-VALIDATE the decisions against the trusted
-    # assessment — an adopt outside the clean-safe set is rejected. v1 validates + records;
-    # acting on the validated adopts (cherry-pick/build/ship) is a further-gated step.
-    log "[phase3] validate decisions against the trusted assessment"
-    python3 execute_decisions.py "${DATE}" >>"${LOG}" 2>&1 || true
-fi
-
-log "[done] eda-fork gatekeeper tick exit ${rc}"
+python3 gatekeeper.py >>"${LOG}" 2>&1
+rc=$?
+log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}
