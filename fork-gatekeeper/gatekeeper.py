@@ -55,6 +55,10 @@ try:
     import pr_notify  # opens a vibe-ic PR on actionable ticks (replaced email)
 except Exception:  # noqa: BLE001
     pr_notify = None
+try:
+    import assess_release  # selective-merge assessment engine (per-commit triage)
+except Exception:  # noqa: BLE001
+    assess_release = None
 
 
 def _now_date() -> str:
@@ -117,11 +121,30 @@ def tick() -> dict:
         if led.get("integrated") and (led.get("behind_releases") or 0) > 0:
             candidates.append(led)
 
-    # option B: run the integration harness for the candidates → per-candidate results
+    # SELECTIVE-MERGE doctrine (owner 2026-07-17): a behind fork gets ASSESSED, not blindly
+    # rebased. Per candidate, enumerate the upstream commits and triage each (category /
+    # relevance / risk / conflict-with-our-patches / clean-cherry-pick / reproduce plan);
+    # the clearly-safe subset is flagged, everything else is a human decision. Assessments
+    # are filed as a vibe-ic review PR (see _maybe_notify).
+    assessments = {}   # tool -> assessment report
+    if candidates and assess_release is not None:
+        adir = STATE / "reports" / "assessments"
+        adir.mkdir(parents=True, exist_ok=True)
+        for led in candidates:
+            try:
+                rep = assess_release.assess(led["tool"])
+                assessments[led["tool"]] = rep
+                (adir / f"{date}-{led['tool']}.md").write_text(assess_release.render_md(rep))
+            except Exception as e:  # noqa: BLE001 — assessment must never break the tick
+                print(f"  [assess] {led['tool']} error (ignored): {e}")
+
+    # LEGACY blind-rebase harness (rebase our branch onto the WHOLE release + build). Retired
+    # as the default by the selective-merge pivot; kept for reference, runs ONLY if explicitly
+    # re-enabled (GK_RUN_HARNESS=1) — the multi-hour docker rebuild is not run just to canary.
     hres = {}          # tool -> {status, detail, sha}
     not_configured = ("new upstream release(s) available; auto-merge (option B) rebuilds the "
                       "vibeic-eda image as the green gate, but image_build.cmd is not configured.")
-    if candidates and cfg:
+    if candidates and cfg and os.environ.get("GK_RUN_HARNESS"):
         hres = _run_harness(cfg, candidates)
 
     results = []
@@ -154,6 +177,17 @@ def tick() -> dict:
             else:  # rebase_conflict / tag_missing / built_red / worktree_fail / no_clone / no_vibeic_branch
                 entry["verdict"] = "DEFERRED"
                 entry["note"] = f"{s} → target {latest}: {detail}"
+        elif tool in assessments:
+            rep = assessments[tool]
+            entry["verdict"] = "DEFERRED"
+            if rep.get("error"):
+                entry["note"] = f"{nr} new release(s) → {latest}; assessment error: {rep['error']}"
+            else:
+                cc, safe = rep.get("commit_count", 0), len(rep.get("clearly_safe") or [])
+                entry["assessed"] = {"commits": cc, "clearly_safe": safe}
+                entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
+                                 f"{safe} clearly-safe, {cc - safe} need human review — "
+                                 f"selective-merge assessment filed (not auto-merged)")
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))
@@ -189,26 +223,34 @@ def tick() -> dict:
         build_page.build(build_page.DEFAULT_OUT)
     except Exception as e:
         print(f"  (page rebuild failed: {e})")
-    _maybe_notify(summary)
+    _maybe_notify(summary, assessments)
     return summary
 
 
-def _maybe_notify(summary: dict):
-    """On an actionable day — a MERGED promote, or a new upstream release that FAILED to
-    integrate (DEFERRED with new_releases>0, needs a human) — open a PR on vibe-ic
-    recording it (MERGED bumps the vibeic-eda doc pins + a sync-log row; a failure files a
-    backlog row). All-CLEAN days do nothing (no PR noise). Never raises — a PR hiccup must
-    not break the tick."""
+def _maybe_notify(summary: dict, assessments: dict | None = None):
+    """On an actionable day — a MERGED promote, or a new upstream release — open a PR on
+    vibe-ic. When there are selective-merge assessments (behind forks), the PR carries the
+    per-commit triage for human review (adopt the clearly-safe subset, decide the rest);
+    otherwise it records the MERGED/DEFERRED sync row. All-CLEAN days do nothing (no PR
+    noise). Never raises — a PR hiccup must not break the tick."""
     if pr_notify is None:
         return
     c = summary["counts"]
-    actionable = c.get("MERGED", 0) > 0 or any(
+    has_assess = bool(assessments) and any(
+        (a.get("commit_count") or 0) > 0 for a in assessments.values())
+    actionable = c.get("MERGED", 0) > 0 or has_assess or any(
         r["verdict"] == "DEFERRED" and (r.get("new_releases") or 0) > 0
         for r in summary["results"])
     if not actionable:
         return
     try:
-        ok, detail = pr_notify.open_pr(summary, _report_md(summary))
+        if has_assess and hasattr(pr_notify, "open_assessment_pr"):
+            ok, detail = pr_notify.open_assessment_pr(summary, assessments,
+                                                      {t: assess_release.render_md(a)
+                                                       for t, a in assessments.items()}
+                                                      if assess_release else {})
+        else:
+            ok, detail = pr_notify.open_pr(summary, _report_md(summary))
         print(f"  [notify] {'PR: ' if ok else 'skip: '}{detail}")
     except Exception as e:  # noqa: BLE001
         print(f"  [notify] error (ignored): {e}")
