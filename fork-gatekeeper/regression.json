@@ -1,10 +1,8 @@
 {
-  "_comment": "Wires option B's green gate. image_build.cmd rebases each candidate's vibeic branch onto its new upstream release, bumps the vibeic-eda Dockerfile ARG, docker-builds the image, and smoke-regresses it. GK_MODE=verify (default, staged) proves the build without touching production; set GK_MODE=promote to auto ff-branch + push image on green. Owner staged rollout: verify green first, then flip to promote.",
+  "_comment": "mode=verify (DISARMED 2026-07-17, owner merge-strategy pivot). The blind auto-promote (rebase our branch onto the WHOLE new upstream release + auto-ship on green) is the 'grab-and-paste' merge the owner is retiring. New doctrine: per-commit relevance assessment + reproduce-the-bug-in-our-version before applying OUR own fix — a careful SELECTIVE merge, not a wholesale rebase. Until that selective-merge flow is built, verify only detects new releases + proves a rebase builds green in scratch (ships NOTHING). The promote_all path is retained for reference but auto-ship stays retired pending the new selective design.",
   "image_build": {
-    "cmd": "bash /home/reyerchu/eda-fork-gatekeeper/build_and_regress.sh",
-    "cwd": "/home/reyerchu/eda-fork-gatekeeper",
+    "cmd": "bash build_and_regress.sh",
     "mode": "verify",
-    "timeout": 21600,
-    "result": "/home/reyerchu/eda-fork-gatekeeper/last_build_result.json"
+    "timeout": 21600
   }
 }
