@@ -34,6 +34,7 @@ REPO = Path(os.environ.get("GK_VIBEIC_REPO", "/home/reyerchu/vibe-ic"))
 GH_REPO = "vibeic/vibe-ic"
 DOC_FILES = ["README.md", "docs/INSTALL.md"]           # where vibe-ic pins the image tag
 LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-only record
+ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
 _PIN_RE = re.compile(r"(vibeic-eda:)\d+\.\d+\.\d+")
 
 
@@ -159,3 +160,82 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
         shutil.rmtree(wt, ignore_errors=True)
         _run(["git", "-C", str(REPO), "branch", "-D", branch])   # local branch not needed (origin has it)
+
+
+def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
+    """Open a vibe-ic REVIEW PR carrying the selective-merge assessments for the behind
+    forks: one markdown per tool under tools/vibeic-eda/upstream-assessments/, plus a body
+    that tallies, per tool, how many upstream commits are clearly-safe vs need a human
+    decision. This is a review request (adopt selectively), NOT an auto-merge. Same
+    worktree-isolated, dupe-guarded, never-raises discipline as open_pr."""
+    tools = sorted(t for t, a in (assessments or {}).items() if (a.get("commit_count") or 0) > 0)
+    if not tools:
+        return (False, "no assessments with commits — no PR")
+    if not REPO.is_dir():
+        return (False, f"vibe-ic clone not found at {REPO}")
+
+    date = str(summary.get("date", "")).strip() or "undated"
+    branch = f"eda-fork-assess-{date}"
+    dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
+
+    rc, out = _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
+    if rc != 0:
+        return (False, f"git fetch origin failed: {out.strip()[:200]}")
+    rc, out = _run(["git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch])
+    if rc == 0 and out.strip() and not dry:
+        return (False, f"assessment branch {branch} already exists on origin — skipping duplicate")
+
+    wt = Path(tempfile.gettempdir()) / f"gk-vibeic-assess-{date}"
+    _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+    shutil.rmtree(wt, ignore_errors=True)
+    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch, str(wt), "origin/main"])
+    if rc != 0:
+        _run(["git", "-C", str(REPO), "branch", "-D", branch])
+        rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch, str(wt), "origin/main"])
+        if rc != 0:
+            return (False, f"worktree add failed: {out.strip()[:200]}")
+
+    try:
+        adir = wt / ASSESS_DIR
+        adir.mkdir(parents=True, exist_ok=True)
+        tally = []
+        for t in tools:
+            (adir / f"{date}-{t}.md").write_text(rendered.get(t) or f"## {t}\n(no render)\n")
+            a = assessments[t]
+            cc, safe = a.get("commit_count", 0), len(a.get("clearly_safe") or [])
+            tally.append(f"- **{t}**: {cc} upstream commit(s) {a.get('base_release')} → "
+                         f"{a.get('latest')} — {safe} clearly-safe, {cc - safe} need review")
+        _run(["git", "-C", str(wt), "add", ASSESS_DIR])
+        title = f"[eda-fork] {date}: upstream release assessment — {len(tools)} tool(s) to review"
+        rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])
+        if rc != 0:
+            return (False, f"commit failed: {out.strip()[:200]}")
+
+        body = ("## Selective-merge assessment — human review requested\n\n"
+                "New upstream release(s) detected. Per the selective-merge doctrine we do NOT "
+                "blindly rebase; below is a per-commit triage. Adopt the clearly-safe subset, and "
+                "for each other commit decide adopt/skip — confirming any bugfix reproduces in our "
+                "version first.\n\n" + "\n".join(tally) +
+                "\n\nFull per-commit tables are in `" + ASSESS_DIR + "/`.\n\n---\n"
+                "_Opened automatically by the eda-fork-gatekeeper. Review request, not an "
+                "auto-merge._\n")
+
+        if dry:
+            rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
+            return (True, f"DRY-RUN — would open assessment PR '{title}'\n{diff.strip()[:800]}")
+
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
+        if rc != 0:
+            return (False, f"branch push failed: {out.strip()[:200]}")
+        bf = Path(tempfile.gettempdir()) / f"gk-assess-body-{date}.md"
+        bf.write_text(body)
+        rc, out = _run(["gh", "pr", "create", "-R", GH_REPO, "--base", "main",
+                        "--head", branch, "--title", title, "--body-file", str(bf)])
+        if rc != 0:
+            return (False, f"gh pr create failed: {out.strip()[:200]}")
+        url = out.strip().splitlines()[-1] if out.strip() else "(created)"
+        return (True, f"opened assessment PR: {url}")
+    finally:
+        _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+        shutil.rmtree(wt, ignore_errors=True)
+        _run(["git", "-C", str(REPO), "branch", "-D", branch])
