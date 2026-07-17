@@ -100,7 +100,7 @@ RUN git clone https://github.com/vibeic/iverilog.git /iverilog \
 #   parity vs the old run_svrf_drc.py proven on a real commercial foundry deck.
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS klayout-builder
-ARG KLAYOUT_REF=e3d26a3342ecaf3468d422e50f806ebff48cbbb0  # pinned; branch vibeic/svrf-native-drc
+ARG KLAYOUT_REF=024ac97ac52890d43d6617ac1da3ada2d8cbc432  # pinned; branch vibeic/svrf-native-drc (re-pinned 2026-07-18 after an NDA-redaction history rewrite — same tree, new SHA)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qtbase5-dev qttools5-dev-tools ca-certificates \
