@@ -111,6 +111,45 @@ def test_gh_never_raises():
         _sp.run = orig
 
 
+def test_classify_maps_judge_verdicts():
+    # the SAFE tool-less judge's {useful,reason,risk} maps into the assess() classify shape
+    import llm_judge
+    os.environ.pop("GK_ASSESS_STUB", None)
+    orig = llm_judge.judge
+    try:
+        llm_judge.judge = lambda tool, role, commits: {
+            "u1": {"useful": True, "reason": "fixes DRC crash", "risk": "low"},
+            "n1": {"useful": False, "reason": "CI only", "risk": "low"}}
+        out = A.classify_commits("magic", "DRC", [{"sha": "u1", "title": "x"}, {"sha": "n1", "title": "y"}])
+        assert out["u1"]["category"] == "bugfix" and out["u1"]["recommend"] == "adopt" and out["u1"]["relevant"] is True
+        assert out["n1"]["category"] == "other" and out["n1"]["recommend"] == "skip" and out["n1"]["relevant"] is False
+    finally:
+        llm_judge.judge = orig
+
+
+def test_classify_degrades_when_judge_returns_none():
+    import llm_judge
+    os.environ.pop("GK_ASSESS_STUB", None)
+    orig = llm_judge.judge
+    try:
+        llm_judge.judge = lambda *a, **k: None   # no token / API error
+        out = A.classify_commits("magic", "DRC", [{"sha": "a", "title": "x"}])
+        assert out["a"]["recommend"] == "manual", "judge None → degrade to manual (never auto-adopt)"
+    finally:
+        llm_judge.judge = orig
+
+
+def test_llm_judge_never_raises_without_token():
+    import llm_judge
+    orig = llm_judge.CRED
+    try:
+        llm_judge.CRED = Path("/no/such/cred.json")   # no credential file
+        assert llm_judge.judge("magic", "DRC", [{"sha": "a", "title": "x"}]) is None
+        assert llm_judge.judge("magic", "DRC", []) == {}
+    finally:
+        llm_judge.CRED = orig
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
