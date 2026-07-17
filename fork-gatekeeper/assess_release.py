@@ -23,9 +23,11 @@ selectively; never grab-and-paste.
 Design notes:
   * Deterministic parts (commit enumeration via `gh api compare`, our-patch file overlap,
     clean-cherry-pick probe) are pure/testable and never spend an LLM.
-  * The AI classification is ONE `claude -p --output-format json` call per release; it
-    DEGRADES GRACEFULLY — if claude is absent/errors, every commit falls back to
-    category=other, risk=high, recommend=manual (never auto-adopt on a failed assessment).
+  * AI classification is OPT-IN (GK_ASSESS_AI=1) and OFF BY DEFAULT — it would feed UNTRUSTED
+    upstream commit text to a `claude -p` call, which is unsafe unsandboxed in the cron
+    (prompt-injection surface); by default every commit degrades to recommend=manual, so the
+    assessment is fully deterministic and everything routes to the human-review PR. Enable AI
+    only in a sandbox. It also degrades gracefully if claude is absent/errors.
   * Never raises out of assess(); returns a report dict with an `error` on hard failure.
 
     python3 assess_release.py <tool>                 # assess that tool from its ledger
@@ -163,9 +165,16 @@ def _normalize(parsed, commits: list[dict]) -> dict:
 
 
 def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
-    """One claude -p call → {sha: {category, summary, relevant, risk, reproduce, recommend}}.
-    Fail-safe: any error → every commit marked degraded/manual. Mockable via GK_ASSESS_STUB
-    (a path to a JSON file) for tests, so the deterministic pipeline is exercised token-free."""
+    """Classify commits → {sha: {category, summary, relevant, risk, reproduce, recommend}}.
+
+    AI classification is OPT-IN (GK_ASSESS_AI=1) and OFF by default. The classifier is one
+    `claude -p` call that would read UNTRUSTED upstream commit text; run unsandboxed in the
+    cron (token in env, ambient shell/network from ~/.claude/settings.json) that is a
+    prompt-injection surface — the same class of hole two reviews condemned for the executor.
+    So by default we DON'T call it: every commit degrades to `manual` (→ everything goes to
+    the human-review PR, nothing auto-flagged safe). Only enable GK_ASSESS_AI in a sandboxed
+    context (separate user/container, no creds, no net). GK_ASSESS_STUB still mocks it for tests.
+    """
     if not commits:
         return {}
     stub = os.environ.get("GK_ASSESS_STUB")
@@ -174,6 +183,8 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
             return _normalize(json.loads(Path(stub).read_text()), commits)
         except (OSError, json.JSONDecodeError):
             return {c["sha"]: dict(_DEGRADED) for c in commits}
+    if os.environ.get("GK_ASSESS_AI") not in ("1", "true", "yes"):
+        return {c["sha"]: dict(_DEGRADED) for c in commits}   # deterministic-only: no LLM, no injection surface
     digest = "\n".join(
         f"- {c['sha']} {c['title']}" + (f"\n    {c['body'].splitlines()[0][:200]}" if c.get("body") else "")
         for c in commits[:MAX_COMMITS])
