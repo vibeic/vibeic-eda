@@ -23,11 +23,11 @@ selectively; never grab-and-paste.
 Design notes:
   * Deterministic parts (commit enumeration via `gh api compare`, our-patch file overlap,
     clean-cherry-pick probe) are pure/testable and never spend an LLM.
-  * AI classification is OPT-IN (GK_ASSESS_AI=1) and OFF BY DEFAULT — it would feed UNTRUSTED
-    upstream commit text to a `claude -p` call, which is unsafe unsandboxed in the cron
-    (prompt-injection surface); by default every commit degrades to recommend=manual, so the
-    assessment is fully deterministic and everything routes to the human-review PR. Enable AI
-    only in a sandbox. It also degrades gracefully if claude is absent/errors.
+  * AI usefulness judgment goes through llm_judge — a SAFE, tool-less Anthropic Messages API
+    call (no shell, no GH_TOKEN, no capability given to the model). A prompt-injected commit
+    body can at worst yield a WRONG judgment (caught by the human on the review PR); it can
+    never run a command or exfiltrate a secret. On by default; kill-switch GK_ASSESS_AI=0 forces
+    deterministic-only. Any failure degrades to recommend=manual (never auto-adopt).
   * Never raises out of assess(); returns a report dict with an `error` on hard failure.
 
     python3 assess_release.py <tool>                 # assess that tool from its ledger
@@ -133,25 +133,10 @@ def clean_cherrypick(tool: str, our_ref: str, commit_sha: str) -> bool | None:
         subprocess.run(["rm", "-rf", str(wt)], capture_output=True)
 
 
-# ── AI classification layer (one claude call, fail-safe) ──────────────────────
+# ── AI classification layer (safe tool-less API judge, fail-safe) ─────────────
 _DEGRADED = {"category": "other", "relevant": None, "risk": "high",
              "summary": "", "reproduce": "", "recommend": "manual",
              "_note": "AI assessment unavailable — defaulted to manual (never auto-adopt)"}
-
-_ASSESS_PROMPT = """You are triaging upstream commits for a FORKED EDA tool ({tool}, role: {role}). \
-We maintain our own enhancement branch and are deciding, per commit, whether to selectively \
-adopt it — we do NOT blindly rebase. For EACH commit below return an object keyed by its short \
-sha with: category (one of bugfix|feature|refactor|test|ci|docs|build|other), summary (<=140 \
-chars, plain), relevant (true/false — is it likely to matter for how {tool} is used in an \
-automated open-source IC signoff flow: synthesis/PnR/DRC/LVS/STA/sim/SPICE as applicable), \
-risk (low|medium|high — how risky to adopt into a maintained fork), reproduce (for a bugfix: a \
-one-line concrete way to check whether this bug manifests in OUR version; else ""), and \
-recommend (adopt|skip|manual). Be conservative: recommend "manual" whenever unsure. Return \
-ONLY a JSON object mapping sha->assessment, no prose.
-
-Commits (oldest first):
-{commits}
-"""
 
 
 def _normalize(parsed, commits: list[dict]) -> dict:
@@ -167,13 +152,13 @@ def _normalize(parsed, commits: list[dict]) -> dict:
 def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
     """Classify commits → {sha: {category, summary, relevant, risk, reproduce, recommend}}.
 
-    AI classification is OPT-IN (GK_ASSESS_AI=1) and OFF by default. The classifier is one
-    `claude -p` call that would read UNTRUSTED upstream commit text; run unsandboxed in the
-    cron (token in env, ambient shell/network from ~/.claude/settings.json) that is a
-    prompt-injection surface — the same class of hole two reviews condemned for the executor.
-    So by default we DON'T call it: every commit degrades to `manual` (→ everything goes to
-    the human-review PR, nothing auto-flagged safe). Only enable GK_ASSESS_AI in a sandboxed
-    context (separate user/container, no creds, no net). GK_ASSESS_STUB still mocks it for tests.
+    Judges each upstream commit's usefulness to our fork via llm_judge (the SAFE, tool-less
+    Anthropic Messages API call — no shell, no GH_TOKEN, no capability given to the model, so
+    a prompt-injected commit body can at worst produce a WRONG judgment that the human catches
+    on the review PR; it can never run a command or exfiltrate a secret). Kill-switch:
+    GK_ASSESS_AI=0 forces deterministic-only (every commit → manual). GK_ASSESS_STUB mocks it
+    for tests. Any failure (no token, API error, bad shape) degrades to manual — never fatal,
+    never auto-adopt on a failed judgment.
     """
     if not commits:
         return {}
@@ -183,27 +168,31 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
             return _normalize(json.loads(Path(stub).read_text()), commits)
         except (OSError, json.JSONDecodeError):
             return {c["sha"]: dict(_DEGRADED) for c in commits}
-    if os.environ.get("GK_ASSESS_AI") not in ("1", "true", "yes"):
-        return {c["sha"]: dict(_DEGRADED) for c in commits}   # deterministic-only: no LLM, no injection surface
-    digest = "\n".join(
-        f"- {c['sha']} {c['title']}" + (f"\n    {c['body'].splitlines()[0][:200]}" if c.get("body") else "")
-        for c in commits[:MAX_COMMITS])
-    prompt = _ASSESS_PROMPT.format(tool=tool, role=role or "EDA tool", commits=digest)
+    if os.environ.get("GK_ASSESS_AI", "1") not in ("1", "true", "yes"):
+        return {c["sha"]: dict(_DEGRADED) for c in commits}   # kill-switch: deterministic-only
     try:
-        r = subprocess.run(["claude", "-p", prompt, "--output-format", "json"],
-                           capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            return {c["sha"]: dict(_DEGRADED) for c in commits}
-        outer = json.loads(r.stdout)
-        text = outer.get("result", outer) if isinstance(outer, dict) else outer
-        if isinstance(text, str):
-            text = text[text.find("{"): text.rfind("}") + 1]
-            parsed = json.loads(text)
-        else:
-            parsed = text
-        return _normalize(parsed, commits)
-    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, AttributeError):
+        import llm_judge
+        verdicts = llm_judge.judge(tool, role, commits)
+    except Exception:  # noqa: BLE001 — a judge hiccup must never break the assessment
+        verdicts = None
+    if not verdicts:
         return {c["sha"]: dict(_DEGRADED) for c in commits}
+    out = {}
+    for c in commits:
+        v = verdicts.get(c["sha"])
+        if not isinstance(v, dict):
+            out[c["sha"]] = dict(_DEGRADED)
+            continue
+        useful = bool(v.get("useful"))
+        # useful → adopt-candidate (category=bugfix + recommend=adopt); the DETERMINISTIC gate
+        # in assess() (clean_cherrypick + no conflict + low risk) still decides auto-safe vs human.
+        out[c["sha"]] = {"category": "bugfix" if useful else "other",
+                         "relevant": useful,
+                         "risk": v.get("risk") if v.get("risk") in ("low", "medium", "high") else "medium",
+                         "summary": str(v.get("reason", ""))[:200],
+                         "reproduce": "",
+                         "recommend": "adopt" if useful else "skip"}
+    return out
 
 
 # ── combine → assessment ──────────────────────────────────────────────────────
