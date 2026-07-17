@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
+import uuid
 from pathlib import Path
 
 STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
@@ -88,16 +90,19 @@ def _prepare_one(tool: str, rep: dict, date: str) -> dict:
     if not up:
         _run(["git", "-C", str(clone), "remote", "remove", "gk_up"])
         _run(["git", "-C", str(clone), "remote", "add", "gk_up", up_url]); up = "gk_up"
-    _run(["git", "-C", str(clone), "fetch", fr, "-q"], timeout=300)
+    # a SILENT fork-fetch failure would leave a STALE remote-tracking base → a misleading
+    # (redundant) PR; bail explicitly so a stale base can never quietly produce one.
+    if _run(["git", "-C", str(clone), "fetch", fr, "-q"], timeout=300)[0] != 0:
+        return {"tool": tool, "status": "fetch_failed", "note": "fork fetch failed — retry next tick"}
     _run(["git", "-C", str(clone), "fetch", up, "--tags", "-q"], timeout=300)
 
     base_ref = f"refs/remotes/{fr}/{branch}"
     if _run(["git", "-C", str(clone), "rev-parse", "--verify", base_ref])[0] != 0:
         return {"tool": tool, "status": "no_branch_ref", "note": f"{fr}/{branch} not found"}
 
-    wt = Path("/tmp") / f"gk-merge-{tool}-{date}"
-    _run(["git", "-C", str(clone), "worktree", "remove", "--force", str(wt)])
-    _run(["rm", "-rf", str(wt)])
+    # UNIQUE worktree/body paths (uuid) so a concurrent hand-run can't rm -rf a live worktree.
+    wt = Path(tempfile.gettempdir()) / f"gk-merge-{tool}-{uuid.uuid4().hex[:10]}"
+    bf = None
     if _run(["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(wt), base_ref])[0] != 0:
         return {"tool": tool, "status": "worktree_fail"}
     try:
@@ -126,26 +131,38 @@ def _prepare_one(tool: str, rep: dict, date: str) -> dict:
             return {"tool": tool, "status": "would_open", "branch": cand, "base": branch,
                     "applied": [a["sha"] for a in applied], "preview": log.strip()[:400]}
 
-        # dupe-guard: skip if today's candidate branch already exists on the fork
-        if _run(["git", "-C", str(clone), "ls-remote", "--heads", fr, cand])[1].strip():
+        # dupe-guard: only STDOUT means "exists"; an ls-remote FAILURE must NOT be misread as
+        # "exists" (that would silently drop the merge) — retry next tick instead.
+        rcl, outl = _run(["git", "-C", str(clone), "ls-remote", "--heads", fr, cand])
+        if rcl != 0:
+            return {"tool": tool, "status": "lsremote_failed", "note": "retry next tick"}
+        if outl.strip():
             return {"tool": tool, "status": "already_exists", "branch": cand}
         # push ONLY the new candidate branch (never force, never the vibeic branch/main)
         rc, out = _run(["git", "-C", str(wt), "push", fr, f"HEAD:refs/heads/{cand}", "-q"])
         if rc != 0:
             return {"tool": tool, "status": "push_failed", "note": out.strip()[:200]}
-        bf = Path("/tmp") / f"gk-merge-body-{tool}-{date}.md"
+        bf = Path(tempfile.gettempdir()) / f"gk-merge-body-{tool}-{uuid.uuid4().hex[:8]}.md"
         bf.write_text(body)
         title = f"[eda-fork] {tool}: merge {len(applied)} useful upstream commit(s) → {branch}"
         rc, out = _run(["gh", "pr", "create", "-R", f"vibeic/{tool}", "--base", branch,
                         "--head", cand, "--title", title, "--body-file", str(bf)])
         if rc != 0:
-            return {"tool": tool, "status": "pr_failed", "note": out.strip()[:200], "branch": cand}
+            # PR failed but the branch is pushed → delete it so a retry re-pushes + re-PRs
+            # (else the dupe-guard would skip it forever, orphaning the branch).
+            _run(["git", "-C", str(clone), "push", fr, "--delete", cand, "-q"])
+            return {"tool": tool, "status": "pr_failed", "note": out.strip()[:200]}
         url = out.strip().splitlines()[-1] if out.strip() else "(created)"
         return {"tool": tool, "status": "opened", "url": url, "branch": cand,
                 "applied": [a["sha"] for a in applied]}
     finally:
         _run(["git", "-C", str(clone), "worktree", "remove", "--force", str(wt)])
         _run(["rm", "-rf", str(wt)])
+        if bf is not None:
+            try:
+                bf.unlink()
+            except OSError:
+                pass
 
 
 def prepare(assessments: dict, date: str) -> list[dict]:

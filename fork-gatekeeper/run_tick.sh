@@ -41,7 +41,13 @@ if [ -z "${TOKEN}" ]; then
 fi
 export GH_TOKEN="${TOKEN}"
 
-log "[start] eda-fork gatekeeper tick"
+# ARMED: when a fork is behind, after the (safe, tool-less) LLM usefulness judgment, open a
+# cherry-pick MERGE PR for the clearly-safe commits (real upstream commits, human-reviewed,
+# never auto-merged, never force-push — reviewed push-safe). Only fires on a behind fork; opens
+# nothing on a clean day. Set GK_MERGE_PR=0 to disable.
+export GK_MERGE_PR="${GK_MERGE_PR:-1}"
+
+log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
 rc=$?
