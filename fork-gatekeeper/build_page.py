@@ -71,6 +71,20 @@ def _latest_report() -> dict | None:
         return None
 
 
+# The per-tool enhancement backlog (capability matrix vs commercial EDA). Unlike the
+# ledgers — which are re-seeded into ~/.cache every day and would overwrite any data
+# stored there — this file lives in the version-controlled source tree next to this
+# script, so it survives the daily re-seed. Keyed by ledger tool name.
+ENH_FILE = HERE / "ENHANCEMENTS.json"
+
+
+def _load_enh() -> dict:
+    try:
+        return json.loads(ENH_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
 NAV = """<nav>
     <div class="nav-inner">
         <a href="/" class="logo"><img src="img/logo-v5.svg" alt="vibeIC.ai" class="logo-img"></a>
@@ -144,7 +158,7 @@ GAP = """<section>
         </table>
         </div>
         <p class="fork-caption" data-en="Do-first spine: (Tier 0) field-solver PEX — the keystone; then (Tier 1, all P0) the signoff-integrity cluster (SI timing → dynamic IR → EM), the reliability layer (PERC), equivalence + formal sign-off (LEC/SEC + formal apps), verification methodology (constrained-random → SVA → coverage merge → UVM), synthesis QoR + DFT, and analog signoff (mismatch Monte-Carlo, high-sigma, hardened convergence). Advanced-node items (multi-patterning coloring, POCV/LVF, CCS/ECSM, GPU FastSPICE) are honestly deferred for a 180nm-class flow." data-zh="先做的主脊：（Tier 0）field-solver PEX — 拱心石；接著（Tier 1，全 P0）簽核完整性群組（SI timing → 動態 IR → EM）、可靠性層（PERC）、等價 + formal 簽核（LEC/SEC + formal apps）、驗證方法學（constrained-random → SVA → 覆蓋合併 → UVM）、合成 QoR + DFT，以及類比簽核（mismatch Monte-Carlo、high-sigma、強化收斂）。進階節點項目（multi-patterning coloring、POCV/LVF、CCS/ECSM、GPU FastSPICE）對 180nm 級流程誠實地延後。">Do-first spine: (Tier 0) field-solver PEX — the keystone; then (Tier 1, all P0) the signoff-integrity cluster (SI timing → dynamic IR → EM), the reliability layer (PERC), equivalence + formal sign-off (LEC/SEC + formal apps), verification methodology (constrained-random → SVA → coverage merge → UVM), synthesis QoR + DFT, and analog signoff (mismatch Monte-Carlo, high-sigma, hardened convergence). Advanced-node items (multi-patterning coloring, POCV/LVF, CCS/ECSM, GPU FastSPICE) are honestly deferred for a 180nm-class flow.</p>
-        <p class="fork-caption" data-en="For the narrative behind this gap — a per-tool deep-dive on where open-source EDA stands versus commercial — see the blog: <a href='/blog/11-oss-vs-commercial-gap-en.html' style='color:#63a8ea'>Open-source vs commercial EDA — where's the gap?</a>" data-zh="這份差距背後的完整敘事（逐工具深入分析開源 EDA 對比商用的現況），見部落格：<a href='/blog/11-oss-vs-commercial-gap-zh.html' style='color:#63a8ea'>開源 vs 商業 EDA 的差距，到底還差在哪？</a>">For the narrative behind this gap — a per-tool deep-dive on where open-source EDA stands versus commercial — see the blog: <a href='/blog/11-oss-vs-commercial-gap-en.html' style='color:#63a8ea'>Open-source vs commercial EDA — where's the gap?</a></p>
+        <p class="fork-caption" data-en="For the narrative behind this gap — a per-tool deep-dive on where open-source EDA stands versus commercial — see the blog: <a href='/blog/07-part3-backend-convergence-en.html' style='color:#63a8ea'>Open-source vs commercial EDA — where's the gap?</a>" data-zh="這份差距背後的完整敘事（逐工具深入分析開源 EDA 對比商用的現況），見部落格：<a href='/blog/07-part3-backend-convergence-zh.html' style='color:#63a8ea'>開源 vs 商業 EDA 的差距，到底還差在哪？</a>">For the narrative behind this gap — a per-tool deep-dive on where open-source EDA stands versus commercial — see the blog: <a href='/blog/07-part3-backend-convergence-en.html' style='color:#63a8ea'>Open-source vs commercial EDA — where's the gap?</a></p>
     </div>
 </section>"""
 
@@ -179,6 +193,28 @@ STYLE = """<style>
 .fork-caption{color:var(--text-muted,#6b7684);font-size:.85rem;margin:.4rem 0 0}
 .fork-scroll{overflow-x:auto}
 @media(max-width:760px){.fork-hide-sm{display:none}}
+/* enhancement backlog (capability matrix vs commercial) inside each tool detail */
+.enh-wrap{margin-top:1rem;border-top:1px solid var(--border,#232a33);padding-top:.7rem}
+.enh-wrap>summary{cursor:pointer;font-size:.85rem;font-weight:600;color:#f5f8fb;list-style:none;user-select:none}
+.enh-wrap>summary::-webkit-details-marker{display:none}
+.enh-wrap>summary::before{content:"\25B8";display:inline-block;margin-right:.45rem;color:var(--text-muted,#6b7684);transition:transform .12s}
+.enh-wrap[open]>summary::before{transform:rotate(90deg)}
+.enh-mini{font-weight:400;color:var(--text-muted,#6b7684);font-size:.8rem}
+.enh-counts{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.7rem 0 .3rem}
+.enh-pill{font-family:ui-monospace,monospace;font-size:.74rem;font-weight:700;padding:.1rem .5rem;border-radius:20px;border:1px solid var(--border,#232a33);white-space:nowrap}
+.enh-pill.done{color:#3fae86}.enh-pill.todo{color:#c8cfd8}.enh-pill.deferred{color:#c8912f}.enh-pill.external{color:var(--text-muted,#6b7684)}
+.enh-summary{color:var(--text-muted,#6b7684);font-size:.8rem;flex:1 1 260px;min-width:200px;font-weight:400}
+.enh-table{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.35rem}
+.enh-table th{text-align:left;font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted,#6b7684);font-weight:600;padding:.35rem .55rem;border-bottom:1px solid var(--border,#232a33);white-space:nowrap}
+.enh-table td{padding:.38rem .55rem;border-bottom:1px solid rgba(120,150,180,.09);vertical-align:top}
+.enh-area td{font-weight:700;font-size:.72rem;color:#9fb0c0;background:rgba(120,150,180,.06);text-transform:uppercase;letter-spacing:.04em;padding-top:.5rem}
+.enh-feat{font-weight:550;color:#e6ebf1;min-width:230px}
+.enh-note{display:block;color:var(--text-muted,#6b7684);font-weight:400;font-size:.74rem;margin-top:.15rem;line-height:1.35}
+.enh-comm{color:var(--text-muted,#6b7684);font-family:ui-monospace,monospace;font-size:.72rem;min-width:120px}
+.enh-st{text-align:center;font-size:.9rem;white-space:nowrap}
+.enh-pr{font-family:ui-monospace,monospace;font-size:.72rem;color:#63a8ea;white-space:nowrap}
+.enh-cl{font-size:.72rem;color:var(--text-muted,#6b7684);white-space:nowrap}
+.enh-r.enh-done .enh-feat{color:#9aa7b4;font-weight:400}
 </style>"""
 
 PAGE = """<!DOCTYPE html>
@@ -220,6 +256,7 @@ __NAV__
 
         <div class="fork-metrics" id="forkMetrics"></div>
         <p class="fork-caption" id="forkUpdated"></p>
+        <p class="fork-caption" id="enhSummary"></p>
 
         <div class="fork-scroll">
         <table class="fork-table">
@@ -247,18 +284,68 @@ __FOOTER__
 <script>
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
+const ENH = __ENH__;
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
+
+// per-tool enhancement backlog (capability matrix vs commercial EDA), grouped by area
+const ENH_ICON = {done:"✅", todo:"⬜", deferred:"🔷", external:"⚪"};
+function enhBlock(tool){
+  const e = ENH && ENH[tool];
+  if(!e || !e.rows || !e.rows.length) return "";
+  const c = e.counts || {};
+  const openN = (c.todo||0) + (c.deferred||0);
+  // group rows by area, preserving first-seen order
+  const groups = []; const idx = {};
+  e.rows.forEach(r => {
+    const a = r.area || "";
+    if(!(a in idx)){ idx[a] = groups.length; groups.push([a, []]); }
+    groups[idx[a]][1].push(r);
+  });
+  const counts = `<div class="enh-counts">`
+    + `<span class="enh-pill done">✅ ${c.done||0}</span>`
+    + `<span class="enh-pill todo">⬜ ${c.todo||0}</span>`
+    + `<span class="enh-pill deferred">🔷 ${c.deferred||0}</span>`
+    + `<span class="enh-pill external">⚪ ${c.external||0}</span>`
+    + `<span class="enh-summary">${esc(e.summary||"")}</span></div>`;
+  const body = groups.map(([area, rs]) => {
+    const rows = rs.map(r => {
+      const note = r.notes ? `<span class="enh-note">${esc(r.notes)}</span>` : "";
+      return `<tr class="enh-r enh-${esc(r.status)}">`
+        + `<td class="enh-feat">${esc(r.feature)}${note}</td>`
+        + `<td class="enh-comm">${esc(r.commercial)}</td>`
+        + `<td class="enh-st" title="${esc(r.status)}">${ENH_ICON[r.status]||""}</td>`
+        + `<td class="enh-pr">${esc(r.priority||"")}</td>`
+        + `<td class="enh-cl">${esc(r.class||"")}</td></tr>`;
+    }).join("");
+    return `<tr class="enh-area"><td colspan="5">${esc(area)}</td></tr>${rows}`;
+  }).join("");
+  return `<details class="enh-wrap"><summary>`
+    + `<span data-en="Enhancement backlog vs commercial EDA" data-zh="對照商用 EDA 的強化 backlog">Enhancement backlog vs commercial EDA</span> `
+    + `<span class="enh-mini">${e.rows.length} <span data-en="capabilities" data-zh="項能力">capabilities</span> · ${c.done||0} <span data-en="done" data-zh="已完成">done</span> · ${openN} <span data-en="open" data-zh="待處理">open</span></span>`
+    + `</summary>${counts}<div class="fork-scroll"><table class="enh-table"><thead><tr>`
+    + `<th data-en="Feature / Capability" data-zh="功能 / 能力">Feature / Capability</th>`
+    + `<th data-en="Commercial equivalent" data-zh="商用對標">Commercial equivalent</th>`
+    + `<th data-en="Status" data-zh="狀態">Status</th>`
+    + `<th data-en="Priority" data-zh="優先">Priority</th>`
+    + `<th data-en="Class" data-zh="類別">Class</th>`
+    + `</tr></thead><tbody>${body}</tbody></table></div></details>`;
+}
 
 (function(){
   const imageVer = (LEDGERS[0]||{}).image_version || "—";
   const totalPatches = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
   const withNewRel = LEDGERS.filter(d=>(d.behind_releases||0)>0).length;
   const lastCheck = REPORT ? (REPORT.date||"") : "—";
+  const enhVals = Object.values(ENH||{});
+  const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
+  const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
+  const enhOpen = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.todo)||0)+((e.counts&&e.counts.deferred)||0)),0);
   const kpis = [
     [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     [totalPatches, {en:"Patches carried",zh:"揹著的補丁"}],
+    [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
     [withNewRel, {en:"Tools with a new release",zh:"有新 release 的工具"}],
     [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
   ];
@@ -295,13 +382,17 @@ const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
     const log = (d.sync_log&&d.sync_log.length)
       ? `<h5 style="margin-top:1rem" data-en="Daily sync log" data-zh="每日同步 log">Daily sync log</h5>` + d.sync_log.slice(-10).reverse().map(s=>`<div class="fork-commit"><span class="sha">${esc((s.date||'').slice(0,10))}</span><span class="fork-verd ${esc(s.verdict||'')}">${esc(s.verdict||'')}</span><span>${esc(s.note||'')}</span></div>`).join("")
       : "";
-    const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${carried}${rel}${log}</div></td></tr>`;
+    const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${carried}${rel}${log}${enhBlock(d.tool)}</div></td></tr>`;
     return row+detail;
   }).join("");
   document.getElementById("forkRows").innerHTML = rows;
   document.getElementById("forkUpdated").innerHTML = REPORT
     ? `<span data-en="Last Gatekeeper run: ${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}" data-zh="最後 Gatekeeper 執行：${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}">Last Gatekeeper run: ${esc(REPORT.date||'')}</span>`
     : `<span data-en="Ledger seeded from live state; the daily Gatekeeper has not run yet." data-zh="Ledger 由即時狀態種入；每日 Gatekeeper 尚未執行。">Ledger seeded from live state; the daily Gatekeeper has not run yet.</span>`;
+  const enhEl = document.getElementById("enhSummary");
+  if(enhEl && enhRows){
+    enhEl.innerHTML = `<span data-en="Capability coverage vs commercial EDA: ${enhRows} capabilities tracked across ${enhVals.length} forks · ${enhDone} delivered · ${enhOpen} open (to-do + deferred). Click a tool to open its enhancement backlog." data-zh="對照商用 EDA 的能力覆蓋：跨 ${enhVals.length} 個 fork 追蹤 ${enhRows} 項能力 · 已交付 ${enhDone} · 待處理 ${enhOpen}（待做 + 延後）。點一個工具展開它的強化 backlog。">Capability coverage vs commercial EDA: ${enhRows} capabilities tracked across ${enhVals.length} forks · ${enhDone} delivered · ${enhOpen} open. Click a tool to open its enhancement backlog.</span>`;
+  }
 
   document.querySelectorAll("tr.trow").forEach(tr => tr.addEventListener("click", ()=>{
     const d = document.querySelector(`tr.fork-detail[data-d="${tr.dataset.i}"]`);
@@ -319,13 +410,17 @@ const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
 def build(out: Path):
     ledgers = _load_ledgers()
     report = _latest_report()
+    enh = _load_enh()
     data = json.dumps(ledgers, ensure_ascii=False)
     html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", NAV).replace("__FOOTER__", FOOTER)
             .replace("__GAP__", GAP)
-            .replace("__DATA__", data).replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
+            .replace("__DATA__", data)
+            .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
+            .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
     html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
     out.write_text(html)
-    print(f"wrote {out}  ({len(html)//1024} KB, {len(ledgers)} tools)")
+    enh_rows = sum(len(v.get("rows", [])) for v in enh.values())
+    print(f"wrote {out}  ({len(html)//1024} KB, {len(ledgers)} tools, {enh_rows} enhancement rows)")
 
 
 if __name__ == "__main__":
