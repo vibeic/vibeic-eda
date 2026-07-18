@@ -141,6 +141,24 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
  && git clone https://github.com/vibeic/pyuvm.git            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
  && git clone https://github.com/vibeic/sby.git              /tb/sby             && git -C /tb/sby             checkout ${SBY_REF}
 
+# ---------------------------------------------------------------------------
+# Stage 9 — NanGate45 / FreePDK45 Open Cell Library (Si2, Apache-2.0).
+#   A GENERIC, NON-FOUNDRY 45nm std-cell enablement (LEF + Liberty + GDS): synth /
+#   PnR / CTS / STA / area all run, and the FreePDK45 KLayout deck gives an
+#   EDUCATIONAL DRC — but it is NOT a manufacturable foundry sign-off (FreePDK45 is a
+#   fictional process; no real foundry, no LVS deck). The iic-osic-tools base ships
+#   sky130/gf180/sg13g2 but NOT nangate45, so we fetch it from the OpenROAD-flow-scripts
+#   `nangate45` platform (the reference open 45nm flow, pinned to the v3.0 tag) and, in
+#   the runtime stage, re-stage it into the open_pdks libs.ref/<scl>/ layout the plugin's
+#   PDK resolvers expect. Registered in the plugin as PDK `nangate45`
+#   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
+# ---------------------------------------------------------------------------
+FROM alpine/git AS nangate45-src
+ARG ORFS_REF=v3.0
+RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \
+      https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git /orfs \
+ && git -C /orfs sparse-checkout set flow/platforms/nangate45
+
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
 # ===========================================================================
@@ -218,6 +236,34 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       -e /opt/vibeic-forks/pyuvm \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
  && chmod -R a+rX /opt/vibeic-forks
+# --- NanGate45 / FreePDK45 enablement (GENERIC 45nm; tapeout_capable=false) ---
+# Re-stage the ORFS nangate45 platform into the open_pdks libs.ref/<scl>/ layout the
+# plugin's PDK resolvers expect: mcp-eda pdkConfig(), phase3_one_shot_runner _detect_pdk(),
+# and programs/pdk_registry.json ALL resolve
+# /foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary/{lib,techlef,lef,gds}/... plus
+# libs.tech/klayout/drc/FreePDK45.lydrc. The cell LEF is the ORFS `.macro.mod.lef`
+# (rect-pin variant the router uses), staged under the canonical NangateOpenCellLibrary.lef
+# name the resolvers reference; the CDL source netlist is kept for structural LVS (no
+# KLayout LVS deck ships — see the registry entry's lvs_deck=null).
+COPY --from=nangate45-src /orfs/flow/platforms/nangate45 /tmp/ng45
+RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
+ && mkdir -p "$NG"/lib "$NG"/techlef "$NG"/lef "$NG"/gds \
+      /foss/pdks/nangate45/libs.tech/klayout/drc \
+      /foss/pdks/nangate45/libs.tech/cdl \
+ && cp /tmp/ng45/lib/NangateOpenCellLibrary_typical.lib   "$NG"/lib/ \
+ && cp /tmp/ng45/lef/NangateOpenCellLibrary.tech.lef      "$NG"/techlef/ \
+ && cp /tmp/ng45/lef/NangateOpenCellLibrary.macro.mod.lef "$NG"/lef/NangateOpenCellLibrary.lef \
+ && cp /tmp/ng45/gds/NangateOpenCellLibrary.gds           "$NG"/gds/ \
+ && cp /tmp/ng45/drc/FreePDK45.lydrc  /foss/pdks/nangate45/libs.tech/klayout/drc/ \
+ && cp /tmp/ng45/cdl/NangateOpenCellLibrary.cdl /foss/pdks/nangate45/libs.tech/cdl/ \
+ && chmod -R a+rX /foss/pdks/nangate45 \
+ && rm -rf /tmp/ng45 \
+ && test -f "$NG"/lib/NangateOpenCellLibrary_typical.lib \
+ && test -f "$NG"/techlef/NangateOpenCellLibrary.tech.lef \
+ && test -f "$NG"/lef/NangateOpenCellLibrary.lef \
+ && test -f "$NG"/gds/NangateOpenCellLibrary.gds \
+ && test -f /foss/pdks/nangate45/libs.tech/klayout/drc/FreePDK45.lydrc \
+ && echo "nangate45 PDK staged OK"
 # restore the base's non-root runtime user
 USER 1000
 
