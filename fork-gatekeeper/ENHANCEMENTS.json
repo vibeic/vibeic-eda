@@ -2436,8 +2436,8 @@
   "klayout": {
     "summary": "Signoff-geometry engine: native C++ SVRF/Calibre DRC engine, KLayout-native LVS, hardened LEF/DEF streamout, plus additive antenna-DRC and density metal-fill. Broad SVRF operator coverage; top forkable gaps are eqDRC, pattern-matching, waiver mgmt, RVE result DB and cumulative antenna (CAA).",
     "counts": {
-      "done": 19,
-      "todo": 27,
+      "done": 21,
+      "todo": 25,
       "deferred": 4,
       "external": 3
     },
@@ -2637,10 +2637,10 @@
         "area": "SVRF-deck-coverage (operators modeled vs a full Calibre deck)",
         "feature": "Native ANTENNA SVRF op inside the engine (currently routed OUT to the separate GDS-geometry antenna deck / router)",
         "commercial": "Calibre nmDRC ANTENNA (native connectivity ratio)",
-        "status": "todo",
+        "status": "done",
         "priority": "P0",
         "class": "algorithm-hard",
-        "notes": "Fold the staged charge-ratio model (row #26) into svrfdrc as a first-class op so one deck run covers antenna too; keep the honest cross-check."
+        "notes": "Fold the staged charge-ratio model (row #26) into svrfdrc as a first-class op so one deck run covers antenna too; keep the honest cross-check. DONE (landed vibeic/klayout 3d391a1da): native two-layer 'ANTENNA <metal> <gate>' runs in-engine on db::LayoutToNetlist with staged (as-fabricated) connectivity; gate-less one-layer form still honest-SKIPs. Unfakeable gate run_antenna_engine_test.sh 5/5 (ratio==hand-computed 50.0; staged jumper ignored) + engine_antenna.golden byte-identical."
       },
       {
         "id": "21",
@@ -2877,10 +2877,10 @@
         "area": "antenna (additive Python tool on KLayout LayoutToNetlist)",
         "feature": "Cumulative antenna area (CAA) across via layers + charge-sharing model",
         "commercial": "Calibre cumulative-antenna checking",
-        "status": "todo",
+        "status": "done",
         "priority": "P0",
         "class": "algorithm-medium",
-        "notes": "Natural extension of the DONE staged/per-layer model: accumulate metal+via area up each stage; the highest-value forkable antenna gap."
+        "notes": "Natural extension of the DONE staged/per-layer model: accumulate metal+via area up each stage; the highest-value forkable antenna gap. DONE (landed vibeic/klayout 43908ef37): CAA accumulates metal+via+contact area up each stage vs a separate cumulative_ratio bound, alongside the per-layer ratio. Unfakeable gate run_antenna_tests.sh 5a/5b: a design passing every per-layer metal ratio (30<40) FAILs cumulative (60.18>50) — proves CAA != per-layer."
       },
       {
         "id": "45",
