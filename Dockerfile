@@ -21,7 +21,7 @@ FROM openroad/ubuntu24.04-dev:latest AS openroad-builder
 # Pinned to the F-A2 commit (tapcell -bound_to_placement) shipped in vibeic-eda:0.2.7,
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
-ARG OPENROAD_REF=3efb695851045c200b95d9bf243884e3810656a6
+ARG OPENROAD_REF=1bade74e7224d9c631b13dec626d258af3f65196  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
 RUN git clone https://github.com/vibeic/OpenROAD.git /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
@@ -31,7 +31,7 @@ RUN git clone https://github.com/vibeic/OpenROAD.git /src \
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS yosys-builder
-ARG YOSYS_REF=1042b3f554592b4f49ea5380ad6af912abc270cd  # pinned; branch vibeic/synth-fixes-v0.67 (v0.67 + 4 vibeic patches + stat-0cells #124, 2026-07-14)
+ARG YOSYS_REF=330b3eb197398f5d9e568c72f364fd3c0efa6f82  # pinned; branch vibeic/synth-fixes-integration (0.2.22: v0.67 base + synth-fixes + w2/w3/w4 + icg consolidated; 15 non-merge commits; build PASS, smoke green)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
       libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
@@ -47,7 +47,7 @@ RUN git clone https://github.com/vibeic/yosys.git /yosys \
 # Stage 3 — vibeic/ngspice (batch-honesty rc + $& scalar + control-mode .param + native MC)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS ngspice-builder
-ARG NGSPICE_REF=cdb4fae2db9716de251cb55df9ebad0bc2c5172b  # pinned; branch vibeic/batch-honesty
+ARG NGSPICE_REF=6e9f78fb5dd56fa56c4d5599ca5c11717a4403ea  # pinned; branch vibeic/batch-honesty-integration (0.2.22: batch-honesty + #11 process-parallel AC (5.5x) + #68 hardened DSPF + w4/w5; make check 54/54)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf automake libtool bison flex \
       libx11-dev libxaw7-dev libreadline-dev libncurses-dev ca-certificates \
@@ -55,7 +55,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN git clone https://github.com/vibeic/ngspice.git /ngspice \
  && cd /ngspice && git checkout ${NGSPICE_REF} \
  && ./autogen.sh \
- && ./configure --prefix=/foss/tools/ngspice --with-ngshared=no --enable-xspice --disable-debug \
+ && ./configure --prefix=/foss/tools/ngspice --with-ngshared=no --enable-xspice --enable-openmp --disable-debug \
  && make -j"$(nproc)" && make install
 
 # ---------------------------------------------------------------------------
@@ -64,8 +64,8 @@ RUN git clone https://github.com/vibeic/ngspice.git /ngspice \
 #   netgen: property-error verdict, portless guard, -auto-global, -nopower, black-box match
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS lvs-builder
-ARG MAGIC_REF=9f91cd2487d61bbc7120b4c1371a3612986d6ddd  # pinned; branch vibeic/lvs-fidelity-8.3.675 (rebased onto 8.3.675 clean, 2026-07-13)
-ARG NETGEN_REF=b7d4138b6407d86107868efd5896644b4f81e535  # pinned; branch vibeic/lvs-fidelity
+ARG MAGIC_REF=19185c197fbaa4a91ec52877a2c13ec08a97b7ed  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
+ARG NETGEN_REF=b711fa5074a8a76f35ec4484768b24b3606f08e1  # pinned; branch vibeic/connectivity-match (0.2.22: lvs-fidelity line + J1 blackbox-zero-pin guard; superset of prior lvs-fidelity)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git m4 tcl-dev tk-dev libx11-dev libcairo2-dev libncurses-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -100,7 +100,7 @@ RUN git clone https://github.com/vibeic/iverilog.git /iverilog \
 #   parity vs the old run_svrf_drc.py proven on a real commercial foundry deck.
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS klayout-builder
-ARG KLAYOUT_REF=024ac97ac52890d43d6617ac1da3ada2d8cbc432  # pinned; branch vibeic/svrf-native-drc (re-pinned 2026-07-18 after an NDA-redaction history rewrite — same tree, new SHA)
+ARG KLAYOUT_REF=4e33e325ec167f03a293f3c4958bc9285131ad03  # pinned; branch vibeic/klayout-signoff-int (0.2.22: svrf-native-drc base + 16 signoff ops — native MP/CAA/CMP-gradient/ERC/voltage-spacing/RVE + sibling tools)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qtbase5-dev qttools5-dev-tools ca-certificates \
@@ -109,7 +109,26 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN git clone https://github.com/vibeic/klayout.git /klayout \
  && cd /klayout && git checkout ${KLAYOUT_REF} \
  && ./build.sh -without-qt -noruby -nolibgit2 -j"$(nproc)" -bin /foss/tools/klayout-vibeic -build /klayout/bld
-# verilator: forked, no honest fix warranted on v5.051 (see FIX_STATUS.md) — nothing to layer.
+# ---------------------------------------------------------------------------
+# Stage 6b — vibeic/verilator. Previously NOT layered: the note here read "no honest
+#   fix warranted on v5.051 — nothing to layer", which was true at the time. It is no
+#   longer: two constrained-randomization fixes landed on the fork with unfakeable
+#   gates (V3Randomize Pow lowering generalized from base-2 to ANY power-of-2 base;
+#   $countbits with a single runtime 1-bit control, previously E_UNSUPPORTED), each
+#   with a proven-negative and 177/177 on the constraint+randomize suite. The base
+#   image ships verilator, so ours is built in parallel and takes PATH precedence.
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS verilator-builder
+ARG VERILATOR_REF=0782026557405c5ee7967a4975e9e6f20ee82154  # pinned; branch vibeic/sv-tb-coverage (id 12: pow2-base Pow lowering + $countbits var-ctrl)
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential git autoconf flex bison ca-certificates help2man perl python3 \
+      libfl2 libfl-dev zlib1g zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/vibeic/verilator.git /verilator \
+ && git config --global --add safe.directory /verilator \
+ && cd /verilator && git checkout ${VERILATOR_REF} \
+ && autoconf && ./configure --prefix=/foss/tools/verilator-vibeic \
+ && make -j"$(nproc)" && make install
 
 # ---------------------------------------------------------------------------
 # Stage 7 — RETIRED. The SVRF/Calibre DRC deck is now executed by the NATIVE C++
@@ -132,10 +151,10 @@ RUN git clone https://github.com/vibeic/klayout.git /klayout \
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=606fb1f5e552fd12e20780dfb3826cfa150a3a85
-ARG COCOTB_COVERAGE_REF=201c6e19761528eb9c03f876666c485027abb7fb
-ARG PYUVM_REF=dfcd1ffb6b7141c6c654e970a0447e36615d5ae9
-ARG SBY_REF=8f8833c6176be263907dea5b50da7759632aaff6
+ARG COCOTB_REF=297211d359e81f6d48465e82752ef1866d1c8b0d  # branch vibeic/parallel-regression-dispatch (PLL1)
+ARG COCOTB_COVERAGE_REF=be916da99520662f77cfccb8dd17861c8f986ce0  # branch vibeic/integration is V15 crv scalability + V36 rank + V10/V11/V35 bins-closure; union verified per-definition (20/20, 0 dropped)
+ARG PYUVM_REF=f6ccec0ecebe504b209ac0cad74dc0716888a96f  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
+ARG SBY_REF=37298228f565ab35549bd7b27c0551ddefb55802  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
 RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone https://github.com/vibeic/pyuvm.git            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
@@ -155,9 +174,12 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
 ARG ORFS_REF=v3.0
+# One clone, both open non-foundry platforms: nangate45 (FreePDK45 45nm) AND
+# asap7 (ASU/ARM 7nm predictive, BSD). Both are re-staged into the open_pdks
+# libs.ref/<scl>/ layout in the runtime stage below.
 RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \
       https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git /orfs \
- && git -C /orfs sparse-checkout set flow/platforms/nangate45
+ && git -C /orfs sparse-checkout set flow/platforms/nangate45 flow/platforms/asap7
 
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
@@ -184,6 +206,7 @@ COPY --from=lvs-builder /foss/tools/magic /foss/tools/magic
 COPY --from=lvs-builder /foss/tools/netgen /foss/tools/netgen
 # --- vibeic/iverilog ---
 COPY --from=iverilog-builder /foss/tools/iverilog /foss/tools/iverilog
+COPY --from=verilator-builder /foss/tools/verilator-vibeic /foss/tools/verilator-vibeic
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
 # build.sh emits the Qt-less db-lib + pymod + db_plugins/liblefdef.so into its -build dir.
 COPY --from=klayout-builder /klayout/bld /foss/tools/klayout-vibeic
@@ -264,6 +287,46 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
  && test -f "$NG"/gds/NangateOpenCellLibrary.gds \
  && test -f /foss/pdks/nangate45/libs.tech/klayout/drc/FreePDK45.lydrc \
  && echo "nangate45 PDK staged OK"
+# --- ASAP7 enablement (GENERIC 7nm PREDICTIVE; tapeout_capable=false) ---
+# ASAP7 is the ASU/ARM 7nm *predictive* academic PDK (BSD-3-Clause): a realistic
+# but NON-FOUNDRY 7nm FinFET std-cell enablement (LEF + Liberty + GDS + KLayout
+# DRC), so synth / PnR / CTS / STA / area all run at a 7nm-representative node and
+# the asap7 KLayout deck gives an EDUCATIONAL DRC — but it is NOT a manufacturable
+# foundry sign-off (no real foundry, no LVS deck; ASAP7 uses a 4x-scaled drawn
+# geometry convention). Re-stage the ORFS asap7 platform (v3.0) into the open_pdks
+# libs.ref/<scl>/ layout the plugin's PDK resolvers expect. The std-cell library is
+# `asap7sc7p5t` (7.5-track). We stage the DEFAULT RVT (R) VT flavor at the TYPICAL
+# (TT / "TC") corner: asap7 splits Liberty into 5 functional groups (AO / INVBUF /
+# OA / SEQ / SIMPLE) rather than one monolithic .lib, and ships most .lib gzipped
+# (SEQ is plain) — we gunzip the 4 gzipped TT libs and keep only the TT set in lib/
+# so any `*.lib` consumer sees a corner-consistent RVT-TT set. Cell LEF / GDS are
+# the per-VT RVT files (asap7 GDS is per-VT-group, not per-cell). Registered in the
+# plugin as PDK `asap7` (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
+COPY --from=nangate45-src /orfs/flow/platforms/asap7 /tmp/asap7
+RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
+ && mkdir -p "$A7"/lib "$A7"/techlef "$A7"/lef "$A7"/gds \
+      /foss/pdks/asap7/libs.tech/klayout/drc \
+ && zcat /tmp/asap7/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
+ && zcat /tmp/asap7/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib.gz > "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
+ && zcat /tmp/asap7/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
+ && zcat /tmp/asap7/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib.gz > "$A7"/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib \
+ && cp /tmp/asap7/lib/asap7sc7p5t_SEQ_RVT_TT_nldm_220123.lib   "$A7"/lib/ \
+ && cp /tmp/asap7/lef/asap7_tech_1x_201209.lef                 "$A7"/techlef/ \
+ && cp /tmp/asap7/lef/asap7sc7p5t_28_R_1x_220121a.lef          "$A7"/lef/ \
+ && cp /tmp/asap7/gds/asap7sc7p5t_28_R_220121a.gds             "$A7"/gds/ \
+ && cp /tmp/asap7/drc/asap7.lydrc  /foss/pdks/asap7/libs.tech/klayout/drc/ \
+ && chmod -R a+rX /foss/pdks/asap7 \
+ && rm -rf /tmp/asap7 \
+ && test -f "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
+ && test -f "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
+ && test -f "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
+ && test -f "$A7"/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib \
+ && test -f "$A7"/lib/asap7sc7p5t_SEQ_RVT_TT_nldm_220123.lib \
+ && test -f "$A7"/techlef/asap7_tech_1x_201209.lef \
+ && test -f "$A7"/lef/asap7sc7p5t_28_R_1x_220121a.lef \
+ && test -f "$A7"/gds/asap7sc7p5t_28_R_220121a.gds \
+ && test -f /foss/pdks/asap7/libs.tech/klayout/drc/asap7.lydrc \
+ && echo "asap7 PDK staged OK"
 # restore the base's non-root runtime user
 USER 1000
 
