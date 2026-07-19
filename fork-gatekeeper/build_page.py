@@ -89,12 +89,7 @@ NAV = """<nav>
     <div class="nav-inner">
         <a href="/" class="logo"><img src="img/logo-v5.svg" alt="vibeIC.ai" class="logo-img"></a>
         <div class="nav-links" id="navLinks">
-            <a href="/" data-en="System" data-zh="系統">System</a>
-            <a href="/flow.html" data-en="Flow" data-zh="流程">Flow</a>
-            <a href="/evaluation.html" data-en="Evaluation" data-zh="驗證">Evaluation</a>
-            <a href="/platform.html" data-en="Platform" data-zh="開放平台">Platform</a>
-            <a href="/eda-forks.html" class="active" data-en="EDA Forks" data-zh="工具追蹤">EDA Forks</a>
-            <a href="/manual.html" data-en="Manual" data-zh="使用手冊">Manual</a>
+__NAVLINKS__
             <a href="https://github.com/vibeic/vibe-ic" target="_blank" class="btn-nav">GitHub</a>
             <div class="lang-switch">
                 <button class="lang-btn active" onclick="setLang('en')">EN</button>
@@ -115,7 +110,7 @@ FOOTER = """<footer>
                 <p data-en="AI-Native IC Design Platform" data-zh="AI 原生 IC 設計平台">AI-Native IC Design Platform</p>
             </div>
             <div class="footer-cols">
-                <div><h6 data-en="Site" data-zh="網站">Site</h6><a href="/" data-en="System" data-zh="系統">System</a><a href="/flow.html" data-en="Flow" data-zh="流程">Flow</a><a href="/evaluation.html" data-en="Evaluation" data-zh="驗證">Evaluation</a><a href="/platform.html" data-en="Platform" data-zh="開放平台">Platform</a><a href="/eda-forks.html" data-en="EDA Forks" data-zh="工具追蹤">EDA Forks</a></div>
+                <div><h6 data-en="Site" data-zh="網站">Site</h6>__FOOTER_SITE__</div>
                 <div><h6 data-en="Resources" data-zh="資源">Resources</h6><a href="https://github.com/vibeic/vibe-ic" target="_blank">GitHub</a><a href="https://github.com/vibeic/vibeic-bench" target="_blank" data-en="Run logs" data-zh="Run log">Run logs</a></div>
                 <div><h6 data-en="Company" data-zh="公司">Company</h6><a href="https://vibeic.ai" target="_blank">vibeic.ai</a><a href="mailto:contact@vibeic.ai" data-en="Contact" data-zh="聯絡">Contact</a></div>
             </div>
@@ -185,6 +180,7 @@ STYLE = """<style>
 .fork-detail .inner{padding:1rem 1.2rem;display:none}
 .fork-detail.open .inner{display:block}
 .fork-detail h5{margin:.2rem 0 .5rem;font-size:.85rem}
+.fork-detail h5.enh-hdr{color:var(--text,#0a0f1a);font-weight:700;font-size:.92rem;margin:.1rem 0 .6rem}
 .fork-commit{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--text-muted,#6b7684);padding:.2rem 0;display:flex;gap:.6rem}
 .fork-commit a{color:inherit;text-decoration:none;border-bottom:1px dotted currentColor}
 .fork-commit .sha{color:#63a8ea;flex:none}
@@ -195,26 +191,26 @@ STYLE = """<style>
 @media(max-width:760px){.fork-hide-sm{display:none}}
 /* enhancement backlog (capability matrix vs commercial) inside each tool detail */
 .enh-wrap{margin-top:1rem;border-top:1px solid var(--border,#232a33);padding-top:.7rem}
-.enh-wrap>summary{cursor:pointer;font-size:.85rem;font-weight:600;color:#f5f8fb;list-style:none;user-select:none}
+.enh-wrap>summary{cursor:pointer;font-size:.85rem;font-weight:600;color:var(--text,#0a0f1a);list-style:none;user-select:none}
 .enh-wrap>summary::-webkit-details-marker{display:none}
-.enh-wrap>summary::before{content:"\25B8";display:inline-block;margin-right:.45rem;color:var(--text-muted,#6b7684);transition:transform .12s}
+.enh-wrap>summary::before{content:"▸";display:inline-block;margin-right:.45rem;color:var(--text-muted,#6b7684);transition:transform .12s}
 .enh-wrap[open]>summary::before{transform:rotate(90deg)}
 .enh-mini{font-weight:400;color:var(--text-muted,#6b7684);font-size:.8rem}
 .enh-counts{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.7rem 0 .3rem}
 .enh-pill{font-family:ui-monospace,monospace;font-size:.74rem;font-weight:700;padding:.1rem .5rem;border-radius:20px;border:1px solid var(--border,#232a33);white-space:nowrap}
-.enh-pill.done{color:#3fae86}.enh-pill.todo{color:#c8cfd8}.enh-pill.deferred{color:#c8912f}.enh-pill.external{color:var(--text-muted,#6b7684)}
+.enh-pill.done{color:#2f8f6b}.enh-pill.todo{color:var(--text-secondary,#3b4259)}.enh-pill.deferred{color:#c07d1e}.enh-pill.external{color:var(--text-muted,#6b7684)}
 .enh-summary{color:var(--text-muted,#6b7684);font-size:.8rem;flex:1 1 260px;min-width:200px;font-weight:400}
 .enh-table{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.35rem}
 .enh-table th{text-align:left;font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted,#6b7684);font-weight:600;padding:.35rem .55rem;border-bottom:1px solid var(--border,#232a33);white-space:nowrap}
 .enh-table td{padding:.38rem .55rem;border-bottom:1px solid rgba(120,150,180,.09);vertical-align:top}
-.enh-area td{font-weight:700;font-size:.72rem;color:#9fb0c0;background:rgba(120,150,180,.06);text-transform:uppercase;letter-spacing:.04em;padding-top:.5rem}
-.enh-feat{font-weight:550;color:#e6ebf1;min-width:230px}
+.enh-area td{font-weight:700;font-size:.72rem;color:var(--text-secondary,#3b4259);background:rgba(120,150,180,.06);text-transform:uppercase;letter-spacing:.04em;padding-top:.5rem}
+.enh-feat{font-weight:550;color:var(--text,#0a0f1a);min-width:230px}
 .enh-note{display:block;color:var(--text-muted,#6b7684);font-weight:400;font-size:.74rem;margin-top:.15rem;line-height:1.35}
 .enh-comm{color:var(--text-muted,#6b7684);font-family:ui-monospace,monospace;font-size:.72rem;min-width:120px}
 .enh-st{text-align:center;font-size:.9rem;white-space:nowrap}
 .enh-pr{font-family:ui-monospace,monospace;font-size:.72rem;color:#63a8ea;white-space:nowrap}
 .enh-cl{font-size:.72rem;color:var(--text-muted,#6b7684);white-space:nowrap}
-.enh-r.enh-done .enh-feat{color:#9aa7b4;font-weight:400}
+.enh-r.enh-done .enh-feat{color:var(--text-secondary,#3b4259);font-weight:400}
 </style>"""
 
 PAGE = """<!DOCTYPE html>
@@ -294,42 +290,61 @@ function enhBlock(tool){
   const e = ENH && ENH[tool];
   if(!e || !e.rows || !e.rows.length) return "";
   const c = e.counts || {};
-  const openN = (c.todo||0) + (c.deferred||0);
-  // group rows by area, preserving first-seen order
-  const groups = []; const idx = {};
-  e.rows.forEach(r => {
-    const a = r.area || "";
-    if(!(a in idx)){ idx[a] = groups.length; groups.push([a, []]); }
-    groups[idx[a]][1].push(r);
-  });
-  const counts = `<div class="enh-counts">`
-    + `<span class="enh-pill done">✅ ${c.done||0}</span>`
-    + `<span class="enh-pill todo">⬜ ${c.todo||0}</span>`
-    + `<span class="enh-pill deferred">🔷 ${c.deferred||0}</span>`
-    + `<span class="enh-pill external">⚪ ${c.external||0}</span>`
-    + `<span class="enh-summary">${esc(e.summary||"")}</span></div>`;
-  const body = groups.map(([area, rs]) => {
-    const rows = rs.map(r => {
-      const note = r.notes ? `<span class="enh-note">${esc(r.notes)}</span>` : "";
-      return `<tr class="enh-r enh-${esc(r.status)}">`
-        + `<td class="enh-feat">${esc(r.feature)}${note}</td>`
-        + `<td class="enh-comm">${esc(r.commercial)}</td>`
-        + `<td class="enh-st" title="${esc(r.status)}">${ENH_ICON[r.status]||""}</td>`
-        + `<td class="enh-pr">${esc(r.priority||"")}</td>`
-        + `<td class="enh-cl">${esc(r.class||"")}</td></tr>`;
-    }).join("");
-    return `<tr class="enh-area"><td colspan="5">${esc(area)}</td></tr>${rows}`;
-  }).join("");
-  return `<details class="enh-wrap"><summary>`
-    + `<span data-en="Enhancement backlog vs commercial EDA" data-zh="對照商用 EDA 的強化 backlog">Enhancement backlog vs commercial EDA</span> `
-    + `<span class="enh-mini">${e.rows.length} <span data-en="capabilities" data-zh="項能力">capabilities</span> · ${c.done||0} <span data-en="done" data-zh="已完成">done</span> · ${openN} <span data-en="open" data-zh="待處理">open</span></span>`
-    + `</summary>${counts}<div class="fork-scroll"><table class="enh-table"><thead><tr>`
+  const openN = (c.todo||0) + (c.deferred||0) + (c.external||0);
+  const prank = r => { const p=String(r.priority||'').match(/P(\d+)/); return p?+p[1]:99; };
+  const thead = `<thead><tr>`
     + `<th data-en="Feature / Capability" data-zh="功能 / 能力">Feature / Capability</th>`
     + `<th data-en="Commercial equivalent" data-zh="商用對標">Commercial equivalent</th>`
     + `<th data-en="Status" data-zh="狀態">Status</th>`
     + `<th data-en="Priority" data-zh="優先">Priority</th>`
-    + `<th data-en="Class" data-zh="類別">Class</th>`
-    + `</tr></thead><tbody>${body}</tbody></table></div></details>`;
+    + `<th data-en="Class" data-zh="類別">Class</th></tr></thead>`;
+  // attr-safe double-escape: getAttribute()->innerHTML in setLang must render < > literally
+  const escA = s => esc(s).replace(/&/g, "&amp;");
+  // bilingual span: EN visible now, data-zh swapped in by the site's setLang; ZH falls back to EN
+  const bil = (en, zh, cls) => `<span${cls?` class="${cls}"`:""} data-en="${escA(en)}" data-zh="${escA(zh||en)}">${esc(en)}</span>`;
+  const areasZh = e.areas_zh || {};
+  // grouped table body from a row-filter; open rows sort by priority within each area
+  function tableBody(filter, sortByPrio){
+    const groups = []; const idx = {};
+    e.rows.filter(filter).forEach(r => {
+      const a = r.area || "";
+      if(!(a in idx)){ idx[a] = groups.length; groups.push([a, []]); }
+      groups[idx[a]][1].push(r);
+    });
+    if(!groups.length) return "";
+    return groups.map(([area, rs0]) => {
+      const rs = sortByPrio ? rs0.slice().sort((x,y)=>prank(x)-prank(y)) : rs0;
+      const rows = rs.map(r => {
+        const note = r.notes ? `<span class="enh-note" data-en="${escA(r.notes)}" data-zh="${escA(r.notes_zh||r.notes)}">${esc(r.notes)}</span>` : "";
+        return `<tr class="enh-r enh-${esc(r.status)}">`
+          + `<td class="enh-feat">${bil(r.feature, r.feature_zh)}${note}</td>`
+          + `<td class="enh-comm">${esc(r.commercial)}</td>`
+          + `<td class="enh-st" title="${esc(r.status)}">${ENH_ICON[r.status]||""}</td>`
+          + `<td class="enh-pr">${esc(r.priority||"")}</td>`
+          + `<td class="enh-cl">${esc(r.class||"")}</td></tr>`;
+      }).join("");
+      return `<tr class="enh-area"><td colspan="5">${bil(area, areasZh[area])}</td></tr>${rows}`;
+    }).join("");
+  }
+  const counts = `<div class="enh-counts">`
+    + `<span class="enh-pill todo">⬜ ${c.todo||0}</span>`
+    + `<span class="enh-pill deferred">🔷 ${c.deferred||0}</span>`
+    + `<span class="enh-pill external">⚪ ${c.external||0}</span>`
+    + `<span class="enh-pill done">✅ ${c.done||0}</span>`
+    + `<span class="enh-summary" data-en="${escA(e.summary||"")}" data-zh="${escA(e.summary_zh||e.summary||"")}">${esc(e.summary||"")}</span></div>`;
+  // OPEN (to-do / deferred / external) shown by DEFAULT, priority-sorted
+  const openBody = tableBody(r => r.status !== 'done', true);
+  const openTable = openBody
+    ? `<div class="fork-scroll"><table class="enh-table">${thead}<tbody>${openBody}</tbody></table></div>`
+    : `<p class="fork-caption" data-en="All tracked capabilities delivered." data-zh="所有追蹤的能力皆已完成。">All tracked capabilities delivered.</p>`;
+  // DONE hidden by default — click to expand
+  const doneBody = tableBody(r => r.status === 'done', false);
+  const doneBlock = doneBody
+    ? `<details class="enh-wrap enh-done"><summary><span data-en="✓ Completed (${c.done||0}) — click to expand" data-zh="✓ 已完成（${c.done||0}）— 點開展開">✓ Completed (${c.done||0})</span></summary>`
+      + `<div class="fork-scroll"><table class="enh-table">${thead}<tbody>${doneBody}</tbody></table></div></details>`
+    : "";
+  const hdr = `<h5 class="enh-hdr" data-en="Enhancement backlog vs commercial EDA — ${openN} open · ${c.done||0} done" data-zh="對照商用 EDA 的強化 backlog — ${openN} 待處理 · ${c.done||0} 已完成">Enhancement backlog vs commercial EDA — ${openN} open · ${c.done||0} done</h5>`;
+  return hdr + counts + openTable + doneBlock;
 }
 
 (function(){
@@ -357,8 +372,16 @@ function enhBlock(tool){
     const newRel = d.behind_releases||0;
     const last = (d.sync_log&&d.sync_log.length)?d.sync_log[d.sync_log.length-1]:null;
     const verd = last ? `<span class="fork-verd ${esc(last.verdict||'')}">${esc(last.verdict||'')}</span> <span style="color:var(--text-muted,#6b7684)">${esc((last.date||'').slice(0,10))}</span>` : '<span style="color:var(--text-muted,#6b7684)">—</span>';
+    // HOW the ref is pinned into the image. Almost every fork is a Dockerfile
+    // ARG; OpenSTA is the exception — it is pinned as OpenROAD's src/sta
+    // SUBMODULE (.gitmodules repointed at the vibeic fork), which the ledger
+    // records as `pinned_via`. Rendering it keeps the mechanism visible instead
+    // of leaving one row silently unexplained.
+    const pinHow = d.pinned_via
+      ? esc(d.pinned_via)
+      : (d.dockerfile_arg ? `Dockerfile ${esc(d.dockerfile_arg)}` : '');
     const pin = d.integrated
-      ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}`
+      ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}${pinHow?`<br><span style="color:var(--text-muted,#6b7684);font-size:.68rem">${pinHow}</span>`:''}`
       : `<span style="color:var(--text-muted,#6b7684)" data-en="not layered" data-zh="未納入">not layered</span>`;
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
@@ -382,7 +405,10 @@ function enhBlock(tool){
     const log = (d.sync_log&&d.sync_log.length)
       ? `<h5 style="margin-top:1rem" data-en="Daily sync log" data-zh="每日同步 log">Daily sync log</h5>` + d.sync_log.slice(-10).reverse().map(s=>`<div class="fork-commit"><span class="sha">${esc((s.date||'').slice(0,10))}</span><span class="fork-verd ${esc(s.verdict||'')}">${esc(s.verdict||'')}</span><span>${esc(s.note||'')}</span></div>`).join("")
       : "";
-    const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${carried}${rel}${log}${enhBlock(d.tool)}</div></td></tr>`;
+    const prov = `<details class="enh-wrap prov-wrap"><summary>`
+      + `<span data-en="Carried patches · Releases · Daily sync log" data-zh="揹著的補丁 · Release · 每日同步 Log">Carried patches · Releases · Daily sync log</span>`
+      + `</summary><div class="prov-inner">${carried}${rel}${log}</div></details>`;
+    const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${enhBlock(d.tool)}${prov}</div></td></tr>`;
     return row+detail;
   }).join("");
   document.getElementById("forkRows").innerHTML = rows;
@@ -407,12 +433,78 @@ function enhBlock(tool){
 </html>"""
 
 
+# Canonical top-nav is OWNED BY THE OTHER PAGES, not by this generator. We EXTRACT the
+# menu-anchor run from a sibling page at build time so eda-forks.html always matches the
+# rest of the site (order, labels, zh text, item set) — regenerating can never drift it.
+# Reference pages are tried in order; the first that parses wins. eda-forks.html is never
+# its own reference. Fallback is the current canonical 7-item nav.
+_NAV_REFERENCES = ("index.html", "evaluation.html", "flow.html", "platform.html", "manual.html")
+_NAV_FALLBACK = "\n".join([
+    '            <a href="/" data-en="System" data-zh="系統">System</a>',
+    '            <a href="/flow.html" data-en="Flow" data-zh="流程">Flow</a>',
+    '            <a href="/evaluation.html" data-en="Evaluation" data-zh="驗證">Evaluation</a>',
+    '            <a href="/eda-forks.html" data-en="EDA Forks" data-zh="EDA 分叉">EDA Forks</a>',
+    '            <a href="/platform.html" data-en="Platform" data-zh="開放平台">Platform</a>',
+    '            <a href="/blog/" data-en="Blog" data-zh="部落格">Blog</a>',
+    '            <a href="/manual.html" data-en="Manual" data-zh="使用手冊">Manual</a>',
+])
+
+
+def _extract_navlinks(html: str) -> list[str] | None:
+    """Return the menu <a> anchors from a page's #navLinks, or None if not parseable.
+    Only the leading site-menu anchors are taken — the run stops at the GitHub btn-nav
+    or the lang-switch, so nav chrome (logo/lang/mobile toggle) is never pulled in."""
+    i = html.find('id="navLinks"')
+    if i < 0:
+        return None
+    j = html.find(">", i)
+    tail = html[j + 1:]
+    # cut at the first non-menu element inside the nav-links container
+    for stop in ('class="btn-nav"', 'class="lang-switch"', "</div>"):
+        k = tail.find(stop)
+        if k != -1:
+            tail = tail[:k]
+    anchors = re.findall(r'<a\s+href="[^"]*"[^>]*\bdata-zh="[^"]*"[^>]*>.*?</a>', tail, re.S)
+    return anchors or None
+
+
+def _canonical_menu(out: Path) -> list[str]:
+    """The site's canonical top-menu anchors (active stripped), from the first sibling
+    page that parses; falls back to the built-in 7-item list on a first-ever build."""
+    for ref in _NAV_REFERENCES:
+        p = out.parent / ref
+        if p.is_file():
+            anchors = _extract_navlinks(p.read_text(encoding="utf-8"))
+            if anchors:
+                return [re.sub(r'\s+class="active"', "", a).strip() for a in anchors]
+    return [a.strip() for a in _NAV_FALLBACK.strip().splitlines()]
+
+
+def build_navlinks(out: Path, active_href: str = "/eda-forks.html") -> str:
+    """Top-nav anchors from the canonical menu, with `active_href` marked active."""
+    out_lines = []
+    for a in _canonical_menu(out):
+        href_m = re.search(r'href="([^"]*)"', a)
+        if href_m and href_m.group(1) == active_href:
+            a = re.sub(r"(<a\s+href=\"[^\"]*\")", r'\1 class="active"', a, count=1)
+        out_lines.append("            " + a)
+    return "\n".join(out_lines)
+
+
+def build_footer_site(out: Path) -> str:
+    """Footer 'Site' column mirrors the canonical top-menu (same items, no active),
+    so the footer stays consistent with the nav and never re-drifts on regeneration."""
+    return "".join(_canonical_menu(out))
+
+
 def build(out: Path):
     ledgers = _load_ledgers()
     report = _latest_report()
     enh = _load_enh()
     data = json.dumps(ledgers, ensure_ascii=False)
-    html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", NAV).replace("__FOOTER__", FOOTER)
+    nav = NAV.replace("__NAVLINKS__", build_navlinks(out))
+    footer = FOOTER.replace("__FOOTER_SITE__", build_footer_site(out))
+    html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", nav).replace("__FOOTER__", footer)
             .replace("__GAP__", GAP)
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
