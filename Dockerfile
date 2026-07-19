@@ -100,7 +100,7 @@ RUN git clone https://github.com/vibeic/iverilog.git /iverilog \
 #   parity vs the old run_svrf_drc.py proven on a real commercial foundry deck.
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS klayout-builder
-ARG KLAYOUT_REF=4e33e325ec167f03a293f3c4958bc9285131ad03  # pinned; branch vibeic/klayout-signoff-int (0.2.22: svrf-native-drc base + 16 signoff ops — native MP/CAA/CMP-gradient/ERC/voltage-spacing/RVE + sibling tools)
+ARG KLAYOUT_REF=bc4e211b5e37d9ae11b57286cff3662cc5a4ab40  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qtbase5-dev qttools5-dev-tools ca-certificates \
