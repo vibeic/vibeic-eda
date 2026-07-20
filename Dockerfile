@@ -181,6 +181,41 @@ RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \
       https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git /orfs \
  && git -C /orfs sparse-checkout set flow/platforms/nangate45 flow/platforms/asap7
 
+# ---------------------------------------------------------------------------
+# Stage 9b — ASAP7 device-LVS source-of-truth (B1/#174; all PUBLIC + BSD).
+#   The ORFS asap7 platform (Stage 9) ships only the physical enablement (LEF /
+#   Liberty / GDS / KLayout DRC) — NO transistor-level golden netlist, which is
+#   why device-level LVS was long deferred. The golden DOES exist and is freely
+#   fetchable:
+#     * asap7sc7p5t_28 (BSD-3) — CDL/LVS/asap7sc7p5t_28_{L,R,SL,SRAM}.cdl: the
+#       transistor-level schematic of every std cell (one .SUBCKT per cell,
+#       4-terminal FinFETs nmos_rvt/pmos_rvt with nfin=N) = the LVS golden.
+#     * asap7_pdk_r1p7 (BSD-3) — models/hspice/7nm_{TT,SS,FF}_160803.pm: the
+#       BSIM-CMG (level 72) FinFET device models.
+#     * laurentc2/ASAP7_for_KLayout (BSD-2) — asap7.lyt / asap7.lyp: the KLayout
+#       layer stack + connectivity used to author the FinFET LVS extraction.
+#   Cloned sparse/blobless; staged in the runtime stage into libs.tech/ mirroring
+#   the sky130/nangate45 golden-CDL convention so the plugin's LVS resolvers find
+#   them with no per-PDK special-casing. Wired in vibe-ic programs/pdk_registry.json
+#   (asap7: cdl_netlist / spice_models / klayout_lvs_tech) and consumed by
+#   programs/asap7_finfet_lvs.py (KLayout geometric FinFET extract + NetlistComparer).
+# ---------------------------------------------------------------------------
+FROM alpine/git AS asap7-lvs-src
+ARG ASAP7SC_REF=main
+ARG ASAP7PDK_REF=main
+ARG ASAP7KL_REF=main
+RUN git clone --depth 1 --branch ${ASAP7SC_REF} --filter=blob:none --sparse \
+      https://github.com/The-OpenROAD-Project/asap7sc7p5t_28.git /a7sc \
+ && git -C /a7sc sparse-checkout set CDL/LVS \
+ && git clone --depth 1 --branch ${ASAP7PDK_REF} --filter=blob:none --sparse \
+      https://github.com/The-OpenROAD-Project/asap7_pdk_r1p7.git /a7pdk \
+ && git -C /a7pdk sparse-checkout set models/hspice \
+ && git clone --depth 1 --branch ${ASAP7KL_REF} \
+      https://github.com/laurentc2/ASAP7_for_KLayout.git /a7kl \
+ && test -f /a7sc/CDL/LVS/asap7sc7p5t_28_R.cdl \
+ && test -f /a7pdk/models/hspice/7nm_TT_160803.pm \
+ && test -f /a7kl/asap7.lyt
+
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
 # ===========================================================================
@@ -341,6 +376,38 @@ RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && test -f /foss/pdks/asap7/libs.tech/librelane/rules.openrcx.asap7.nom \
  && test -f /foss/pdks/asap7/libs.tech/librelane/setRC.asap7.tcl \
  && echo "asap7 PDK staged OK"
+
+# B1/#174 — stage the ASAP7 device-LVS source-of-truth (Stage 9b) into libs.tech/.
+#   CDL golden  -> libs.tech/cdl/       (mirrors the nangate45 `cdl_netlist` glob the
+#                                        plugin's LVS resolver already understands)
+#   FinFET SPICE models -> libs.tech/hspice/   (BSIM-CMG level-72 device models)
+#   KLayout LVS layer stack -> libs.tech/klayout/lvs/   (asap7.lyt/.lyp, authored the
+#                                        FinFET extraction in asap7_finfet_lvs.py)
+#   All four CDL VT flavors are staged (R is the flavor matching the staged R GDS +
+#   the pdk_registry `cdl_netlist` pointer; L/SL/SRAM kept for completeness).
+COPY --from=asap7-lvs-src /a7sc/CDL/LVS /tmp/a7cdl
+COPY --from=asap7-lvs-src /a7pdk/models/hspice /tmp/a7hspice
+COPY --from=asap7-lvs-src /a7kl /tmp/a7kl
+RUN A7T=/foss/pdks/asap7/libs.tech \
+ && mkdir -p "$A7T"/cdl "$A7T"/hspice "$A7T"/klayout/lvs \
+ && cp /tmp/a7cdl/asap7sc7p5t_28_L.cdl    "$A7T"/cdl/ \
+ && cp /tmp/a7cdl/asap7sc7p5t_28_R.cdl    "$A7T"/cdl/ \
+ && cp /tmp/a7cdl/asap7sc7p5t_28_SL.cdl   "$A7T"/cdl/ \
+ && cp /tmp/a7cdl/asap7sc7p5t_28_SRAM.cdl "$A7T"/cdl/ \
+ && cp /tmp/a7hspice/7nm_TT_160803.pm "$A7T"/hspice/ \
+ && cp /tmp/a7hspice/7nm_SS_160803.pm "$A7T"/hspice/ \
+ && cp /tmp/a7hspice/7nm_FF_160803.pm "$A7T"/hspice/ \
+ && cp /tmp/a7kl/asap7.lyt "$A7T"/klayout/lvs/ \
+ && cp /tmp/a7kl/asap7.lyp "$A7T"/klayout/lvs/ \
+ && chmod -R a+rX "$A7T"/cdl "$A7T"/hspice "$A7T"/klayout/lvs \
+ && rm -rf /tmp/a7cdl /tmp/a7hspice /tmp/a7kl \
+ && grep -q "BSD 3-Clause" "$A7T"/cdl/asap7sc7p5t_28_R.cdl \
+ && grep -q "BSD 3-Clause" "$A7T"/hspice/7nm_TT_160803.pm \
+ && test -f "$A7T"/cdl/asap7sc7p5t_28_R.cdl \
+ && test -f "$A7T"/hspice/7nm_TT_160803.pm \
+ && test -f "$A7T"/klayout/lvs/asap7.lyt \
+ && echo "asap7 device-LVS source-of-truth staged OK"
+
 # restore the base's non-root runtime user
 USER 1000
 
