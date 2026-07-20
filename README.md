@@ -17,7 +17,7 @@ you have the whole fixed toolchain. The image is published to the **GitHub Conta
 Registry (GHCR)** and is public (no login required):
 
 ```bash
-docker pull ghcr.io/vibeic/vibeic-eda:0.2.23
+docker pull ghcr.io/vibeic/vibeic-eda:0.2.24
 ```
 
 > The image lives on GHCR (`ghcr.io/vibeic/...`), **not** Docker Hub — always use the
@@ -143,7 +143,7 @@ just `svrfdrc`.
 **Headless / batch (CI, scripted flows):**
 ```bash
 docker rm -f vibeic-eda 2>/dev/null || true   # "name already in use"? drop the old container first
-docker run -d --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.23 --skip sleep infinity
+docker run -d --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.24 --skip sleep infinity
 docker exec vibeic-eda yosys --version
 docker exec vibeic-eda openroad -version
 ```
@@ -158,7 +158,7 @@ container, or you get `cd: No such file or directory`. Start it with an identity
 ```bash
 docker run -d --name vibeic-eda \
   -v "$PWD:$PWD" -w "$PWD" \
-  ghcr.io/vibeic/vibeic-eda:0.2.23 --skip sleep infinity
+  ghcr.io/vibeic/vibeic-eda:0.2.24 --skip sleep infinity
 # then point the MCP at it:  EDA_CONTAINER=vibeic-eda
 ```
 
@@ -166,14 +166,14 @@ docker run -d --name vibeic-eda \
 ```bash
 docker run -d --name vibeic-eda \
   -p 5901:5901 -p 8080:80 \
-  ghcr.io/vibeic/vibeic-eda:0.2.23
+  ghcr.io/vibeic/vibeic-eda:0.2.24
 # noVNC:  http://localhost:8080     VNC: localhost:5901   (default password: abc123)
 ```
 
 **Mount your design directory:**
 ```bash
 docker run -it --rm -v "$PWD:/foss/designs/work" -w /foss/designs/work \
-  ghcr.io/vibeic/vibeic-eda:0.2.23 bash
+  ghcr.io/vibeic/vibeic-eda:0.2.24 bash
 ```
 
 Tools live at the same paths as the iic-osic-tools base (`/foss/tools/bin/...`), so any
@@ -252,7 +252,7 @@ Semantic versions track the fix-program milestones in `FIX_STATUS.md`:
 - `ghcr.io/vibeic/vibeic-eda:X.Y.Z` — immutable, reproducible from the pinned SHAs at that tag.
 - `ghcr.io/vibeic/vibeic-eda:latest` — the newest released `X.Y.Z`.
 
-Current: **0.2.23** — adds the klayout `tl::Thread` `pthread_join` fix described above
+Current: **0.2.24** — adds the klayout `tl::Thread` `pthread_join` fix described above
 (re-pins `KLAYOUT_REF`; recompiles `tlThreads.cc` and relinks `libklayout_tl.so`). Builds
 on **0.2.22**, the 12-fork consolidation: every fork moved onto a single integration
 branch, the `vibeic/OpenSTA` fork was published for the first time and wired in as

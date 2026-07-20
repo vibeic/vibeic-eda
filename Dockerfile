@@ -302,10 +302,20 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # so any `*.lib` consumer sees a corner-consistent RVT-TT set. Cell LEF / GDS are
 # the per-VT RVT files (asap7 GDS is per-VT-group, not per-cell). Registered in the
 # plugin as PDK `asap7` (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
+# B2/#175 — also stage the ORFS OpenRCX extraction model so post-route SPEF EXTRACTS
+# against a real per-layer RC model instead of the tech-LEF-RC fallback: the platform's
+# `rcx_patterns.rules` (BSD; header "Extraction Rules for OpenRCX", the `-ext_model_file`
+# consumed by `extract_parasitics`) is staged as
+# `libs.tech/librelane/rules.openrcx.asap7.nom` — the SAME captable-glob convention the
+# runner already uses for sky130A/gf180 (phase3_one_shot_runner `_emit_spef` globs
+# `libs.tech/{librelane,openlane}/rules.openrcx.*.nom[.magic]`). `setRC.tcl` (per-layer
+# set_layer_rc estimate) is staged alongside as `setRC.asap7.tcl` for reference. ASAP7
+# ships ONE (typical) corner only → single-corner `.nom` SPEF (min/max disclosed absent).
 COPY --from=nangate45-src /orfs/flow/platforms/asap7 /tmp/asap7
 RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && mkdir -p "$A7"/lib "$A7"/techlef "$A7"/lef "$A7"/gds \
       /foss/pdks/asap7/libs.tech/klayout/drc \
+      /foss/pdks/asap7/libs.tech/librelane \
  && zcat /tmp/asap7/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
  && zcat /tmp/asap7/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib.gz > "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
  && zcat /tmp/asap7/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
@@ -315,6 +325,8 @@ RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && cp /tmp/asap7/lef/asap7sc7p5t_28_R_1x_220121a.lef          "$A7"/lef/ \
  && cp /tmp/asap7/gds/asap7sc7p5t_28_R_220121a.gds             "$A7"/gds/ \
  && cp /tmp/asap7/drc/asap7.lydrc  /foss/pdks/asap7/libs.tech/klayout/drc/ \
+ && cp /tmp/asap7/rcx_patterns.rules  /foss/pdks/asap7/libs.tech/librelane/rules.openrcx.asap7.nom \
+ && cp /tmp/asap7/setRC.tcl           /foss/pdks/asap7/libs.tech/librelane/setRC.asap7.tcl \
  && chmod -R a+rX /foss/pdks/asap7 \
  && rm -rf /tmp/asap7 \
  && test -f "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
@@ -326,6 +338,8 @@ RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && test -f "$A7"/lef/asap7sc7p5t_28_R_1x_220121a.lef \
  && test -f "$A7"/gds/asap7sc7p5t_28_R_220121a.gds \
  && test -f /foss/pdks/asap7/libs.tech/klayout/drc/asap7.lydrc \
+ && test -f /foss/pdks/asap7/libs.tech/librelane/rules.openrcx.asap7.nom \
+ && test -f /foss/pdks/asap7/libs.tech/librelane/setRC.asap7.tcl \
  && echo "asap7 PDK staged OK"
 # restore the base's non-root runtime user
 USER 1000
