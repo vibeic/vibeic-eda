@@ -15,6 +15,25 @@ advances.
    smoke-regresses it (`build_and_regress.sh`, `verify_yosys.sh`).
 3. **Publish** (`build_page.py`) — renders the fork status page for the site.
 
+## Reviewer-side gate: redundancy precheck (`pr_precheck.py`)
+
+Before landing ANY fork PR, run:
+
+```
+python3 pr_precheck.py vibeic/<tool> <pr#>
+```
+
+`mergeable=CLEAN` does **not** mean a PR is worth landing. A PR authored against
+an OLDER base can duplicate a fix the fork's own working line has ALREADY landed
+under a different commit — it merges cleanly and still adds dead-weight (2026-07-21:
+2 of 5 fork PRs were exactly this — iverilog #1 duplicated `bedf375e9` closing
+vibe-ic#125; yosys #1 duplicated `26bb283e58` closing vibe-ic#124). The tell is
+cheap: the PR is BEHIND its base, and a base-only commit already Closes the same
+issue. `pr_precheck.py` computes both from `gh api` (no clone, no mutation) and
+emits `OK` (0) / `REVIEW` (1, base advanced — re-test on the rebased tree) /
+`REDUNDANT_RISK` (2, base already closes a shared issue — prove it, then land
+test-only or reject the code). Run it as the first step of every land.
+
 ## Modes (staged rollout)
 
 `GK_MODE=verify` (default) proves the rebuild without touching production;
