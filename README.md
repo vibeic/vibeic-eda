@@ -5,9 +5,11 @@
 `vibeic-eda` is the [hpretl/iic-osic-tools](https://github.com/iic-jku/iic-osic-tools)
 base (all the open-source EDA tools + the sky130 / gf180mcu / ihp PDKs) with our
 **patched `vibeic/*` tool forks** layered in to close the capability gaps where stock
-open-source EDA falls short of commercial tools. Every fork is pinned to a commit SHA in
-the [Dockerfile](./Dockerfile), and every fix ships with a reproducible **FAIL → PASS
-proof** (see [`FIX_STATUS.md`](./FIX_STATUS.md)).
+open-source EDA falls short of commercial tools. Every fork that ships is pinned to a
+commit SHA in the [Dockerfile](./Dockerfile), and every `DONE` fix carries a reproducible
+**FAIL → PASS proof** that was re-run before integration (see
+[`FIX_STATUS.md`](./FIX_STATUS.md), which also marks the rows closed by *adopting* a newer
+upstream, the deferred ones, and the one that turned out non-reproducible).
 
 This is the toolchain the **Vibe-IC plugin** runs on — the MCP `eda_*` tools drive these
 binaries by `docker exec` into a container built from this image.
@@ -48,8 +50,12 @@ Full scoreboard with per-fix proofs: [`FIX_STATUS.md`](./FIX_STATUS.md).
 
 ## The forks it carries
 
-**12 forks are pinned as Dockerfile `ARG`s**, plus **one more pinned as a git submodule**
-(OpenSTA — see the note below), for **13 vibeic forks total** in the image.
+The `vibeic` org currently holds **15 forked tool repos**. **13 of them ship in this
+image**; the two ALIGN repos are forked but **not yet shipped in any image** (see
+[below](#forked-but-not-yet-shipped-in-the-image)).
+
+Of the 13 that ship: **12 are pinned as Dockerfile `ARG`s**, plus **one more pinned as a
+git submodule** (OpenSTA — see the note below).
 
 | Tool | What our fork adds | Branch |
 |---|---|---|
@@ -71,15 +77,38 @@ Full scoreboard with per-fix proofs: [`FIX_STATUS.md`](./FIX_STATUS.md).
 OpenROAD's **`src/sta` git submodule**: the integration branch's `.gitmodules` was
 repointed from the upstream relative URL to `https://github.com/vibeic/OpenSTA.git`, so
 `git submodule update --init --recursive` in the OpenROAD build stage checks out our
-superset commit on `vibeic/sta-timing-eco`. That is why
-`grep '^ARG .*_REF=' Dockerfile` counts 12 forks (plus an `ORFS_REF` upstream tag) while
-the image actually carries 13. **Regen invariant:** any OpenROAD ref whose `src/sta`
-points at a vibeic commit *must* keep `.gitmodules` on `vibeic/OpenSTA`, and that commit
-*must* be pushed there, or the build fails with `upload-pack: not our ref`.
+superset commit on `vibeic/sta-timing-eco`. That is why no `ARG` mentions OpenSTA at all.
+**Regen invariant:** any OpenROAD ref whose `src/sta` points at a vibeic commit *must*
+keep `.gitmodules` on `vibeic/OpenSTA`, and that commit *must* be pushed there, or the
+build fails with `upload-pack: not our ref`.
 
-`ORFS_REF` (`v3.0`) is **not** a fork — it is an upstream
-[OpenROAD-flow-scripts](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts)
-tag, cloned sparsely only to stage two open PDK platforms (below).
+**Don't read the `ARG` count as a fork count.** `grep -c '^ARG .*_REF=' Dockerfile`
+returns **16**: the 12 tool forks above, plus four refs that are *not* forks —
+
+- `ORFS_REF` (`v3.0`) — an upstream
+  [OpenROAD-flow-scripts](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts)
+  tag, cloned sparsely only to stage two open PDK platforms (below).
+- `ASAP7SC_REF` / `ASAP7PDK_REF` / `ASAP7KL_REF` — upstream ASAP7 *data* repos
+  (`asap7sc7p5t_28`, `asap7_pdk_r1p7`, `laurentc2/ASAP7_for_KLayout`) staged for the
+  ASAP7 device-LVS source-of-truth. These three track `main`, not a SHA — see
+  [Build from source](#build-from-source) on what that means for reproducibility.
+
+### Forked but not yet shipped in the image
+
+Two further `vibeic` forks exist for the analog auto-layout track. **Neither is built into
+any published image** — the newest tag (`0.2.26`) contains no ALIGN, and the Docker stage
+for it is planned, not built.
+
+| Fork | Upstream | State |
+|---|---|---|
+| `vibeic/ALIGN-public` | `ALIGN-analoglayout/ALIGN-public` | clean fork, **0 commits ahead** of upstream |
+| `vibeic/ALIGN-pdk-sky130` | `ALIGN-analoglayout/ALIGN-pdk-sky130` | **1 commit ahead** (`db6d7f1a`): the sky130 MOS generator now honours the netlist channel length `L` instead of drawing every gate at the fixed 150 nm poly width |
+
+Treat the analog auto-layout capability as **spike-proven, image-integration pending** —
+the plan, the spike evidence, and the open blockers are in
+[`ANALOG_LAYOUT_ROADMAP.md`](./ANALOG_LAYOUT_ROADMAP.md) and the Bucket-T row of
+[`FIX_STATUS.md`](./FIX_STATUS.md). Until a tag ships it, the MCP `eda_analog_layout`
+capability gap is still open.
 
 ---
 
@@ -111,9 +140,25 @@ Apache-2.0) and ASAP7 (ASU/ARM 7nm FinFET predictive, BSD-3-Clause) are
 ASAP7 is staged as the RVT (`R`) VT flavor at the typical (TT) corner — 5 Liberty
 functional groups (AO / INVBUF / OA / SIMPLE / SEQ), tech LEF, cell LEF, per-VT GDS.
 
+Two later additions extend what ASAP7 can actually close (both from public BSD sources):
+
+- **OpenRCX extraction model (0.2.24).** The ORFS `rcx_patterns.rules` is staged as
+  `libs.tech/librelane/rules.openrcx.asap7.nom`, so post-route SPEF extracts against a
+  real per-layer RC model instead of falling back to tech-LEF estimates. ASAP7 ships
+  **one (typical) corner only** → single-corner `.nom` SPEF; min/max are absent, not
+  silently substituted.
+- **Device-LVS source-of-truth (0.2.25).** Golden CDL (`asap7sc7p5t_28_{L,R,SL,SRAM}`),
+  the BSIM-CMG level-72 FinFET models (`7nm_{TT,SS,FF}_160803.pm`), and a KLayout layer
+  stack are staged under `libs.tech/{cdl,hspice,klayout/lvs}`. Measured on the `R`
+  library: **159/208 (76%) device-level MATCH**, with a proven-negative control (a
+  one-net corruption does report MISMATCH, so it is not a false-clean).
+
+Neither changes the sign-off status above: ASAP7 still has **no foundry DRC sign-off
+deck**, and 76% is a disclosed partial, not a clean LVS.
+
 ---
 
-## This cycle's notable fix — klayout `tl::Thread` use-after-free (0.2.23)
+## Notable engine fix — klayout `tl::Thread` use-after-free (shipped in 0.2.23)
 
 `svrfdrc` was intermittently aborting with `malloc(): unaligned tcache chunk` (rc 139/134,
 no DRC report emitted, spurious phase-3 FAIL). The root cause was **not** in the SVRF
@@ -134,7 +179,9 @@ its report on the first try, the caller's defense-in-depth retry never fired, an
 changed engine artifact between images is `libklayout_tl.so`.
 
 This is a fix in `tlThreads.cc` — it repairs **the whole klayout `--threads` path**, not
-just `svrfdrc`.
+just `svrfdrc`. Every number above is from the fork commit itself:
+[`bc4e211b`](https://github.com/vibeic/klayout/commit/bc4e211b5e37d9ae11b57286cff3662cc5a4ab40)
+on `vibeic/klayout-signoff-int`, which is the `KLAYOUT_REF` pinned in the Dockerfile.
 
 ---
 
@@ -205,8 +252,12 @@ toolchain.
 `vibeic` forks in sync with their upstreams and rebuilds this image when a fork advances:
 
 1. **Discover** — `discover_forks.py` enumerates the vibeic org's forks and records each
-   one's upstream parent into [`FORKS.json`](./fork-gatekeeper/FORKS.json) (the registry:
-   12 tools, e.g. `OpenROAD → The-OpenROAD-Project/OpenROAD`, `klayout → KLayout/klayout`).
+   one's upstream parent into [`FORKS.json`](./fork-gatekeeper/FORKS.json)
+   (e.g. `OpenROAD → The-OpenROAD-Project/OpenROAD`, `klayout → KLayout/klayout`).
+   The checked-in registry lists the **12 `ARG`-pinned tools** — it is deliberately
+   narrower than the org's 15 forks: OpenSTA rides in as OpenROAD's submodule rather
+   than as its own tracked ref, and the two ALIGN forks are not image-integrated yet,
+   so neither is on the rebuild-on-upstream-release path.
 2. **Track & gate** — `gatekeeper.py` / `run_tick.sh` check each upstream for a new
    release; for a candidate they rebase the vibeic fork branch onto the new upstream, bump
    the corresponding `Dockerfile` ARG, docker-build the image, and smoke-regress it
@@ -226,10 +277,10 @@ sign-off deck" — never by process name, SKU, or rule id.
 
 ---
 
-## Build from source (reproducible)
+## Build from source
 
-The image is built entirely from source, with every fork pinned to a commit SHA, so a
-rebuild is reproducible:
+The image is built entirely from source, and **all 12 tool forks are pinned to a commit
+SHA**, so the *tool* half of a rebuild is reproducible:
 
 ```bash
 git clone https://github.com/vibeic/vibeic-eda.git
@@ -240,8 +291,20 @@ DOCKER_BUILDKIT=1 docker build --network=host -t vibeic-eda:local .
 Each tool is compiled in a native ubuntu24.04 builder so the binary matches the
 iic-osic-tools runtime (python3.12 / glibc2.39). Override any fork ref with
 `--build-arg YOSYS_REF=<sha>` etc. `--network=host` avoids the transient-DNS
-submodule-fetch failures seen on some hosts. **Note:** a full from-source build produces a
-~27 GB image and takes 1–2 h — use a machine with adequate disk (≥ 60 GB free) and cores.
+submodule-fetch failures seen on some hosts.
+
+**What is *not* SHA-pinned** — be aware before treating a rebuild as bit-reproducible:
+the runtime base (`hpretl/iic-osic-tools:latest`) and the OpenROAD builder base
+(`openroad/ubuntu24.04-dev:latest`) are `:latest`; `ORFS_REF` is a tag (`v3.0`); and the
+three ASAP7 asset refs default to `main`. Pin them with `--build-arg` if you need an
+exactly-repeatable rebuild.
+
+**Resources:** a full from-source build takes **1–2 h** (the 0.2.26 release run on the
+self-hosted `vibeic-builder` runner ran 1 h 39 m) and needs **≥ 60 GB free disk** — the
+GitHub-hosted runners' 14 GB cannot do it. The resulting image is **~27 GB** on disk
+(26.9 GB measured at 0.2.22 — see
+[`IMAGE_0.2.22_DELIVERY.md`](./IMAGE_0.2.22_DELIVERY.md); not re-measured since). For
+reference, the published `0.2.26` manifest on GHCR is 5.99 GB compressed across 80 layers.
 
 ---
 
@@ -249,16 +312,30 @@ submodule-fetch failures seen on some hosts. **Note:** a full from-source build 
 
 Semantic versions track the fix-program milestones in `FIX_STATUS.md`:
 
-- `ghcr.io/vibeic/vibeic-eda:X.Y.Z` — immutable, reproducible from the pinned SHAs at that tag.
-- `ghcr.io/vibeic/vibeic-eda:latest` — the newest released `X.Y.Z`.
+- `ghcr.io/vibeic/vibeic-eda:X.Y.Z` — immutable; the tool forks it was built from are the
+  SHAs pinned at that tag (see [Build from source](#build-from-source) for what else moves).
+- `ghcr.io/vibeic/vibeic-eda:latest` — the newest released `X.Y.Z`; it currently resolves
+  to the same manifest digest as `0.2.26`.
 
-Current: **0.2.26** — adds the klayout `tl::Thread` `pthread_join` fix described above
-(re-pins `KLAYOUT_REF`; recompiles `tlThreads.cc` and relinks `libklayout_tl.so`). Builds
-on **0.2.22**, the 12-fork consolidation: every fork moved onto a single integration
-branch, the `vibeic/OpenSTA` fork was published for the first time and wired in as
-OpenROAD's `src/sta` submodule, the ASAP7 PDK was staged, and ngspice picked up
-`--enable-openmp`. See [`IMAGE_0.2.22_DELIVERY.md`](./IMAGE_0.2.22_DELIVERY.md) for the
-full per-fork manifest and the regen checklist.
+Current: **0.2.26** — the canonical from-source rebuild that folds the ASAP7 work of the
+two preceding tags into the multi-stage build. 0.2.24 and 0.2.25 were verified-correct
+*thin-layer overlays* (the sandbox build host had no DNS and a cold tool cache); 0.2.26
+rebuilds the identical public/BSD asset staging through `release.yml` on the
+`vibeic-builder` runner. No fork ref changed relative to 0.2.25.
+
+The tags it consolidates:
+
+| Tag | What it added |
+|---|---|
+| `0.2.22` | the **12-fork consolidation** — every fork onto a single integration branch, `vibeic/OpenSTA` published for the first time and wired in as OpenROAD's `src/sta` submodule, the ASAP7 PDK staged, ngspice `--enable-openmp` |
+| `0.2.23` | klayout `tl::Thread` `pthread_join` fix (above) — re-pins `KLAYOUT_REF`, recompiles `tlThreads.cc`, relinks `libklayout_tl.so` |
+| `0.2.24` | ASAP7 OpenRCX extraction model |
+| `0.2.25` | ASAP7 device-LVS source-of-truth (golden CDL + BSIM-CMG models + KLayout stack) |
+| `0.2.26` | canonical from-source rebuild carrying both |
+
+See [`IMAGE_0.2.22_DELIVERY.md`](./IMAGE_0.2.22_DELIVERY.md) for the full per-fork
+manifest and the regen checklist — note it documents the **0.2.22** image specifically and
+has not been regenerated for later tags.
 
 ---
 
