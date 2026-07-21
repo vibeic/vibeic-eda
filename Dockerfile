@@ -65,7 +65,7 @@ RUN git clone https://github.com/vibeic/ngspice.git /ngspice \
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS lvs-builder
 ARG MAGIC_REF=19185c197fbaa4a91ec52877a2c13ec08a97b7ed  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
-ARG NETGEN_REF=b711fa5074a8a76f35ec4484768b24b3606f08e1  # pinned; branch vibeic/connectivity-match (0.2.22: lvs-fidelity line + J1 blackbox-zero-pin guard; superset of prior lvs-fidelity)
+ARG NETGEN_REF=0334b7dfb1d6adce0a8079f5552f68982815d3d9  # pinned; branch vibeic/connectivity-match (netgen PR#1: plain-mode lvs finishes + stdout==report, resolves vibe-ic#191 tool layer; report byte-identical so #189 classifier/Step-31 unaffected)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git m4 tcl-dev tk-dev libx11-dev libcairo2-dev libncurses-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -215,6 +215,28 @@ RUN git clone --depth 1 --branch ${ASAP7SC_REF} --filter=blob:none --sparse \
  && test -f /a7sc/CDL/LVS/asap7sc7p5t_28_R.cdl \
  && test -f /a7pdk/models/hspice/7nm_TT_160803.pm \
  && test -f /a7kl/asap7.lyt
+
+# ---------------------------------------------------------------------------
+# Stage 11 — ALIGN (analog place & route: device-level SPICE netlist -> placed +
+#   routed GDS) sources. The analog counterpart of the digital OpenROAD flow.
+#   Bucket-T: we OWN it. BOTH repos are vibeic forks pinned by SHA and the engine is
+#   BUILT FROM OUR SOURCE in the runtime stage — deliberately NOT the published PyPI
+#   `align-analoglayout` wheel — so ALIGN is patchable in-tree like every other tool
+#   here and no upstream-published binary enters a sign-off toolchain.
+#     * vibeic/ALIGN-public      — the engine (Python + the PnR C++ pybind11 extension).
+#     * vibeic/ALIGN-pdk-sky130  — the sky130 ALIGN PDK; carries OUR channel-length fix.
+#   Both trees are kept on disk in the runtime (/opt/align-src, mirroring
+#   /opt/vibeic-forks) because neither is reachable from the installed package:
+#   ALIGN-public's setup.py package_data ships only align/pdk/finfet (NO sky130) and
+#   does not install examples/, and the sky130 PDK lives entirely in the second fork.
+# ---------------------------------------------------------------------------
+FROM alpine/git AS align-src
+ARG ALIGN_PUBLIC_REF=e392ae4789eb49193a4865244d8cc31dbe1744b7  # pinned; branch master — vibeic fork is 0 commits ahead / 0 behind upstream ALIGN-analoglayout/ALIGN-public (align/__init__.py declares __version__ 0.9.8); forked so ALIGN is patchable in-tree, and BUILT FROM SOURCE below rather than pip-installed from PyPI
+ARG ALIGN_PDK_SKY130_REF=db6d7f1a2ad8499a1b8705f65bc084484dbdf769  # pinned; branch main — carries our fix(mos): honour netlist channel length L instead of drawing every gate at 150nm, guarded by tests/test_channel_length.py (which ships its own negative control)
+RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public     && git -C /align/ALIGN-public     checkout ${ALIGN_PUBLIC_REF} \
+ && git clone https://github.com/vibeic/ALIGN-pdk-sky130.git /align/ALIGN-pdk-sky130 && git -C /align/ALIGN-pdk-sky130 checkout ${ALIGN_PDK_SKY130_REF} \
+ && test -f /align/ALIGN-public/setup.py \
+ && test -f /align/ALIGN-pdk-sky130/SKY130_PDK/mos.py
 
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
@@ -407,6 +429,72 @@ RUN A7T=/foss/pdks/asap7/libs.tech \
  && test -f "$A7T"/hspice/7nm_TT_160803.pm \
  && test -f "$A7T"/klayout/lvs/asap7.lyt \
  && echo "asap7 device-LVS source-of-truth staged OK"
+
+# --- ALIGN analog place & route (BUILT FROM vibeic/ALIGN-public SOURCE, isolated venv) ---
+# ALIGN turns a device-level SPICE netlist straight into a placed + routed GDS: the analog
+# counterpart of the digital OpenROAD flow. Built HERE from our own pinned fork (Stage 11),
+# deliberately NOT `pip install align-analoglayout` — every other tool in this image is our
+# source at a pinned SHA, and an upstream-published binary has no place in a sign-off
+# toolchain we claim to own. Three MEASURED facts shape this block:
+#
+# 1. DEPENDENCY CONFLICT. ALIGN requires `pydantic>=1.9.2,<2.0`; this image ships
+#    gdsfactory 9.44 on pydantic 2.x. A system-wide (--break-system-packages) install
+#    breaks whichever of the two loses. So ALIGN gets its OWN venv at /foss/tools/align
+#    and NOTHING is installed into the system interpreter.
+# 2. A VENV ALONE IS NOT ISOLATION. The base's profile.d exports a global PYTHONPATH that
+#    includes /usr/local/lib/python3.12/dist-packages, and PYTHONPATH is searched BEFORE a
+#    venv's site-packages. Measured in 0.2.26:
+#        /foss/tools/align/bin/python -c "import pydantic; print(pydantic.VERSION)" -> 2.12.5
+#        env -u PYTHONPATH  (same command)                                          -> 1.10.26
+#    The first one breaks ALIGN. Every entry point below therefore runs under
+#    `env -u PYTHONPATH` — that, not the venv, is what actually insulates it.
+# 3. NO LD_LIBRARY_PATH CRUTCH IS NEEDED, *because* we build from source. The published
+#    PyPI wheel needs LD_LIBRARY_PATH=<venv>/lib at solve time (auditwheel left its
+#    vendored libCbc-*.so requiring unmangled COIN-OR sonames). Building here links the
+#    COIN-OR ILP stack (CBC/Clp/Cgl/Osi/CoinUtils/SYMPHONY) statically into align/PnR*.so.
+#    Measured: `readelf -d align/PnR*.so` lists NO COIN-OR NEEDED entry — the only shared
+#    dependency is liblpsolve55.so.5, resolved by the extension's own
+#    RUNPATH $ORIGIN/thirdparty — and a full five_transistor_ota run completes with
+#    LD_LIBRARY_PATH unset. The wrappers below therefore do NOT set it. If ALIGN is ever
+#    switched back to the wheel, this changes and the wrappers must set it again.
+#
+# The C++ side (boost / spdlog / nlohmann-json / superlu / lpsolve + the COIN-OR stack) is
+# fetched and compiled by ALIGN's CMake during pip install. CBC's own build is serial
+# (`make -j1`, fixed upstream) and dominates the wall time of this layer. That cost is
+# accepted deliberately. `_skbuild` (~1.4 GB of intermediates) is deleted in the SAME layer.
+COPY --from=align-src /align /opt/align-src
+ENV ALIGN_HOME=/foss/tools/align \
+    ALIGN_PDK_SKY130=/opt/align-src/ALIGN-pdk-sky130/SKY130_PDK
+RUN unset PYTHONPATH \
+ && python3 -m venv /foss/tools/align \
+ && /foss/tools/align/bin/pip install --no-cache-dir -q -U pip setuptools wheel \
+ && /foss/tools/align/bin/pip install --no-cache-dir /opt/align-src/ALIGN-public \
+ && /foss/tools/align/bin/pip install --no-cache-dir -q pytest \
+ && rm -rf /opt/align-src/ALIGN-public/_skbuild \
+ && printf '#!/bin/sh\n# vibeic wrapper: run ALIGN from its isolated venv (/foss/tools/align).\n# `env -u PYTHONPATH` is load bearing: this image exports a global PYTHONPATH that\n# would otherwise shadow the venv with the system pydantic 2 and break ALIGN.\n# No LD_LIBRARY_PATH needed: the COIN-OR solvers are linked statically into PnR*.so.\nexec env -u PYTHONPATH /foss/tools/align/bin/python /foss/tools/align/bin/schematic2layout.py "$@"\n' > /foss/tools/bin/align-schematic2layout \
+ && printf '#!/bin/sh\n# vibeic wrapper: the ALIGN venv interpreter, insulated from the global PYTHONPATH.\nexec env -u PYTHONPATH /foss/tools/align/bin/python "$@"\n' > /foss/tools/bin/align-python \
+ && chmod +x /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python \
+ && mkdir -p /foss/tools/align/Viewer/INPUT \
+ && chmod -R a+rX /foss/tools/align /opt/align-src \
+# SELF-TEST — a successful pip install proves nothing about a P&R tool. Generate a real
+# layout at a NON-nominal channel length and require (a) the GDS to actually contain
+# geometry and (b) the drawn poly gates to equal the netlist L. (b) is the discriminating
+# check: upstream's sky130 PDK draws every gate at the fixed 150nm Poly.Width, so if this
+# image ever picks up upstream instead of vibeic/ALIGN-pdk-sky130 the build FAILS here.
+ && cp -r /opt/align-src/ALIGN-pdk-sky130/examples/five_transistor_ota /tmp/align-selftest \
+ && sed -i s/L=150e-9/L=500e-9/g /tmp/align-selftest/five_transistor_ota.sp \
+ && cd /tmp/align-selftest \
+ && { /foss/tools/bin/align-schematic2layout . -f /tmp/align-selftest/five_transistor_ota.sp \
+        -p ${ALIGN_PDK_SKY130} > /tmp/align-selftest/run.log 2>&1 \
+      || { echo '=== ALIGN self-test FAILED — run.log follows (the build layer is about to be discarded, so it is printed here) ==='; \
+           tail -120 /tmp/align-selftest/run.log; exit 1; }; } \
+ && /foss/tools/bin/align-python -c 'import gdspy; lib=gdspy.GdsLibrary(infile="/tmp/align-selftest/FIVE_TRANSISTOR_OTA_0.gds"); cell=lib.top_level()[0]; ps=cell.get_polygons(by_spec=True); n=sum(len(v) for v in ps.values()); gates=sorted({round((p[:,0].max()-p[:,0].min())*1e9) for p in ps[(66,20)] if (p[:,1].max()-p[:,1].min()) >= (p[:,0].max()-p[:,0].min())}); print("ALIGN self-test: top cell %s, geometry polygons=%d, vertical poly 66/20 gate lengths(nm)=%s" % (cell.name, n, gates)); assert n > 0, "FAIL: ALIGN emitted a GDS with no geometry"; assert gates == [500], "FAIL: gates not drawn at the netlist L=500nm -> the sky130 PDK in this image is NOT our patched fork"' \
+# and the PDK fork's own regression guard, which ships a NEGATIVE CONTROL proving the
+# guard is capable of failing (revert the fix -> 3 of its 6 tests fail).
+ && cd /opt/align-src/ALIGN-pdk-sky130 \
+ && env -u PYTHONPATH PATH=/foss/tools/align/bin:$PATH /foss/tools/align/bin/python -m pytest -q tests/test_channel_length.py \
+ && rm -rf /tmp/align-selftest /opt/align-src/ALIGN-pdk-sky130/.pytest_cache \
+ && echo "ALIGN OK: built from vibeic source; sky130 PDK honours netlist L; 6/6 channel-length guards pass"
 
 # restore the base's non-root runtime user
 USER 1000
