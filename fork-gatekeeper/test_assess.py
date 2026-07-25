@@ -233,6 +233,76 @@ def test_judge_request_pins_temperature_zero():
     assert '"temperature": 0' in src, "llm_judge must pin temperature=0"
 
 
+# ── carried / recorded-decision filters (2026-07-25) ─────────────────────────
+# magic 8.3.674->8.3.676 reported "2 need human decision" for 7 days while BOTH
+# were already in what we ship: cc4da9a05fde as a direct ancestor, a22b7508acfe
+# as cherry-pick fe91f011 (identical patch-id). behind_releases compares RELEASE
+# TAGS but selective-merge adopts COMMITS, so the tag never advances and the
+# fork reads "behind" forever, re-proposing work that is already done.
+
+def test_already_carried_is_fail_open_without_a_clone():
+    """UNKNOWN must read as NOT-carried: a genuinely new commit must never be
+    silently dropped from review because we could not check."""
+    orig = A.FORKS_DIR
+    try:
+        A.FORKS_DIR = Path("/nonexistent-fork-dir")
+        got = A.already_carried("magic", "someref",
+                                [{"sha": "aaa111", "sha_full": "a" * 40}])
+        assert got == set()
+    finally:
+        A.FORKS_DIR = orig
+
+
+def test_already_carried_empty_inputs():
+    assert A.already_carried("magic", "ref", []) == set()
+    assert A.already_carried("magic", "", [{"sha": "a", "sha_full": "a" * 40}]) == set()
+
+
+def test_recorded_decisions_reads_the_register():
+    d = A.recorded_decisions("magic")
+    assert isinstance(d, dict)
+    for sha, rec in d.items():
+        assert rec.get("decision") in ("skip", "adopt"), (sha, rec)
+        assert len(str(rec.get("reason", ""))) >= 20, f"{sha} has no real reason"
+        assert rec.get("decided_by") and rec.get("decided_on")
+
+
+def test_recorded_decisions_fail_open():
+    """Unknown tool, and a missing/corrupt register, yield {} — never an
+    exception, and never a decision we did not make."""
+    assert A.recorded_decisions("no-such-tool-xyz") == {}
+    orig = A.DECISIONS
+    try:
+        A.DECISIONS = Path(tempfile.mkdtemp()) / "missing.json"
+        assert A.recorded_decisions("magic") == {}
+        bad = Path(tempfile.mkdtemp()) / "bad.json"
+        bad.write_text("{not json")
+        A.DECISIONS = bad
+        assert A.recorded_decisions("magic") == {}
+    finally:
+        A.DECISIONS = orig
+
+
+def test_render_marks_a_fully_settled_range_as_decided():
+    rep = {"tool": "magic", "status": "assessed", "base_release": "8.3.674",
+           "latest": "8.3.676", "our_patch_files": 59, "commit_count": 2,
+           "carried": ["aaa111"], "decided": ["bbb222"], "clearly_safe": [],
+           "outstanding": [],
+           "commits": [
+               {"sha": "aaa111", "category": "carried", "risk": None,
+                "relevant": None, "touches_our_patches": None,
+                "clean_cherrypick": None, "recommend": "carried",
+                "decision": "carried", "summary": "already ours", "title": ""},
+               {"sha": "bbb222", "category": "decided", "risk": None,
+                "relevant": None, "touches_our_patches": None,
+                "clean_cherrypick": None, "recommend": "skip",
+                "decision": "recorded:skip", "summary": "UI only", "title": ""}]}
+    md = A.render_md(rep)
+    assert "needs human decision: 0" in md
+    assert "DECIDED — no action required" in md
+    assert "RELEASE TAGS" in md          # explains why "behind" is not "owed work"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
