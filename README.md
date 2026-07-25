@@ -19,7 +19,7 @@ you have the whole fixed toolchain. The image is published to the **GitHub Conta
 Registry (GHCR)** and is public (no login required):
 
 ```bash
-docker pull ghcr.io/vibeic/vibeic-eda:0.2.27
+docker pull ghcr.io/vibeic/vibeic-eda:0.2.30
 ```
 
 > The image lives on GHCR (`ghcr.io/vibeic/...`), **not** Docker Hub — always use the
@@ -93,11 +93,11 @@ returns **16**: the 12 tool forks above, plus four refs that are *not* forks —
   ASAP7 device-LVS source-of-truth. These three track `main`, not a SHA — see
   [Build from source](#build-from-source) on what that means for reproducibility.
 
-### Forked but not yet shipped in the image
+### Analog auto-layout track (ALIGN)
 
-Two further `vibeic` forks exist for the analog auto-layout track. **Neither is built into
-any published image** — the newest tag (`0.2.26`) contains no ALIGN, and the Docker stage
-for it is planned, not built.
+Two further `vibeic` forks exist for the analog auto-layout track. The ALIGN Docker
+stage ships in the image since `0.2.27` (staged under `/foss/tools/align`; built from
+the pinned source below).
 
 | Fork | Upstream | State |
 |---|---|---|
@@ -190,7 +190,7 @@ on `vibeic/klayout-signoff-int`, which is the `KLAYOUT_REF` pinned in the Docker
 **Headless / batch (CI, scripted flows):**
 ```bash
 docker rm -f vibeic-eda 2>/dev/null || true   # "name already in use"? drop the old container first
-docker run -d --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.27 --skip sleep infinity
+docker run -d --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.30 --skip sleep infinity
 docker exec vibeic-eda yosys --version
 docker exec vibeic-eda openroad -version
 ```
@@ -205,7 +205,7 @@ container, or you get `cd: No such file or directory`. Start it with an identity
 ```bash
 docker run -d --name vibeic-eda \
   -v "$PWD:$PWD" -w "$PWD" \
-  ghcr.io/vibeic/vibeic-eda:0.2.27 --skip sleep infinity
+  ghcr.io/vibeic/vibeic-eda:0.2.30 --skip sleep infinity
 # then point the MCP at it:  EDA_CONTAINER=vibeic-eda
 ```
 
@@ -213,14 +213,14 @@ docker run -d --name vibeic-eda \
 ```bash
 docker run -d --name vibeic-eda \
   -p 5901:5901 -p 8080:80 \
-  ghcr.io/vibeic/vibeic-eda:0.2.27
+  ghcr.io/vibeic/vibeic-eda:0.2.30
 # noVNC:  http://localhost:8080     VNC: localhost:5901   (default password: abc123)
 ```
 
 **Mount your design directory:**
 ```bash
 docker run -it --rm -v "$PWD:/foss/designs/work" -w /foss/designs/work \
-  ghcr.io/vibeic/vibeic-eda:0.2.27 bash
+  ghcr.io/vibeic/vibeic-eda:0.2.30 bash
 ```
 
 Tools live at the same paths as the iic-osic-tools base (`/foss/tools/bin/...`), so any

@@ -31,7 +31,7 @@ RUN git clone https://github.com/vibeic/OpenROAD.git /src \
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS yosys-builder
-ARG YOSYS_REF=330b3eb197398f5d9e568c72f364fd3c0efa6f82  # pinned; branch vibeic/synth-fixes-integration (0.2.22: v0.67 base + synth-fixes + w2/w3/w4 + icg consolidated; 15 non-merge commits; build PASS, smoke green)
+ARG YOSYS_REF=baf3472497809d6bc3ff19da7a05312064729066  # pinned; branch satfix-integration (0.2.30 / vibe-ic#354: 0.67+26, i.e. the 0.2.22 synth-fixes-integration line 330b3eb19 + ExtCdclSat `sat -select-solver` backend (kissat/cadical) forward-port — the DT1/DT2/DT3 external-CDCL fix v1.5.71 wired and 0.2.29 was supposed to deliver)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
       libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
@@ -42,6 +42,29 @@ RUN git clone https://github.com/vibeic/yosys.git /yosys \
  && cmake -S /yosys -B /yosys/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/foss/tools/yosys \
  && cmake --build /yosys/build -j"$(nproc)" \
  && cmake --install /yosys/build
+
+# ---------------------------------------------------------------------------
+# Stage 2b — external CDCL SAT solvers (kissat + cadical) for the fork yosys
+# `sat -select-solver` backend (vibe-ic#354 / 0.2.30; plugin probes them
+# SELF-VALIDATINGLY in transition_fault_atpg_run.py and falls back to the
+# built-in ezMiniSAT when absent, so their absence never flips a grade).
+# Upstream Armin Biere releases, pinned by tag SHA; NOT forks — no vibeic
+# delta, so they live outside the fork-gatekeeper ledger.
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS sat-solvers-builder
+ARG KISSAT_REF=8af8e56f174b778aef3aa45af9f739b2a5f492c2   # tag rel-4.0.4
+ARG CADICAL_REF=c60730422e758ef1cebe7aeddf2dda31c996bf04    # tag rel-3.0.1
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/arminbiere/kissat.git /kissat \
+ && cd /kissat && git checkout ${KISSAT_REF} \
+ && ./configure && make -j"$(nproc)" \
+ && install -m 0755 build/kissat /usr/local/bin/kissat
+RUN git clone https://github.com/arminbiere/cadical.git /cadical \
+ && cd /cadical && git checkout ${CADICAL_REF} \
+ && ./configure && make -j"$(nproc)" \
+ && install -m 0755 build/cadical /usr/local/bin/cadical
 
 # ---------------------------------------------------------------------------
 # Stage 3 — vibeic/ngspice (batch-honesty rc + $& scalar + control-mode .param + native MC)
@@ -256,6 +279,9 @@ COPY --from=openroad-builder /src/build/bin/openroad /foss/tools/openroad/bin/op
 RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=yosys-builder /foss/tools/yosys /foss/tools/yosys
+# external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
+COPY --from=sat-solvers-builder /usr/local/bin/kissat /foss/tools/bin/kissat
+COPY --from=sat-solvers-builder /usr/local/bin/cadical /foss/tools/bin/cadical
 # --- vibeic/ngspice ---
 COPY --from=ngspice-builder /foss/tools/ngspice /foss/tools/ngspice
 # --- vibeic/magic + vibeic/netgen ---
