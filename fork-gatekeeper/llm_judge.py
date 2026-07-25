@@ -76,6 +76,14 @@ def judge(tool: str, role: str, commits: list[dict]) -> dict | None:
     body = {
         "model": MODEL,
         "max_tokens": 4096,
+        # temperature=0 — REQUIRED, not a tuning knob. `risk` feeds assess_release's
+        # _clearly_safe() gate, and clearly_safe feeds prepare_merge_pr, which opens a
+        # real cherry-pick PR against the fork. At the API default (1.0) that verdict is
+        # SAMPLED: the identical magic range 8.3.674→8.3.676 was assessed 7 days running
+        # (2026-07-19..25) and the clearly-safe count oscillated 1,1,1,0,0,0,1 with no
+        # upstream change — commit cc4da9a05fde flipped risk medium↔low, i.e. human-review
+        # ↔ auto-adopt, purely on sampling. A merge gate must not be a coin flip.
+        "temperature": 0,
         "system": [{"type": "text", "text": _SYS_IDENTITY},
                    {"type": "text", "text": _SYS_TASK.format(tool=tool, role=role or "EDA tool")}],
         # NOTE: no "tools" key → the model has no tool capability at all.
