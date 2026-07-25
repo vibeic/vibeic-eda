@@ -139,13 +139,22 @@ def tick() -> dict:
             except Exception as e:  # noqa: BLE001 — assessment must never break the tick
                 print(f"  [assess] {led['tool']} error (ignored): {e}")
 
+    # An assessment replayed from cache (identical tool + upstream range + carried-patch
+    # ref) is NOT news: we already filed its review PR and already offered its clearly-safe
+    # set on the tick that first produced it. Re-filing would reopen the same PR every day.
+    # Only FRESH assessments drive PR-opening; cached ones still show in the report/summary.
+    fresh = {t: r for t, r in assessments.items() if not r.get("cached")}
+    for t in sorted(set(assessments) - set(fresh)):
+        print(f"  [assess] {t:16} unchanged range — replayed from cache, no new PR")
+
     # Phase 3: open a cherry-pick MERGE PR (deterministic; holds token) for the clearly-safe
     # commits — real upstream commits, human-reviewed, never auto-merged, never force-push.
-    # Opt-in (GK_MERGE_PR), off by default. Never breaks the tick.
-    if assessments and os.environ.get("GK_MERGE_PR") in ("1", "true", "yes"):
+    # Gated on GK_MERGE_PR, which run_tick.sh (the cron entrypoint) defaults to 1 = ARMED.
+    # Never breaks the tick.
+    if fresh and os.environ.get("GK_MERGE_PR") in ("1", "true", "yes"):
         try:
             import prepare_merge_pr
-            for r in prepare_merge_pr.prepare(assessments, date):
+            for r in prepare_merge_pr.prepare(fresh, date):
                 print(f"  [merge-pr] {r.get('tool'):16} {r.get('status')} "
                       f"{r.get('url') or r.get('note') or ''}"[:110])
         except Exception as e:  # noqa: BLE001
@@ -236,7 +245,7 @@ def tick() -> dict:
         build_page.build(build_page.DEFAULT_OUT)
     except Exception as e:
         print(f"  (page rebuild failed: {e})")
-    _maybe_notify(summary, assessments)
+    _maybe_notify(summary, fresh)   # cached (unchanged-range) assessments file no new PR
     return summary
 
 

@@ -150,6 +150,89 @@ def test_llm_judge_never_raises_without_token():
         llm_judge.CRED = orig
 
 
+# ── determinism / idempotency (2026-07-25) ───────────────────────────────────
+# The magic range 8.3.674→8.3.676 was re-assessed 7 days running with NO upstream
+# change, and the clearly-safe count oscillated 1,1,1,0,0,0,1 — a sampled `risk`
+# flipping a commit between human-review and auto-adopt. Two guards below.
+
+def _cache_fixture(tmp, risks):
+    """assess() wired to stub layers; `risks` is consumed one per classify call."""
+    os.environ["GK_STATE_DIR"] = str(tmp)
+    import importlib
+    importlib.reload(A)
+    (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+    (tmp / "ledger" / "magic.json").write_text(json.dumps({
+        "tool": "magic", "integrated": True, "behind_releases": 1,
+        "upstream": "up/magic", "upstream_default_branch": "master",
+        "pinned_ref_full": "a" * 40, "base_release": "8.3.674",
+        "upstream_latest_release": "8.3.676", "role": "DRC"}))
+    A.upstream_commits = lambda *a: ([{"sha": "cc4da9a05fde", "sha_full": "c" * 40,
+                                       "title": "fix substrate extraction", "body": "",
+                                       "url": "", "author": "x"}], ["ext.c"])
+    A.our_patch_files = lambda *a: set()
+    A._commit_files = lambda *a: {"ext.c"}
+    A.clean_cherrypick = lambda *a: True
+    seq = list(risks)
+    calls = []
+    def classify(tool, role, commits):
+        calls.append(1)
+        r = seq.pop(0) if seq else "low"
+        return {c["sha"]: {"category": "bugfix", "relevant": True, "risk": r,
+                           "summary": "s", "reproduce": "", "recommend": "adopt"}
+                for c in commits}
+    A.classify_commits = classify
+    return calls
+
+
+def test_unchanged_range_replays_and_does_not_redrift():
+    """Identical input ⇒ stored verdict replayed, no second judgment, no drift."""
+    with tempfile.TemporaryDirectory() as d:
+        calls = _cache_fixture(Path(d), ["low", "medium"])   # 2nd call WOULD drift
+        r1 = A.assess("magic")
+        r2 = A.assess("magic")
+        assert r1["clearly_safe"] == ["cc4da9a05fde"]
+        assert r2["clearly_safe"] == r1["clearly_safe"], "verdict drifted on identical input"
+        assert r2.get("cached") is True
+        assert len(calls) == 1, f"re-judged an unchanged range ({len(calls)} calls)"
+
+
+def test_new_range_is_reassessed():
+    """A real upstream move must NOT be masked by the cache."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        calls = _cache_fixture(tmp, ["low", "low"])
+        A.assess("magic")
+        led = json.loads((tmp / "ledger" / "magic.json").read_text())
+        led["upstream_latest_release"] = "8.3.677"           # upstream advanced
+        (tmp / "ledger" / "magic.json").write_text(json.dumps(led))
+        r = A.assess("magic")
+        assert not r.get("cached"), "a NEW range was wrongly served from cache"
+        assert len(calls) == 2
+
+
+def test_degraded_assessment_is_not_cached():
+    """A judge outage must not freeze a provisional 'needs human' verdict forever."""
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["GK_STATE_DIR"] = d
+        import importlib
+        importlib.reload(A)
+        tmp = Path(d)
+        _cache_fixture(tmp, [])
+        A.classify_commits = lambda tool, role, commits: {
+            c["sha"]: dict(A._DEGRADED) for c in commits}
+        r1 = A.assess("magic")
+        assert r1["clearly_safe"] == []
+        assert not r1.get("cached")
+        r2 = A.assess("magic")
+        assert not r2.get("cached"), "degraded (AI-unavailable) verdict was cached"
+
+
+def test_judge_request_pins_temperature_zero():
+    """`risk` gates auto-adopt, so the judgment must not be sampled."""
+    src = (Path(__file__).parent / "llm_judge.py").read_text()
+    assert '"temperature": 0' in src, "llm_judge must pin temperature=0"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0

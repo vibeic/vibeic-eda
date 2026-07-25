@@ -15,10 +15,19 @@ upstream commit we would be pulling in and, per commit, judges:
 
 The output is a structured assessment (+ markdown) for a human-review vibe-ic PR. The
 "CLEARLY-SAFE" subset (low-risk self-contained bugfix, relevant, no overlap with our
-patches, cherry-picks clean) is flagged so the gatekeeper CAN auto-adopt it — but that
-execution stays gated (GK_ADOPT=auto-safe) and off by default until the assessments are
-trusted. Everything else is a human decision. Doctrine: understand + verify + adopt
-selectively; never grab-and-paste.
+patches, cherry-picks clean) is flagged and drives what prepare_merge_pr proposes.
+Everything else is a human decision. Doctrine: understand + verify + adopt selectively;
+never grab-and-paste.
+
+WHAT "CLEARLY-SAFE" ACTUALLY TRIGGERS (this docstring used to misstate it): it is NOT
+inert-until-enabled. It is consumed by prepare_merge_pr, gated on GK_MERGE_PR, which
+run_tick.sh — the cron entrypoint — defaults to 1 (its own comment says "ARMED"). On a
+clearly-safe commit the tick cherry-picks it onto a candidate branch and OPENS a PR on
+the fork. It never auto-MERGES: a human still merges. The earlier text named a
+`GK_ADOPT=auto-safe` switch that "gates" this and is "off by default" — no such variable
+is read anywhere in this codebase, so that was a false safety claim. Treat `clearly_safe`
+as a live, PR-opening decision, and keep every input to it deterministic (see llm_judge's
+temperature=0 and the assess() cache).
 
 Design notes:
   * Deterministic parts (commit enumeration via `gh api compare`, our-patch file overlap,
@@ -207,8 +216,52 @@ def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None) -
             and clean_pick is True)
 
 
+CACHE = STATE / "assessment-cache"
+
+
+def _cache_key(tool: str, base_ref: str, new_ref: str, our_ref: str | None) -> str:
+    """Identity of an assessment INPUT: the tool, the upstream range, and the ref our
+    carried patches sit on. Same key ⇒ nothing we assess over has changed."""
+    return f"{tool}|{base_ref}|{new_ref}|{(our_ref or '')[:12]}"
+
+
+def _cache_get(tool: str, key: str) -> dict | None:
+    try:
+        blob = json.loads((CACHE / f"{tool}.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    rep = blob.get(key)
+    return rep if isinstance(rep, dict) else None
+
+
+def _cache_put(tool: str, key: str, rep: dict) -> None:
+    """Best-effort persist; a cache failure must never break the tick."""
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        p = CACHE / f"{tool}.json"
+        try:
+            blob = json.loads(p.read_text())
+            if not isinstance(blob, dict):
+                blob = {}
+        except (OSError, json.JSONDecodeError):
+            blob = {}
+        blob[key] = rep
+        p.write_text(json.dumps(blob, ensure_ascii=False))
+    except OSError:
+        pass
+
+
 def assess(tool: str) -> dict:
-    """Full per-commit assessment for one tool, from its ledger. Never raises."""
+    """Full per-commit assessment for one tool, from its ledger. Never raises.
+
+    IDEMPOTENT over an unchanged input: an upstream range we have already assessed,
+    on the same carried-patch ref, replays the STORED verdict instead of re-judging.
+    Without this the daily cron re-assessed a static range forever — the magic range
+    8.3.674→8.3.676 was assessed 7 days running (2026-07-19..25), spending an LLM call
+    and opening a fresh vibe-ic review PR each day, and (because the judgment was
+    sampled) contradicting its own earlier verdicts. Re-judging identical input can
+    only add drift, never information.
+    """
     led_p = LEDGER / f"{tool}.json"
     if not led_p.is_file():
         return {"tool": tool, "error": f"no ledger at {led_p}"}
@@ -230,6 +283,13 @@ def assess(tool: str) -> dict:
     new_ref = led.get("upstream_latest_release")
     if not (base_ref and new_ref):
         return {"tool": tool, "error": "missing base_release/latest for the commit range"}
+
+    # Already assessed this exact input? Replay it — no LLM, no new PR, no drift.
+    ckey = _cache_key(tool, base_ref, new_ref, our_ref)
+    if os.environ.get("GK_ASSESS_NOCACHE") not in ("1", "true", "yes"):
+        hit = _cache_get(tool, ckey)
+        if hit is not None:
+            return {**hit, "cached": True}
 
     got = upstream_commits(upstream, base_ref, new_ref)
     if isinstance(got, list) and got and got[0].get("_err"):
@@ -262,12 +322,18 @@ def assess(tool: str) -> dict:
             row["decision"] = "human"
         assessed.append(row)
 
-    return {"tool": tool, "status": "assessed", "upstream": upstream,
-            "base_release": base_ref, "latest": new_ref,
-            "our_ref": (our_ref or "")[:12],
-            "our_patch_files": (len(our_files) if our_files is not None else None),
-            "commit_count": len(commits), "aggregate_files": len(agg_files),
-            "clearly_safe": safe, "commits": assessed}
+    rep = {"tool": tool, "status": "assessed", "upstream": upstream,
+           "base_release": base_ref, "latest": new_ref,
+           "our_ref": (our_ref or "")[:12],
+           "our_patch_files": (len(our_files) if our_files is not None else None),
+           "commit_count": len(commits), "aggregate_files": len(agg_files),
+           "clearly_safe": safe, "commits": assessed}
+    # Only a COMPLETE assessment is cacheable. If the AI degraded (any commit fell back
+    # to the manual default) the verdict is provisional — caching it would freeze a
+    # transient API outage into a permanent "needs human" record that never re-resolves.
+    if not any(c.get("_note") for c in cls_map.values()):
+        _cache_put(tool, ckey, rep)
+    return rep
 
 
 def _commit_files(upstream: str, sha_full: str) -> set[str] | None:
