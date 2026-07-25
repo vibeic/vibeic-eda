@@ -110,6 +110,98 @@ def our_patch_files(upstream: str, up_branch: str, our_ref: str, tool: str) -> s
     return {f.get("filename") for f in (cmp.get("files") or []) if f.get("filename")}
 
 
+DECISIONS = HERE / "DECISIONS.json"
+
+
+def recorded_decisions(tool: str) -> dict[str, dict]:
+    """Durable per-commit gatekeeper decisions for `tool` (see DECISIONS.json).
+
+    A selective-merge decision is DATA, not a judgment to re-derive. Without this
+    the tick re-asks the LLM about the same commit every day, and because that
+    judgment is a sampled text completion it can answer differently on different
+    days — which is exactly how magic's cc4da9a05fde flipped between
+    'human decision' and 'auto-adopt' across 7 identical runs. An entry here is
+    final until a human edits the file. Missing/broken file → {} (no decisions),
+    never an exception: the assessment must still run.
+    """
+    try:
+        blob = json.loads(DECISIONS.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    d = blob.get(tool)
+    return d if isinstance(d, dict) else {}
+
+
+def already_carried(tool: str, our_ref: str, commits: list[dict]) -> set[str]:
+    """The subset of `commits` our shipped ref ALREADY contains.
+
+    Two ways a commit can already be ours, and the second is the one that was
+    being missed:
+
+      * ANCESTRY — the sha is literally an ancestor of our pinned ref (we merged
+        or rebased past it);
+      * PATCH-ID — we CHERRY-PICKED it, so the change is ours under a different
+        sha. `git patch-id --stable` gives the same id for both.
+
+    Why this matters (magic, 2026-07-25): the range 8.3.674 -> 8.3.676 was
+    assessed 7 days running and 2 of its 3 commits were reported as awaiting a
+    human decision — but BOTH were already in what we ship. cc4da9a05fde was a
+    direct ancestor, and a22b7508acfe was carried as cherry-pick fe91f011
+    (patch-id c39ec7531d7a5eb7 on both). `behind_releases` compares RELEASE
+    TAGS, but selective-merge adopts COMMITS, so after adopting the useful ones
+    the tag never advances and the fork reads "behind" forever — re-proposing
+    work that is already done.
+
+    Returns the SHORT shas that are already carried. Empty set when we cannot
+    tell (no clone / git failure): unknown must read as "not carried" so a
+    genuinely new commit is never silently dropped from review.
+    """
+    clone = FORKS_DIR / tool
+    if not commits or not our_ref or not (clone / ".git").is_dir():
+        return set()
+
+    def _git(*args: str, timeout: int = 60):
+        try:
+            return subprocess.run(["git", "-C", str(clone), *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    def _patch_id(rev: str) -> str | None:
+        show = _git("show", rev)
+        if show is None or show.returncode != 0 or not show.stdout:
+            return None
+        try:
+            pid = subprocess.run(["git", "patch-id", "--stable"], input=show.stdout,
+                                 capture_output=True, text=True, timeout=60)
+        except (subprocess.SubprocessError, OSError):
+            return None
+        out = (pid.stdout or "").split()
+        return out[0] if out else None
+
+    carried: set[str] = set()
+    # Patch-ids of everything our ref carries since the fork point — computed once.
+    ours: set[str] = set()
+    log = _git("log", "--format=%H", f"{our_ref}", "-n", "400", timeout=120)
+    if log is not None and log.returncode == 0:
+        for h in (log.stdout or "").split():
+            p = _patch_id(h)
+            if p:
+                ours.add(p)
+    for c in commits:
+        sha = c.get("sha_full") or c.get("sha") or ""
+        if not sha:
+            continue
+        anc = _git("merge-base", "--is-ancestor", sha, our_ref)
+        if anc is not None and anc.returncode == 0:
+            carried.add(c["sha"])
+            continue
+        p = _patch_id(sha)
+        if p and p in ours:
+            carried.add(c["sha"])
+    return carried
+
+
 def clean_cherrypick(tool: str, our_ref: str, commit_sha: str) -> bool | None:
     """Probe (in the local fork clone, non-destructive) whether commit_sha cherry-picks
     cleanly onto our_ref. None if we can't tell (no clone / fetch fail). Never mutates
@@ -296,10 +388,34 @@ def assess(tool: str) -> dict:
         return {"tool": tool, "error": f"compare failed: {got[0]['_err']}"}
     commits, agg_files = got
     our_files = our_patch_files(upstream, up_branch, our_ref, tool) if our_ref else set()
-    cls_map = classify_commits(tool, led.get("role", ""), commits)
+    # DETERMINISTIC pre-filter, before any LLM spend: drop the commits our shipped
+    # ref already carries (by ancestry OR cherry-pick patch-id). Work that is
+    # already done is not a human decision, and re-proposing it is how the same
+    # range stayed "2 need review" for 7 days while both were in fact ours.
+    carried = already_carried(tool, our_ref, commits) if our_ref else set()
+    # A commit with a RECORDED gatekeeper decision is settled too — don't re-judge it.
+    decided = recorded_decisions(tool)
+    todo = [c for c in commits if c["sha"] not in carried and c["sha"] not in decided]
+    cls_map = classify_commits(tool, led.get("role", ""), todo)
 
     assessed, safe = [], []
     for c in commits:
+        if c["sha"] in carried:
+            assessed.append({**c, "category": "carried", "summary":
+                             "already in our shipped ref (ancestor or cherry-picked)",
+                             "relevant": None, "risk": None, "reproduce": "",
+                             "recommend": "carried", "touches_our_patches": None,
+                             "clean_cherrypick": None, "decision": "carried"})
+            continue
+        if c["sha"] in decided:
+            rec = decided[c["sha"]]
+            assessed.append({**c, "category": "decided",
+                             "summary": str(rec.get("reason", ""))[:200],
+                             "relevant": None, "risk": None, "reproduce": "",
+                             "recommend": rec.get("decision", "skip"),
+                             "touches_our_patches": None, "clean_cherrypick": None,
+                             "decision": f"recorded:{rec.get('decision', 'skip')}"})
+            continue
         cls = cls_map.get(c["sha"], dict(_DEGRADED))
         # cheap overlap signal from the aggregate diff isn't per-commit; do a per-commit
         # touch check only for adopt-candidates (bugfix + relevant) to bound gh/git cost.
@@ -327,7 +443,13 @@ def assess(tool: str) -> dict:
            "our_ref": (our_ref or "")[:12],
            "our_patch_files": (len(our_files) if our_files is not None else None),
            "commit_count": len(commits), "aggregate_files": len(agg_files),
-           "clearly_safe": safe, "commits": assessed}
+           "carried": sorted(carried), "clearly_safe": safe, "commits": assessed}
+    # Nothing left to decide: every upstream commit is either already ours or has
+    # been triaged. Say so explicitly — a range whose only outstanding item is a
+    # deliberate SKIP is DECIDED, not pending, and must not read as open work.
+    rep["decided"] = sorted(s for s in decided if any(c["sha"] == s for c in commits))
+    rep["outstanding"] = [c["sha"] for c in assessed
+                          if c["decision"] == "human" and c.get("recommend") != "skip"]
     # Only a COMPLETE assessment is cacheable. If the AI degraded (any commit fell back
     # to the manual default) the verdict is provisional — caching it would freeze a
     # transient API outage into a permanent "needs human" record that never re-resolves.
@@ -352,12 +474,25 @@ def render_md(rep: dict) -> str:
         return f"### {tool}: assessment error — {rep['error']}\n"
     if rep.get("status") in ("clean", "not_layered"):
         return f"### {tool}: {rep['status']} — nothing to assess.\n"
+    n_carried = len(rep.get("carried") or [])
+    n_decided = len(rep.get("decided") or [])
+    n_safe = len(rep.get("clearly_safe") or [])
+    n_open = len(rep.get("outstanding", [])) if "outstanding" in rep else \
+        rep["commit_count"] - n_safe - n_carried - n_decided
     L = [f"## {tool} — selective-merge assessment",
          f"Range **{rep['base_release']} → {rep['latest']}** · {rep['commit_count']} upstream "
          f"commit(s) · our branch carries patches over "
          f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
-         f"**Clearly-safe to auto-adopt: {len(rep['clearly_safe'])}** · "
-         f"**needs human decision: {rep['commit_count'] - len(rep['clearly_safe'])}**", "",
+         f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
+         f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**", ""]
+    if (n_carried or n_decided) and not n_open and not n_safe:
+        L += ["> **This range is DECIDED — no action required.** Every upstream commit is "
+              "either already in our shipped ref (as an ancestor or a cherry-pick) or "
+              "carries a recorded skip decision in `DECISIONS.json`. `behind_releases` "
+              "compares RELEASE TAGS, but selective-merge adopts COMMITS, so the tag stays "
+              "behind by design after a selective adoption — being 'behind' a tag is not "
+              "the same as owing work.", ""]
+    L += [
          "| sha | cat | risk | rel | conflict | clean-pick | rec | decision | summary |",
          "|---|---|---|---|---|---|---|---|---|"]
     for c in rep["commits"]:

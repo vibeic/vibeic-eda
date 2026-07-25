@@ -1,0 +1,12 @@
+{
+  "_doc": "Durable selective-merge DECISIONS, per fork, per upstream commit. A gatekeeper decision is DATA, not a judgment to re-derive: without this record the daily tick re-asks the LLM about the same commit forever, and (because that judgment is a text completion) it can answer differently on different days. An entry here is final until a human edits it. Recognised decisions: 'skip' (deliberately not adopted) and 'adopt' (wanted; still goes through the normal cherry-pick + review path).",
+  "_schema": "tool -> sha(short) -> {decision, reason, decided_by, decided_on}",
+  "magic": {
+    "42b346e31887": {
+      "decision": "skip",
+      "reason": "Extends the interactive `findlabel` command so `findlabel -glob <pattern> <n>` selects the nth matching label and moves the cursor box. This is an interactive layout-editing/UI affordance plus its documentation; magic's role in this distribution is batch DRC / extraction / GDS streamout driven by scripts, which never invokes findlabel. Adopting it would add carried delta with no signoff-path effect. Re-evaluate only if an automated flow starts using findlabel.",
+      "decided_by": "fork-gatekeeper",
+      "decided_on": "2026-07-25"
+    }
+  }
+}
