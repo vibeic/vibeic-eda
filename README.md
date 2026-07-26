@@ -314,14 +314,25 @@ Semantic versions track the fix-program milestones in `FIX_STATUS.md`:
 
 - `ghcr.io/vibeic/vibeic-eda:X.Y.Z` — immutable; the tool forks it was built from are the
   SHAs pinned at that tag (see [Build from source](#build-from-source) for what else moves).
-- `ghcr.io/vibeic/vibeic-eda:latest` — the newest released `X.Y.Z`; it currently resolves
-  to the same manifest digest as `0.2.26`.
+- `ghcr.io/vibeic/vibeic-eda:latest` — intended to be the newest released `X.Y.Z`.
+  **It is not, right now.** Measured against the registry on 2026-07-26:
 
-Current: **0.2.27** — the canonical from-source rebuild that folds the ASAP7 work of the
-two preceding tags into the multi-stage build. 0.2.24 and 0.2.25 were verified-correct
-*thin-layer overlays* (the sandbox build host had no DNS and a cold tool cache); 0.2.26
-rebuilds the identical public/BSD asset staging through `release.yml` on the
-`vibeic-builder` runner. No fork ref changed relative to 0.2.25.
+  | tag | manifest digest |
+  |---|---|
+  | `0.2.30` | `sha256:d2bbc5c8b004…` |
+  | `0.2.28` | `sha256:3ba01229b38c…` |
+  | `latest` | `sha256:3ba01229b38c…` — **the same image as `0.2.28`** |
+
+  So `docker pull …:latest` currently gets **0.2.28**, two releases behind. Pin an
+  explicit `X.Y.Z` until the moving tag is re-pointed; re-tagging a published image
+  changes what every existing `:latest` user receives, so it is left to the owner
+  rather than done as a side effect of a docs fix. (The previous text here claimed
+  `latest` matched `0.2.26` — `sha256:cafd850169ee…` — which was also untrue.)
+
+Current: **0.2.30** — the from-source release that is pinned by the plugin's
+image-version gate. `0.2.29` was assigned and never published; the registry has no
+such tag, which is what that gate now blocks. For what each earlier tag added, see
+the table below.
 
 The tags it consolidates:
 
