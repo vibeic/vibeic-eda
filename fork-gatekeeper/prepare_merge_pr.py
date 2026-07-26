@@ -26,10 +26,51 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from _nda_tokens import find as _nda_find
+
 STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
 LEDGER = STATE / "ledger"
 FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 
+
+
+def _nda_block_push(wt, rev_range: str = "origin/main..HEAD") -> str:
+    """"" if the range is clean, else a REFUSAL message.
+
+    vibe-ic#395: these push sites write branches to PUBLIC fork repositories
+    and scanned nothing. That is a wider exposure than the vibe-ic CI diffs
+    (which gained this scan in v1.6.27/28), on the exact path where this
+    project already paid for a leak twice in force-pushed history rewrites.
+
+    Scans the commit MESSAGES, the added CONTENT and the added PATHS — all
+    three carriers — and reports token INDICES only, never the literal.
+    A range that cannot be resolved is scanned as the tip commit rather than
+    reported clean: unknown must not read as safe.
+    """
+    import subprocess as _sp
+    try:
+        r = _sp.run(["git", "-C", str(wt), "log", "--format=%B", rev_range],
+                    capture_output=True, text=True, timeout=120)
+        msgs = r.stdout if r.returncode == 0 else ""
+        d = _sp.run(["git", "-C", str(wt), "diff", "--unified=0", rev_range],
+                    capture_output=True, text=True, timeout=300)
+        diff = d.stdout if d.returncode == 0 else ""
+        if r.returncode != 0 or d.returncode != 0:
+            r2 = _sp.run(["git", "-C", str(wt), "show", "--format=%B", "HEAD"],
+                         capture_output=True, text=True, timeout=300)
+            msgs, diff = r2.stdout, r2.stdout
+    except Exception as exc:  # noqa: BLE001 — a guard that dies must not pass
+        return f"NDA pre-push scan could not run ({exc.__class__.__name__}) — refusing to push"
+    added = "\n".join(l for l in diff.splitlines()
+                       if l.startswith("+") and not l.startswith("+++"))
+    paths = "\n".join(l for l in diff.splitlines() if l.startswith("+++ b/"))
+    hits = sorted(set(_nda_find(msgs)) | set(_nda_find(added)) | set(_nda_find(paths)))
+    if hits:
+        return (f"NDA pre-push guard: {len(hits)} token role(s) present "
+                f"(indices {hits}) in the commit messages / added content / "
+                f"added paths of {rev_range} — REFUSING to push to a public "
+                f"repository. Literals are not printed by design (vibe-ic#395).")
+    return ""
 
 def _run(args, cwd=None, timeout=180):
     try:
@@ -139,6 +180,9 @@ def _prepare_one(tool: str, rep: dict, date: str) -> dict:
         if outl.strip():
             return {"tool": tool, "status": "already_exists", "branch": cand}
         # push ONLY the new candidate branch (never force, never the vibeic branch/main)
+        _nda_stop = _nda_block_push(wt)
+        if _nda_stop:
+            return (False, _nda_stop)
         rc, out = _run(["git", "-C", str(wt), "push", fr, f"HEAD:refs/heads/{cand}", "-q"])
         if rc != 0:
             return {"tool": tool, "status": "push_failed", "note": out.strip()[:200]}

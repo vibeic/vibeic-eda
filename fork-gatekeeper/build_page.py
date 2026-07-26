@@ -48,25 +48,11 @@ DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or "/home/reyerchu/vibeic.ai/ed
 # page could carry them. A parallel list drifts; it already had. All eight
 # roles are covered now, and the real fix is a SHARED token module across
 # the two repos rather than a copy that must be remembered.
-_NDA_SUBS_ENCODED: list[tuple[str, str]] = [
-    ("cmVhbC1IUDE4RTgwLWRlY2s=", "real-commercial-PDK-deck"),
-    ("cmVhbC1IUDE4RTgw", "real-commercial-PDK"),
-    ("SFAxOEU4MA==", "a commercial 180nm NDA PDK"),
-    ("S2V5ID9Gb3VuZHJ5", "a commercial foundry"),
-    ("XGJtMThlODBcdyo=", "commercial-180nm-pdk"),
-    ("bWFnbmFjaGlw", "a commercial foundry"),
-    ("ZU1lbW9yeQ==", "a commercial IP vendor"),
-    ("RU8wMTI4WDhLQTE4MEJBMTE=", "a commercial IP part number"),
-]
-
-_NDA_SUBS = [(re.compile(base64.b64decode(a).decode("utf-8"), re.I), b)
-             for a, b in _NDA_SUBS_ENCODED]
+from _nda_tokens import redact as _redact_nda_impl  # noqa: E402
 
 
 def _redact_nda(s: str) -> str:
-    for pat, rep in _NDA_SUBS:
-        s = pat.sub(rep, s)
-    return s
+    return _redact_nda_impl(s)
 
 
 def _load_ledgers() -> list[dict]:

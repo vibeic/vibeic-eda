@@ -30,6 +30,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from _nda_tokens import find as _nda_find
+
 REPO = Path(os.environ.get("GK_VIBEIC_REPO", "/home/reyerchu/vibe-ic"))
 GH_REPO = "vibeic/vibe-ic"
 DOC_FILES = ["README.md", "docs/INSTALL.md"]           # where vibe-ic pins the image tag
@@ -37,6 +39,45 @@ LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-o
 ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
 _PIN_RE = re.compile(r"(vibeic-eda:)\d+\.\d+\.\d+")
 
+
+
+def _nda_block_push(wt, rev_range: str = "origin/main..HEAD") -> str:
+    """"" if the range is clean, else a REFUSAL message.
+
+    vibe-ic#395: these push sites write branches to PUBLIC fork repositories
+    and scanned nothing. That is a wider exposure than the vibe-ic CI diffs
+    (which gained this scan in v1.6.27/28), on the exact path where this
+    project already paid for a leak twice in force-pushed history rewrites.
+
+    Scans the commit MESSAGES, the added CONTENT and the added PATHS — all
+    three carriers — and reports token INDICES only, never the literal.
+    A range that cannot be resolved is scanned as the tip commit rather than
+    reported clean: unknown must not read as safe.
+    """
+    import subprocess as _sp
+    try:
+        r = _sp.run(["git", "-C", str(wt), "log", "--format=%B", rev_range],
+                    capture_output=True, text=True, timeout=120)
+        msgs = r.stdout if r.returncode == 0 else ""
+        d = _sp.run(["git", "-C", str(wt), "diff", "--unified=0", rev_range],
+                    capture_output=True, text=True, timeout=300)
+        diff = d.stdout if d.returncode == 0 else ""
+        if r.returncode != 0 or d.returncode != 0:
+            r2 = _sp.run(["git", "-C", str(wt), "show", "--format=%B", "HEAD"],
+                         capture_output=True, text=True, timeout=300)
+            msgs, diff = r2.stdout, r2.stdout
+    except Exception as exc:  # noqa: BLE001 — a guard that dies must not pass
+        return f"NDA pre-push scan could not run ({exc.__class__.__name__}) — refusing to push"
+    added = "\n".join(l for l in diff.splitlines()
+                       if l.startswith("+") and not l.startswith("+++"))
+    paths = "\n".join(l for l in diff.splitlines() if l.startswith("+++ b/"))
+    hits = sorted(set(_nda_find(msgs)) | set(_nda_find(added)) | set(_nda_find(paths)))
+    if hits:
+        return (f"NDA pre-push guard: {len(hits)} token role(s) present "
+                f"(indices {hits}) in the commit messages / added content / "
+                f"added paths of {rev_range} — REFUSING to push to a public "
+                f"repository. Literals are not printed by design (vibe-ic#395).")
+    return ""
 
 def _run(args, cwd=None):
     """Run a command; return (rc, combined_output). Never raises."""
@@ -145,6 +186,9 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
             rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
             return (True, f"DRY-RUN — would open PR '{title}' on {GH_REPO}\n{diff.strip()[:800]}")
 
+        _nda_stop = _nda_block_push(wt)
+        if _nda_stop:
+            return (False, _nda_stop)
         rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
         if rc != 0:
             return (False, f"branch push failed: {out.strip()[:200]}")
@@ -231,6 +275,9 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
             rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
             return (True, f"DRY-RUN — would open assessment PR '{title}'\n{diff.strip()[:800]}")
 
+        _nda_stop = _nda_block_push(wt)
+        if _nda_stop:
+            return (False, _nda_stop)
         rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
         if rc != 0:
             return (False, f"branch push failed: {out.strip()[:200]}")
