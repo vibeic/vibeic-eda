@@ -205,11 +205,39 @@ def tick() -> dict:
             if rep.get("error"):
                 entry["note"] = f"{nr} new release(s) → {latest}; assessment error: {rep['error']}"
             else:
-                cc, safe = rep.get("commit_count", 0), len(rep.get("clearly_safe") or [])
-                entry["assessed"] = {"commits": cc, "clearly_safe": safe}
+                # CONSUME the assessment's own classification. This line used
+                # to re-derive "needs human" as `commit_count - clearly_safe`,
+                # which silently discards the two categories the assessment
+                # already resolved: commits our ref CARRIES (by ancestry or
+                # cherry-pick patch-id) and commits with a RECORDED decision.
+                # Measured on magic 8.3.674 → 8.3.676: 2 carried + 1 recorded
+                # skip = nothing outstanding, yet this note reported "3 need
+                # human review" and the range was re-proposed on 07-23, 07-24
+                # and 07-26. `assess_release` computes `outstanding` (and the
+                # markdown report prints it correctly); only this summary went
+                # its own way — a producer/consumer split inside one tool.
+                cc = rep.get("commit_count", 0)
+                safe = len(rep.get("clearly_safe") or [])
+                carried = len(rep.get("carried") or [])
+                decided = len(rep.get("decided") or [])
+                outstanding = rep.get("outstanding")
+                # Fall back to the old arithmetic ONLY when the assessment did
+                # not report `outstanding` (an older cached report): unknown
+                # must read as "needs review", never as "nothing to do".
+                n_open = len(outstanding) if outstanding is not None else cc - safe
+                entry["assessed"] = {"commits": cc, "clearly_safe": safe,
+                                     "carried": carried, "decided": decided,
+                                     "outstanding": n_open}
+                resolved = f"{carried} already carried, {decided} previously decided"
                 entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
-                                 f"{safe} clearly-safe, {cc - safe} need human review — "
+                                 f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
                                  f"selective-merge assessment filed (not auto-merged)")
+                if n_open == 0 and safe == 0:
+                    # Nothing is outstanding: reporting DEFERRED here is what
+                    # turned settled work into a recurring proposal.
+                    entry["verdict"] = "RESOLVED"
+                    entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → "
+                                     f"{latest}: {resolved} — nothing outstanding")
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))

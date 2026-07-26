@@ -311,3 +311,48 @@ if __name__ == "__main__":
         print(f"  ✓ {fn.__name__}")
         passed += 1
     print(f"ALL {passed} PASS")
+
+
+# ── the summary must CONSUME the assessment's classification (vibe-ic#369) ──
+# `assess_release` resolves three categories: clearly-safe, CARRIED (ancestry
+# or cherry-pick patch-id) and DECIDED (recorded gatekeeper decision). The
+# sync-log note re-derived "needs human" as `commit_count - clearly_safe`,
+# discarding the last two. Measured on magic 8.3.674 -> 8.3.676: 2 carried +
+# 1 recorded skip = nothing outstanding, yet it reported "3 need human
+# review" and the settled range was re-proposed on 07-23, 07-24 and 07-26.
+
+def _note_for(rep):
+    """Drive the real summary branch with a synthetic assessment report."""
+    import importlib.util, sys as _s
+    from pathlib import Path as _P
+    spec = importlib.util.spec_from_file_location(
+        "_gk", _P(__file__).resolve().parent / "gatekeeper.py")
+    gk = importlib.util.module_from_spec(spec)
+    _s.modules["_gk"] = gk
+    spec.loader.exec_module(gk)
+    return gk
+
+
+def test_369_carried_and_decided_are_not_counted_as_open_work():
+    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    # the crude re-derivation must be gone from the summary branch
+    assert 'f"{safe} clearly-safe, {cc - safe} need human review' not in src
+    assert 'rep.get("outstanding")' in src
+    assert '"carried": carried' in src and '"decided": decided' in src
+
+
+def test_369_unknown_outstanding_still_reads_as_needing_review():
+    """An older cached report without `outstanding` must fall back to the
+    conservative arithmetic — unknown may never read as 'nothing to do'."""
+    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert "if outstanding is not None else cc - safe" in src
+
+
+def test_369_nothing_outstanding_is_not_reported_as_deferred():
+    """DEFERRED on a fully-resolved range is what turned settled work into a
+    recurring proposal."""
+    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert 'entry["verdict"] = "RESOLVED"' in src
+    i = src.index('entry["verdict"] = "RESOLVED"')
+    window = src[max(0, i - 400):i]
+    assert "n_open == 0" in window and "safe == 0" in window
