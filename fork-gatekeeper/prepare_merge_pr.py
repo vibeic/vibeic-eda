@@ -182,7 +182,17 @@ def _prepare_one(tool: str, rep: dict, date: str) -> dict:
         # push ONLY the new candidate branch (never force, never the vibeic branch/main)
         _nda_stop = _nda_block_push(wt)
         if _nda_stop:
-            return (False, _nda_stop)
+            # vibe-ic#395. This returned a TUPLE while every other exit of
+            # `_prepare_one` returns a dict — the same two lines pasted into
+            # `pr_notify._open_pr`, whose contract really is (bool, str).
+            # The push was still blocked, so nothing leaked; what broke was
+            # the REPORT. `gatekeeper.py` does `r.get('status')` on each row,
+            # so a tuple raised AttributeError into a broad `except` that
+            # prints "error (ignored)" — the operator was told an NDA hit was
+            # an ignorable hiccup — and the `for` loop died there, so every
+            # remaining fork in that tick went unreported too. A guard whose
+            # own alarm is swallowed at the moment it fires.
+            return {"tool": tool, "status": "nda_blocked", "note": _nda_stop}
         rc, out = _run(["git", "-C", str(wt), "push", fr, f"HEAD:refs/heads/{cand}", "-q"])
         if rc != 0:
             return {"tool": tool, "status": "push_failed", "note": out.strip()[:200]}

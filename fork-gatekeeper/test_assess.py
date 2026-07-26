@@ -304,11 +304,29 @@ def test_render_marks_a_fully_settled_range_as_decided():
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
+    # `assess_release` and restores NONE of them, so whichever test used it
+    # last leaks its stubs into every test that runs after. In script order
+    # (alphabetical) the victim was
+    # `test_our_patch_files_unknown_on_error_fails_safe`: it called the leaked
+    # `our_patch_files = lambda *a: set()` instead of the real function, so
+    # the assertion that an ERRORED lookup returns None — the FAIL-SAFE the
+    # conflict gate depends on — could not fail no matter what the production
+    # code did. Under pytest the same suite passed, because pytest runs in
+    # definition order and the leaking test happens to come after.
+    #
+    # A suite whose result depends on which runner you use is not reporting
+    # on the code. Reload between tests so each starts from the real module;
+    # `_cache_fixture` already reloads on entry, so this is the symmetric half
+    # rather than a new convention.
+    import importlib
+    fns = [k for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
     passed = 0
-    for fn in fns:
-        fn()
-        print(f"  ✓ {fn.__name__}")
+    for name in fns:
+        importlib.reload(A)
+        globals()[name]()
+        print(f"  ✓ {name}")
         passed += 1
     print(f"ALL {passed} PASS")
 
