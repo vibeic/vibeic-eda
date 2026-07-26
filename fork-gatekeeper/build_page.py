@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import base64
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,13 +33,34 @@ DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or "/home/reyerchu/vibeic.ai/ed
 # point where ledger data becomes a public artifact, so we sanitize the emitted
 # HTML here — defense-in-depth, so a future commit message can't re-leak it.
 # (Order matters: replace the specific compound tokens before the bare name.)
-_NDA_SUBS = [
-    (re.compile(r"real-<REDACTED-NDA>-deck", re.I), "real-commercial-PDK-deck"),
-    (re.compile(r"real-<REDACTED-NDA>", re.I), "real-commercial-PDK"),
-    (re.compile(r"<REDACTED-NDA>", re.I), "a commercial 180nm NDA PDK"),
-    (re.compile(r"Key ?Foundry", re.I), "a commercial foundry"),
-    (re.compile(r"\b<REDACTED-NDA>\w*", re.I), "commercial-180nm-pdk"),
+# The token PATTERNS are stored base64-encoded and decoded at run time. They
+# were plain literals here until 2026-07-26 — in a file that is TRACKED and
+# PUSHED to a PUBLIC repository. This block's own comment claimed to be
+# "defense-in-depth so a future commit message can't re-leak it" while the
+# block itself WAS the leak: a redactor that spells out what it redacts
+# publishes it. Same encoded-store form the vibe-ic NDA checkers already use
+# (programs/_commercial_pdk.py) so the two cannot drift apart in approach.
+# Order still matters: compound tokens before the bare name.
+#
+# COVERAGE, measured 2026-07-26: this list held 5 patterns while the
+# canonical store knows EIGHT token roles — a second foundry brand, an IP
+# vendor and an IP part number were NOT redacted at all, so the published
+# page could carry them. A parallel list drifts; it already had. All eight
+# roles are covered now, and the real fix is a SHARED token module across
+# the two repos rather than a copy that must be remembered.
+_NDA_SUBS_ENCODED: list[tuple[str, str]] = [
+    ("cmVhbC1IUDE4RTgwLWRlY2s=", "real-commercial-PDK-deck"),
+    ("cmVhbC1IUDE4RTgw", "real-commercial-PDK"),
+    ("SFAxOEU4MA==", "a commercial 180nm NDA PDK"),
+    ("S2V5ID9Gb3VuZHJ5", "a commercial foundry"),
+    ("XGJtMThlODBcdyo=", "commercial-180nm-pdk"),
+    ("bWFnbmFjaGlw", "a commercial foundry"),
+    ("ZU1lbW9yeQ==", "a commercial IP vendor"),
+    ("RU8wMTI4WDhLQTE4MEJBMTE=", "a commercial IP part number"),
 ]
+
+_NDA_SUBS = [(re.compile(base64.b64decode(a).decode("utf-8"), re.I), b)
+             for a, b in _NDA_SUBS_ENCODED]
 
 
 def _redact_nda(s: str) -> str:
@@ -119,15 +141,19 @@ FOOTER = """<footer>
     </div>
 </footer>"""
 
-# Static (non-data-driven) section: an honest commercial-gap self-assessment, from a
-# top-down survey of all 12 forks vs the leading commercial suites. Persists across
-# every regeneration because it lives in the template, not the ledger.
+# Honest commercial-gap self-assessment, from a top-down survey of every fork vs the
+# leading commercial suites. The prose lives in the template, but its two COUNTS are
+# substituted from ENHANCEMENTS.json at build time (__NFORKS__ / __NOPEN__).
+# This used to read "all 12 forks ... ~63-item backlog" as literal text, and both
+# numbers silently went stale: the fork count reached 15, and ~63 reconciled with no
+# band of the ledger at all (open=143, open-with-priority=116, P0-P2=51, P0-P3=83).
+# A hardcoded count beside the data that defines it will always drift, so it is derived.
 GAP = """<section>
     <div class="fork-wrap">
         <div class="section-header" style="text-align:left">
             <p class="eyebrow" data-en="Honest self-assessment" data-zh="誠實自評">Honest self-assessment</p>
             <h2 data-en="What our forks can't do yet — vs commercial EDA" data-zh="我們的 fork 還做不到什麼 — 對照商用 EDA">What our forks can't do yet — vs commercial EDA</h2>
-            <p data-en="We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all 12 forks produced a prioritized ~63-item enhancement backlog. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust." data-zh="我們擁有核心引擎，缺的是上面那層簽核 + 方法學。我們對三大廠（Synopsys／Cadence／Siemens EDA，加上 Ansys／Keysight／Empyrean）做了系統化調查，對照全部 12 個 fork，整理出一份排序過、約 63 項的強化 backlog。最高槓桿的單一項目是 field-solver 級、耦合感知的寄生萃取（PEX）：它是串擾／SI timing、動態 IR-drop、電遷移、點對點可靠性的前置條件 — 一個拱心石解鎖橫跨兩個工具的約五個下游簽核功能。我們公開這份差距；對能力天花板誠實，正是我們贏得信任的方式。">We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all 12 forks produced a prioritized ~63-item enhancement backlog. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust.</p>
+            <p data-en="We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all __NFORKS__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust." data-zh="我們擁有核心引擎，缺的是上面那層簽核 + 方法學。我們對三大廠（Synopsys／Cadence／Siemens EDA，加上 Ansys／Keysight／Empyrean）做了系統化調查，對照全部 __NFORKS__ 個 fork，整理出一份強化 backlog，目前有 __NOPEN__ 項未交付（直接數下方帳本裡尚未完成的每一列）。最高槓桿的單一項目是 field-solver 級、耦合感知的寄生萃取（PEX）：它是串擾／SI timing、動態 IR-drop、電遷移、點對點可靠性的前置條件 — 一個拱心石解鎖橫跨兩個工具的約五個下游簽核功能。我們公開這份差距；對能力天花板誠實，正是我們贏得信任的方式。">We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all __NFORKS__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust.</p>
         </div>
 
         <div class="fork-scroll">
@@ -505,7 +531,11 @@ def build(out: Path):
     nav = NAV.replace("__NAVLINKS__", build_navlinks(out))
     footer = FOOTER.replace("__FOOTER_SITE__", build_footer_site(out))
     html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", nav).replace("__FOOTER__", footer)
-            .replace("__GAP__", GAP)
+            .replace("__GAP__", GAP
+                     .replace("__NFORKS__", str(len(enh)))
+                     .replace("__NOPEN__", str(sum(
+                         1 for v in enh.values() for r in v.get("rows", [])
+                         if r.get("status") in ("todo", "deferred")))))
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
             .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
