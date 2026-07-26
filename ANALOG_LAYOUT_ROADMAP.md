@@ -105,11 +105,11 @@ what remains is (1) reconcile the ALIGN/PDK version, (2) close 2 opens, (3) DRC-
 | Real **sky130** DRC-iterated geometry | **MEDIUM** | adopt `ALIGN-pdk-sky130` + fix `m1Pitch` schema skew + close 2 opens + DRC loop against native svrfdrc |
 | **sg13g2** (IHP) auto-layout | **HIGH** | no community ALIGN sg13g2 PDK — author the ALIGN PDK abstraction (`Align_primitives.py`/`layers.json`/`mos.py`) atop the IHP gdsfactory/klayout PCell substrate |
 | Constraint-driven quality (common-centroid, guard-ring, matching) | MEDIUM | ALIGN supports `.const.json`; author a spec→constraint generator |
-| **Commercial NDA-process (<REDACTED-NDA> 180nm) auto-layout** | **STAGED-LATER** | ALIGN/MAGICAL have no NDA-process PDK abstraction; authoring one is gated on the NDA collateral + is a later item after the open-PDK path lands. The spike deliberately stays on the OPEN PDK (sky130/sg13g2). |
+| **Commercial NDA-process (a commercial 180nm NDA PDK) auto-layout** | **STAGED-LATER** | ALIGN/MAGICAL have no NDA-process PDK abstraction; authoring one is gated on the NDA collateral + is a later item after the open-PDK path lands. The spike deliberately stays on the OPEN PDK (sky130/sg13g2). |
 
-### 4.5 NDA-process (<REDACTED-NDA>) — layout staged-later, but SIGN-OFF already engine-solved
+### 4.5 NDA-process (a commercial 180nm NDA PDK) — layout staged-later, but SIGN-OFF already engine-solved
 The feasibility spike is intentionally OPEN-PDK only. For the NDA commercial process
-(Key Foundry <REDACTED-NDA> 180nm), analog auto-**layout** is a staged-later item (needs an ALIGN
+(a commercial 180nm NDA PDK), analog auto-**layout** is a staged-later item (needs an ALIGN
 PDK abstraction over the NDA collateral). However the **A6 sign-off half is already solved
 at the engine level** and only needs per-block analog wiring (plugin-side — owned by the
 parallel gatekeeper; this roadmap REFERENCES, does not implement):
