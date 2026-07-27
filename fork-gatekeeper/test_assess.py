@@ -707,6 +707,211 @@ def test_369_nothing_outstanding_is_not_reported_as_deferred():
     assert "n_open == 0" in window and "safe == 0" in window
 
 
+# ── the cache must identify the ASSESSOR too (vibeic/vibeic-eda#4) ───────────
+# `_cache_key` identified the assessment's INPUT (tool, upstream range, our
+# carried-patch ref) and nothing about the classifier. f312813 changed what the
+# judge concludes about identical commits, and for every range already cached
+# that repair was invisible: the tick printed "unchanged range — replayed from
+# cache" and never called the new code. A replayed verdict and a freshly computed
+# one rendered identically in the report, the PR body and the log.
+
+def _pop_state_dir():
+    """`_cache_fixture` sets GK_STATE_DIR and never clears it, and a test that
+    re-points ASSESSOR_SOURCES must not leak that at the next test either (under
+    pytest nothing reloads the module between tests — vibe-ic#395's lesson)."""
+    os.environ.pop("GK_STATE_DIR", None)
+    import importlib
+    importlib.reload(A)
+
+
+def test_cache_key_carries_the_assessor():
+    k1 = A._cache_key("magic", "8.3.674", "8.3.678", "d" * 40, "aaaa")
+    k2 = A._cache_key("magic", "8.3.674", "8.3.678", "d" * 40, "bbbb")
+    assert k1 != k2, "two different judges shared one cache slot"
+    assert k1.endswith("|aaaa")
+    assert k1.startswith(A._cache_input_prefix("magic", "8.3.674", "8.3.678", "d" * 40) + "|")
+
+
+def test_an_unchanged_assessor_still_hits_the_cache():
+    """HALF TWO: widening the key must not cost the idempotency #4 keeps."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            calls = _cache_fixture(tmp, ["low", "medium"])   # a 2nd call WOULD drift
+            judge = tmp / "judge_source.py"
+            judge.write_text("VERDICT = 'v1'\n")
+            A.ASSESSOR_SOURCES = (judge,)
+            r1 = A.assess("magic")
+            r2 = A.assess("magic")
+            assert r2.get("cached") is True, "an unchanged assessor missed the cache"
+            assert len(calls) == 1, f"re-judged an unchanged range ({len(calls)} calls)"
+            assert r2["clearly_safe"] == r1["clearly_safe"]
+            assert r2["assessor"] == r1["assessor"]
+            assert not r2.get("reassessed_because")
+        finally:
+            _pop_state_dir()
+
+
+def test_a_changed_assessor_misses_the_cache_on_an_unchanged_range():
+    """HALF ONE — THE LOAD-BEARING HALF. Same tool, same upstream range, same
+    carried-patch ref, DIFFERENT judge ⇒ the stored verdict must NOT be replayed."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            calls = _cache_fixture(tmp, ["low", "low"])
+            judge = tmp / "judge_source.py"
+            judge.write_text("VERDICT = 'v1'\n")
+            A.ASSESSOR_SOURCES = (judge,)
+            r1 = A.assess("magic")
+            assert not r1.get("cached") and len(calls) == 1
+            assert A.assess("magic").get("cached") is True      # settles into the cache
+            assert len(calls) == 1
+
+            # the judge changes; NOTHING about the input does (this is f312813)
+            judge.write_text("VERDICT = 'v2'  # the judge now concludes differently\n")
+            r3 = A.assess("magic")
+
+            assert not r3.get("cached"), "a stale verdict replayed after the judge changed"
+            assert len(calls) == 2, "the CHANGED judge was never called"
+            assert r3["assessor"] != r1["assessor"]
+            why = r3.get("reassessed_because", "")
+            assert "assessor changed" in why, why
+            assert r1["assessor"] in why and r3["assessor"] in why, why
+        finally:
+            _pop_state_dir()
+
+
+def test_assessor_id_is_derived_from_the_judge_source_not_declared():
+    """A hand-maintained version integer drifts from the code it claims to describe;
+    the identity has to be the CONTENT."""
+    import shutil
+    real = Path(__file__).resolve().parent / "llm_judge.py"
+    orig = A.ASSESSOR_SOURCES
+    with tempfile.TemporaryDirectory() as d:
+        copy = Path(d) / "llm_judge.py"
+        shutil.copy(real, copy)
+        try:
+            A.ASSESSOR_SOURCES = (copy,)
+            before = A.assessor_id()
+            copy.write_text(copy.read_text() + "\n# an edit to what the judge concludes\n")
+            after = A.assessor_id()
+        finally:
+            A.ASSESSOR_SOURCES = orig
+    assert before != after, "the assessor id did not follow the judge module's content"
+    assert any(p.name == "llm_judge.py" for p in A.ASSESSOR_SOURCES), \
+        "the judge module is not part of the assessor identity"
+    import re
+    src = (Path(__file__).resolve().parent / "assess_release.py").read_text()
+    assert re.search(r"^\s*ASSESSOR_VERSION\s*=", src, re.M) is None, \
+        "a hand-maintained version integer came back"
+
+
+def test_assessor_id_survives_an_unreadable_source():
+    """Never raises, and 'I could not read the judge' must not collide with a real one."""
+    orig = A.ASSESSOR_SOURCES
+    try:
+        A.ASSESSOR_SOURCES = (Path("/no/such/judge.py"),)
+        missing = A.assessor_id()
+    finally:
+        A.ASSESSOR_SOURCES = orig
+    assert isinstance(missing, str) and missing
+    assert missing != A.assessor_id()
+
+
+def test_assessor_id_tracks_the_model_and_the_chunking():
+    """Both are env-overridable, so identical source can still be two judges."""
+    import importlib
+    import llm_judge
+    base = A.assessor_id()
+    for var, val in (("GK_JUDGE_MODEL", "some-other-model"), ("GK_JUDGE_CHUNK", "7")):
+        try:
+            os.environ[var] = val
+            importlib.reload(llm_judge)
+            assert A.assessor_id() != base, f"{var} did not move the assessor id"
+        finally:
+            os.environ.pop(var, None)
+            importlib.reload(llm_judge)
+    assert A.assessor_id() == base, "the assessor id did not come back"
+
+
+def test_assessor_id_tracks_the_system_prompt():
+    import llm_judge
+    orig = llm_judge._SYS_TASK
+    base = A.assessor_id()
+    try:
+        llm_judge._SYS_TASK = orig + " Prefer commits that touch the router."
+        assert A.assessor_id() != base, "the system prompt is not part of the assessor identity"
+    finally:
+        llm_judge._SYS_TASK = orig
+    assert A.assessor_id() == base
+
+
+def _provenance_rep(**kw):
+    rep = {"tool": "magic", "status": "assessed", "base_release": "8.3.674",
+           "latest": "8.3.678", "our_patch_files": 59, "commit_count": 1,
+           "carried": [], "decided": [], "clearly_safe": [], "outstanding": ["aaa111"],
+           "not_assessed": [],
+           "commits": [{"sha": "aaa111", "title": "fix drc", "category": "bugfix",
+                        "risk": "low", "relevant": True, "touches_our_patches": False,
+                        "clean_cherrypick": True, "recommend": "adopt",
+                        "decision": "human", "summary": "real judgement"}]}
+    rep.update(kw)
+    return rep
+
+
+def test_a_replayed_report_is_visibly_a_replay():
+    """The reader of 2026-07-28-magic.md must be able to tell whether that judgement
+    was computed today or restored, and against which assessor."""
+    fresh = A.render_md(_provenance_rep(assessor="abc123abc123",
+                                        assessed_at="2026-07-28T05:00:00Z"))
+    assert "REPLAYED FROM CACHE" not in fresh
+    assert "Computed on 2026-07-28T05:00:00Z" in fresh
+    assert "abc123abc123" in fresh
+
+    replay = A.render_md(_provenance_rep(assessor="abc123abc123",
+                                         assessed_at="2026-07-25T05:00:00Z",
+                                         cached=True, replayed_at="2026-07-28T05:00:00Z"))
+    assert "REPLAYED FROM CACHE" in replay
+    assert "no classifier ran" in replay
+    assert "2026-07-25T05:00:00Z" in replay, "the report must say WHEN it was decided"
+    assert "2026-07-28T05:00:00Z" in replay, "and when it was restored"
+    assert "abc123abc123" in replay, "and by which assessor"
+
+    old = A.render_md(_provenance_rep(cached=True))
+    assert "predates assessor pinning" in old, "an unattributable replay must say so"
+
+
+def test_a_legacy_input_only_cache_entry_is_rejudged_with_a_reason():
+    """The live cache at f312813 held input-only keys (`magic|8.3.674|8.3.678|1918…`).
+    Those must NOT replay, and the tick must say why it is spending the calls."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            calls = _cache_fixture(tmp, ["low"])
+            legacy = A._cache_input_prefix("magic", "8.3.674", "8.3.676", "a" * 40)
+            (tmp / "assessment-cache").mkdir(parents=True, exist_ok=True)
+            (tmp / "assessment-cache" / "magic.json").write_text(json.dumps(
+                {legacy: {"tool": "magic", "status": "assessed", "commit_count": 1,
+                          "clearly_safe": ["a-stale-verdict"], "commits": []}}))
+            r = A.assess("magic")
+            assert not r.get("cached"), "a pre-assessor cache entry was replayed"
+            assert r["clearly_safe"] == ["cc4da9a05fde"], "the stale verdict was served"
+            assert len(calls) == 1, "the judge was not re-run"
+            why = r.get("reassessed_because", "")
+            assert "before the assessor was part of the cache identity" in why, why
+        finally:
+            _pop_state_dir()
+
+
+def test_gatekeeper_log_explains_the_invalidation_spike():
+    """Widening the key re-judges every cached range once. An unexplained spike in API
+    calls is how a correct invalidation gets mistaken for a bug and reverted."""
+    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert 'r.get("reassessed_because")' in gk
+    assert "RE-JUDGED" in gk
+    assert "unchanged assessor" in gk, "the replay log must name what it checked"
+
+
 if __name__ == "__main__":
     # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
     # `assess_release` and restores NONE of them, so whichever test used it

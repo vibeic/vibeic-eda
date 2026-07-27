@@ -145,7 +145,18 @@ def tick() -> dict:
     # Only FRESH assessments drive PR-opening; cached ones still show in the report/summary.
     fresh = {t: r for t, r in assessments.items() if not r.get("cached")}
     for t in sorted(set(assessments) - set(fresh)):
-        print(f"  [assess] {t:16} unchanged range — replayed from cache, no new PR")
+        a = assessments[t]
+        print(f"  [assess] {t:16} unchanged range AND unchanged assessor "
+              f"({a.get('assessor') or '?'}) — replayed from cache "
+              f"(computed {a.get('assessed_at') or 'earlier'}), no new PR")
+    # vibeic/vibeic-eda#4: the cache key now identifies the ASSESSOR as well as the
+    # input, so editing the judge re-judges every cached range on the next tick. That
+    # is the correct behaviour and it costs real API calls — say WHY, or it reads as an
+    # unexplained spike and gets "fixed" by reverting the invalidation.
+    for t, r in sorted(assessments.items()):
+        if r.get("reassessed_because"):
+            print(f"  [assess] {t:16} RE-JUDGED (cache intentionally missed): "
+                  f"{r['reassessed_because']}")
 
     # Phase 3: open a cherry-pick MERGE PR (deterministic; holds token) for the clearly-safe
     # commits — real upstream commits, human-reviewed, never auto-merged, never force-push.

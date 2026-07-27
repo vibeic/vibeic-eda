@@ -46,6 +46,8 @@ Design notes:
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -345,20 +347,119 @@ def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None) -
 
 CACHE = STATE / "assessment-cache"
 
+# ── ASSESSOR IDENTITY (vibeic/vibeic-eda#4) ──────────────────────────────────
+# The files whose CONTENT decides what a judgement says. Anything listed here is
+# hashed into the cache key, so editing it misses the cache BY CONSTRUCTION.
+#
+# This is derived, never declared. A hand-maintained `ASSESSOR_VERSION = 3` would
+# have to be bumped by whoever edits the judge — and the one time they forget is
+# exactly the time a stale verdict replays. Hash the bytes instead: forgetting is
+# not possible.
+ASSESSOR_SOURCES = (HERE / "llm_judge.py",)
 
-def _cache_key(tool: str, base_ref: str, new_ref: str, our_ref: str | None) -> str:
-    """Identity of an assessment INPUT: the tool, the upstream range, and the ref our
-    carried patches sit on. Same key ⇒ nothing we assess over has changed."""
+
+def _assessor_knobs() -> dict:
+    """The RUNTIME inputs-to-behaviour that are not fixed by the source bytes.
+
+    The model id and the chunk size are env-overridable (GK_JUDGE_MODEL /
+    GK_JUDGE_CHUNK / GK_JUDGE_MAX_TOKENS), so two runs of identical source can
+    still be two different assessors. The system prompt IS in the source, but it
+    is named separately because it is the behaviour contract — a reader looking
+    for "is the prompt part of the identity?" must find a yes here, not have to
+    reason about which file it lives in.
+
+    Never raises: a judge that will not import is itself a distinct assessor.
+    """
+    try:
+        import llm_judge
+    except Exception:  # noqa: BLE001
+        return {"model": os.environ.get("GK_JUDGE_MODEL", "?"),
+                "chunk": os.environ.get("GK_JUDGE_CHUNK", "?"),
+                "max_tokens": os.environ.get("GK_JUDGE_MAX_TOKENS", "?"),
+                "prompt": "judge-unimportable"}
+    prompt = f"{llm_judge._SYS_IDENTITY}\n{llm_judge._SYS_TASK}"
+    return {"model": llm_judge.MODEL, "chunk": llm_judge.CHUNK,
+            "max_tokens": llm_judge.MAX_TOKENS,
+            "prompt": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]}
+
+
+def assessor_id() -> str:
+    """Content identity of the thing that DOES the assessing.
+
+    `_cache_key` used to identify only the assessment's INPUT — the tool, the
+    upstream range, the ref our carried patches sit on. Its docstring said "same
+    key ⇒ nothing we assess over has changed", which is true and is not the
+    premise a replay needs: replaying is sound only when nothing we assess WITH
+    has changed either. f312813 repaired what the judge concludes about identical
+    commits, and for every range already in the cache that repair was invisible —
+    the tick printed "unchanged range — replayed from cache" and never called the
+    new code. A stale verdict and a current one rendered identically.
+
+    An unreadable source file hashes as a distinct constant rather than being
+    skipped: "I could not read the judge" must not collide with any real judge.
+    """
+    h = hashlib.sha256()
+    for p in ASSESSOR_SOURCES:
+        h.update(p.name.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            h.update(b"<unreadable>")
+        h.update(b"\0")
+    for k, v in sorted(_assessor_knobs().items()):
+        h.update(f"{k}={v}\0".encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cache_key(tool: str, base_ref: str, new_ref: str, our_ref: str | None,
+               assessor: str) -> str:
+    """Identity of an assessment: its INPUT (tool, upstream range, the ref our carried
+    patches sit on) AND its ASSESSOR (the content hash of the classifier). Same key ⇒
+    neither what we assess OVER nor what we assess WITH has changed."""
+    return f"{_cache_input_prefix(tool, base_ref, new_ref, our_ref)}|{assessor}"
+
+
+def _cache_input_prefix(tool: str, base_ref: str, new_ref: str, our_ref: str | None) -> str:
+    """The INPUT half of the key — everything except the assessor."""
     return f"{tool}|{base_ref}|{new_ref}|{(our_ref or '')[:12]}"
 
 
-def _cache_get(tool: str, key: str) -> dict | None:
+def _cache_blob(tool: str) -> dict:
     try:
         blob = json.loads((CACHE / f"{tool}.json").read_text())
     except (OSError, json.JSONDecodeError):
-        return None
-    rep = blob.get(key)
+        return {}
+    return blob if isinstance(blob, dict) else {}
+
+
+def _cache_get(tool: str, key: str) -> dict | None:
+    rep = _cache_blob(tool).get(key)
     return rep if isinstance(rep, dict) else None
+
+
+def _prior_assessors(tool: str, prefix: str) -> list[str | None]:
+    """Assessors this exact INPUT was previously judged by, newest-file order.
+
+    `None` marks a legacy 4-field key: a report cached before the assessor was
+    part of the identity, whose judge we cannot attribute. Used only to EXPLAIN a
+    miss in the log — widening the key re-judges every cached range once, and an
+    unexplained spike in API calls is how a correct invalidation gets mistaken for
+    a bug and reverted.
+    """
+    out: list[str | None] = []
+    for k in _cache_blob(tool):
+        if not isinstance(k, str):
+            continue
+        if k == prefix:
+            out.append(None)                       # legacy: input-only key
+        elif k.startswith(prefix + "|"):
+            out.append(k[len(prefix) + 1:])
+    return out
 
 
 def _cache_put(tool: str, key: str, rep: dict) -> None:
@@ -381,13 +482,14 @@ def _cache_put(tool: str, key: str, rep: dict) -> None:
 def assess(tool: str) -> dict:
     """Full per-commit assessment for one tool, from its ledger. Never raises.
 
-    IDEMPOTENT over an unchanged input: an upstream range we have already assessed,
-    on the same carried-patch ref, replays the STORED verdict instead of re-judging.
-    Without this the daily cron re-assessed a static range forever — the magic range
-    8.3.674→8.3.676 was assessed 7 days running (2026-07-19..25), spending an LLM call
-    and opening a fresh vibe-ic review PR each day, and (because the judgment was
-    sampled) contradicting its own earlier verdicts. Re-judging identical input can
-    only add drift, never information.
+    IDEMPOTENT over an unchanged input JUDGED BY AN UNCHANGED ASSESSOR: such a range
+    replays the STORED verdict instead of re-judging. Without the input half the daily
+    cron re-assessed a static range forever — the magic range 8.3.674→8.3.676 was
+    assessed 7 days running (2026-07-19..25), spending an LLM call and opening a fresh
+    vibe-ic review PR each day, and (because the judgment was sampled) contradicting its
+    own earlier verdicts. Re-judging identical input can only add drift, never
+    information — but only while the judge is identical too, which is why `assessor_id()`
+    is in the key (vibeic/vibeic-eda#4).
     """
     led_p = LEDGER / f"{tool}.json"
     if not led_p.is_file():
@@ -411,12 +513,31 @@ def assess(tool: str) -> dict:
     if not (base_ref and new_ref):
         return {"tool": tool, "error": "missing base_release/latest for the commit range"}
 
-    # Already assessed this exact input? Replay it — no LLM, no new PR, no drift.
-    ckey = _cache_key(tool, base_ref, new_ref, our_ref)
+    # Already assessed this exact input WITH THIS EXACT ASSESSOR? Replay it — no LLM,
+    # no new PR, no drift. A different assessor is a different question, so it misses.
+    aid = assessor_id()
+    prefix = _cache_input_prefix(tool, base_ref, new_ref, our_ref)
+    ckey = _cache_key(tool, base_ref, new_ref, our_ref, aid)
+    why_reassessed = ""
     if os.environ.get("GK_ASSESS_NOCACHE") not in ("1", "true", "yes"):
         hit = _cache_get(tool, ckey)
         if hit is not None:
-            return {**hit, "cached": True}
+            return {**hit, "cached": True, "assessor": aid, "replayed_at": _now_iso()}
+        # MISS. If we HAVE judged this same range before, say which judge did it —
+        # widening the key re-judges every cached range exactly once, and an
+        # unexplained spike in API calls is how a correct invalidation gets
+        # mistaken for a bug.
+        priors = _prior_assessors(tool, prefix)
+        if priors:
+            named = sorted({p for p in priors if p})
+            if named:
+                why_reassessed = (f"the assessor changed ({', '.join(named)} → {aid}) — the "
+                                  f"cached verdict for {base_ref}→{new_ref} was produced by a "
+                                  f"different judge, so it is being re-judged, not replayed")
+            else:
+                why_reassessed = (f"{base_ref}→{new_ref} was cached before the assessor was part "
+                                  f"of the cache identity — re-judging once under assessor {aid} "
+                                  f"so the verdict is attributable")
 
     got = upstream_commits(upstream, base_ref, new_ref)
     if isinstance(got, list) and got and got[0].get("_err"):
@@ -475,6 +596,9 @@ def assess(tool: str) -> dict:
 
     rep = {"tool": tool, "status": "assessed", "upstream": upstream,
            "base_release": base_ref, "latest": new_ref,
+           # PROVENANCE — who judged this, and when. Carried into the cache so a
+           # replayed report can say it was restored, and by whom it was decided.
+           "assessor": aid, "assessed_at": _now_iso(),
            "our_ref": (our_ref or "")[:12],
            "our_patch_files": (len(our_files) if our_files is not None else None),
            "commit_count": len(commits), "aggregate_files": len(agg_files),
@@ -494,6 +618,10 @@ def assess(tool: str) -> dict:
     # that got cut off at the output cap, into a permanent record that never re-resolves.
     if not any(c.get("_note") for c in cls_map.values()):
         _cache_put(tool, ckey, rep)
+    if why_reassessed:
+        # Deliberately set AFTER _cache_put: this explains THIS tick's miss and must
+        # not be replayed later as though the next reader's tick re-judged anything.
+        rep["reassessed_because"] = why_reassessed
     return rep
 
 
@@ -524,6 +652,31 @@ def _probe_cell(val, yes: str, no: str, settled: bool) -> str:
     return "n/a" if settled else "not-probed"
 
 
+def _provenance_lines(rep: dict) -> list[str]:
+    """Was this judgement COMPUTED on this tick, or RESTORED from an earlier one?
+
+    vibeic/vibeic-eda#4: a replayed verdict used to be byte-indistinguishable from a
+    freshly computed one — in the report, in the PR body and in the `[assess]` log
+    line. Only the tick's stdout said "replayed from cache", and nobody reads a cron
+    log a week later while reading `2026-07-28-magic.md`. The report itself has to
+    carry it, together with the identity of the judge that decided it.
+    """
+    aid = rep.get("assessor")
+    when = rep.get("assessed_at")
+    if rep.get("cached"):
+        return [f"> **⟲ REPLAYED FROM CACHE — no classifier ran for this report.** The "
+                f"judgement below was COMPUTED "
+                f"{('on ' + when) if when else 'on an unrecorded earlier tick'} by assessor "
+                f"`{aid or 'unknown — this report predates assessor pinning'}` and RESTORED "
+                f"{('on ' + rep['replayed_at']) if rep.get('replayed_at') else 'on this tick'}, "
+                f"because the upstream range, our carried-patch ref AND the assessor are all "
+                f"unchanged. Nothing in this table was re-judged today.", ""]
+    return [f"> Computed {('on ' + when) if when else 'on this tick'} by assessor "
+            f"`{aid or 'unrecorded'}` — a content hash of the judge module, its system prompt, "
+            f"the model id and the chunk size. Change any of them and this range is re-judged "
+            f"rather than replayed.", ""]
+
+
 def render_md(rep: dict) -> str:
     tool = rep.get("tool", "?")
     if rep.get("error"):
@@ -541,6 +694,7 @@ def render_md(rep: dict) -> str:
          f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
          f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**", ""]
+    L += _provenance_lines(rep)
     # An assessment that did not complete must SAY SO, above the table, before a reader
     # starts triaging cells that no classifier ever filled in.
     n_na = len(rep["not_assessed"]) if "not_assessed" in rep else \
