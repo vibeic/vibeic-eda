@@ -254,8 +254,17 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
                              f"(needs manual review)")
                 continue
             cc, safe = a.get("commit_count", 0), len(a.get("clearly_safe") or [])
-            tally.append(f"- **{t}**: {cc} upstream commit(s) {a.get('base_release')} → "
-                         f"{a.get('latest')} — {safe} clearly-safe, {cc - safe} need review")
+            line = (f"- **{t}**: {cc} upstream commit(s) {a.get('base_release')} → "
+                    f"{a.get('latest')} — {safe} clearly-safe, {cc - safe} need review")
+            # An incomplete judgment must be visible in the PR BODY, not only in the
+            # attached per-commit table. Otherwise the summary a reviewer reads first
+            # presents "N need review" as a triage result when nothing was triaged.
+            n_na = len(a.get("not_assessed") or [])
+            if n_na:
+                line += (f" — ⚠ **the judge did not complete: {n_na} commit(s) NOT ASSESSED** "
+                         f"(no classification was made for them; this is missing analysis, "
+                         f"not a risk finding)")
+            tally.append(line)
         _run(["git", "-C", str(wt), "add", ASSESS_DIR])
         title = f"[eda-fork] {date}: upstream release assessment — {len(tools)} tool(s) to review"
         rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])

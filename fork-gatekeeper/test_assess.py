@@ -25,7 +25,7 @@ def test_clearly_safe_gate():
     assert A._clearly_safe({**safe, "category": "feature"}, False, True) is False
     assert A._clearly_safe({**safe, "relevant": False}, False, True) is False
     assert A._clearly_safe({**safe, "recommend": "manual"}, False, True) is False
-    assert A._clearly_safe(dict(A._DEGRADED), False, True) is False
+    assert A._clearly_safe(A._not_assessed("truncated"), False, True) is False
 
 
 def test_classify_stub_and_degraded_fill():
@@ -117,9 +117,9 @@ def test_classify_maps_judge_verdicts():
     os.environ.pop("GK_ASSESS_STUB", None)
     orig = llm_judge.judge
     try:
-        llm_judge.judge = lambda tool, role, commits: {
-            "u1": {"useful": True, "reason": "fixes DRC crash", "risk": "low"},
-            "n1": {"useful": False, "reason": "CI only", "risk": "low"}}
+        llm_judge.judge = lambda tool, role, commits: llm_judge.JudgeOutcome(
+            {"u1": {"useful": True, "reason": "fixes DRC crash", "risk": "low"},
+             "n1": {"useful": False, "reason": "CI only", "risk": "low"}}, {})
         out = A.classify_commits("magic", "DRC", [{"sha": "u1", "title": "x"}, {"sha": "n1", "title": "y"}])
         assert out["u1"]["category"] == "bugfix" and out["u1"]["recommend"] == "adopt" and out["u1"]["relevant"] is True
         assert out["n1"]["category"] == "other" and out["n1"]["recommend"] == "skip" and out["n1"]["relevant"] is False
@@ -127,16 +127,36 @@ def test_classify_maps_judge_verdicts():
         llm_judge.judge = orig
 
 
-def test_classify_degrades_when_judge_returns_none():
+def test_classify_degrades_when_judge_returns_nothing():
     import llm_judge
     os.environ.pop("GK_ASSESS_STUB", None)
     orig = llm_judge.judge
     try:
-        llm_judge.judge = lambda *a, **k: None   # no token / API error
+        llm_judge.judge = lambda *a, **k: llm_judge.JudgeOutcome({}, {"a": "API error"})
         out = A.classify_commits("magic", "DRC", [{"sha": "a", "title": "x"}])
-        assert out["a"]["recommend"] == "manual", "judge None → degrade to manual (never auto-adopt)"
+        assert out["a"]["recommend"] == "manual", "no verdict → manual (never auto-adopt)"
+        assert out["a"]["category"] == A.NOT_ASSESSED and out["a"]["risk"] == A.NOT_ASSESSED
+        assert "API error" in out["a"]["summary"], "the reason must reach the report"
     finally:
         llm_judge.judge = orig
+
+
+def test_classify_survives_a_judge_that_returns_junk():
+    """A judge that raises, or returns the wrong type, must still yield a per-commit
+    NOT-ASSESSED row rather than an exception or a fabricated verdict."""
+    import llm_judge
+    os.environ.pop("GK_ASSESS_STUB", None)
+    orig = llm_judge.judge
+    for bad in (lambda *a, **k: None,
+                lambda *a, **k: {"a": {"useful": True, "risk": "low"}},   # legacy raw dict
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))):
+        try:
+            llm_judge.judge = bad
+            out = A.classify_commits("magic", "DRC", [{"sha": "a", "title": "x"}])
+            assert out["a"]["category"] == A.NOT_ASSESSED
+            assert out["a"]["recommend"] == "manual"
+        finally:
+            llm_judge.judge = orig
 
 
 def test_llm_judge_never_raises_without_token():
@@ -144,8 +164,11 @@ def test_llm_judge_never_raises_without_token():
     orig = llm_judge.CRED
     try:
         llm_judge.CRED = Path("/no/such/cred.json")   # no credential file
-        assert llm_judge.judge("magic", "DRC", [{"sha": "a", "title": "x"}]) is None
-        assert llm_judge.judge("magic", "DRC", []) == {}
+        r = llm_judge.judge("magic", "DRC", [{"sha": "a", "title": "x"}])
+        assert r.verdicts == {}
+        assert "a" in r.unassessed and "NOT classified" in r.unassessed["a"]
+        empty = llm_judge.judge("magic", "DRC", [])
+        assert empty.verdicts == {} and empty.unassessed == {}
     finally:
         llm_judge.CRED = orig
 
@@ -219,7 +242,7 @@ def test_degraded_assessment_is_not_cached():
         tmp = Path(d)
         _cache_fixture(tmp, [])
         A.classify_commits = lambda tool, role, commits: {
-            c["sha"]: dict(A._DEGRADED) for c in commits}
+            c["sha"]: A._not_assessed("judge outage") for c in commits}
         r1 = A.assess("magic")
         assert r1["clearly_safe"] == []
         assert not r1.get("cached")
@@ -303,32 +326,340 @@ def test_render_marks_a_fully_settled_range_as_decided():
     assert "RELEASE TAGS" in md          # explains why "behind" is not "owed work"
 
 
-if __name__ == "__main__":
-    # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
-    # `assess_release` and restores NONE of them, so whichever test used it
-    # last leaks its stubs into every test that runs after. In script order
-    # (alphabetical) the victim was
-    # `test_our_patch_files_unknown_on_error_fails_safe`: it called the leaked
-    # `our_patch_files = lambda *a: set()` instead of the real function, so
-    # the assertion that an ERRORED lookup returns None — the FAIL-SAFE the
-    # conflict gate depends on — could not fail no matter what the production
-    # code did. Under pytest the same suite passed, because pytest runs in
-    # definition order and the leaking test happens to come after.
-    #
-    # A suite whose result depends on which runner you use is not reporting
-    # on the code. Reload between tests so each starts from the real module;
-    # `_cache_fixture` already reloads on entry, so this is the symmetric half
-    # rather than a new convention.
+# ── a truncated judge reply (vibeic/vibeic-eda#3, 2026-07-28) ────────────────
+# magic 8.3.674 → 8.3.678 sent 80 commits in ONE request against a 4096-token
+# output cap. The reply came back pretty-printed, hit the cap at exactly 4096
+# output tokens (stop_reason=max_tokens) and was cut mid-string. `json.loads`
+# raised, the handler returned None, and the caller degraded ALL 108 commits to
+# category=other / relevant=None / risk=high / recommend=manual. The published
+# report read "105 need human decision", every row high risk — while the
+# truncated reply had in fact classified 76 of those same build/GHA commits
+# `risk: low`. Nothing ever looked at `stop_reason`, so a cut-off reply was
+# indistinguishable from a network error.
+#
+# These tests stub the HTTP layer; none of them calls the API.
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._p = json.dumps(payload).encode()
+
+    def read(self):
+        return self._p
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _shas_in(req_body: dict) -> list[str]:
+    """The shas one request actually asked about."""
+    txt = req_body["messages"][0]["content"]
+    return [ln.split()[1] for ln in txt.splitlines() if ln.startswith("- ")]
+
+
+def _pretty_reply(shas, useful=False, risk="low"):
+    """The pretty-printed JSON the model really emits (~3x compact size)."""
+    return "{\n" + ",\n".join(
+        f'  "{s}": {{\n    "useful": {"true" if useful else "false"},\n'
+        f'    "reason": "GHA / packaging churn, no signoff impact",\n'
+        f'    "risk": "{risk}"\n  }}' for s in shas) + "\n}"
+
+
+def _stub_api(make_payload, sent=None):
+    """Replace the HTTP layer llm_judge uses. `make_payload(shas) -> API response.`"""
+    def fake(req, timeout=None):
+        body = json.loads(req.data.decode())
+        if sent is not None:
+            sent.append(body)
+        return _FakeResp(make_payload(_shas_in(body)))
+    return fake
+
+
+def _with_stubbed_api(make_payload, fn, sent=None):
+    import urllib.request as U
+    import llm_judge
+    orig_tok, orig_open = llm_judge._token, U.urlopen
+    try:
+        llm_judge._token = lambda: "stub-token"
+        U.urlopen = _stub_api(make_payload, sent)
+        return fn()
+    finally:
+        llm_judge._token, U.urlopen = orig_tok, orig_open
+
+
+def _truncated_payload(shas, keep=3):
+    """A reply cut mid-string inside entry #keep+1 — exactly the observed failure."""
+    full = _pretty_reply(shas)
+    cut = full.index(f'"{shas[keep]}"') + 30      # lands inside `"useful": fal…`
+    return {"content": [{"type": "text", "text": full[:cut]}],
+            "stop_reason": "max_tokens", "usage": {"output_tokens": 4096}}
+
+
+def test_truncated_reply_is_disclosed_and_partial_results_survive():
+    """HALF ONE: a reply cut mid-JSON yields a DISCLOSED not-assessed outcome for the
+    shas that were actually lost — and keeps every judgment that arrived intact."""
+    import llm_judge
+    commits = [{"sha": f"sha{i:03d}", "title": "GHA bump"} for i in range(5)]
+    r = _with_stubbed_api(lambda shas: _truncated_payload(shas, keep=3),
+                          lambda: llm_judge.judge("magic", "DRC", commits))
+    # partial survival — the old code discarded all five
+    assert len(r.verdicts) == 3, f"completed judgments were discarded: {r.verdicts}"
+    assert all(v["risk"] == "low" for v in r.verdicts.values())
+    # and ONLY the genuinely missing shas are unassessed
+    assert set(r.unassessed) == {"sha003", "sha004"}
+    assert all("max_tokens" in w for w in r.unassessed.values()), r.unassessed
+    # every input sha lands in exactly one of the two maps
+    assert set(r.verdicts) | set(r.unassessed) == {c["sha"] for c in commits}
+    assert not (set(r.verdicts) & set(r.unassessed))
+
+
+def test_wellformed_reply_still_classifies():
+    """HALF TWO: the fix must not cost the happy path. A complete reply classifies."""
+    import llm_judge
+    commits = [{"sha": f"sha{i:03d}", "title": "fix DRC crash"} for i in range(4)]
+    r = _with_stubbed_api(
+        lambda shas: {"content": [{"type": "text", "text": _pretty_reply(shas, useful=True)}],
+                      "stop_reason": "end_turn"},
+        lambda: llm_judge.judge("magic", "DRC", commits))
+    assert r.unassessed == {}, r.unassessed
+    assert len(r.verdicts) == 4
+    assert all(v["useful"] is True and v["risk"] == "low" for v in r.verdicts.values())
+
+
+def test_judge_covers_the_whole_range_in_output_sized_chunks():
+    """The old code sent commits[:80] in ONE request: on the 105-commit magic range 25
+    commits were never even asked about, and the 80 that were could not fit the cap."""
+    import llm_judge
+    import math
+    n = 100
+    commits = [{"sha": f"sha{i:03d}", "title": "t"} for i in range(n)]
+    sent = []
+    r = _with_stubbed_api(
+        lambda shas: {"content": [{"type": "text", "text": _pretty_reply(shas)}],
+                      "stop_reason": "end_turn"},
+        lambda: llm_judge.judge("magic", "DRC", commits), sent=sent)
+    assert set(r.verdicts) == {c["sha"] for c in commits}, "the range was truncated"
+    assert r.unassessed == {}
+    assert len(sent) == math.ceil(n / llm_judge.CHUNK), f"{len(sent)} requests"
+    assert max(len(_shas_in(b)) for b in sent) <= llm_judge.CHUNK
+    assert all(b["max_tokens"] == llm_judge.MAX_TOKENS for b in sent)
+    assert all(b["temperature"] == 0 for b in sent), "the verdict must not be sampled"
+
+
+def test_a_failing_chunk_costs_only_its_own_commits():
+    """Chunk independence: one bad reply must not discard the other chunks' judgments."""
+    import llm_judge
+    commits = [{"sha": f"sha{i:03d}", "title": "t"} for i in range(2 * llm_judge.CHUNK)]
+    calls = []
+
+    def payload(shas):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"content": [{"type": "text", "text": "not json at all"}],
+                    "stop_reason": "end_turn"}
+        return {"content": [{"type": "text", "text": _pretty_reply(shas)}],
+                "stop_reason": "end_turn"}
+
+    r = _with_stubbed_api(payload, lambda: llm_judge.judge("magic", "DRC", commits))
+    assert len(r.verdicts) == llm_judge.CHUNK, "a bad chunk took the good one down"
+    assert len(r.unassessed) == llm_judge.CHUNK
+    assert all("NOT classified" in w for w in r.unassessed.values())
+
+
+def test_chunk_size_is_derived_from_the_measured_output_cost():
+    """The chunk size must come from the OUTPUT budget, not from a commit count."""
+    import llm_judge
+    assert llm_judge.CHUNK == llm_judge.MAX_TOKENS // llm_judge._OUT_TOKENS_PER_COMMIT
+    # measured 2026-07-28 on magic 8.3.674→8.3.678: 4096 output tokens produced exactly
+    # 77 complete entries before the cut → 53.2 output tokens per commit.
+    measured = 4096 / 77
+    assert llm_judge.CHUNK * measured < 0.6 * llm_judge.MAX_TOKENS, "no headroom"
+    assert 80 * measured > llm_judge.MAX_TOKENS, "the old 80-commit request could not fit"
+
+
+def test_salvage_keeps_complete_entries_and_never_invents_one():
+    import llm_judge as J
+    good = '{"a": {"useful": true, "reason": "x", "risk": "low"}}'
+    assert J._salvage_json_object(good) == json.loads(good)
+    assert J._salvage_json_object("chatty preamble " + good + " trailer") == json.loads(good)
+    assert J._salvage_json_object('{"a": {"useful": true, "reas') is None   # nothing complete
+    assert J._salvage_json_object("no json here") is None
+    assert J._salvage_json_object("") is None
+    # braces and escaped quotes INSIDE a string must not fool the scanner
+    tricky = '{"a": {"useful": true, "reason": "x } { \\" y", "risk": "low"}, "b": {"use'
+    assert J._salvage_json_object(tricky) == {
+        "a": {"useful": True, "reason": 'x } { " y', "risk": "low"}}
+
+
+# ── a degraded row must not look like a judgement ────────────────────────────
+def _clearly_safe_BEFORE(cls, touches_our_files, clean_pick):
+    """FROZEN copy of the gate as it stood at 84b2a7f — the baseline for the
+    strictness proof below. Do not 'fix' this to match the live one."""
+    return (cls.get("category") == "bugfix"
+            and cls.get("risk") == "low"
+            and cls.get("relevant") is True
+            and cls.get("recommend") == "adopt"
+            and not touches_our_files
+            and clean_pick is True)
+
+
+def test_clearly_safe_is_no_looser_than_before():
+    """EXHAUSTIVE over the gate's whole input domain: every input the NEW gate calls
+    auto-adoptable, the OLD gate called auto-adoptable too. Retiring the `risk="high"`
+    default must not open a door — including via the new `not-assessed` token."""
+    import itertools
+    cats = ["bugfix", "other", "feature", A.NOT_ASSESSED, None]
+    risks = ["low", "medium", "high", A.NOT_ASSESSED, None]
+    rels = [True, False, None]
+    recs = ["adopt", "skip", "manual", None]
+    tri = [True, False, None]
+    n = looser = 0
+    for cat, risk, rel, rec, t, cp in itertools.product(cats, risks, rels, recs, tri, tri):
+        cls = {"category": cat, "risk": risk, "relevant": rel, "recommend": rec}
+        n += 1
+        if A._clearly_safe(cls, t, cp) and not _clearly_safe_BEFORE(cls, t, cp):
+            looser += 1
+    assert n == 5 * 5 * 3 * 4 * 3 * 3 == 2700
+    assert looser == 0, f"{looser}/{n} inputs became newly auto-adoptable"
+    # and a not-assessed row can never be auto-adopted, under ANY probe outcome
+    for t, cp in itertools.product(tri, tri):
+        assert A._clearly_safe(A._not_assessed("truncated"), t, cp) is False
+
+
+def test_not_assessed_row_is_not_a_judgement():
+    na = A._not_assessed("the judge's reply hit the output-token cap")
+    # THE regression: `high` in the column a reviewer triages on was a fabricated finding
+    assert na["risk"] != "high"
+    assert na["risk"] not in ("low", "medium", "high"), "an absence must not read as a verdict"
+    assert na["risk"] == A.NOT_ASSESSED and na["category"] == A.NOT_ASSESSED
+    assert na["relevant"] is None
+    assert "NOT ASSESSED" in na["summary"] and "output-token cap" in na["summary"]
+    assert na["recommend"] == "manual", "manual is still the correct ACTION"
+    assert na["_note"], "must keep the assessment out of the cache"
+
+
+def test_render_discloses_an_incomplete_judgement():
+    rep = {"tool": "magic", "status": "assessed", "base_release": "8.3.674",
+           "latest": "8.3.678", "our_patch_files": 59, "commit_count": 2,
+           "carried": [], "decided": [], "clearly_safe": [], "outstanding": ["bbb222"],
+           "not_assessed": ["bbb222"],
+           "commits": [
+               {"sha": "aaa111", "title": "fix drc", "category": "bugfix", "risk": "low",
+                "relevant": True, "touches_our_patches": False, "clean_cherrypick": True,
+                "recommend": "adopt", "decision": "human", "summary": "real judgement"},
+               {**A._not_assessed("reply truncated at the output cap"), "sha": "bbb222",
+                "title": "GHA bump", "touches_our_patches": None,
+                "clean_cherrypick": None, "decision": "human"}]}
+    md = A.render_md(rep)
+    assert "THE JUDGE DID NOT COMPLETE" in md
+    assert "1 of 2 commit(s) were NOT ASSESSED" in md
+    assert "not-probed" in md, "an unrun probe must not render as a neutral dash"
+    assert "| high |" not in md, "no fabricated risk verdict"
+    assert "DID NOT RUN" in md, "must say the conflict/clean-pick analyses did not run"
+    assert "real judgement" in md          # the assessed row still renders normally
+    # the banner promises cat/risk/rel all read `not-assessed` — the row must agree,
+    # or the disclosure describes a table the reader is not looking at
+    row = next(ln for ln in md.splitlines() if ln.startswith("| `bbb222`"))
+    cells = [x.strip() for x in row.split("|")]
+    assert cells[2] == cells[3] == cells[4] == A.NOT_ASSESSED, row
+    assert cells[5] == cells[6] == "not-probed", row
+    # the reason must survive the summary-column truncation intact
+    assert "reply truncated at the output cap" in md
+
+
+def test_render_settled_range_is_unaffected_by_the_disclosure_banner():
+    """A fully-decided range must NOT grow a scary banner: n_assessed there is 0."""
+    rep = {"tool": "magic", "status": "assessed", "base_release": "8.3.674",
+           "latest": "8.3.676", "our_patch_files": 59, "commit_count": 1,
+           "carried": ["aaa111"], "decided": [], "clearly_safe": [], "outstanding": [],
+           "not_assessed": [],
+           "commits": [{"sha": "aaa111", "category": "carried", "risk": None,
+                        "relevant": None, "touches_our_patches": None,
+                        "clean_cherrypick": None, "recommend": "carried",
+                        "decision": "carried", "summary": "already ours", "title": ""}]}
+    md = A.render_md(rep)
+    assert "THE JUDGE DID NOT COMPLETE" not in md
+    assert "DECIDED — no action required" in md
+    assert "n/a" in md, "a settled row's probe columns are not-applicable, not unknown"
+
+
+def test_assess_end_to_end_discloses_truncation_and_keeps_partials():
+    """The whole path — truncated API reply → judge → classify → assess → render."""
     import importlib
-    fns = [k for k, v in sorted(globals().items())
-           if k.startswith("test_") and callable(v)]
-    passed = 0
-    for name in fns:
-        importlib.reload(A)
-        globals()[name]()
-        print(f"  ✓ {name}")
-        passed += 1
-    print(f"ALL {passed} PASS")
+    import llm_judge
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        os.environ["GK_STATE_DIR"] = str(tmp)
+        os.environ.pop("GK_ASSESS_STUB", None)
+        try:
+            importlib.reload(A)
+            (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+            (tmp / "ledger" / "magic.json").write_text(json.dumps({
+                "tool": "magic", "integrated": True, "behind_releases": 1,
+                "upstream": "up/magic", "upstream_default_branch": "master",
+                "pinned_ref_full": "", "base_release": "8.3.674",
+                "upstream_latest_release": "8.3.678", "role": "DRC"}))
+            cs = [{"sha": f"sha{i:03d}", "sha_full": f"{i:040d}", "title": "GHA bump",
+                   "body": "", "url": "", "author": "x"} for i in range(5)]
+            A.upstream_commits = lambda *a: (cs, ["f.c"])
+            A.our_patch_files = lambda *a: set()
+            A._commit_files = lambda *a: set()
+            A.clean_cherrypick = lambda *a: True
+            rep = _with_stubbed_api(lambda shas: _truncated_payload(shas, keep=3),
+                                    lambda: A.assess("magic"))
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+    # only the shas actually lost are degraded — NOT all five
+    assert rep["not_assessed"] == ["sha003", "sha004"], rep["not_assessed"]
+    # the three that completed carry their REAL verdict, not a default
+    kept = [c for c in rep["commits"] if c["category"] != A.NOT_ASSESSED]
+    assert len(kept) == 3 and all(c["risk"] == "low" for c in kept)
+    assert not any(c.get("risk") == "high" for c in rep["commits"]), \
+        "a fabricated high-risk verdict was published"
+    assert rep["clearly_safe"] == [], "an unassessed range must never auto-adopt"
+    md = A.render_md(rep)
+    assert "THE JUDGE DID NOT COMPLETE" in md and "2 of 5" in md
+
+
+def test_incomplete_assessment_is_not_cached():
+    """A truncated run must stay provisional so the next tick can re-resolve it."""
+    import importlib
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        os.environ["GK_STATE_DIR"] = str(tmp)
+        os.environ.pop("GK_ASSESS_STUB", None)
+        try:
+            importlib.reload(A)
+            (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+            (tmp / "ledger" / "magic.json").write_text(json.dumps({
+                "tool": "magic", "integrated": True, "behind_releases": 1,
+                "upstream": "up/magic", "upstream_default_branch": "master",
+                "pinned_ref_full": "", "base_release": "8.3.674",
+                "upstream_latest_release": "8.3.678", "role": "DRC"}))
+            cs = [{"sha": f"sha{i:03d}", "sha_full": f"{i:040d}", "title": "t",
+                   "body": "", "url": "", "author": "x"} for i in range(5)]
+            A.upstream_commits = lambda *a: (cs, ["f.c"])
+            A.our_patch_files = lambda *a: set()
+            A._commit_files = lambda *a: set()
+            A.clean_cherrypick = lambda *a: True
+            run = lambda: _with_stubbed_api(                      # noqa: E731
+                lambda shas: _truncated_payload(shas, keep=3), lambda: A.assess("magic"))
+            run()
+            assert not run().get("cached"), "a truncated verdict was frozen into the cache"
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_gatekeeper_and_pr_body_report_the_incomplete_judgement():
+    """The disclosure has to reach the two places a human actually reads."""
+    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert 'rep.get("not_assessed")' in gk
+    assert "NOT ASSESSED" in gk
+    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
+    assert 'a.get("not_assessed")' in pn
+    assert "NOT ASSESSED" in pn
 
 
 # ── the summary must CONSUME the assessment's classification (vibe-ic#369) ──
@@ -374,3 +705,36 @@ def test_369_nothing_outstanding_is_not_reported_as_deferred():
     i = src.index('entry["verdict"] = "RESOLVED"')
     window = src[max(0, i - 400):i]
     assert "n_open == 0" in window and "safe == 0" in window
+
+
+if __name__ == "__main__":
+    # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
+    # `assess_release` and restores NONE of them, so whichever test used it
+    # last leaks its stubs into every test that runs after. In script order
+    # (alphabetical) the victim was
+    # `test_our_patch_files_unknown_on_error_fails_safe`: it called the leaked
+    # `our_patch_files = lambda *a: set()` instead of the real function, so
+    # the assertion that an ERRORED lookup returns None — the FAIL-SAFE the
+    # conflict gate depends on — could not fail no matter what the production
+    # code did. Under pytest the same suite passed, because pytest runs in
+    # definition order and the leaking test happens to come after.
+    #
+    # A suite whose result depends on which runner you use is not reporting
+    # on the code. Reload between tests so each starts from the real module;
+    # `_cache_fixture` already reloads on entry, so this is the symmetric half
+    # rather than a new convention.
+    #
+    # This block MUST stay the last thing in the file. It used to sit in the
+    # middle, and `globals()` at that point does not contain the tests defined
+    # below it — so script mode silently ran 20 of the 27 tests while pytest
+    # ran all 27. Same file, two different answers about the code.
+    import importlib
+    fns = [k for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+    passed = 0
+    for name in fns:
+        importlib.reload(A)
+        globals()[name]()
+        print(f"  ✓ {name}")
+        passed += 1
+    print(f"ALL {passed} PASS")

@@ -225,13 +225,21 @@ def tick() -> dict:
                 # not report `outstanding` (an older cached report): unknown
                 # must read as "needs review", never as "nothing to do".
                 n_open = len(outstanding) if outstanding is not None else cc - safe
+                # Commits the AI judge never reached a conclusion about. The operator must
+                # be told the analysis did not run, rather than reading its absence as a
+                # triage result — see the 2026-07-28 magic assessment, where a truncated
+                # judge reply published 105 rows of fabricated "high risk".
+                n_na = len(rep.get("not_assessed") or [])
                 entry["assessed"] = {"commits": cc, "clearly_safe": safe,
                                      "carried": carried, "decided": decided,
-                                     "outstanding": n_open}
+                                     "outstanding": n_open, "not_assessed": n_na}
                 resolved = f"{carried} already carried, {decided} previously decided"
                 entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
                                  f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
                                  f"selective-merge assessment filed (not auto-merged)")
+                if n_na:
+                    entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
+                                      f"commit(s) NOT ASSESSED (no classification made)")
                 if n_open == 0 and safe == 0:
                     # Nothing is outstanding: reporting DEFERRED here is what
                     # turned settled work into a recurring proposal.

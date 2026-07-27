@@ -36,7 +36,9 @@ Design notes:
     call (no shell, no GH_TOKEN, no capability given to the model). A prompt-injected commit
     body can at worst yield a WRONG judgment (caught by the human on the review PR); it can
     never run a command or exfiltrate a secret. On by default; kill-switch GK_ASSESS_AI=0 forces
-    deterministic-only. Any failure degrades to recommend=manual (never auto-adopt).
+    deterministic-only. Any failure degrades to recommend=manual (never auto-adopt) — PER COMMIT,
+    with the reason recorded, and the report DISCLOSES the unassessed set rather than printing a
+    default into the columns a reviewer triages on.
   * Never raises out of assess(); returns a report dict with an `error` on hard failure.
 
     python3 assess_release.py <tool>                 # assess that tool from its ledger
@@ -54,7 +56,9 @@ HERE = Path(__file__).parent
 STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
 LEDGER = STATE / "ledger"
 FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
-MAX_COMMITS = int(os.environ.get("GK_ASSESS_MAX_COMMITS", "80"))   # cap the LLM payload
+# NOTE: the "cap the LLM payload" constant that used to sit here was dead — nothing in this
+# module read it — and its name described the wrong side of the constraint anyway. The judge's
+# request sizing now lives in llm_judge (CHUNK, derived from the OUTPUT token cap).
 
 
 # ── deterministic layer (no LLM) ──────────────────────────────────────────────
@@ -235,18 +239,39 @@ def clean_cherrypick(tool: str, our_ref: str, commit_sha: str) -> bool | None:
 
 
 # ── AI classification layer (safe tool-less API judge, fail-safe) ─────────────
-_DEGRADED = {"category": "other", "relevant": None, "risk": "high",
-             "summary": "", "reproduce": "", "recommend": "manual",
-             "_note": "AI assessment unavailable — defaulted to manual (never auto-adopt)"}
+NOT_ASSESSED = "not-assessed"
+
+
+def _not_assessed(why: str = "") -> dict:
+    """A commit the classifier never reached a conclusion about.
+
+    Every field a reviewer triages on says NOT_ASSESSED rather than carrying a default
+    that reads like a measurement. This constant used to be
+    `category="other", relevant=None, risk="high"`, and on magic 8.3.674 → 8.3.678
+    (2026-07-28) that printed 105 rows of "high risk" — for commits whose judgments the
+    model had in fact completed as `risk: low` before its reply was cut off at the
+    output cap. A classifier's I-don't-know must never be rendered in the column that
+    holds its verdict; `high` there is a fabricated finding, and a reviewer cannot tell
+    it apart from a real one.
+
+    `recommend` stays "manual" — that IS the correct action, and it keeps these commits
+    inside `outstanding` so an unassessed range can never read as settled. `_note` is
+    what stops the assessment being cached (see assess()).
+    """
+    why = why or "the AI judge produced no classification for this commit"
+    return {"category": NOT_ASSESSED, "relevant": None, "risk": NOT_ASSESSED,
+            "summary": f"NOT ASSESSED — {why}", "reproduce": "", "recommend": "manual",
+            "_note": why}
 
 
 def _normalize(parsed, commits: list[dict]) -> dict:
     """Map exactly the commits we asked about to their assessment; any sha the model
-    omitted or returned non-dict for falls back to degraded/manual (never auto-adopt)."""
+    omitted or returned non-dict for is reported as NOT ASSESSED (never auto-adopt)."""
     out = {}
     for c in commits:
         a = parsed.get(c["sha"]) if isinstance(parsed, dict) else None
-        out[c["sha"]] = a if isinstance(a, dict) else dict(_DEGRADED)
+        out[c["sha"]] = a if isinstance(a, dict) else _not_assessed(
+            "the stubbed judgment omitted this commit")
     return out
 
 
@@ -257,9 +282,11 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
     Anthropic Messages API call — no shell, no GH_TOKEN, no capability given to the model, so
     a prompt-injected commit body can at worst produce a WRONG judgment that the human catches
     on the review PR; it can never run a command or exfiltrate a secret). Kill-switch:
-    GK_ASSESS_AI=0 forces deterministic-only (every commit → manual). GK_ASSESS_STUB mocks it
-    for tests. Any failure (no token, API error, bad shape) degrades to manual — never fatal,
-    never auto-adopt on a failed judgment.
+    GK_ASSESS_AI=0 forces deterministic-only (every commit → NOT ASSESSED / manual).
+    GK_ASSESS_STUB mocks it for tests. Any failure (no token, API error, truncated reply,
+    bad shape) is reported PER COMMIT as NOT ASSESSED — never fatal, never auto-adopt on a
+    failed judgment, and never all-or-nothing: the judge returns the verdicts it did
+    establish alongside a reason for each one it did not, and both survive to the report.
     """
     if not commits:
         return {}
@@ -268,21 +295,29 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
         try:
             return _normalize(json.loads(Path(stub).read_text()), commits)
         except (OSError, json.JSONDecodeError):
-            return {c["sha"]: dict(_DEGRADED) for c in commits}
+            return {c["sha"]: _not_assessed("the stubbed judgment could not be read")
+                    for c in commits}
     if os.environ.get("GK_ASSESS_AI", "1") not in ("1", "true", "yes"):
-        return {c["sha"]: dict(_DEGRADED) for c in commits}   # kill-switch: deterministic-only
+        return {c["sha"]: _not_assessed("AI judgment is switched off (GK_ASSESS_AI=0)")
+                for c in commits}   # kill-switch: deterministic-only
     try:
         import llm_judge
-        verdicts = llm_judge.judge(tool, role, commits)
     except Exception:  # noqa: BLE001 — a judge hiccup must never break the assessment
-        verdicts = None
-    if not verdicts:
-        return {c["sha"]: dict(_DEGRADED) for c in commits}
+        return {c["sha"]: _not_assessed("the judge module could not be loaded") for c in commits}
+    try:
+        outcome = llm_judge.judge(tool, role, commits)
+    except Exception:  # noqa: BLE001
+        outcome = None
+    if not isinstance(outcome, llm_judge.JudgeOutcome):
+        return {c["sha"]: _not_assessed("the judge returned no usable result") for c in commits}
+    verdicts, why = outcome.verdicts, outcome.unassessed
     out = {}
     for c in commits:
         v = verdicts.get(c["sha"])
         if not isinstance(v, dict):
-            out[c["sha"]] = dict(_DEGRADED)
+            # PARTIAL SURVIVAL: only the shas actually missing are degraded, each with the
+            # judge's own reason. One truncated reply used to discard all 80 judgments.
+            out[c["sha"]] = _not_assessed(why.get(c["sha"], ""))
             continue
         useful = bool(v.get("useful"))
         # useful → adopt-candidate (category=bugfix + recommend=adopt); the DETERMINISTIC gate
@@ -416,7 +451,7 @@ def assess(tool: str) -> dict:
                              "touches_our_patches": None, "clean_cherrypick": None,
                              "decision": f"recorded:{rec.get('decision', 'skip')}"})
             continue
-        cls = cls_map.get(c["sha"], dict(_DEGRADED))
+        cls = cls_map.get(c["sha"], _not_assessed("this commit was never sent to the judge"))
         # cheap overlap signal from the aggregate diff isn't per-commit; do a per-commit
         # touch check only for adopt-candidates (bugfix + relevant) to bound gh/git cost.
         cand = cls.get("category") == "bugfix" and cls.get("recommend") == "adopt"
@@ -450,9 +485,13 @@ def assess(tool: str) -> dict:
     rep["decided"] = sorted(s for s in decided if any(c["sha"] == s for c in commits))
     rep["outstanding"] = [c["sha"] for c in assessed
                           if c["decision"] == "human" and c.get("recommend") != "skip"]
-    # Only a COMPLETE assessment is cacheable. If the AI degraded (any commit fell back
-    # to the manual default) the verdict is provisional — caching it would freeze a
-    # transient API outage into a permanent "needs human" record that never re-resolves.
+    # DISCLOSURE: the commits the judge never reached a conclusion about. Without this the
+    # report cannot distinguish "judged, and unremarkable" from "never judged" — which is
+    # exactly how a truncated reply published itself as 105 high-risk findings.
+    rep["not_assessed"] = [c["sha"] for c in assessed if c.get("category") == NOT_ASSESSED]
+    # Only a COMPLETE assessment is cacheable. If ANY commit came back NOT ASSESSED the
+    # verdict is provisional — caching it would freeze a transient API outage, or a reply
+    # that got cut off at the output cap, into a permanent record that never re-resolves.
     if not any(c.get("_note") for c in cls_map.values()):
         _cache_put(tool, ckey, rep)
     return rep
@@ -468,6 +507,23 @@ def _commit_files(upstream: str, sha_full: str) -> set[str] | None:
 
 
 # ── markdown render (for the PR body) ─────────────────────────────────────────
+def _probe_cell(val, yes: str, no: str, settled: bool) -> str:
+    """Render one of the two PROBE columns (`conflict`, `clean-pick`).
+
+    None is not a measurement. On a settled row (carried / recorded decision) the probe
+    does not apply; on any other row it means the probe DID NOT RUN — both probes are
+    computed only for adopt-candidates, to bound gh/git cost. Neither case may render as
+    a bare dash, which reads as "checked, nothing to report". `clean-pick` used to print
+    `—` for None while `conflict` printed `?` for the same None, so the table disagreed
+    with itself about what an unknown looks like.
+    """
+    if val is True:
+        return yes
+    if val is False:
+        return no
+    return "n/a" if settled else "not-probed"
+
+
 def render_md(rep: dict) -> str:
     tool = rep.get("tool", "?")
     if rep.get("error"):
@@ -485,7 +541,20 @@ def render_md(rep: dict) -> str:
          f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
          f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**", ""]
-    if (n_carried or n_decided) and not n_open and not n_safe:
+    # An assessment that did not complete must SAY SO, above the table, before a reader
+    # starts triaging cells that no classifier ever filled in.
+    n_na = len(rep["not_assessed"]) if "not_assessed" in rep else \
+        len([c for c in rep.get("commits") or [] if c.get("category") == NOT_ASSESSED])
+    if n_na:
+        L += [f"> **⚠ THE JUDGE DID NOT COMPLETE — {n_na} of {rep['commit_count']} commit(s) were "
+              "NOT ASSESSED.** Their `cat` / `risk` / `rel` cells read `not-assessed`: no "
+              "classifier reached a conclusion about them. That is an ABSENCE OF ANALYSIS, not "
+              "a finding — do not read those rows as triage. `conflict` and `clean-pick` are "
+              "`not-probed` on the same rows for a second reason: both probes run only for "
+              "adopt-candidates, so for an unassessed commit the our-patch-overlap and "
+              "cherry-pick analyses DID NOT RUN either. The per-commit reason is in the "
+              "summary column.", ""]
+    if (n_carried or n_decided) and not n_open and not n_safe and not n_na:
         L += ["> **This range is DECIDED — no action required.** Every upstream commit is "
               "either already in our shipped ref (as an ancestor or a cherry-pick) or "
               "carries a recorded skip decision in `DECISIONS.json`. `behind_releases` "
@@ -496,20 +565,33 @@ def render_md(rep: dict) -> str:
          "| sha | cat | risk | rel | conflict | clean-pick | rec | decision | summary |",
          "|---|---|---|---|---|---|---|---|---|"]
     for c in rep["commits"]:
+        # A row is SETTLED (carried / recorded decision) or NOT ASSESSED or judged. Only
+        # the last kind has measurements, and the other two must say which they are —
+        # a bare "?" cannot tell a reader "does not apply" from "we never looked".
+        settled = c.get("category") in ("carried", "decided")
+        blank = "n/a" if settled else (NOT_ASSESSED if c.get("category") == NOT_ASSESSED else "?")
         L.append("| `{sha}` | {category} | {risk} | {rel} | {conf} | {clean} | {recommend} | "
                  "**{decision}** | {summary} |".format(
-                     sha=c["sha"], category=c.get("category") or "?", risk=c.get("risk") or "?",
-                     rel={True: "yes", False: "no", None: "?"}.get(c.get("relevant"), "?"),
-                     conf={True: "⚠", False: "—", None: "?"}.get(c.get("touches_our_patches"), "—"),
-                     clean={True: "✓", False: "✗", None: "—"}.get(c.get("clean_cherrypick"), "—"),
+                     sha=c["sha"], category=c.get("category") or "?",
+                     risk=c.get("risk") or blank,
+                     rel={True: "yes", False: "no"}.get(c.get("relevant"), blank),
+                     conf=_probe_cell(c.get("touches_our_patches"), "⚠", "—", settled),
+                     clean=_probe_cell(c.get("clean_cherrypick"), "✓", "✗", settled),
                      recommend=c.get("recommend") or "?", decision=c.get("decision"),
-                     summary=(c.get("summary") or c.get("title") or "")[:80].replace("|", "\\|")))
+                     # 110, not 80: the not-assessed reason is the whole point of that row,
+                     # and at 80 it was cut mid-word ("...stop_reason=max_token").
+                     summary=(c.get("summary") or c.get("title") or "")[:110].replace("|", "\\|")))
     repro = [c for c in rep["commits"] if c.get("reproduce")]
     if repro:
         L += ["", "### Reproduce-before-adopt (bugfixes)"]
         for c in repro:
             L.append(f"- `{c['sha']}` {c.get('summary') or c['title']} — **reproduce:** {c['reproduce']}")
-    L += ["", "> Doctrine: understand every commit, confirm each bugfix reproduces in OUR version, "
+    L += ["", "> Column notes: `conflict` (does it touch a file our carried patches touch) and "
+          "`clean-pick` (does it cherry-pick cleanly onto our branch) are computed ONLY for "
+          "adopt-candidates, to bound gh/git cost. `not-probed` means that analysis did not run — "
+          "it is never evidence of no conflict. `n/a` means the row is already settled (carried, "
+          "or a recorded decision).",
+          "", "> Doctrine: understand every commit, confirm each bugfix reproduces in OUR version, "
           "adopt selectively. The clearly-safe subset (self-contained low-risk bugfix, relevant, no "
           "overlap with our patches, clean cherry-pick) may be auto-adopted once enabled; everything "
           "else is a human decision."]
