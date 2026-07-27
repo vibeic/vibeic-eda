@@ -241,9 +241,14 @@ def tick() -> dict:
                 # triage result — see the 2026-07-28 magic assessment, where a truncated
                 # judge reply published 105 rows of fabricated "high risk".
                 n_na = len(rep.get("not_assessed") or [])
+                # vibeic/vibeic-eda#5: adopt-candidates the model called relevant that
+                # nothing we run can reach. DISCLOSED, never resolved away — the verdict
+                # may still be right, but its stated evidence is not true of our fork.
+                n_unreach = len(rep.get("unreachable") or [])
                 entry["assessed"] = {"commits": cc, "clearly_safe": safe,
                                      "carried": carried, "decided": decided,
-                                     "outstanding": n_open, "not_assessed": n_na}
+                                     "outstanding": n_open, "not_assessed": n_na,
+                                     "unreachable": n_unreach}
                 resolved = f"{carried} already carried, {decided} previously decided"
                 entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
                                  f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
@@ -251,6 +256,11 @@ def tick() -> dict:
                 if n_na:
                     entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
                                       f"commit(s) NOT ASSESSED (no classification made)")
+                if n_unreach:
+                    entry["note"] += (f" — {n_unreach} commit(s) the judge called relevant are "
+                                      f"UNREACHABLE from any command our emitters issue "
+                                      f"(model/surface disagreement → human decision, not "
+                                      f"auto-proposed)")
                 if n_open == 0 and safe == 0:
                     # Nothing is outstanding: reporting DEFERRED here is what
                     # turned settled work into a recurring proposal.

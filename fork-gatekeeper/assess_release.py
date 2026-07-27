@@ -334,9 +334,21 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
 
 
 # ── combine → assessment ──────────────────────────────────────────────────────
-def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None) -> bool:
+def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None,
+                  reach: dict | None = None) -> bool:
     """The narrow gate for auto-adopt: an unambiguous, self-contained, relevant, low-risk
-    bugfix that does NOT overlap our patches and cherry-picks cleanly. Anything less → human."""
+    bugfix that does NOT overlap our patches, cherry-picks cleanly, AND touches code
+    something we run can actually reach. Anything less → human.
+
+    `relevant` is the model's opinion. `reach` is a program's (see reachability.py).
+    When they DISAGREE — the model says relevant, the surface analysis says nothing we
+    issue can reach the changed symbols — the commit drops to human review with both
+    statements on the row (vibeic/vibeic-eda#5). An UNKNOWN reachability result leaves
+    the model's verdict standing: "I could not determine the surface" is not
+    "unreachable", and demoting on it would silently gate every candidate.
+    """
+    if reach is not None and reach.get("verdict") == "unreachable":
+        return False
     return (cls.get("category") == "bugfix"
             and cls.get("risk") == "low"
             and cls.get("relevant") is True
@@ -355,7 +367,10 @@ CACHE = STATE / "assessment-cache"
 # have to be bumped by whoever edits the judge — and the one time they forget is
 # exactly the time a stale verdict replays. Hash the bytes instead: forgetting is
 # not possible.
-ASSESSOR_SOURCES = (HERE / "llm_judge.py",)
+#
+# reachability.py is here for the same reason as llm_judge.py: it decides what a row
+# says, so editing it must re-judge cached ranges rather than have the change masked.
+ASSESSOR_SOURCES = (HERE / "llm_judge.py", HERE / "reachability.py")
 
 
 def _assessor_knobs() -> dict:
@@ -578,16 +593,32 @@ def assess(tool: str) -> dict:
         cand = cls.get("category") == "bugfix" and cls.get("recommend") == "adopt"
         touches = None
         clean = None
+        reach = None
         if cand:
             cf = _commit_files(upstream, c["sha_full"])
             # UNKNOWN on EITHER side (our patch files errored → None, or this commit's files
             # errored → None) must read as "assume overlap" so the conflict gate fails safe.
             touches = True if (our_files is None or cf is None) else bool(our_files & cf)
             clean = clean_cherrypick(tool, our_ref, c["sha_full"]) if our_ref else None
+            # The doctrine's "confirm it reproduces in OUR version", as a program
+            # (vibeic/vibeic-eda#5). Adopt-candidates only, same cost bound as the
+            # probes above.
+            reach = _reachability(tool, c["sha_full"])
         row = {**c, **{k: cls.get(k) for k in
                        ("category", "summary", "relevant", "risk", "reproduce", "recommend")},
-               "touches_our_patches": touches, "clean_cherrypick": clean}
-        if cand and _clearly_safe(cls, touches, clean):
+               "touches_our_patches": touches, "clean_cherrypick": clean,
+               "reachability": reach}
+        if reach is not None and reach.get("verdict") == "unreachable":
+            # DISCLOSE the disagreement, do not resolve it silently. The judge's reason
+            # travels into an auto-opened merge PR, so a reason the analysis contradicts
+            # must never be printed on its own — the marker leads so the summary column's
+            # truncation cannot hide it.
+            row["judge_summary"] = row.get("summary") or ""
+            row["reachability_conflict"] = True
+            row["summary"] = (f"⚠ UNREACHABLE FROM OUR SURFACE — {reach.get('detail', '')} · "
+                              f"the judge nonetheless called it relevant: "
+                              f"\"{row['judge_summary']}\"")
+        if cand and _clearly_safe(cls, touches, clean, reach):
             row["decision"] = "auto-safe"
             safe.append(row["sha"])
         else:
@@ -613,6 +644,9 @@ def assess(tool: str) -> dict:
     # report cannot distinguish "judged, and unremarkable" from "never judged" — which is
     # exactly how a truncated reply published itself as 105 high-risk findings.
     rep["not_assessed"] = [c["sha"] for c in assessed if c.get("category") == NOT_ASSESSED]
+    # DISCLOSURE: adopt-candidates the model called relevant that nothing we run reaches.
+    # These are NOT clearly-safe — they are human decisions, with both statements on the row.
+    rep["unreachable"] = [c["sha"] for c in assessed if c.get("reachability_conflict")]
     # Only a COMPLETE assessment is cacheable. If ANY commit came back NOT ASSESSED the
     # verdict is provisional — caching it would freeze a transient API outage, or a reply
     # that got cut off at the output cap, into a permanent record that never re-resolves.
@@ -623,6 +657,23 @@ def assess(tool: str) -> dict:
         # not be replayed later as though the next reader's tick re-judged anything.
         rep["reassessed_because"] = why_reassessed
     return rep
+
+
+def _reachability(tool: str, sha_full: str) -> dict | None:
+    """The deterministic surface check, or None if the module is unavailable.
+
+    None (module missing) is NOT a demotion — it is the same "could not determine"
+    the check itself returns, expressed by the absence of a result, and `_clearly_safe`
+    treats it as such.
+    """
+    try:
+        import reachability
+    except Exception:  # noqa: BLE001 — a check that will not import must not break the tick
+        return None
+    try:
+        return reachability.check(tool, sha_full)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _commit_files(upstream: str, sha_full: str) -> set[str] | None:
@@ -650,6 +701,16 @@ def _probe_cell(val, yes: str, no: str, settled: bool) -> str:
     if val is False:
         return no
     return "n/a" if settled else "not-probed"
+
+
+def _reach_cell(reach: dict | None, settled: bool) -> str:
+    """Render the `reach` column. Like the two probes, it runs only for adopt-candidates,
+    so absence means DID NOT RUN — never "checked, reachable"."""
+    if not isinstance(reach, dict):
+        return "n/a" if settled else "not-probed"
+    v = reach.get("verdict")
+    return {"reachable": "✓ ours", "unreachable": "⚠ NOT ours",
+            "unknown": "undetermined"}.get(v, "not-probed")
 
 
 def _provenance_lines(rep: dict) -> list[str]:
@@ -715,40 +776,62 @@ def render_md(rep: dict) -> str:
               "compares RELEASE TAGS, but selective-merge adopts COMMITS, so the tag stays "
               "behind by design after a selective adoption — being 'behind' a tag is not "
               "the same as owing work.", ""]
+    # The doctrine's confirmation step, when it CONTRADICTS the model (vibeic/vibeic-eda#5).
+    n_unreach = len(rep["unreachable"]) if "unreachable" in rep else \
+        len([c for c in rep.get("commits") or [] if c.get("reachability_conflict")])
+    if n_unreach:  # DISCLOSED above the table, like the not-assessed banner
+        L += [f"> **⚠ MODEL / SURFACE DISAGREEMENT on {n_unreach} commit(s).** The judge called "
+              "them relevant; the deterministic reachability check found the symbols they "
+              "change are reachable only from commands our emitters never issue. Both "
+              "statements are on the row and NEITHER has been resolved away. Such a commit is "
+              "NOT clearly-safe and is not auto-proposed — it is a human decision. The verdict "
+              "may still be right (a NULL guard in a tool we run headless is harmless); what is "
+              "wrong is the EVIDENCE, and the evidence is what travels into a merge PR.", ""]
     L += [
-         "| sha | cat | risk | rel | conflict | clean-pick | rec | decision | summary |",
-         "|---|---|---|---|---|---|---|---|---|"]
+         "| sha | cat | risk | rel | conflict | clean-pick | reach | rec | decision | summary |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
     for c in rep["commits"]:
         # A row is SETTLED (carried / recorded decision) or NOT ASSESSED or judged. Only
         # the last kind has measurements, and the other two must say which they are —
         # a bare "?" cannot tell a reader "does not apply" from "we never looked".
         settled = c.get("category") in ("carried", "decided")
         blank = "n/a" if settled else (NOT_ASSESSED if c.get("category") == NOT_ASSESSED else "?")
-        L.append("| `{sha}` | {category} | {risk} | {rel} | {conf} | {clean} | {recommend} | "
-                 "**{decision}** | {summary} |".format(
+        L.append("| `{sha}` | {category} | {risk} | {rel} | {conf} | {clean} | {reach} | "
+                 "{recommend} | **{decision}** | {summary} |".format(
                      sha=c["sha"], category=c.get("category") or "?",
                      risk=c.get("risk") or blank,
                      rel={True: "yes", False: "no"}.get(c.get("relevant"), blank),
                      conf=_probe_cell(c.get("touches_our_patches"), "⚠", "—", settled),
                      clean=_probe_cell(c.get("clean_cherrypick"), "✓", "✗", settled),
+                     reach=_reach_cell(c.get("reachability"), settled),
                      recommend=c.get("recommend") or "?", decision=c.get("decision"),
                      # 110, not 80: the not-assessed reason is the whole point of that row,
-                     # and at 80 it was cut mid-word ("...stop_reason=max_token").
-                     summary=(c.get("summary") or c.get("title") or "")[:110].replace("|", "\\|")))
+                     # and at 80 it was cut mid-word ("...stop_reason=max_token"). A
+                     # model/surface disagreement gets more still — it has to carry BOTH
+                     # statements, and at 110 it was cut before the half that contradicts
+                     # ("…reachable only from `" — the reader never sees WHICH command,
+                     # nor that we do not issue it).
+                     summary=(c.get("summary") or c.get("title") or "")[
+                         :600 if c.get("reachability_conflict") else 110].replace("|", "\\|")))
     repro = [c for c in rep["commits"] if c.get("reproduce")]
     if repro:
         L += ["", "### Reproduce-before-adopt (bugfixes)"]
         for c in repro:
             L.append(f"- `{c['sha']}` {c.get('summary') or c['title']} — **reproduce:** {c['reproduce']}")
-    L += ["", "> Column notes: `conflict` (does it touch a file our carried patches touch) and "
-          "`clean-pick` (does it cherry-pick cleanly onto our branch) are computed ONLY for "
-          "adopt-candidates, to bound gh/git cost. `not-probed` means that analysis did not run — "
-          "it is never evidence of no conflict. `n/a` means the row is already settled (carried, "
-          "or a recorded decision).",
+    L += ["", "> Column notes: `conflict` (does it touch a file our carried patches touch), "
+          "`clean-pick` (does it cherry-pick cleanly onto our branch) and `reach` (can any command "
+          "our emitters issue reach the symbols it changes) are computed ONLY for adopt-candidates, "
+          "to bound gh/git cost. `not-probed` means that analysis did not run — it is never "
+          "evidence of no conflict. `n/a` means the row is already settled (carried, or a recorded "
+          "decision). `reach` = `undetermined` means the check could not decide — which is NOT "
+          "'unreachable', and leaves the model's verdict standing.",
           "", "> Doctrine: understand every commit, confirm each bugfix reproduces in OUR version, "
-          "adopt selectively. The clearly-safe subset (self-contained low-risk bugfix, relevant, no "
-          "overlap with our patches, clean cherry-pick) may be auto-adopted once enabled; everything "
-          "else is a human decision."]
+          "adopt selectively. The `reach` column is that confirmation step as a PROGRAM (no model "
+          "involved): it reads the symbols the patch changes, walks callers up to the tool's own "
+          "command registry, and compares the result against the commands our emitters actually "
+          "issue. The clearly-safe subset (self-contained low-risk bugfix, relevant, no overlap "
+          "with our patches, clean cherry-pick, and not contradicted by the reachability check) "
+          "may be auto-adopted once enabled; everything else is a human decision."]
     return "\n".join(L) + "\n"
 
 

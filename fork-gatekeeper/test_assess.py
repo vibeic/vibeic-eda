@@ -912,6 +912,321 @@ def test_gatekeeper_log_explains_the_invalidation_spike():
     assert "unchanged assessor" in gk, "the replay log must name what it checked"
 
 
+# ── the doctrine's confirmation step, as a program (vibeic/vibeic-eda#5) ─────
+# Every assessment printed "confirm each bugfix reproduces in OUR version" and
+# nothing implemented it. On magic 8.3.674 → 8.3.678 the ONE clearly-safe row was
+# 3f1747b1fb91, whose reason read "critical for automated batch DRC/extraction
+# runs" — while the patch guards CmdCrosshair()/DBWSetCrosshair(), reachable only
+# from the `crosshair` command, which we never issue. The verdict was defensible;
+# the EVIDENCE was not, and the evidence is what travels into a merge PR.
+#
+# These tests build a synthetic clone and run the REAL registrar regex, caller
+# walk and surface scan over it. Nothing here touches the network.
+
+def _run(*args, cwd):
+    import subprocess
+    return subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, check=True)
+
+
+def _reach_fixture(tmp: Path):
+    """A miniature C tool + its command table + our emitter tree.
+
+    Layout mirrors the real defect: `crosshairPos()` is reachable only from the
+    `crosshair` command; `drcHelper()` only from `drc`, two calls up. Our emitters
+    issue `drc`, never `crosshair`.
+    """
+    clone = tmp / "clone"
+    (clone / "commands").mkdir(parents=True)
+    (clone / "dbwind").mkdir(parents=True)
+    (clone / "drc").mkdir(parents=True)
+    (clone / "commands" / "CmdCD.c").write_text(
+        "#include <stdio.h>\n"
+        "\n"
+        "void\n"
+        "CmdCrosshair(w, cmd)\n"
+        "{\n"
+        "    crosshairPos(w);\n"
+        "}\n"
+        "\n"
+        "void\n"
+        "CmdDrc(w, cmd)\n"
+        "{\n"
+        "    DRCBasicCheck(w);\n"
+        "}\n")
+    (clone / "dbwind" / "DBWtools.c").write_text(
+        "void\n"
+        "crosshairPos(window)\n"
+        "{\n"
+        "    return;\n"
+        "}\n")
+    (clone / "drc" / "DRCbasic.c").write_text(
+        "void\n"
+        "DRCBasicCheck(w)\n"
+        "{\n"
+        "    drcHelper();\n"
+        "}\n"
+        "\n"
+        "void\n"
+        "drcHelper()\n"
+        "{\n"
+        "    return;\n"
+        "}\n")
+    (clone / "dbwind" / "DBWcommands.c").write_text(
+        "void DBWCommandInit()\n"
+        "{\n"
+        "    WindAddCommand(DBWclientID,\n"
+        '\t"crosshair x y | off\tenable and move or disable the screen crosshair",\n'
+        "\tCmdCrosshair, FALSE);\n"
+        "    WindAddCommand(DBWclientID,\n"
+        '\t"drc option\t\tdesign rule checker",\n'
+        "\tCmdDrc, FALSE);\n"
+        "}\n")
+    _run("git", "init", "-q", ".", cwd=clone)
+    for k, v in (("user.email", "t@example.com"), ("user.name", "t")):
+        _run("git", "config", k, v, cwd=clone)
+    _run("git", "add", "commands/CmdCD.c", "dbwind/DBWtools.c", "dbwind/DBWcommands.c",
+         "drc/DRCbasic.c", cwd=clone)
+    _run("git", "commit", "-q", "-m", "base", cwd=clone)
+
+    def _commit(path: str, old: str, new: str, msg: str) -> str:
+        p = clone / path
+        p.write_text(p.read_text().replace(old, new))
+        _run("git", "add", path, cwd=clone)
+        _run("git", "commit", "-q", "-m", msg, cwd=clone)
+        return _run("git", "rev-parse", "HEAD", cwd=clone).stdout.strip()
+
+    crosshair_sha = _commit("dbwind/DBWtools.c", "    return;\n", "    assert(window);\n",
+                            "crosshair: prevent crash in headless mode")
+    drc_sha = _commit("drc/DRCbasic.c", "void\ndrcHelper()\n{\n    return;\n}",
+                      "void\ndrcHelper()\n{\n    assert(1);\n}",
+                      "drc: fix a check")
+
+    emitters = tmp / "emitters"
+    emitters.mkdir()
+    (emitters / "magic_emit.py").write_text(
+        'CMD = "magic -noconsole -dnull -rcfile x.magicrc"\n'
+        'def emit():\n'
+        '    return ["drc check", "drc catchup"]\n')
+    return clone, [emitters], crosshair_sha, drc_sha
+
+
+def test_reachability_demotes_a_commit_nothing_we_run_can_reach():
+    """DIRECTION ONE: a commit whose only route in is a command we never issue."""
+    import reachability as R
+    with tempfile.TemporaryDirectory() as d:
+        clone, roots, crosshair_sha, _ = _reach_fixture(Path(d))
+        r = R.check("magic", crosshair_sha, clone=clone, roots=roots)
+    assert r["verdict"] == R.UNREACHABLE, r
+    assert r["commands"] == ["crosshair"], r
+    assert r["surface"] == ["drc"], r
+    assert r["closure_complete"] is True
+    assert "crosshair" in r["detail"] and "we never issue" in r["detail"]
+    # and it can never be auto-adopted, however good the model's verdict was
+    good = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
+    assert A._clearly_safe(good, False, True) is True          # without the check
+    assert A._clearly_safe(good, False, True, r) is False       # with it
+
+
+def test_reachability_keeps_a_commit_our_commands_do_reach():
+    """DIRECTION TWO: a drc-path commit two calls below the handler stays a candidate."""
+    import reachability as R
+    with tempfile.TemporaryDirectory() as d:
+        clone, roots, _, drc_sha = _reach_fixture(Path(d))
+        r = R.check("magic", drc_sha, clone=clone, roots=roots)
+    assert r["verdict"] == R.REACHABLE, r
+    assert "drc" in r["commands"], r
+    assert "drc" in r["detail"]
+    good = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
+    assert A._clearly_safe(good, False, True, r) is True, "a reachable fix was demoted"
+
+
+def test_could_not_determine_is_not_unreachable():
+    """REQUIREMENT 3. Every undecidable case leaves the model's verdict standing —
+    silently demoting all of them would be the same error class this fixes."""
+    import reachability as R
+    good = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
+    with tempfile.TemporaryDirectory() as d:
+        clone, roots, crosshair_sha, _ = _reach_fixture(Path(d))
+        cases = {
+            # a tool whose command registration idiom we do not know (klayout, netgen, …)
+            "no registry": R.check("some-other-tool", crosshair_sha, clone=clone, roots=roots),
+            # the emitter trees are not on this machine
+            "no emitters": R.check("magic", crosshair_sha, clone=clone,
+                                   roots=[Path(d) / "nope"]),
+            # the commit is not in the local clone
+            "unknown sha": R.check("magic", "0" * 40, clone=clone, roots=roots),
+            # no clone at all
+            "no clone": R.check("magic", crosshair_sha, clone=Path(d) / "missing",
+                                roots=roots),
+        }
+    for name, r in cases.items():
+        assert r["verdict"] == R.UNKNOWN, f"{name}: {r}"
+        assert r["detail"].startswith("NOT DETERMINED"), f"{name}: {r}"
+        assert A._clearly_safe(good, False, True, r) is True, \
+            f"{name}: an undetermined surface demoted a candidate"
+
+
+def test_reachability_kill_switch_is_undetermined_not_unreachable():
+    import reachability as R
+    os.environ["GK_REACHABILITY"] = "0"
+    try:
+        r = R.check("magic", "0" * 40)
+    finally:
+        os.environ.pop("GK_REACHABILITY", None)
+    assert r["verdict"] == R.UNKNOWN and "switched off" in r["detail"]
+
+
+def test_reachability_never_raises():
+    import reachability as R
+    orig = R.command_registry
+    try:
+        R.command_registry = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        r = R.check("magic", "0" * 40)
+    finally:
+        R.command_registry = orig
+    assert r["verdict"] == R.UNKNOWN and "errored" in r["detail"]
+    # and the assess()-side wrapper swallows an unimportable module the same way
+    assert A._reachability("magic", "") is None or isinstance(A._reachability("magic", ""), dict)
+
+
+def test_surface_is_read_from_the_emitters_not_hand_listed():
+    """The surface is the intersection of the TOOL's own command vocabulary with the
+    command lines our emitters write — so it cannot rot into a stale hand-kept list."""
+    import re
+    import reachability as R
+    with tempfile.TemporaryDirectory() as d:
+        clone, roots, _, _ = _reach_fixture(Path(d))
+        reg, regfiles = R.command_registry("magic", clone)
+        vocab = set()
+        for cs in reg.values():
+            vocab |= cs
+        assert vocab == {"crosshair", "drc"}, vocab
+        assert "dbwind/DBWcommands.c" in regfiles, "the dispatch table must be excluded"
+        surface, why = R.command_surface("magic", vocab, roots)
+        assert set(surface) == {"drc"}, (surface, why)
+        assert surface["drc"] == 2, "the surface carries its own evidence count"
+        # an empty vocabulary is UNKNOWN, never "we issue nothing"
+        empty, why_empty = R.command_surface("magic", set(), roots)
+        assert empty is None and why_empty, (empty, why_empty)
+    src = (Path(__file__).resolve().parent / "reachability.py").read_text()
+    assert re.search(r'^\s*(MAGIC_)?COMMANDS\s*=\s*[\[{(]', src, re.M) is None, \
+        "a hand-listed command surface came back"
+
+
+def _unreachable_stub(tool, sha_full):
+    return {"verdict": "unreachable", "commands": ["crosshair"], "surface": ["drc", "extract"],
+            "closure_complete": True, "symbols": ["CmdCrosshair"],
+            "detail": "the changed symbol(s) CmdCrosshair are reachable only from "
+                      "`crosshair`, and we never issue that"}
+
+
+def test_assess_discloses_the_disagreement_and_does_not_auto_propose():
+    """End to end: the model says relevant, the surface says unreachable. The row must
+    state BOTH, drop out of clearly-safe, and not silently keep the judge's reason."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            _cache_fixture(tmp, ["low"])
+            A._reachability = _unreachable_stub
+            # the real reason string from the live 2026-07-28 magic report
+            A.classify_commits = lambda tool, role, commits: {
+                c["sha"]: {"category": "bugfix", "relevant": True, "risk": "low",
+                           "summary": "Prevents crash in headless mode — critical for "
+                                      "automated batch DRC/extraction runs",
+                           "reproduce": "", "recommend": "adopt"} for c in commits}
+            rep = A.assess("magic")
+        finally:
+            _pop_state_dir()
+    assert rep["clearly_safe"] == [], "an unreachable commit was auto-proposed"
+    assert rep["unreachable"] == ["cc4da9a05fde"], rep.get("unreachable")
+    row = rep["commits"][0]
+    assert row["decision"] == "human"
+    assert row["relevant"] is True, "the model's verdict must NOT be rewritten"
+    assert row["reachability"]["verdict"] == "unreachable"
+    # requirement 4: the rendered reason may not claim a relevance the analysis contradicts
+    assert row["summary"].startswith("⚠ UNREACHABLE FROM OUR SURFACE")
+    assert row["judge_summary"] == ("Prevents crash in headless mode — critical for "
+                                    "automated batch DRC/extraction runs"), \
+        "the judge's own reason must survive verbatim"
+    assert "the judge nonetheless called it relevant" in row["summary"]
+    md = A.render_md(rep)
+    assert "MODEL / SURFACE DISAGREEMENT on 1 commit(s)" in md
+    assert "NEITHER has been resolved away" in md
+    assert "⚠ NOT ours" in md, "the reach column must show the disagreement"
+    row_line = next(ln for ln in md.splitlines() if ln.startswith("| `cc4da9a05fde`"))
+    assert "**human**" in row_line
+    # the CONTRADICTING half must survive the summary-column truncation: at 110 chars
+    # the row stopped at "reachable only from `" and never named the command, nor said
+    # we do not issue it
+    assert "we never issue that" in row_line, row_line
+    assert "the judge nonetheless called it relevant" in row_line, row_line
+    assert "batch DRC/extraction runs" in row_line, \
+        "the claim being contradicted was itself truncated away"
+    assert row_line.rstrip().endswith('" |'), f"the disclosure cell was cut: {row_line}"
+
+
+def test_a_reachable_candidate_is_still_auto_safe_end_to_end():
+    """The fix must not cost the happy path: a reachable low-risk bugfix still qualifies."""
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            _cache_fixture(tmp, ["low"])
+            A._reachability = lambda tool, sha: {
+                "verdict": "reachable", "commands": ["drc", "extract"],
+                "surface": ["drc"], "closure_complete": True, "symbols": ["DRCBasicCheck"],
+                "detail": "reached from drc, which our emitters issue"}
+            rep = A.assess("magic")
+        finally:
+            _pop_state_dir()
+    assert rep["clearly_safe"] == ["cc4da9a05fde"], rep["clearly_safe"]
+    assert rep["unreachable"] == []
+    md = A.render_md(rep)
+    assert "✓ ours" in md
+    assert "MODEL / SURFACE DISAGREEMENT" not in md
+
+
+def test_reach_column_says_not_probed_when_it_did_not_run():
+    """Absence of the check must never render as 'checked, reachable' — the same rule
+    the conflict / clean-pick columns already obey."""
+    rep = _provenance_rep(assessor="a" * 12, assessed_at="2026-07-28T00:00:00Z")
+    rep["commits"][0].pop("reachability", None)
+    md = A.render_md(rep)
+    row = next(ln for ln in md.splitlines() if ln.startswith("| `aaa111`"))
+    cells = [x.strip() for x in row.split("|")]
+    assert cells[7] == "not-probed", row
+    assert cells[5] == "—" and cells[6] == "✓", "the older columns must not have shifted"
+
+
+def test_the_disagreement_reaches_the_gatekeeper_note_and_the_pr_body():
+    """The disclosure has to reach the two places a human actually reads."""
+    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert 'rep.get("unreachable")' in gk
+    assert "UNREACHABLE from any command our emitters issue" in gk
+    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
+    assert 'a.get("unreachable")' in pn
+    assert "UNREACHABLE from our command surface" in pn
+
+
+def test_the_reachability_check_is_part_of_the_assessor_identity():
+    """It decides what a row says, so editing it must re-judge cached ranges rather
+    than have the change masked by the cache (vibeic/vibeic-eda#4)."""
+    assert any(p.name == "reachability.py" for p in A.ASSESSOR_SOURCES), A.ASSESSOR_SOURCES
+    import shutil
+    real = Path(__file__).resolve().parent / "reachability.py"
+    orig = A.ASSESSOR_SOURCES
+    with tempfile.TemporaryDirectory() as d:
+        copy = Path(d) / "reachability.py"
+        shutil.copy(real, copy)
+        try:
+            A.ASSESSOR_SOURCES = (copy,)
+            before = A.assessor_id()
+            copy.write_text(copy.read_text() + "\n# tighten the surface filter\n")
+            after = A.assessor_id()
+        finally:
+            A.ASSESSOR_SOURCES = orig
+    assert before != after
+
+
 if __name__ == "__main__":
     # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
     # `assess_release` and restores NONE of them, so whichever test used it

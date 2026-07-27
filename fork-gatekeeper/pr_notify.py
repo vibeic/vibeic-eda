@@ -264,6 +264,15 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
                 line += (f" — ⚠ **the judge did not complete: {n_na} commit(s) NOT ASSESSED** "
                          f"(no classification was made for them; this is missing analysis, "
                          f"not a risk finding)")
+            # vibeic/vibeic-eda#5. A commit the model called relevant that nothing we run
+            # can reach is the disagreement worth surfacing FIRST — it is the one whose
+            # stated justification a reviewer would otherwise take at face value.
+            n_unreach = len(a.get("unreachable") or [])
+            if n_unreach:
+                line += (f" — ⚠ **{n_unreach} UNREACHABLE from our command surface** (the judge "
+                         f"called them relevant; the deterministic check says nothing our "
+                         f"emitters issue reaches the symbols they change — human decision, "
+                         f"not auto-proposed)")
             tally.append(line)
         _run(["git", "-C", str(wt), "add", ASSESS_DIR])
         title = f"[eda-fork] {date}: upstream release assessment — {len(tools)} tool(s) to review"
