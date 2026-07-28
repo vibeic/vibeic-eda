@@ -8,11 +8,14 @@ Owner directives:
 
 Flow each day (only for the forks in FORKS.json):
   1. re-seed the ledgers from live state — the vibeic-eda Dockerfile is the source of
-     truth for what we ship (ARG <TOOL>_REF pins each fork's vibeic branch); we compare
+     truth for what we ship (ARG <TOOL>_REF pins each fork's vibeic branch, and a fork
+     VENDORED as a submodule of a pinned fork ships inside that fork's ref); we compare
      the release our pin is based on against the upstream's newer releases.
   2. per fork verdict:
-       NOT_LAYERED — forked but not pinned into the image (e.g. verilator); informational
-       CLEAN       — pinned + already on the latest upstream release; filtered out
+       NOT_LAYERED — forked but NOT REACHED BY THE IMAGE BUILD at all: no ARG pin of its
+                     own and not vendored inside one, so the image uses upstream directly
+                     and there is nothing to sync; informational
+       CLEAN       — in the image + already on the latest upstream release; filtered out
        candidate   — a newer upstream release exists → try to integrate
   3. GATE (option B): integrating a candidate = rebase our vibeic branch onto the new
      release, bump the Dockerfile ARG, and **rebuild the vibeic-eda image**. That image
@@ -204,6 +207,43 @@ def assessment_entry(rep: dict, nr: int, latest) -> dict:
     return entry
 
 
+def pin_provenance(led: dict) -> str:
+    """The clause a report row adds when the pin is INDIRECT; "" for a direct ARG.
+
+    vibeic/vibeic-eda#8. "pinned via `OPENROAD_REF` (`src/sta`)" and "pinned via
+    `OPENSTA_REF`" are the same fact only to a reader who does not have to act on it: a
+    change to the vendored copy is shipped by rebuilding the HOST, not this tool. An
+    operator reading the row to decide what to rebuild has to be told which, and a row
+    that says nothing is read as the ordinary case — its own ARG.
+    """
+    host, path = led.get("vendored_in"), led.get("vendored_path")
+    if not (host and path):
+        return ""
+    return (f" — pinned via `{led.get('dockerfile_arg') or '?'}` (`{path}` in "
+            f"vibeic/{host}), not an ARG of its own: changing it means rebuilding {host}")
+
+
+def unassessed_drift(led: dict) -> str:
+    """What a CLEAN row does not say: upstream commits our pinned ref does not carry.
+
+    CLEAN answers the RELEASE question, and the row used to stop there — so a fork whose
+    upstream has cut no release since 2020 reads as "nothing to do" however far its
+    default branch has moved. `behind_commits` measures that distance on every tick and
+    was published nowhere (vibeic/vibeic-eda#8, where the complaint that a 48-commit gap
+    "has never been triaged" turned out to be true of every CLEAN fork, not only the
+    misclassified one).
+
+    DISCLOSED, not acted on. The owner's directive is to track releases; this changes
+    what the reader is told, not what the gatekeeper does, and it spends nothing.
+    """
+    n = led.get("behind_commits") or 0
+    if not n:
+        return ""
+    return (f" — {n} upstream commit(s) on "
+            f"{led.get('upstream_default_branch') or 'the default branch'} are not in our "
+            f"pinned ref; no new release, so release-tracking does not assess them")
+
+
 def tick() -> dict:
     print(f"[{_now_iso()}] gatekeeper tick — re-seeding ledgers…")
     disc.main()
@@ -280,7 +320,12 @@ def tick() -> dict:
     not_configured = ("new upstream release(s) available; auto-merge (option B) rebuilds the "
                       "vibeic-eda image as the green gate, but image_build.cmd is not configured.")
     if candidates and cfg and os.environ.get("GK_RUN_HARNESS"):
-        hres = _run_harness(cfg, candidates)
+        # A VENDORED fork is never handed to this harness: its whole operation is "rebase
+        # the branch, bump `<TOOL>_REF`, rebuild", and a vendored fork's ARG belongs to
+        # its HOST — bumping it to this tool's release sha would repoint the host at the
+        # wrong repository. Such a candidate falls through to the selective-merge
+        # assessment path instead, which proposes a cherry-pick PR on the fork itself.
+        hres = _run_harness(cfg, [c for c in candidates if not c.get("vendored_in")])
 
     results = []
     conflicts: list[str] = []    # cross-document count disagreements (vibeic/vibeic-eda#7)
@@ -291,13 +336,16 @@ def tick() -> dict:
         latest = led.get("upstream_latest_release")
         entry = {"date": date, "verdict": None, "note": "", "new_releases": nr,
                  "latest_release": latest, "merged_release": None}
+        cross_checked = None
 
         if not led.get("integrated"):
             entry["verdict"] = "NOT_LAYERED"
             entry["note"] = "forked but not pinned into the image (uses upstream directly) — nothing to sync"
         elif nr == 0:
             entry["verdict"] = "CLEAN"
-            entry["note"] = f"on the latest upstream release ({led.get('base_release') or led.get('pinned_ref')})"
+            entry["note"] = (f"on the latest upstream release "
+                             f"({led.get('base_release') or led.get('pinned_ref')})"
+                             f"{unassessed_drift(led)}")
         elif tool in hres:
             st = hres[tool]
             s, detail = st.get("status", "?"), st.get("detail", "")
@@ -315,16 +363,8 @@ def tick() -> dict:
                 entry["verdict"] = "DEFERRED"
                 entry["note"] = f"{s} → target {latest}: {detail}"
         elif tool in assessments:
-            rep = assessments[tool]
-            entry.update(assessment_entry(rep, nr, latest))
-            # CROSS-DOCUMENT CHECK (vibeic/vibeic-eda#7). Both documents are now
-            # rendered; parse the numbers back OUT of each and require them to agree.
-            # Checking the rendered text rather than the ints they were built from is
-            # the point — it is what a formatter that drops a field, or a caller that
-            # pairs this report with a different assessment, cannot slip past.
-            # Disagreement is collected, never reconciled: see the abort below.
-            conflicts.extend(assess_release.cross_check(
-                rep, {"assessment": rendered.get(tool) or "", "report": entry["note"]}))
+            entry.update(assessment_entry(assessments[tool], nr, latest))
+            cross_checked = tool
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))
@@ -332,6 +372,26 @@ def tick() -> dict:
         else:
             entry["verdict"] = "DEFERRED"
             entry["note"] = f"{nr} new release(s) → {latest}; harness returned no result for this tool"
+
+        # HOW this fork is pinned, appended once for every verdict — a fork vendored
+        # inside another fork's ref is pinned for as long as it is in the image, not only
+        # while it is a candidate (vibeic/vibeic-eda#8).
+        entry["note"] += pin_provenance(led)
+
+        # CROSS-DOCUMENT CHECK (vibeic/vibeic-eda#7). Both documents are now rendered;
+        # parse the numbers back OUT of each and require them to agree. Checking the
+        # rendered text rather than the ints they were built from is the point — it is
+        # what a formatter that drops a field, or a caller that pairs this report with a
+        # different assessment, cannot slip past. Disagreement is collected, never
+        # reconciled: see the abort below.
+        #
+        # It runs AFTER the note is FINAL, deliberately. Checking the text before its last
+        # clause is appended checks a document nobody publishes, and would have let any
+        # later addition to the row past the one gate that reads what is written.
+        if cross_checked:
+            conflicts.extend(assess_release.cross_check(
+                assessments[cross_checked],
+                {"assessment": rendered.get(cross_checked) or "", "report": entry["note"]}))
 
         led.setdefault("sync_log", []).append(entry)
         led["last_sync"] = date
@@ -516,7 +576,8 @@ def _report_md(s: dict) -> str:
         lines.append(f"| {r['tool']} | {r['verdict']} | {r['new_releases']} | "
                      f"{r.get('latest_release') or '—'} | {r['note']} |")
     lines += ["", "> CLEAN = already on the latest upstream release. NOT_LAYERED = forked but "
-              "not in the image. DEFERRED tools have a new upstream release staged; the image "
+              "the image build never fetches it — no ARG pin of its own and not vendored "
+              "inside one. DEFERRED tools have a new upstream release staged; the image "
               "auto-rebuilds + merges once image_build.cmd is wired and the rebuild is green."]
     return "\n".join(lines) + "\n"
 

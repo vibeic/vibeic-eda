@@ -1830,7 +1830,7 @@ def test_the_provenance_stamp_tells_two_vintages_of_one_date_apart():
                                            if k not in ("assessor", "assessed_at")})) == {}
 
 
-def _tick_fixture(state: Path, rep, render=None):
+def _tick_fixture(state: Path, rep, render=None, ledgers=None, on_cross_check=None):
     """Run a REAL tick against a prepared state dir — no network, no PR, no page.
 
     `disc.main` (which re-seeds the ledgers over the GitHub API) and `assess` (which
@@ -1838,11 +1838,12 @@ def _tick_fixture(state: Path, rep, render=None):
     to the files on disk is the production path.
     """
     (state / "ledger").mkdir(parents=True, exist_ok=True)
-    (state / "ledger" / "magic.json").write_text(json.dumps({
-        "tool": "magic", "integrated": True, "behind_releases": 4,
-        "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
-        "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
-        "pinned_ref_full": "19185c197fba" + "0" * 28}))
+    for name, led in (ledgers or {"magic": {
+            "tool": "magic", "integrated": True, "behind_releases": 4,
+            "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
+            "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
+            "pinned_ref_full": "19185c197fba" + "0" * 28}}).items():
+        (state / "ledger" / f"{name}.json").write_text(json.dumps(led))
     os.environ["GK_STATE_DIR"] = str(state)
     merge_pr = os.environ.pop("GK_MERGE_PR", None)   # never open a real cherry-pick PR
     try:
@@ -1862,6 +1863,13 @@ def _tick_fixture(state: Path, rep, render=None):
             if render is not None:
                 def render_md(self, r):
                     return render(r)
+
+            if on_cross_check is not None:
+                # records the documents the gate was HANDED, which is the only way to
+                # tell "the row says X" from "the row the gate read says X"
+                def cross_check(self, r, documents):
+                    on_cross_check(dict(documents))
+                    return A.cross_check(r, documents)
         gk.assess_release = _Shim()
         return gk, gk.tick()
     finally:
@@ -1920,6 +1928,357 @@ def test_a_tick_whose_documents_agree_publishes_both_and_verifies_on_disk():
             assert any("two vintages of one date" in b for b in bad), bad
         finally:
             os.environ.pop("GK_STATE_DIR", None)
+
+
+# ── vibeic/vibeic-eda#8 — a fork that ships INSIDE another fork's pin ────────────────
+#
+# The detector modelled one ARG per tool, so a fork vendored as a submodule of a pinned
+# fork had no ARG of its own and read as `integrated=False` → "forked but not pinned into
+# the image (uses upstream directly) — nothing to sync", about a tool whose enhancements
+# the image actually runs. NOT_LAYERED had exactly one member and it was that error.
+#
+# Every fixture below is named for nothing we ship. The rule has to hold for any host and
+# any vendored fork, and a rule proven only on the instance that exposed it is a special
+# case wearing a general name — so `Alpha`/`Zeta`/`vendor/zeta` is the test, and the
+# production pair is only the thing that made us look.
+
+_ALPHA_DOCKERFILE = """\
+FROM base AS alpha-builder
+ARG ALPHA_REF=aaaa1111aaaa1111  # pinned; branch vibeic/alpha-line
+RUN git clone https://github.com/vibeic/Alpha.git /src \\
+ && cd /src && git checkout ${ALPHA_REF} \\
+ && git submodule update --init --recursive --depth 1 \\
+ && make install
+
+FROM base AS beta-builder
+ARG BETA_REF=bbbb2222bbbb2222  # pinned; branch vibeic/beta-line
+RUN git clone https://github.com/vibeic/Beta.git /beta \\
+ && cd /beta && git checkout ${BETA_REF} \\
+ && make install
+"""
+
+# Alpha vendors ONE fork of ours and one repository that is not ours. The foreign one is
+# written in git's RELATIVE form, which is not a hypothetical: the live OpenROAD
+# .gitmodules pins abc as `../../The-OpenROAD-Project/abc.git`, and a reader that treated
+# the `..` segments as literal path would have claimed it as a vibeic fork.
+_ALPHA_GITMODULES = """\
+[submodule "vendor/zeta"]
+\tpath = vendor/zeta
+\turl = https://github.com/vibeic/Zeta.git
+[submodule "third-party/ext"]
+\tpath = third-party/ext
+\turl = ../../SomeoneElse/ext.git
+"""
+
+# Beta declares the SAME vendored fork, but its build never fetches submodules.
+_BETA_GITMODULES = """\
+[submodule "vendor/omega"]
+\tpath = vendor/omega
+\turl = https://github.com/vibeic/Omega.git
+"""
+
+
+def _fake_gh(routes):
+    """A `gh` that serves a fixed route table — no network, no token."""
+    def gh(path):
+        if path in routes:
+            return routes[path]
+        return {"_err": f"unrouted: {path}"}
+    return gh
+
+
+def _b64(text):
+    import base64
+    return {"content": base64.b64encode(text.encode()).decode()}
+
+
+def _disc_with_routes(routes):
+    d = _load("discover_forks")
+    d.gh = _fake_gh(routes)
+    return d
+
+
+_ALPHA_ROUTES = {
+    "repos/vibeic/Alpha/contents/.gitmodules?ref=aaaa1111aaaa1111": _b64(_ALPHA_GITMODULES),
+    "repos/vibeic/Beta/contents/.gitmodules?ref=bbbb2222bbbb2222": _b64(_BETA_GITMODULES),
+    "repos/vibeic/Alpha/contents/vendor/zeta?ref=aaaa1111aaaa1111": {
+        "type": "submodule", "sha": "zzzz9999zzzz9999"},
+    "repos/vibeic/Zeta/commits/zzzz9999zzzz9999/branches-where-head": [
+        {"name": "vibeic/zeta-work"}],
+    # Zeta itself declares nothing, so the --recursive descent terminates
+    "repos/vibeic/Zeta/contents/.gitmodules?ref=zzzz9999zzzz9999": {"_err": "404"},
+    # Omega is fully resolvable — its gitlink and its branch are both here. The ONLY
+    # thing standing between it and the ledger is that Beta's build never fetches
+    # submodules, so a test that Omega is absent fails the moment that check is dropped
+    # instead of passing because the fixture ran out of data.
+    "repos/vibeic/Beta/contents/vendor/omega?ref=bbbb2222bbbb2222": {
+        "type": "submodule", "sha": "8888"},
+    "repos/vibeic/Omega/commits/8888/branches-where-head": [{"name": "vibeic/omega"}],
+    "repos/vibeic/Omega/contents/.gitmodules?ref=8888": {"_err": "404"},
+    # ...and so is the foreign one, for the same reason: the only thing that keeps
+    # SomeoneElse/ext out of our ledger must be that it is not ours.
+    "repos/vibeic/Alpha/contents/third-party/ext?ref=aaaa1111aaaa1111": {
+        "type": "submodule", "sha": "6666"},
+    "repos/SomeoneElse/ext/commits/6666/branches-where-head": [{"name": "main"}],
+    "repos/SomeoneElse/ext/contents/.gitmodules?ref=6666": {"_err": "404"},
+}
+
+
+def test_a_fork_vendored_inside_another_pin_reaches_the_image():
+    d = _disc_with_routes(_ALPHA_ROUTES)
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(_ALPHA_DOCKERFILE))
+    assert "zeta" in pins, "a fork shipped inside another fork's pin was invisible"
+    z = pins["zeta"]
+    # the gitlink, not the ARG value: the vendored fork ships at the commit the HOST's
+    # tree records, which is the only thing that says which version is in the image
+    assert z["ref"] == "zzzz9999zzzz9999"
+    assert (z["vendored_in"], z["vendored_path"]) == ("Alpha", "vendor/zeta")
+    assert z["arg"] == "ALPHA_REF" and z["host_ref"] == "aaaa1111aaaa1111"
+    # the branch is recovered from the fork itself, so the merge-PR path has a base
+    assert z["branch"] == "vibeic/zeta-work"
+
+
+def test_the_vendoring_rule_holds_for_a_host_and_fork_it_was_not_written_for():
+    """Tool-agnosticism, as behaviour rather than as a claim about the source.
+
+    Nothing in the fixture shares a name, an ARG, a path or an upstream with the pair
+    that exposed the defect; the same code finds it. A rule that only fires on the
+    instance it was written for is the defect one level up.
+    """
+    df = _ALPHA_DOCKERFILE.replace("Alpha", "Carrier").replace("ALPHA_REF", "CARRIER_REF")
+    routes = {
+        "repos/vibeic/Carrier/contents/.gitmodules?ref=aaaa1111aaaa1111": _b64(
+            '[submodule "libs/Nested"]\n\turl = git@github.com:vibeic/Nested.git\n'),
+        "repos/vibeic/Carrier/contents/libs/Nested?ref=aaaa1111aaaa1111": {
+            "type": "submodule", "sha": "7777"},
+        "repos/vibeic/Nested/commits/7777/branches-where-head": [{"name": "vibeic/nested"}],
+        "repos/vibeic/Nested/contents/.gitmodules?ref=7777": {"_err": "404"},
+    }
+    d = _disc_with_routes(routes)
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(df))
+    assert "nested" in pins, pins
+    # the section NAME is the path when no `path =` is given — which is exactly how the
+    # live host declares its vendored fork, and an ssh-form url is still our repository
+    assert pins["nested"]["vendored_path"] == "libs/Nested"
+    assert pins["nested"]["vendored_in"] == "Carrier"
+    assert pins["nested"]["arg"] == "CARRIER_REF"
+
+
+def test_a_declared_submodule_the_build_never_fetches_is_not_in_the_image():
+    """`integrated` means REACHES THE IMAGE, and a .gitmodules entry alone does not.
+
+    Beta declares the same kind of relationship Alpha does and its clone step never runs
+    `git submodule update --init`, so nothing of Omega is fetched and nothing of Omega is
+    built. Reading the declaration as shipment would replace one wrong answer with its
+    mirror image.
+    """
+    d = _disc_with_routes(_ALPHA_ROUTES)
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(_ALPHA_DOCKERFILE))
+    assert "omega" not in pins, "a submodule the build never fetches was called shipped"
+    assert pins["beta"]["submodules"] is False
+    assert pins["alpha"]["submodules"] is True
+
+
+def test_a_forks_third_party_submodules_are_not_forks_of_ours():
+    d = _disc_with_routes(_ALPHA_ROUTES)
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(_ALPHA_DOCKERFILE))
+    assert "ext" not in pins, "somebody else's submodule was tracked as our fork"
+    # the resolution itself, including git's relative form against the HOST repository
+    assert d.submodule_repo("../../SomeoneElse/ext.git", "vibeic/Alpha") == "SomeoneElse/ext"
+    assert d.submodule_repo("../sibling.git", "vibeic/Alpha") == "vibeic/sibling"
+    assert d.submodule_repo("https://github.com/vibeic/Zeta.git", "vibeic/Alpha") == "vibeic/Zeta"
+    assert d.submodule_repo("git@github.com:vibeic/Zeta.git", "vibeic/Alpha") == "vibeic/Zeta"
+    assert d.submodule_repo("https://gitlab.com/vibeic/Zeta.git", "vibeic/Alpha") is None
+    assert d.submodule_repo("", "vibeic/Alpha") is None
+
+
+def test_an_arg_pin_is_never_overwritten_by_a_vendored_one():
+    """A tool with its own ARG ships by that ARG. If a host also vendors it, the direct
+    pin is the more specific statement of how it reaches the image — and the one whose
+    bump actually changes what is built."""
+    df = _ALPHA_DOCKERFILE + (
+        "\nARG ZETA_REF=cccc3333cccc3333  # pinned; branch vibeic/zeta-direct\n"
+        "RUN git clone https://github.com/vibeic/Zeta.git /z && cd /z "
+        "&& git checkout ${ZETA_REF}\n")
+    d = _disc_with_routes(_ALPHA_ROUTES)
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(df))
+    assert pins["zeta"]["ref"] == "cccc3333cccc3333"
+    assert pins["zeta"]["arg"] == "ZETA_REF"
+    assert "vendored_in" not in pins["zeta"]
+
+
+def test_the_ledger_records_how_an_indirectly_pinned_fork_reaches_the_image():
+    """`integrated` is not enough on its own: the row also has to say by WHICH pin, or an
+    operator reads the ordinary case (its own ARG) into a tool that has none."""
+    d = _disc_with_routes({
+        **_ALPHA_ROUTES,
+        "repos/vibeic/Zeta": {"parent": {"default_branch": "main"},
+                              "created_at": "2020-01-01T00:00:00Z", "default_branch": "main"},
+        "repos/vibeic/Zeta/compare/them:main...zzzz9999zzzz9999": {
+            "ahead_by": 7, "behind_by": 57, "commits": [],
+            "merge_base_commit": {"sha": "m" * 40,
+                                  "commit": {"message": "merge base",
+                                             "author": {"date": "2026-06-30T00:00:00Z"}}}},
+        "repos/them/Zeta/releases?per_page=30": [{"tag_name": "v2.2.0",
+                                                  "published_at": "2020-09-14T00:00:00Z"}],
+        "repos/vibeic/Zeta/compare/them:v2.2.0...zzzz9999zzzz9999": {
+            "ahead_by": 2200, "behind_by": 0},
+    })
+    pins = d.expand_vendored_pins(d.parse_dockerfile_pins(_ALPHA_DOCKERFILE))
+    led = d.discover_one({"tool": "Zeta", "upstream": "them/Zeta", "role": "timing"},
+                         pins, "0.2.30")
+    assert led["integrated"] is True
+    assert led["pinned_ref"] == "zzzz9999zzzz"
+    assert led["dockerfile_arg"] == "ALPHA_REF"
+    assert led["vendored_in"] == "Alpha" and led["vendored_path"] == "vendor/zeta"
+    assert led["pinned_via"] == "ALPHA_REF → vibeic/Alpha vendor/zeta"
+    # the patches we carry are now measured against the ref we SHIP, not against a branch
+    # of the fork the image never builds
+    assert led["ahead"] == 7 and led["behind_commits"] == 57
+
+
+def test_not_layered_still_holds_a_fork_the_image_never_fetches():
+    """The category is kept, and its note is accurate for the shape it was written for:
+    forked, no pin of any kind, image uses upstream directly. #8 was a membership defect,
+    and fixing membership by deleting the category would lose the honest row too."""
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        _, summary = _tick_fixture(state, None, ledgers={"unshipped": {
+            "tool": "unshipped", "integrated": False, "behind_releases": 0,
+            "upstream": "them/unshipped", "image_version": "0.2.30",
+            "behind_commits": 12}})
+        row = next(r for r in summary["results"] if r["tool"] == "unshipped")
+        assert row["verdict"] == "NOT_LAYERED"
+        assert row["note"] == ("forked but not pinned into the image (uses upstream "
+                               "directly) — nothing to sync")
+        assert summary["counts"]["NOT_LAYERED"] == 1
+
+
+def test_the_report_row_states_the_pin_indirection():
+    """"pinned via `ALPHA_REF` (`vendor/zeta`)" and "pinned via `ZETA_REF`" are different
+    instructions to whoever has to rebuild: the vendored copy moves when the HOST is
+    rebuilt. A row that says nothing is read as the ordinary case."""
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        _, summary = _tick_fixture(state, None, ledgers={"Zeta": {
+            "tool": "Zeta", "integrated": True, "behind_releases": 0,
+            "upstream": "them/Zeta", "image_version": "0.2.30", "base_release": "v2.2.0",
+            "upstream_latest_release": "v2.2.0", "dockerfile_arg": "ALPHA_REF",
+            "vendored_in": "Alpha", "vendored_path": "vendor/zeta",
+            "upstream_default_branch": "main", "behind_commits": 0}})
+        row = next(r for r in summary["results"] if r["tool"] == "Zeta")
+        assert row["verdict"] == "CLEAN"
+        assert "pinned via `ALPHA_REF` (`vendor/zeta` in vibeic/Alpha)" in row["note"]
+        assert "rebuilding Alpha" in row["note"]
+        # and a DIRECTLY pinned fork says nothing extra — the clause marks the exception
+        assert _gk().pin_provenance({"dockerfile_arg": "BETA_REF"}) == ""
+
+
+def test_a_clean_row_discloses_the_upstream_commits_it_never_assessed():
+    """CLEAN answers the RELEASE question and used to stop there.
+
+    #8 reported a 48-commit gap that "has never been triaged". Reclassifying the fork does
+    not by itself triage it — upstream had cut no new release, so the release-tracking
+    verdict is genuinely CLEAN — and leaving the row at "on the latest upstream release"
+    is what makes an unreviewed gap read as nothing-to-do. The distance is measured on
+    every tick; it is now also stated.
+    """
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        _, summary = _tick_fixture(state, None, ledgers={"Zeta": {
+            "tool": "Zeta", "integrated": True, "behind_releases": 0,
+            "upstream": "them/Zeta", "image_version": "0.2.30", "base_release": "v2.2.0",
+            "upstream_latest_release": "v2.2.0", "upstream_default_branch": "master",
+            "behind_commits": 57}})
+        note = next(r for r in summary["results"] if r["tool"] == "Zeta")["note"]
+        assert "on the latest upstream release (v2.2.0)" in note
+        assert "57 upstream commit(s) on master are not in our pinned ref" in note
+        assert "release-tracking does not assess them" in note
+        # a fork that is genuinely level says nothing extra
+        assert _gk().unassessed_drift({"behind_commits": 0}) == ""
+
+
+def test_the_added_clause_is_inside_the_document_the_cross_check_reads():
+    """#7's gate parses the numbers back out of the row it is about to publish. A clause
+    appended AFTER that check would be published unchecked — and the check would be
+    validating a document nobody reads. The assessed row carries both."""
+    seen = []
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        _, summary = _tick_fixture(state, MAGIC_0728, on_cross_check=seen.append, ledgers={"magic": {
+            "tool": "magic", "integrated": True, "behind_releases": 4,
+            "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
+            "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
+            "pinned_ref_full": "19185c197fba" + "0" * 28,
+            "dockerfile_arg": "HOST_REF", "vendored_in": "Host",
+            "vendored_path": "src/vendored"}})
+        row = next(r for r in summary["results"] if r["tool"] == "magic")
+        assert "pinned via `HOST_REF` (`src/vendored` in vibeic/Host)" in row["note"]
+        # the ordering invariant, observed rather than assumed: what the gate was handed
+        # is byte-identical to what was published. A clause appended after the check is
+        # published unchecked, and the check is then reading a document nobody sees.
+        assert len(seen) == 1, seen
+        assert seen[0]["report"] == row["note"]
+        # the counts still parse out of the row the gate checked — this is the published
+        # text, clause and all
+        assert A.parse_headline("report", row["note"]) == {
+            "clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 2}
+        assert row["assessed"]["outstanding"] == 2
+        date = summary["date"]
+        os.environ["GK_STATE_DIR"] = str(state)
+        try:
+            assert _gk().verify_documents(date) == []
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_a_vendored_candidate_is_not_handed_to_the_arg_bumping_harness():
+    """The legacy harness rebases a branch and bumps `<TOOL>_REF`. A vendored fork's ARG
+    belongs to its HOST, so bumping it to this tool's release sha would repoint the host
+    at the wrong repository. Such a candidate belongs on the selective-merge path."""
+    gk = _gk()
+    seen = {}
+    def _spy(cfg, cands):
+        seen["cands"] = [c["tool"] for c in cands]
+        return {}
+
+    gk._run_harness = _spy
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        os.environ["GK_STATE_DIR"] = str(state)
+        os.environ["GK_RUN_HARNESS"] = "1"
+        try:
+            gk.STATE = Path(state)
+            gk.LEDGER = Path(state) / "ledger"
+            gk.REPORTS = Path(state) / "reports"
+            gk.LEDGER.mkdir(parents=True)
+            for name, led in {
+                "direct": {"tool": "direct", "integrated": True, "behind_releases": 1,
+                           "upstream": "them/direct", "upstream_latest_release": "v2"},
+                "Zeta": {"tool": "Zeta", "integrated": True, "behind_releases": 1,
+                         "upstream": "them/Zeta", "upstream_latest_release": "v2",
+                         "dockerfile_arg": "ALPHA_REF", "vendored_in": "Alpha",
+                         "vendored_path": "vendor/zeta"}}.items():
+                (gk.LEDGER / f"{name}.json").write_text(json.dumps(led))
+            gk.disc = type("D", (), {"main": staticmethod(lambda: None)})()
+            gk.pr_notify = None
+
+            class _Shim:
+                def __getattr__(self, k):
+                    return getattr(A, k)
+
+                def assess(self, tool):
+                    return _rep(tool=tool, base_release="v1", latest="v2")
+
+            gk.assess_release = _Shim()
+            gk.build_page = type("B", (), {"DEFAULT_OUT": None,
+                                           "build": staticmethod(lambda *a: None)})()
+            gk._image_build_cfg = lambda: {"cmd": "true"}
+            gk.tick()
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+            os.environ.pop("GK_RUN_HARNESS", None)
+    assert seen.get("cands") == ["direct"], seen
 
 
 if __name__ == "__main__":
