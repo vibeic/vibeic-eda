@@ -4,7 +4,7 @@ SCRATCH=/tmp/gk-eda-build-magic
 TAG=vibeic-eda-gkcandidate:magic-8.3.675
 LOG=/home/reyerchu/eda-fork-gatekeeper/reports/image_build_magic.log
 : > "$LOG"
-echo "[$(date -Is)] docker build ${TAG} (MAGIC_REF=$(grep -m1 '^ARG MAGIC_REF' $SCRATCH/Dockerfile|cut -d= -f2|cut -c1-12))" | tee -a "$LOG"
+echo "[$(date -Is)] docker build ${TAG} (MAGIC_REF=$(grep -hm1 "^ARG MAGIC_REF" "$SCRATCH"/Dockerfile "$SCRATCH"/tools/*/Dockerfile 2>/dev/null | cut -d= -f2 | cut -c1-12 || echo UNKNOWN))" | tee -a "$LOG"
 docker build -t "${TAG}" "${SCRATCH}" >>"$LOG" 2>&1
 rc=$?
 echo "[$(date -Is)] docker build exit ${rc}" | tee -a "$LOG"
