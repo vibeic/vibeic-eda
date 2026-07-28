@@ -526,16 +526,64 @@ def assessor_id() -> str:
     return h.hexdigest()[:16]
 
 
+def judge_context_id(tool: str, role: str) -> str:
+    """Content identity of the QUESTION the judge is asked about this fork
+    (vibeic/vibeic-eda#11).
+
+    `assessor_id` answers "who is judging"; this answers "what were they asked". They are
+    different things and must be keyed separately, because they have different BLAST
+    RADII. The judge is one object shared by every fork, so changing it re-judges the
+    fleet — correctly. A `role` belongs to ONE fork, so putting it in `assessor_id` (or
+    hashing `FORKS.json` into it) would make "OpenSTA's description was reworded", or even
+    "a fork was added", re-judge magic's cached range for a question that did not move.
+
+    Derived from `llm_judge.system_prompt` — the renderer the request itself uses — and
+    NOT from `FORKS.json`, for three reasons measured on this codebase:
+
+      * the prompt is what changes the verdict. `FORKS.json` also carries `org`,
+        `upstream`, `_comment` and fourteen other forks' entries, none of which any
+        prompt has ever seen;
+      * the value that reaches the judge comes from the LEDGER, not from `FORKS.json`.
+        vibeic/vibeic-eda#10 is the proof that those two can differ — ledgers are written
+        by discovery and never pruned, so keying on the file would key on a document that
+        is upstream of, and can disagree with, the actual input;
+      * the render NORMALIZES. An absent role, `""`, and the literal "EDA tool" are three
+        `FORKS.json` states and one question; hashing the raw string would re-judge a
+        range whose prompt is byte-identical.
+
+    Never raises, and the degraded value is DISTINCT from every real one: a judge that
+    will not import, or a template that will not format, is not the same question as any
+    that does. (Such a run also classifies every commit NOT ASSESSED, which the cache gate
+    already refuses to store — this only has to avoid colliding.)
+    """
+    try:
+        import llm_judge
+        blob = json.dumps(llm_judge.system_prompt(tool, role), sort_keys=True,
+                          ensure_ascii=False)
+    except Exception:  # noqa: BLE001 — an unrenderable question is a distinct question
+        blob = json.dumps(["<judge-context-unrenderable>", tool, role or ""],
+                          ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _cache_key(tool: str, base_ref: str, new_ref: str, our_ref: str | None,
-               assessor: str) -> str:
+               assessor: str, question: str = "") -> str:
     """Identity of an assessment: its INPUT (tool, upstream range, the ref our carried
-    patches sit on) AND its ASSESSOR (the content hash of the classifier). Same key ⇒
-    neither what we assess OVER nor what we assess WITH has changed."""
-    return f"{_cache_input_prefix(tool, base_ref, new_ref, our_ref)}|{assessor}"
+    patches sit on), the QUESTION asked about it, and its ASSESSOR (the content hash of
+    the classifier). Same key ⇒ nothing we assess OVER, nothing we ASK, and nothing we
+    assess WITH has changed.
+
+    `question` defaults to empty ONLY so the key shape can be exercised without a judge
+    import; `assess()` — the sole caller — always passes `judge_context_id(...)`, and
+    `test_the_key_assess_actually_writes_carries_the_question` pins that end to end
+    rather than trusting this signature. An empty component is not a legal
+    `judge_context_id` value (a sha256 prefix is never ""), so the two never collide.
+    """
+    return f"{_cache_input_prefix(tool, base_ref, new_ref, our_ref)}|{question}|{assessor}"
 
 
 def _cache_input_prefix(tool: str, base_ref: str, new_ref: str, our_ref: str | None) -> str:
@@ -556,24 +604,65 @@ def _cache_get(tool: str, key: str) -> dict | None:
     return rep if isinstance(rep, dict) else None
 
 
-def _prior_assessors(tool: str, prefix: str) -> list[str | None]:
-    """Assessors this exact INPUT was previously judged by, newest-file order.
+def _prior_keys(tool: str, prefix: str) -> list[tuple[str | None, str | None]]:
+    """(question, assessor) this exact INPUT was previously judged under, per cache entry.
 
-    `None` marks a legacy 4-field key: a report cached before the assessor was
-    part of the identity, whose judge we cannot attribute. Used only to EXPLAIN a
-    miss in the log — widening the key re-judges every cached range once, and an
-    unexplained spike in API calls is how a correct invalidation gets mistaken for
-    a bug and reverted.
+    `None` marks a component the stored key's SHAPE did not carry, and the shapes are a
+    history of this cache's widenings:
+
+        <prefix>                      pre-#4  → (None, None)   input only
+        <prefix>|<assessor>           #4      → (None, assessor)
+        <prefix>|<question>|<assessor> #11    → (question, assessor)
+
+    Used only to EXPLAIN a miss. Each widening re-judges every cached range exactly once,
+    and an unexplained spike in API calls is how a correct invalidation gets mistaken for
+    a bug and reverted — so the explanation has to name WHICH component moved. "The
+    assessor changed" printed over a role edit would send the reader to diff `llm_judge.py`
+    and find it identical.
     """
-    out: list[str | None] = []
+    out: list[tuple[str | None, str | None]] = []
     for k in _cache_blob(tool):
         if not isinstance(k, str):
             continue
         if k == prefix:
-            out.append(None)                       # legacy: input-only key
+            out.append((None, None))               # legacy: input-only key
         elif k.startswith(prefix + "|"):
-            out.append(k[len(prefix) + 1:])
+            parts = k[len(prefix) + 1:].split("|")
+            out.append((parts[0] or None, parts[1]) if len(parts) == 2
+                       else (None, parts[0] or None))
     return out
+
+
+def _why_rejudged(priors: list[tuple[str | None, str | None]], qid: str, aid: str,
+                  base_ref: str, new_ref: str) -> str:
+    """Why this exact input, already in the cache, is being re-judged rather than replayed.
+
+    Evaluated in blast-radius order: a changed ASSESSOR re-judges the whole fleet and is
+    the reading a spike should be attributed to first; a changed QUESTION re-judges one
+    fork. The two shape-widening cases follow, and the final branch is total — a miss the
+    other four cannot explain must still say something, not fall through silently.
+    """
+    q_named = sorted({q for q, _ in priors if q})
+    a_named = sorted({a for _, a in priors if a})
+    if a_named and aid not in a_named:
+        return (f"the assessor changed ({', '.join(a_named)} → {aid}) — the "
+                f"cached verdict for {base_ref}→{new_ref} was produced by a "
+                f"different judge, so it is being re-judged, not replayed")
+    if q_named and qid not in q_named:
+        return (f"the judge context changed ({', '.join(q_named)} → {qid}) — this fork's "
+                f"`role` is interpolated into the judge's prompt, so the cached verdict "
+                f"for {base_ref}→{new_ref} answers a DIFFERENT question; it is being "
+                f"re-judged, not replayed")
+    if any(q is None and a is not None for q, a in priors):
+        return (f"{base_ref}→{new_ref} was cached before the judge context was part of "
+                f"the cache identity — re-judging once under context {qid} so the verdict "
+                f"records which question it answers")
+    if any(a is None for _, a in priors):
+        return (f"{base_ref}→{new_ref} was cached before the assessor was part "
+                f"of the cache identity — re-judging once under assessor {aid} "
+                f"so the verdict is attributable")
+    return (f"{base_ref}→{new_ref} has cached verdicts, but none under this exact "
+            f"context/assessor pair ({qid}/{aid}) — re-judging, not replaying")
 
 
 def _cache_put(tool: str, key: str, rep: dict) -> None:
@@ -627,31 +716,27 @@ def assess(tool: str) -> dict:
     if not (base_ref and new_ref):
         return {"tool": tool, "error": "missing base_release/latest for the commit range"}
 
-    # Already assessed this exact input WITH THIS EXACT ASSESSOR? Replay it — no LLM,
-    # no new PR, no drift. A different assessor is a different question, so it misses.
+    # Already assessed this exact input, UNDER THIS EXACT QUESTION, WITH THIS EXACT
+    # ASSESSOR? Replay it — no LLM, no new PR, no drift. A different assessor is a
+    # different judge and a different `role` is a different question; either one misses.
+    role = led.get("role", "")
     aid = assessor_id()
+    qid = judge_context_id(tool, role)
     prefix = _cache_input_prefix(tool, base_ref, new_ref, our_ref)
-    ckey = _cache_key(tool, base_ref, new_ref, our_ref, aid)
+    ckey = _cache_key(tool, base_ref, new_ref, our_ref, aid, qid)
     why_reassessed = ""
     if os.environ.get("GK_ASSESS_NOCACHE") not in ("1", "true", "yes"):
         hit = _cache_get(tool, ckey)
         if hit is not None:
-            return {**hit, "cached": True, "assessor": aid, "replayed_at": _now_iso()}
-        # MISS. If we HAVE judged this same range before, say which judge did it —
-        # widening the key re-judges every cached range exactly once, and an
+            return {**hit, "cached": True, "assessor": aid, "judge_context": qid,
+                    "replayed_at": _now_iso()}
+        # MISS. If we HAVE judged this same range before, say WHICH input to the verdict
+        # moved — widening the key re-judges every cached range exactly once, and an
         # unexplained spike in API calls is how a correct invalidation gets
         # mistaken for a bug.
-        priors = _prior_assessors(tool, prefix)
+        priors = _prior_keys(tool, prefix)
         if priors:
-            named = sorted({p for p in priors if p})
-            if named:
-                why_reassessed = (f"the assessor changed ({', '.join(named)} → {aid}) — the "
-                                  f"cached verdict for {base_ref}→{new_ref} was produced by a "
-                                  f"different judge, so it is being re-judged, not replayed")
-            else:
-                why_reassessed = (f"{base_ref}→{new_ref} was cached before the assessor was part "
-                                  f"of the cache identity — re-judging once under assessor {aid} "
-                                  f"so the verdict is attributable")
+            why_reassessed = _why_rejudged(priors, qid, aid, base_ref, new_ref)
 
     got = upstream_commits(upstream, base_ref, new_ref)
     if isinstance(got, list) and got and got[0].get("_err"):
@@ -666,7 +751,9 @@ def assess(tool: str) -> dict:
     # A commit with a RECORDED gatekeeper decision is settled too — don't re-judge it.
     decided = recorded_decisions(tool)
     todo = [c for c in commits if c["sha"] not in carried and c["sha"] not in decided]
-    cls_map = classify_commits(tool, led.get("role", ""), todo)
+    # `role` — the same local the cache key was derived from. Two readings of the ledger
+    # is how the key and the prompt drift apart again (vibeic/vibeic-eda#11).
+    cls_map = classify_commits(tool, role, todo)
 
     # ── PASS 1: the deterministic probes, per commit ──────────────────────────
     # Everything except whether the JUDGEMENT reproduces. Splitting the loop is what
@@ -703,7 +790,7 @@ def assess(tool: str) -> dict:
     # same 105 commits judged three times returned three different `useful` sets — so
     # the auto-adopt tier, and only it, must rest on agreeing independent samples.
     pre = [c for c in commits if probes.get(c["sha"], {}).get("pre")]
-    agreements = _confirm_candidates(tool, led.get("role", ""), pre, cls_map)
+    agreements = _confirm_candidates(tool, role, pre, cls_map)
 
     # ── PASS 3: rows ──────────────────────────────────────────────────────────
     assessed, safe = [], []
@@ -763,9 +850,12 @@ def assess(tool: str) -> dict:
 
     rep = {"tool": tool, "status": "assessed", "upstream": upstream,
            "base_release": base_ref, "latest": new_ref,
-           # PROVENANCE — who judged this, and when. Carried into the cache so a
-           # replayed report can say it was restored, and by whom it was decided.
-           "assessor": aid, "assessed_at": _now_iso(),
+           # PROVENANCE — who judged this, WHAT THEY WERE ASKED, and when. Carried into
+           # the cache so a replayed report can say it was restored, by whom it was
+           # decided, and under which question (vibeic/vibeic-eda#11: a verdict reached
+           # under a role we have since reworded is not the verdict the report implies).
+           "assessor": aid, "judge_context": qid, "judge_role": role,
+           "assessed_at": _now_iso(),
            "our_ref": (our_ref or "")[:12],
            "our_patch_files": (len(our_files) if our_files is not None else None),
            "commit_count": len(commits), "aggregate_files": len(agg_files),
@@ -1100,21 +1190,35 @@ def _provenance_lines(rep: dict) -> list[str]:
     """
     aid = rep.get("assessor")
     when = rep.get("assessed_at")
+    # The QUESTION the verdict answers (vibeic/vibeic-eda#11). Rendered only when the
+    # report carries it: an archived report that predates the field must not be made to
+    # look as though it recorded one.
+    qid = rep.get("judge_context")
+    # The role is CONFIGURATION prose rendered into a markdown blockquote: a newline would
+    # end the quote mid-sentence and a backtick would open a code span that swallows the
+    # rest of the banner. Flattened and bounded here rather than trusted, the same way
+    # every judge-supplied `summary` is.
+    role = " ".join(str(rep.get("judge_role") or "").replace("`", "'").split())[:200]
+    asked = (f" asked as `{qid}`" + (f" (role: {role})" if role else "")) if qid else ""
     if rep.get("cached"):
         return [f"> **⟲ REPLAYED FROM CACHE — no classifier ran for this report.** The "
                 f"judgement below was COMPUTED "
                 f"{('on ' + when) if when else 'on an unrecorded earlier tick'} by assessor "
-                f"`{aid or 'unknown — this report predates assessor pinning'}` and RESTORED "
+                f"`{aid or 'unknown — this report predates assessor pinning'}`"
+                f"{asked} and RESTORED "
                 f"{('on ' + rep['replayed_at']) if rep.get('replayed_at') else 'on this tick'}, "
-                f"because the upstream range, our carried-patch ref AND the assessor are all "
-                f"unchanged. Nothing in this table was re-judged today.", ""]
+                f"because the upstream range, our carried-patch ref, the question this fork's "
+                f"`role` puts to the judge AND the assessor are all unchanged. Nothing in this "
+                f"table was re-judged today.", ""]
     n = rep.get("judge_samples")
     how = (f" Each auto-adopt candidate had to survive {n} independent judgements."
            if n else "")
+    under = asked or " under this fork's recorded role"
     return [f"> Computed {('on ' + when) if when else 'on this tick'} by assessor "
             f"`{aid or 'unrecorded'}` — a content hash of the judge module, its system prompt, "
-            f"the model id, the chunk size and the sample count. Change any of them and this "
-            f"range is re-judged rather than replayed.{how}", ""]
+            f"the model id, the chunk size and the sample count —{under}. Change any of them, "
+            f"or the `role` that question is built from, and this range is re-judged rather "
+            f"than replayed.{how}", ""]
 
 
 def _derived_lines(counts: dict) -> list[str]:

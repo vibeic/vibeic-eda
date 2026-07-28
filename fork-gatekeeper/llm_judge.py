@@ -250,6 +250,30 @@ _SYS_TASK = (
 )
 
 
+def system_prompt(tool: str, role: str) -> list[dict]:
+    """The system blocks of ONE judge request — the ONLY place DATA parameterises what
+    the judge is asked (vibeic/vibeic-eda#11).
+
+    `_judge_chunk` formatted `_SYS_TASK` inline, so the values that reach the prompt were
+    knowable only by reading that one expression. `assess_release._cache_key` was written
+    against a DIFFERENT reading of the same question — "the judge's source files" — and
+    `role` fell in the gap: editing a fork's `role` changed what the judge was asked while
+    every cached range replayed the verdict computed under the old wording.
+
+    Extracting the render gives the cache something to hash that IS the question rather
+    than a list of the values someone remembered were in it. A future field interpolated
+    here is picked up by the cache key with no second edit, which is the property that was
+    missing — the same "derive it, never declare it" argument as `assessor_id`.
+
+    `role or "EDA tool"` is why the cache must hash THIS and not the raw ledger string:
+    an absent role, an empty role and the literal "EDA tool" are three ledger states and
+    ONE question, and a key over the raw string would re-judge a range whose prompt did
+    not move.
+    """
+    return [{"type": "text", "text": _SYS_IDENTITY},
+            {"type": "text", "text": _SYS_TASK.format(tool=tool, role=role or "EDA tool")}]
+
+
 def _token() -> str | None:
     try:
         d = json.loads(CRED.read_text(encoding="utf-8"))
@@ -328,8 +352,9 @@ def _judge_chunk(tool: str, role: str, commits: list[dict], token: str) -> tuple
         # upstream change — commit cc4da9a05fde flipped risk medium↔low, i.e. human-review
         # ↔ auto-adopt, purely on sampling. A merge gate must not be a coin flip.
         "temperature": 0,
-        "system": [{"type": "text", "text": _SYS_IDENTITY},
-                   {"type": "text", "text": _SYS_TASK.format(tool=tool, role=role or "EDA tool")}],
+        # ONE renderer, shared with the cache key (vibeic/vibeic-eda#11): the question
+        # asked here and the question the cache is keyed on cannot drift apart.
+        "system": system_prompt(tool, role),
         # NOTE: no "tools" key → the model has no tool capability at all.
         "messages": [{"role": "user", "content": f"Commits (oldest first) to classify:\n{digest}"}],
     }

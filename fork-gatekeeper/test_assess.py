@@ -2783,6 +2783,363 @@ def test_the_fleet_list_and_the_published_page_describe_the_same_fleet():
     assert fleet == enh, {"only in FORKS.json": sorted(fleet - enh),
                           "only in ENHANCEMENTS.json": sorted(enh - fleet)}
 
+# ── the ROLE is a judge input, so it is a cache input (vibeic/vibeic-eda#11) ──
+# `assess_release` hands each fork's `role` to the judge as prompt context, and it was in
+# neither thing that decides whether a cached verdict may be replayed: not in
+# `_cache_key`, not in `assessor_id`'s ASSESSOR_SOURCES. Editing a role therefore changed
+# what the judge is asked while every cached range replayed the verdict computed under
+# the old wording — the same class as #4, which put the assessor in the key precisely so
+# a changed judge cannot replay old verdicts.
+#
+# MEASURED at f90bf18, with the role moved from "DRC / layout-edit / extraction" to "DRC
+# only — we do not use its extraction at all" and nothing else touched: the key was
+# byte-identical (`magic|8.3.674|8.3.678|aaaaaaaaaaaa|3bad71411cf05a4f` both times), the
+# second assess() returned `cached: True`, the judge was never asked the new question,
+# and the commit stayed in `clearly_safe` — the tier that opens a real cherry-pick PR.
+#
+# WHICH MECHANISM, and why the narrow one. `assessor_id` is the identity of the thing
+# that judges — one object, shared by the whole fleet, so moving it re-judges every fork,
+# correctly. A `role` belongs to ONE fork. Hashing `FORKS.json` into `assessor_id` would
+# make "a fork was added", or "OpenSTA's description was reworded", re-judge magic's
+# cached range for a question that did not move. So the role rides in `_cache_key`, as a
+# QUESTION component, and it is derived from `llm_judge.system_prompt` — the renderer the
+# request itself uses — rather than from the config file, so that a field interpolated
+# into the prompt later is picked up with no second edit.
+#
+# These tests stub only the HTTP layer; `classify_commits`, `llm_judge` and the
+# confirmation round are the real ones.
+
+def _role_fixture(tmp: Path, tools: dict, commits=None):
+    """assess() over SEVERAL tools at once, each with its own ledger + role.
+
+    Returns (assess_fn, sent, set_role). `sent` accumulates every outbound judge request
+    body across calls — which is what makes "tool B was not re-judged" a measurement
+    rather than an inference.
+    """
+    import importlib
+    import urllib.request as U
+    import llm_judge
+    os.environ["GK_STATE_DIR"] = str(tmp)
+    os.environ.pop("GK_ASSESS_STUB", None)
+    importlib.reload(A)
+    (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+
+    def set_role(tool, role):
+        led = {"tool": tool, "integrated": True, "behind_releases": 1,
+               "upstream": f"up/{tool}", "upstream_default_branch": "master",
+               "pinned_ref_full": "a" * 40, "base_release": "8.3.674",
+               "upstream_latest_release": "8.3.678"}
+        if role is not None:
+            led["role"] = role
+        (tmp / "ledger" / f"{tool}.json").write_text(json.dumps(led))
+
+    for tool, role in tools.items():
+        set_role(tool, role)
+    cs = commits or [{"sha": "sha000", "sha_full": "0" * 40, "title": "fix drc",
+                      "body": "", "url": "", "author": "x"}]
+    A.upstream_commits = lambda *a: (list(cs), ["f.c"])
+    A.our_patch_files = lambda *a: set()
+    A._commit_files = lambda *a: {"f.c"}
+    A.clean_cherrypick = lambda *a: True
+    A.already_carried = lambda *a: set()
+    A.recorded_decisions = lambda *a: {}
+    A._reachability = lambda *a: None
+    sent = []
+    llm_judge._token = lambda: "stub-token"
+
+    def fake(req, timeout=None):
+        """A judge that answers FROM THE ROLE it was handed — which is the whole premise:
+        if the role were not an input to the verdict there would be nothing to key on."""
+        body = json.loads(req.data.decode())
+        sent.append(body)
+        shas = _shas_in(body)
+        role_text = body["system"][1]["text"]
+        useful = set() if "we do not use" in role_text else set(shas)
+        return _FakeResp(_mixed_reply(shas, useful))
+
+    U.urlopen = fake
+    return sent, set_role
+
+
+def _teardown_role_fixture(orig_open, orig_tok):
+    import importlib
+    import urllib.request as U
+    import llm_judge
+    U.urlopen = orig_open
+    llm_judge._token = orig_tok
+    os.environ.pop("GK_STATE_DIR", None)
+    importlib.reload(A)
+
+
+def _role_env():
+    import urllib.request as U
+    import llm_judge
+    return U.urlopen, llm_judge._token
+
+
+R_WIDE = "DRC / layout-edit / extraction"
+R_NARROW = "DRC only — we do not use its extraction at all"
+
+
+def test_a_role_edit_is_a_different_question_and_must_not_replay():
+    """THE DEFECT. Same tool, same upstream range, same carried-patch ref, same judge —
+    a DIFFERENT `role`. The stored verdict must not be replayed, and the judge must be
+    asked the NEW question."""
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, set_role = _role_fixture(tmp, {"magic": R_WIDE})
+            r1 = A.assess("magic")
+            assert not r1.get("cached")
+            assert r1["clearly_safe"] == ["sha000"], r1["clearly_safe"]
+
+            # unchanged role ⇒ still idempotent (the property #4 bought, kept)
+            r2 = A.assess("magic")
+            assert r2.get("cached") is True, "an unchanged role stopped hitting the cache"
+            n_after_replay = len(sent)
+
+            set_role("magic", R_NARROW)          # the ONLY thing that changes
+            r3 = A.assess("magic")
+
+            assert not r3.get("cached"), "a verdict computed under the OLD role was replayed"
+            assert len(sent) > n_after_replay, "the judge was never asked the new question"
+            assert R_NARROW in sent[-1]["system"][1]["text"], \
+                "the re-judge did not carry the edited role"
+            assert r3["clearly_safe"] == [], \
+                "the verdict did not follow the role the judge was actually given"
+            assert r3["judge_context"] != r1["judge_context"]
+            assert r3["assessor"] == r1["assessor"], \
+                "the JUDGE moved too — this test would then prove nothing about the role"
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_editing_one_forks_role_does_not_invalidate_another_forks_cache():
+    """NARROW SCOPE — the reason this is in `_cache_key` and not in `assessor_id`.
+
+    Hashing `FORKS.json` into the assessor would re-judge the whole fleet on any fleet-list
+    edit, including adding an unrelated fork. Only the fork whose question moved may miss.
+    """
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, set_role = _role_fixture(tmp, {"magic": R_WIDE, "netgen": "LVS"})
+            A.assess("magic")
+            A.assess("netgen")
+            assert A.assess("netgen").get("cached") is True     # settles into the cache
+            aid_before = A.assessor_id()
+            key_before = A._cache_key("netgen", "8.3.674", "8.3.678", "a" * 40,
+                                      aid_before, A.judge_context_id("netgen", "LVS"))
+            n = len(sent)
+
+            set_role("magic", R_NARROW)          # a DIFFERENT fork's role
+            assert not A.assess("magic").get("cached"), "the edited fork did not re-judge"
+            spent_on_magic = len(sent) - n
+
+            r = A.assess("netgen")
+            assert r.get("cached") is True, \
+                "editing magic's role invalidated netgen's cached verdict"
+            assert len(sent) == n + spent_on_magic, \
+                "netgen was re-judged over an edit to magic's role"
+            assert A.assessor_id() == aid_before, \
+                "the assessor moved on a fleet-list edit — that is the BROAD mechanism"
+            assert A._cache_key("netgen", "8.3.674", "8.3.678", "a" * 40,
+                                A.assessor_id(),
+                                A.judge_context_id("netgen", "LVS")) == key_before
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_the_key_assess_actually_writes_carries_the_question():
+    """`_cache_key`'s `question` has a default so the key shape can be exercised without a
+    judge import. A default is forgettable, so what is pinned is the key `assess()` really
+    writes — end to end, out of the cache file — not the signature."""
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            _role_fixture(tmp, {"magic": R_WIDE})
+            A.assess("magic")
+            keys = list(json.loads((tmp / "assessment-cache" / "magic.json").read_text()))
+            assert len(keys) == 1, keys
+            parts = keys[0].split("|")
+            assert len(parts) == 6, f"the written key has no question component: {keys[0]}"
+            tool, base, new, our, question, assessor = parts
+            assert (tool, base, new) == ("magic", "8.3.674", "8.3.678")
+            assert question == A.judge_context_id("magic", R_WIDE), question
+            assert question and question != assessor
+            assert assessor == A.assessor_id()
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_the_judge_request_and_the_cache_key_are_built_by_ONE_renderer():
+    """`role` was missed because the invalidation set was "the judge's source files" while
+    the prompt was assembled somewhere else. One renderer removes the gap: what the request
+    carries and what the key hashes cannot drift apart."""
+    import llm_judge
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, _ = _role_fixture(tmp, {"magic": R_WIDE})
+            A.assess("magic")
+            assert sent, "no request was made"
+            assert sent[0]["system"] == llm_judge.system_prompt("magic", R_WIDE), \
+                "the request does not come from the renderer the cache key hashes"
+            assert R_WIDE in sent[0]["system"][1]["text"], "the role never reached the prompt"
+        finally:
+            _teardown_role_fixture(*orig)
+
+    # DERIVED, not declared: the id follows the renderer's OUTPUT, so a value interpolated
+    # into the prompt later is in the key with no second edit here.
+    real = llm_judge.system_prompt
+    base = A.judge_context_id("magic", R_WIDE)
+    try:
+        llm_judge.system_prompt = lambda tool, role: real(tool, role) + [
+            {"type": "text", "text": "PDK: sky130A"}]      # a NEW data-derived field
+        assert A.judge_context_id("magic", R_WIDE) != base, \
+            "the question id ignored a value the renderer now puts in the prompt"
+    finally:
+        llm_judge.system_prompt = real
+    assert A.judge_context_id("magic", R_WIDE) == base
+
+
+def test_three_ledger_states_that_render_ONE_question_share_one_cache_entry():
+    """`llm_judge` substitutes the literal "EDA tool" for a falsy role, so an absent role,
+    `""` and "EDA tool" are three ledger states and ONE prompt. Keying on the raw string
+    would re-judge a range whose question is byte-identical — which is why the id is over
+    the RENDER."""
+    import llm_judge
+    ids = {A.judge_context_id("magic", r) for r in ("", "EDA tool")}
+    ids.add(A.judge_context_id("magic", None or ""))
+    assert len(ids) == 1, "three ledger states of one question got three cache slots"
+    assert llm_judge.system_prompt("magic", "") == llm_judge.system_prompt("magic", "EDA tool")
+    assert A.judge_context_id("magic", R_WIDE) not in ids, "a real role collided with the default"
+
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, set_role = _role_fixture(tmp, {"magic": ""})
+            A.assess("magic")
+            n = len(sent)
+            set_role("magic", None)                     # the key is absent entirely
+            assert A.assess("magic").get("cached") is True, \
+                "a role edit that does not move the PROMPT still re-judged"
+            set_role("magic", "EDA tool")               # the literal the render falls back to
+            assert A.assess("magic").get("cached") is True
+            assert len(sent) == n, "the judge was called for a question that did not change"
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_the_miss_names_the_ROLE_and_does_not_blame_the_judge():
+    """Each widening re-judges every cached range once, and an unexplained spike in API
+    calls is how a correct invalidation gets reverted. "The assessor changed", printed over
+    a role edit, sends the reader to diff `llm_judge.py` and find it identical."""
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, set_role = _role_fixture(tmp, {"magic": R_WIDE})
+            r1 = A.assess("magic")
+            set_role("magic", R_NARROW)
+            r2 = A.assess("magic")
+            why = r2.get("reassessed_because", "")
+            assert "judge context changed" in why, why
+            assert "`role`" in why, why
+            assert r1["judge_context"] in why and r2["judge_context"] in why, why
+            assert "assessor changed" not in why, \
+                "a role edit was reported as a changed judge"
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_a_pre_role_cache_entry_is_rejudged_with_a_reason():
+    """The LIVE cache at f90bf18 holds #4-shape keys (`…|<assessor>`, no question). They
+    must not replay, and — because the assessor in them may well be the current one — the
+    reason must say the KEY SHAPE widened, not that the judge changed."""
+    orig = _role_env()
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        try:
+            sent, _ = _role_fixture(tmp, {"magic": R_WIDE})
+            prefix = A._cache_input_prefix("magic", "8.3.674", "8.3.678", "a" * 40)
+            (tmp / "assessment-cache").mkdir(parents=True, exist_ok=True)
+            (tmp / "assessment-cache" / "magic.json").write_text(json.dumps({
+                f"{prefix}|{A.assessor_id()}": {
+                    "tool": "magic", "status": "assessed", "commit_count": 1,
+                    "clearly_safe": ["a-stale-verdict"], "commits": []}}))
+            r = A.assess("magic")
+            assert not r.get("cached"), "a pre-#11 cache entry was replayed"
+            assert r["clearly_safe"] == ["sha000"], "the stale verdict was served"
+            why = r.get("reassessed_because", "")
+            assert "before the judge context was part of the cache identity" in why, why
+            assert "assessor changed" not in why, why
+        finally:
+            _teardown_role_fixture(*orig)
+
+
+def test_the_other_data_derived_prompt_input_the_tool_name_cannot_replay_across_tools():
+    """Found by the same execution sweep that found `role`: `{tool}` is interpolated into
+    the system prompt twice. It is already the FIRST component of the key, so it cannot
+    replay across tools — pinned here so the sweep's second finding has a guard too."""
+    import llm_judge
+    a = llm_judge.system_prompt("magic", R_WIDE)[1]["text"]
+    b = llm_judge.system_prompt("netgen", R_WIDE)[1]["text"]
+    assert a != b and "magic" in a and "netgen" in b, "the tool name is not in the prompt"
+    k_magic = A._cache_key("magic", "8.3.674", "8.3.678", "a" * 40, "aid",
+                           A.judge_context_id("magic", R_WIDE))
+    k_netgen = A._cache_key("netgen", "8.3.674", "8.3.678", "a" * 40, "aid",
+                            A.judge_context_id("netgen", R_WIDE))
+    assert k_magic != k_netgen
+
+
+def test_the_replay_banner_states_the_question_the_verdict_answers():
+    """A replayed report claimed the range, the ref AND the assessor were unchanged — a
+    completeness claim that was false while `role` could move underneath it."""
+    rep = _provenance_rep(assessor="abc123abc123", judge_context="q0q0q0q0",
+                          judge_role=R_WIDE, assessed_at="2026-07-25T05:00:00Z",
+                          cached=True, replayed_at="2026-07-28T05:00:00Z")
+    md = A.render_md(rep)
+    assert "q0q0q0q0" in md, "a replayed verdict does not say which question it answers"
+    assert R_WIDE in md
+    assert "`role` puts to the judge" in md, \
+        "the replay banner still claims completeness it does not have"
+    assert A.parse_provenance(md).get("assessor") == "abc123abc123", \
+        "the #7 provenance cross-check can no longer read the banner"
+
+    # An archived report that predates the field must not be made to look as though it
+    # recorded a question.
+    old = A.render_md(_provenance_rep(assessor="abc123abc123",
+                                      assessed_at="2026-07-25T05:00:00Z", cached=True))
+    assert "asked as" not in old, "a report with no recorded question claimed one"
+    assert "REPLAYED FROM CACHE" in old
+
+    # The role is CONFIGURATION PROSE going into a markdown blockquote. A newline ends the
+    # quote mid-sentence and a backtick opens a code span that swallows the rest of the
+    # banner — including the words that say the verdict was not computed today.
+    hostile = A.render_md(_provenance_rep(
+        assessor="abc123abc123", judge_context="q0q0q0q0",
+        judge_role="DRC\n\n## Not a heading\n`unclosed", cached=True,
+        assessed_at="2026-07-25T05:00:00Z"))
+    banner = [ln for ln in hostile.splitlines() if "REPLAYED FROM CACHE" in ln]
+    assert len(banner) == 1 and banner[0].count("`") % 2 == 0, banner
+    assert "Not a heading" in banner[0], "the role was dropped rather than flattened"
+    assert "\n## " not in hostile.split("| sha |")[0].replace("\n## magic", ""), \
+        "a role broke out of the provenance blockquote"
+
+
+def test_the_fleet_list_is_deliberately_NOT_part_of_the_assessor_identity():
+    """The design decision, pinned. `FORKS.json` in ASSESSOR_SOURCES would re-judge every
+    fork on any fleet-list edit — including adding an unrelated fork — for questions that
+    did not move. The per-fork question component is the narrower instrument."""
+    assert not any(p.name == "FORKS.json" for p in A.ASSESSOR_SOURCES), A.ASSESSOR_SOURCES
+    # and the instrument that DID take the role is per-fork, which is the whole argument
+    assert A.judge_context_id("magic", R_WIDE) != A.judge_context_id("netgen", R_WIDE)
 
 if __name__ == "__main__":
     # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
