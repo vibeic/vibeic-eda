@@ -61,6 +61,42 @@ MAX_TOKENS = int(os.environ.get("GK_JUDGE_MAX_TOKENS", "4096"))
 _OUT_TOKENS_PER_COMMIT = 110
 CHUNK = max(1, int(os.environ.get("GK_JUDGE_CHUNK", str(MAX_TOKENS // _OUT_TOKENS_PER_COMMIT))))
 
+# ── how many INDEPENDENT judgements an AUTO-ADOPT verdict must survive ───────
+# `temperature=0` (see _judge_chunk) removed the variance it could and no more.
+# MEASURED 2026-07-28 (vibeic/vibeic-eda#6): the identical 105-commit magic range,
+# one assessor, one prompt, temperature=0, cache bypassed, judged three times:
+#
+#     sample 1  useful = 2   sample 2  useful = 4   sample 3  useful = 2
+#     risk: all 105 gradings IDENTICAL in all three samples
+#
+# With the two judgements already in the live cache that is FOUR readings of one
+# input and THREE different useful sets. Every commit that ever moved was a
+# genuinely arguable one; the two substantive fixes appeared in all four.
+#
+# So the residual variance lands exactly on the field the auto-adopt gate consumes,
+# and a clearly-safe verdict opens a real cherry-pick PR. One sample is a thinly
+# biased coin toss. Agreement across independent samples is not.
+#
+# 3, not 2. On the measurement a borderline commit was called useful on roughly one
+# reading in four, so ONE confirmation cuts the odds of an unreproducible auto-adopt
+# by ~4x and TWO cut it by ~16x. The cost is bounded by the CANDIDATE set — the
+# commits that already passed every other gate, ONE commit on the range that
+# motivated this — never by the range: two extra requests, not 2 x 105 judgements.
+#
+# Floor of 2, deliberately. GK_JUDGE_SAMPLES exists to let a nervous operator raise
+# the bar, never to switch the confirmation off; 1 would restore the defect. A
+# garbage value falls back to the default rather than making this module
+# unimportable, because an unimportable judge degrades EVERY commit to unassessed.
+def _samples_env() -> int:
+    try:
+        n = int(os.environ.get("GK_JUDGE_SAMPLES", "3"))
+    except (TypeError, ValueError):
+        n = 3
+    return max(2, min(n, 9))
+
+
+SAMPLES = _samples_env()
+
 # A per-run ceiling on how much judging one assessment may spend. This is a RUNAWAY
 # GUARD (a 5000-commit range would otherwise fire 136 requests), not an output bound —
 # the chunking above is what keeps replies inside the cap. Raised from 80, which used to
@@ -95,6 +131,103 @@ class JudgeOutcome(NamedTuple):
     """
     verdicts: dict
     unassessed: dict
+
+
+class Agreement(NamedTuple):
+    """Did INDEPENDENT judgements of one commit say the same thing? (vibeic/vibeic-eda#6)
+
+    agree     True only if EVERY sample produced a verdict AND all of them match the
+              first reading on BOTH fields the auto-adopt gate consumes (useful, risk).
+              A sample that never arrived is NOT agreement — see `complete`.
+    complete  Every sample produced a verdict. False means at least one call failed, was
+              cut off, or omitted the sha: the verdict is unconfirmed for a TRANSIENT
+              reason, which must never be frozen into the assessment cache the way a
+              truncated reply must never be (see assess_release's cache gate).
+    readings  ((useful, risk) | None, ...) — the FIRST reading first, then each extra
+              sample in order. This is the DISCLOSURE payload: every reading is printed,
+              never reduced to a majority.
+    detail    One sentence, for the report table and the PR body.
+    """
+    agree: bool
+    complete: bool
+    readings: tuple
+    detail: str
+
+
+def reading_of(v) -> tuple | None:
+    """A verdict dict → the (useful, risk) pair the gate reads, or None for 'no verdict'.
+
+    Only these two fields participate: `reason` is prose the model rewrites freely, and
+    comparing it would demote on wording rather than on judgement.
+    """
+    if not isinstance(v, dict):
+        return None
+    return (bool(v.get("useful")),
+            v.get("risk") if v.get("risk") in ("low", "medium", "high") else "medium")
+
+
+def _render_reading(r) -> str:
+    return "no verdict" if r is None else f"useful={str(bool(r[0])).lower()}, risk={r[1]}"
+
+
+def confirm(commits: list[dict], first: dict, sampler, extra: int | None = None) -> dict:
+    """Re-judge `commits` `extra` more times; report per sha whether the readings agree.
+
+    Call this with the CANDIDATE set ONLY — the commits that already passed every other
+    clearly-safe condition (bugfix, low risk, no overlap with our patches, clean
+    cherry-pick, reachable). On the range that motivated #6 that set is ONE commit out
+    of 105, so the price is `extra` requests over a handful of shas and never `extra` x
+    the range. Widening this to every commit is explicitly not the fix.
+
+    `sampler(commits) -> {sha: (useful, risk) | None}` is INJECTED: this function never
+    calls the API itself, so `judge()` stays the single place in this module that spends
+    tokens, and a test can drive the whole comparison without a network.
+
+    The extra samples are a DIFFERENT CONTEXT from the first reading — the original
+    judged the commit inside a chunk of up to CHUNK others, the confirmation judges the
+    candidate set alone. That makes agreement a STRONGER claim than mere repetition (the
+    verdict survived being judged in a crowd and judged alone), and it can only ever
+    demote: the gate reads `agree`, so a context-sensitive verdict fails it and lands in
+    front of a human.
+
+    Never raises. A sampler that fails outright yields no readings, which is NOT
+    agreement — the commit drops to human review with the failure named.
+    """
+    if not commits:
+        return {}
+    n = SAMPLES - 1 if extra is None else extra
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 1
+    n = max(1, min(n, 8))            # at least one confirmation; hard ceiling on spend
+    samples: list[dict] = []
+    for _ in range(n):
+        try:
+            got = sampler(commits)
+        except Exception:  # noqa: BLE001 — a failed sample is a disclosure, not a crash
+            got = {}
+        samples.append(got if isinstance(got, dict) else {})
+    out = {}
+    for c in commits:
+        sha = c.get("sha")
+        readings = [first.get(sha)] + [s.get(sha) for s in samples]
+        complete = all(r is not None for r in readings)
+        agree = complete and all(r == readings[0] for r in readings)
+        if agree:
+            detail = (f"{len(readings)} independent judgements agreed "
+                      f"({_render_reading(readings[0])})")
+        elif not complete:
+            got_n = sum(1 for r in readings if r is not None)
+            detail = (f"only {got_n} of {len(readings)} judgements produced a verdict "
+                      f"({' · '.join(f'#{i + 1} {_render_reading(r)}' for i, r in enumerate(readings))})"
+                      f" — a sample that never arrived is not agreement")
+        else:
+            detail = ("independent judgements of the SAME commit text DISAGREED — "
+                      + " · ".join(f"#{i + 1} {_render_reading(r)}"
+                                   for i, r in enumerate(readings)))
+        out[sha] = Agreement(agree, complete, tuple(readings), detail)
+    return out
 
 
 # The OAuth (subscription) path requires the request to carry the Claude Code identity as the

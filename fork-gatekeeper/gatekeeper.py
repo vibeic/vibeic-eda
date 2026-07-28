@@ -245,10 +245,13 @@ def tick() -> dict:
                 # nothing we run can reach. DISCLOSED, never resolved away — the verdict
                 # may still be right, but its stated evidence is not true of our fork.
                 n_unreach = len(rep.get("unreachable") or [])
+                # vibeic/vibeic-eda#6: adopt-candidates whose judgement did not reproduce
+                # across independent samples. DISCLOSED, never averaged into a majority.
+                n_unconf = len(rep.get("unconfirmed") or [])
                 entry["assessed"] = {"commits": cc, "clearly_safe": safe,
                                      "carried": carried, "decided": decided,
                                      "outstanding": n_open, "not_assessed": n_na,
-                                     "unreachable": n_unreach}
+                                     "unreachable": n_unreach, "unconfirmed": n_unconf}
                 resolved = f"{carried} already carried, {decided} previously decided"
                 entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
                                  f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
@@ -261,6 +264,11 @@ def tick() -> dict:
                                       f"UNREACHABLE from any command our emitters issue "
                                       f"(model/surface disagreement → human decision, not "
                                       f"auto-proposed)")
+                if n_unconf:
+                    entry["note"] += (
+                        f" — {n_unconf} commit(s) cleared every other auto-adopt condition but "
+                        f"their JUDGEMENT DID NOT REPRODUCE across independent samples "
+                        f"(every reading is on the row → human decision, not auto-proposed)")
                 if n_open == 0 and safe == 0:
                     # Nothing is outstanding: reporting DEFERRED here is what
                     # turned settled work into a recurring proposal.

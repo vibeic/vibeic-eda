@@ -15,17 +15,37 @@ sys.path.insert(0, str(Path(__file__).parent))
 import assess_release as A
 
 
+# A judgement the confirmation round agreed on. Every auto-adopt assertion below has to
+# carry one, because since vibeic/vibeic-eda#6 a verdict only ONE sample supports is not
+# clearly-safe: three judgements of one 105-commit range returned three different useful
+# sets, so the tier that opens a cherry-pick PR needs agreement, not a single reading.
+AGREED = {"agree": True, "complete": True,
+          "readings": [[True, "low"], [True, "low"], [True, "low"]],
+          "detail": "3 independent judgements agreed (useful=true, risk=low)"}
+
+
 def test_clearly_safe_gate():
     safe = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
-    assert A._clearly_safe(safe, touches_our_files=False, clean_pick=True) is True
-    assert A._clearly_safe(safe, touches_our_files=True, clean_pick=True) is False   # overlaps our patch
-    assert A._clearly_safe(safe, touches_our_files=False, clean_pick=False) is False  # dirty pick
-    assert A._clearly_safe(safe, touches_our_files=False, clean_pick=None) is False   # unknown pick
-    assert A._clearly_safe({**safe, "risk": "medium"}, False, True) is False
-    assert A._clearly_safe({**safe, "category": "feature"}, False, True) is False
-    assert A._clearly_safe({**safe, "relevant": False}, False, True) is False
-    assert A._clearly_safe({**safe, "recommend": "manual"}, False, True) is False
-    assert A._clearly_safe(A._not_assessed("truncated"), False, True) is False
+    assert A._clearly_safe(safe, False, True, None, AGREED) is True
+    assert A._clearly_safe(safe, True, True, None, AGREED) is False   # overlaps our patch
+    assert A._clearly_safe(safe, False, False, None, AGREED) is False  # dirty pick
+    assert A._clearly_safe(safe, False, None, None, AGREED) is False   # unknown pick
+    assert A._clearly_safe({**safe, "risk": "medium"}, False, True, None, AGREED) is False
+    assert A._clearly_safe({**safe, "category": "feature"}, False, True, None, AGREED) is False
+    assert A._clearly_safe({**safe, "relevant": False}, False, True, None, AGREED) is False
+    assert A._clearly_safe({**safe, "recommend": "manual"}, False, True, None, AGREED) is False
+    assert A._clearly_safe(A._not_assessed("truncated"), False, True, None, AGREED) is False
+    # and the #6 condition itself: no agreement record at all, a disagreement, and an
+    # incomplete round are each enough on their own to withhold auto-adopt.
+    assert A._clearly_safe(safe, False, True) is False, "one sample was enough for auto-adopt"
+    assert A._clearly_safe(safe, False, True, None, {**AGREED, "agree": False}) is False
+    assert A._clearly_safe(safe, False, True, None, {**AGREED, "complete": False}) is False
+    assert A._clearly_safe(safe, False, True, None, {}) is False
+    assert A._clearly_safe(safe, False, True, None, "yes") is False   # not even a dict
+    # the readings are the DISCLOSURE payload, not a gate input — an agreed, complete
+    # record still admits without them
+    assert A._clearly_safe(safe, False, True, None,
+                           {"agree": True, "complete": True}) is True
 
 
 def test_classify_stub_and_degraded_fill():
@@ -204,6 +224,15 @@ def _cache_fixture(tmp, risks):
                            "summary": "s", "reproduce": "", "recommend": "adopt"}
                 for c in commits}
     A.classify_commits = classify
+    # The confirmation round (vibeic/vibeic-eda#6) is a stubbed LAYER here, exactly like
+    # `_commit_files` / `clean_cherrypick` above: these tests are about the CACHE, and
+    # leaving it live would make `calls` count samples instead of assessment rounds and
+    # make the `risks` sequence mean something else. The round itself is proven
+    # end-to-end against the real HTTP layer in the #6 tests below.
+    A._confirm_candidates = lambda tool, role, cands, cls_map: {
+        c["sha"]: {"agree": True, "complete": True,
+                   "readings": [[True, "low"]] * 3, "detail": "stubbed: agreed"}
+        for c in cands}
     return calls
 
 
@@ -1023,8 +1052,8 @@ def test_reachability_demotes_a_commit_nothing_we_run_can_reach():
     assert "crosshair" in r["detail"] and "we never issue" in r["detail"]
     # and it can never be auto-adopted, however good the model's verdict was
     good = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
-    assert A._clearly_safe(good, False, True) is True          # without the check
-    assert A._clearly_safe(good, False, True, r) is False       # with it
+    assert A._clearly_safe(good, False, True, None, AGREED) is True   # without the check
+    assert A._clearly_safe(good, False, True, r, AGREED) is False      # with it
 
 
 def test_reachability_keeps_a_commit_our_commands_do_reach():
@@ -1037,7 +1066,7 @@ def test_reachability_keeps_a_commit_our_commands_do_reach():
     assert "drc" in r["commands"], r
     assert "drc" in r["detail"]
     good = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
-    assert A._clearly_safe(good, False, True, r) is True, "a reachable fix was demoted"
+    assert A._clearly_safe(good, False, True, r, AGREED) is True, "a reachable fix was demoted"
 
 
 def test_could_not_determine_is_not_unreachable():
@@ -1062,7 +1091,7 @@ def test_could_not_determine_is_not_unreachable():
     for name, r in cases.items():
         assert r["verdict"] == R.UNKNOWN, f"{name}: {r}"
         assert r["detail"].startswith("NOT DETERMINED"), f"{name}: {r}"
-        assert A._clearly_safe(good, False, True, r) is True, \
+        assert A._clearly_safe(good, False, True, r, AGREED) is True, \
             f"{name}: an undetermined surface demoted a candidate"
 
 
@@ -1225,6 +1254,425 @@ def test_the_reachability_check_is_part_of_the_assessor_identity():
         finally:
             A.ASSESSOR_SOURCES = orig
     assert before != after
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# vibeic/vibeic-eda#6 — a verdict only ONE sample supports must not auto-adopt
+#
+# temperature=0 removed the variance it could and no more. MEASURED 2026-07-28: the
+# identical 105-commit magic range, one assessor, one prompt, cache bypassed, judged
+# three times returned useful sets of 2 / 4 / 2 — three different answers to one
+# question — while all 315 `risk` gradings were identical. Every commit that moved was
+# a borderline one, which is exactly the population `_clearly_safe` decides, and a
+# clearly-safe verdict opens a real cherry-pick PR.
+#
+# The treatment is deliberately NARROW: re-sample only the commits that already passed
+# every OTHER clearly-safe condition (1 of 105 on that range), never the range.
+
+def _clearly_safe_BEFORE_SAMPLING(cls, touches_our_files, clean_pick, reach=None):
+    """FROZEN copy of the gate as it stood at 1b36787 — after #5 added `reach`, before
+    #6 added the confirmation. This is the baseline for the strictness proof below. Do
+    NOT 'fix' it to match the live gate: its entire job is to disagree if the live one
+    ever loosens."""
+    if reach is not None and reach.get("verdict") == "unreachable":
+        return False
+    return (cls.get("category") == "bugfix"
+            and cls.get("risk") == "low"
+            and cls.get("relevant") is True
+            and cls.get("recommend") == "adopt"
+            and not touches_our_files
+            and clean_pick is True)
+
+
+def test_clearly_safe_is_no_looser_after_the_confirmation_requirement():
+    """EXHAUSTIVE over the gate's WHOLE input domain, new axis included: every input the
+    NEW gate calls auto-adoptable, the pre-#6 gate called auto-adoptable too."""
+    import itertools
+    cats = ["bugfix", "other", "feature", A.NOT_ASSESSED, None]
+    risks = ["low", "medium", "high", A.NOT_ASSESSED, None]
+    rels = [True, False, None]
+    recs = ["adopt", "skip", "manual", None]
+    tri = [True, False, None]
+    reaches = [None, {"verdict": "reachable"}, {"verdict": "unreachable"},
+               {"verdict": "unknown"}]
+    agrees = [None, {}, {"agree": True, "complete": True}, {"agree": False, "complete": True},
+              {"agree": True, "complete": False}]
+    n = looser = new_admits = old_admits = 0
+    for cat, risk, rel, rec, t, cp, rc, ag in itertools.product(
+            cats, risks, rels, recs, tri, tri, reaches, agrees):
+        cls = {"category": cat, "risk": risk, "relevant": rel, "recommend": rec}
+        n += 1
+        new = A._clearly_safe(cls, t, cp, rc, ag)
+        old = _clearly_safe_BEFORE_SAMPLING(cls, t, cp, rc)
+        old_admits += bool(old)
+        new_admits += bool(new)
+        if new and not old:
+            looser += 1
+    assert n == 5 * 5 * 3 * 4 * 3 * 3 * 4 * 5 == 54000, n
+    assert looser == 0, f"{looser}/{n} inputs became NEWLY auto-adoptable"
+    # STRICTLY stricter, and not vacuously so: the gate still admits the confirmed
+    # candidate it is supposed to admit. A gate that rejects everything would also
+    # score `looser == 0` and would be useless.
+    assert new_admits > 0, "the gate admits nothing at all — vacuously strict"
+    assert new_admits < old_admits, (new_admits, old_admits)
+
+
+def test_one_sample_alone_can_never_be_auto_adopted():
+    """The issue in one assertion: the pre-#6 gate said yes on a single reading."""
+    perfect = {"category": "bugfix", "risk": "low", "relevant": True, "recommend": "adopt"}
+    assert _clearly_safe_BEFORE_SAMPLING(perfect, False, True, {"verdict": "reachable"}) is True
+    assert A._clearly_safe(perfect, False, True, {"verdict": "reachable"}) is False
+
+
+# ── llm_judge.confirm: what counts as agreement ──────────────────────────────
+def test_confirm_agrees_only_when_every_sample_matches():
+    import llm_judge as J
+    commits = [{"sha": "sha001", "title": "fix"}]
+    first = {"sha001": (True, "low")}
+    same = J.confirm(commits, first, lambda cs: {"sha001": (True, "low")}, extra=2)["sha001"]
+    assert same.agree is True and same.complete is True
+    assert same.readings == ((True, "low"), (True, "low"), (True, "low"))
+    assert "3 independent judgements agreed" in same.detail
+
+    # `useful` flips — the field the measurement showed moving
+    flip = J.confirm(commits, first, lambda cs: {"sha001": (False, "low")}, extra=1)["sha001"]
+    assert flip.agree is False and flip.complete is True
+    assert "DISAGREED" in flip.detail
+    assert "#1 useful=true, risk=low" in flip.detail and "#2 useful=false" in flip.detail
+
+    # `risk` flips — it did not move in 315 measured gradings, but the gate reads it,
+    # and it is the field that oscillated medium<->low before temperature was pinned
+    rf = J.confirm(commits, first, lambda cs: {"sha001": (True, "medium")}, extra=1)["sha001"]
+    assert rf.agree is False and "risk=medium" in rf.detail
+
+
+def test_a_sample_that_never_arrived_is_not_agreement():
+    """REQUIREMENT 4. A failed re-sample call is not a confirmation — it is a demotion,
+    and it is TRANSIENT, which the `complete` flag is what tells the cache."""
+    import llm_judge as J
+    commits = [{"sha": "sha001", "title": "fix"}]
+    first = {"sha001": (True, "low")}
+    for sampler in (lambda cs: {},                                   # call returned nothing
+                    lambda cs: {"sha001": None},                     # sha omitted / unassessed
+                    lambda cs: (_ for _ in ()).throw(RuntimeError("boom")),   # call exploded
+                    lambda cs: "not a dict"):                        # nonsense shape
+        a = J.confirm(commits, first, sampler, extra=2)["sha001"]
+        assert a.agree is False, sampler
+        assert a.complete is False, sampler
+        assert "never arrived is not agreement" in a.detail
+        assert "only 1 of 3" in a.detail
+    # and a MISSING first reading is the same failure from the other end
+    a = J.confirm(commits, {}, lambda cs: {"sha001": (True, "low")}, extra=1)["sha001"]
+    assert a.agree is False and a.complete is False
+
+
+def test_confirm_disclosure_prints_every_reading_never_a_majority():
+    """REQUIREMENT 2. 2-of-3 is not a verdict — it is a disagreement, and both sides
+    of it have to be legible."""
+    import llm_judge as J
+    commits = [{"sha": "sha001", "title": "fix"}]
+    seq = [{"sha001": (False, "low")}, {"sha001": (True, "low")}]
+    a = J.confirm(commits, {"sha001": (True, "low")}, lambda cs: seq.pop(0), extra=2)["sha001"]
+    assert a.agree is False, "a 2-of-3 majority was silently adopted"
+    assert a.readings == ((True, "low"), (False, "low"), (True, "low"))
+    for want in ("#1 useful=true", "#2 useful=false", "#3 useful=true"):
+        assert want in a.detail, a.detail
+
+
+def test_confirm_is_bounded_and_never_calls_the_api_itself():
+    """The sampler is INJECTED, so `judge()` stays the only token-spending call in the
+    module, and the sample count is clamped so a bad env var cannot run away."""
+    import llm_judge as J
+    commits = [{"sha": "sha001", "title": "fix"}]
+    for asked, want in ((1, 1), (0, 1), (-5, 1), (99, 8), ("junk", 1), (None, J.SAMPLES - 1)):
+        seen = []
+        J.confirm(commits, {"sha001": (True, "low")},
+                  lambda cs: seen.append(1) or {"sha001": (True, "low")}, extra=asked)
+        assert len(seen) == want, (asked, len(seen))
+    import inspect
+    src = inspect.getsource(J.confirm)
+    assert "urlopen" not in src and "_judge_chunk" not in src
+
+
+def test_the_sample_count_has_a_floor_and_survives_a_garbage_env():
+    """GK_JUDGE_SAMPLES may RAISE the bar, never switch the confirmation off; and a
+    typo in it must not make the judge unimportable (that degrades every commit)."""
+    import importlib
+    import llm_judge as J
+    try:
+        for val, want in (("1", 2), ("0", 2), ("-3", 2), ("", 3), ("three", 3),
+                          ("4", 4), ("500", 9)):
+            os.environ["GK_JUDGE_SAMPLES"] = val
+            importlib.reload(J)
+            assert J.SAMPLES == want, (val, J.SAMPLES)
+    finally:
+        os.environ.pop("GK_JUDGE_SAMPLES", None)
+        importlib.reload(J)
+    assert J.SAMPLES == 3
+
+
+def test_the_sample_count_is_part_of_the_assessor_identity():
+    """A verdict confirmed once and a verdict confirmed twice are different claims, so
+    they must not share a cache slot (vibeic/vibeic-eda#4's rule, applied to #6's knob)."""
+    import importlib
+    import llm_judge
+    base = A.assessor_id()
+    try:
+        os.environ["GK_JUDGE_SAMPLES"] = "5"
+        importlib.reload(llm_judge)
+        assert A.assessor_id() != base, "GK_JUDGE_SAMPLES did not move the assessor id"
+    finally:
+        os.environ.pop("GK_JUDGE_SAMPLES", None)
+        importlib.reload(llm_judge)
+    assert A.assessor_id() == base
+    assert "samples" in A._assessor_knobs()
+
+
+def test_the_confirmation_routes_through_the_same_classifier_the_first_reading_used():
+    """The stub path must reach the round, not bypass it — otherwise every stub-driven
+    caller is silently locked out of auto-adopt, and the comparison code goes untested
+    on the path most tests take. A stub is deterministic, so it AGREES, honestly."""
+    cands = [{"sha": "sha001", "title": "fix drc null deref", "body": ""}]
+    verdict = {"category": "bugfix", "relevant": True, "risk": "low",
+               "summary": "s", "reproduce": "", "recommend": "adopt"}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump({"sha001": verdict}, f)
+        sp = f.name
+    try:
+        os.environ["GK_ASSESS_STUB"] = sp
+        got = A._confirm_candidates("magic", "DRC", cands, {"sha001": verdict})
+    finally:
+        os.environ.pop("GK_ASSESS_STUB", None)
+        os.unlink(sp)
+    assert got["sha001"]["agree"] is True and got["sha001"]["complete"] is True
+    assert got["sha001"]["readings"] == [[True, "low"]] * 3
+    assert A._clearly_safe(verdict, False, True, None, got["sha001"]) is True
+
+
+def test_the_ai_kill_switch_cannot_confirm_anything():
+    """GK_ASSESS_AI=0 yields no verdict, and no verdict is not agreement — the
+    deterministic-only mode must never be a back door into the auto-adopt tier."""
+    cands = [{"sha": "sha001", "title": "fix", "body": ""}]
+    verdict = {"category": "bugfix", "relevant": True, "risk": "low",
+               "summary": "s", "reproduce": "", "recommend": "adopt"}
+    os.environ["GK_ASSESS_AI"] = "0"
+    try:
+        got = A._confirm_candidates("magic", "DRC", cands, {"sha001": verdict})
+    finally:
+        os.environ.pop("GK_ASSESS_AI", None)
+    assert got["sha001"]["agree"] is False and got["sha001"]["complete"] is False
+    assert A._clearly_safe(verdict, False, True, None, got["sha001"]) is False
+
+
+def test_an_unimportable_or_exploding_judge_is_not_agreement():
+    """Every escape hatch out of the confirmation lands on 'not confirmed'."""
+    import llm_judge
+    cands = [{"sha": "sha001", "title": "fix", "body": ""}]
+    verdict = {"category": "bugfix", "relevant": True, "risk": "low",
+               "recommend": "adopt", "summary": "s", "reproduce": ""}
+    orig = llm_judge.confirm
+    try:
+        llm_judge.confirm = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        got = A._confirm_candidates("magic", "DRC", cands, {"sha001": verdict})
+        assert got["sha001"]["agree"] is False
+        assert "rests on ONE sample" in got["sha001"]["detail"]
+        llm_judge.confirm = lambda *a, **k: {}          # returned nothing for the sha
+        got = A._confirm_candidates("magic", "DRC", cands, {"sha001": verdict})
+        assert got["sha001"]["agree"] is False
+        assert "returned nothing for this" in got["sha001"]["detail"]
+    finally:
+        llm_judge.confirm = orig
+    assert A._confirm_candidates("magic", "DRC", [], {}) == {}
+
+
+# ── end to end through assess(), against the real HTTP layer (stubbed) ───────
+def _mixed_reply(shas, useful, risk="low"):
+    """A complete, well-formed judge reply marking `useful` the shas in that set."""
+    return {"content": [{"type": "text", "text": "{\n" + ",\n".join(
+        f'  "{s}": {{"useful": {"true" if s in useful else "false"}, '
+        f'"reason": "judged {s}", "risk": "{risk}"}}' for s in shas) + "\n}"}],
+        "stop_reason": "end_turn"}
+
+
+def _sequenced_api(replies, sent):
+    """urlopen stub answering request #i from replies[i] (the last entry repeats)."""
+    n = {"i": 0}
+
+    def make(shas):
+        i = n["i"]
+        n["i"] += 1
+        return replies[min(i, len(replies) - 1)](shas)
+    return _stub_api(make, sent)
+
+
+def _e2e(tmp, replies, commits=None, touches=False):
+    """assess() with gh/git stubbed but classify_commits, llm_judge and the
+    confirmation round ALL REAL — only the HTTP layer is faked."""
+    import importlib
+    import urllib.request as U
+    import llm_judge
+    os.environ["GK_STATE_DIR"] = str(tmp)
+    os.environ.pop("GK_ASSESS_STUB", None)
+    importlib.reload(A)
+    (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+    (tmp / "ledger" / "magic.json").write_text(json.dumps({
+        "tool": "magic", "integrated": True, "behind_releases": 1,
+        "upstream": "up/magic", "upstream_default_branch": "master",
+        "pinned_ref_full": "a" * 40, "base_release": "8.3.674",
+        "upstream_latest_release": "8.3.678", "role": "DRC"}))
+    cs = commits or [{"sha": f"sha{i:03d}", "sha_full": f"{i:040d}", "title": "t",
+                      "body": "", "url": "", "author": "x"} for i in range(5)]
+    A.upstream_commits = lambda *a: (cs, ["f.c"])
+    A.our_patch_files = lambda *a: {"ours.c"} if touches else set()
+    A._commit_files = lambda *a: {"ours.c"} if touches else {"f.c"}
+    A.clean_cherrypick = lambda *a: True
+    A.already_carried = lambda *a: set()
+    A.recorded_decisions = lambda *a: {}
+    A._reachability = lambda *a: None          # undetermined → verdict stands (#5's rule)
+    sent = []
+    orig_tok, orig_open = llm_judge._token, U.urlopen
+    try:
+        llm_judge._token = lambda: "stub-token"
+        U.urlopen = _sequenced_api(replies, sent)
+        return A.assess("magic"), sent
+    finally:
+        llm_judge._token, U.urlopen = orig_tok, orig_open
+        os.environ.pop("GK_STATE_DIR", None)
+        importlib.reload(A)
+
+
+def test_agreeing_samples_auto_adopt_and_cost_only_the_candidates():
+    """REQUIREMENT 5, the load-bearing one: the extra requests ask about the CANDIDATE
+    ONLY. 105 x N per tick is not the fix; N over the handful that already passed
+    everything else is."""
+    with tempfile.TemporaryDirectory() as d:
+        rep, sent = _e2e(Path(d), [lambda shas: _mixed_reply(shas, {"sha002"})])
+    assert rep["clearly_safe"] == ["sha002"], rep["clearly_safe"]
+    assert rep["unconfirmed"] == []
+    assert rep["judge_samples"] == 3
+    # 1 first reading over the whole range + (SAMPLES-1) confirmations
+    assert len(sent) == 3, [_shas_in(b) for b in sent]
+    assert _shas_in(sent[0]) == [f"sha{i:03d}" for i in range(5)], "the range moved"
+    assert _shas_in(sent[1]) == ["sha002"], "a confirmation re-judged more than the candidate"
+    assert _shas_in(sent[2]) == ["sha002"]
+    md = A.render_md(rep)
+    assert "✓ 3/3" in md
+    assert "JUDGEMENT DID NOT REPRODUCE" not in md
+
+
+def test_a_verdict_only_one_sample_supports_drops_to_human_with_both_readings():
+    """REQUIREMENTS 1 + 2. The FIRST reading says adopt; a confirmation disagrees. The
+    commit must not auto-adopt, and the report must print BOTH readings — not the
+    2-of-3 majority, which here would still say 'useful'."""
+    with tempfile.TemporaryDirectory() as d:
+        rep, sent = _e2e(Path(d), [lambda shas: _mixed_reply(shas, {"sha002"}),
+                                   lambda shas: _mixed_reply(shas, set()),
+                                   lambda shas: _mixed_reply(shas, {"sha002"})])
+    assert rep["clearly_safe"] == [], "a majority of samples was silently adopted"
+    assert rep["unconfirmed"] == ["sha002"], rep["unconfirmed"]
+    row = next(c for c in rep["commits"] if c["sha"] == "sha002")
+    assert row["decision"] == "human"
+    assert row["sampling_conflict"] is True
+    assert row["judge_summary"] == "judged sha002", "the first reading's reason was lost"
+    for want in ("JUDGEMENT DID NOT REPRODUCE", "#1 useful=true", "#2 useful=false",
+                 "#3 useful=true", "judged sha002"):
+        assert want in row["summary"], row["summary"]
+    # every reading survives as data too, not only as prose
+    assert row["agreement"]["readings"] == [[True, "low"], [False, "low"], [True, "low"]]
+    md = A.render_md(rep)
+    assert "JUDGEMENT DID NOT REPRODUCE on 1 commit(s)" in md
+    assert "none has been averaged into a majority" in md
+    assert "⚠ DIVERGED" in md
+    # and the disclosure is not truncated away in the summary column
+    assert "#2 useful=false" in md, "the contradicting reading was cut off"
+
+
+def test_a_failed_resample_call_is_not_agreement_and_is_not_cached():
+    """REQUIREMENT 4. An outage during the confirmation must demote (fail closed) AND
+    stay provisional, so the next tick can re-resolve it instead of the failure being
+    frozen in as a permanent verdict."""
+    import urllib.error
+
+    def boom(shas):
+        raise urllib.error.URLError("connection reset")
+
+    with tempfile.TemporaryDirectory() as d:
+        rep, sent = _e2e(Path(d), [lambda shas: _mixed_reply(shas, {"sha002"}), boom])
+        assert rep["clearly_safe"] == []
+        assert rep["unconfirmed"] == ["sha002"]
+        row = next(c for c in rep["commits"] if c["sha"] == "sha002")
+        assert "never arrived is not agreement" in row["summary"], row["summary"]
+        assert row["agreement"]["complete"] is False
+        # re-running must RE-JUDGE, not replay a frozen outage
+        rep2, _ = _e2e(Path(d), [lambda shas: _mixed_reply(shas, {"sha002"})])
+        assert not rep2.get("cached"), "a transient confirmation failure was cached"
+        assert rep2["clearly_safe"] == ["sha002"], "the range never re-resolved"
+
+
+def test_a_genuine_disagreement_does_cache():
+    """The other half: a DISAGREEMENT is a finding, not an outage. Re-judging it every
+    tick would reintroduce exactly the daily re-drift the cache exists to stop."""
+    replies = [lambda shas: _mixed_reply(shas, {"sha002"}),
+               lambda shas: _mixed_reply(shas, set())]
+    with tempfile.TemporaryDirectory() as d:
+        rep1, _ = _e2e(Path(d), replies)
+        assert rep1["unconfirmed"] == ["sha002"]
+        rep2, sent2 = _e2e(Path(d), replies)
+        assert rep2.get("cached") is True, "a settled disagreement was re-judged"
+        assert sent2 == [], "the cache replay still spent API calls"
+
+
+def test_nothing_is_resampled_when_another_condition_already_failed():
+    """REQUIREMENT 5 from the other side: a candidate that overlaps our carried patches
+    is already not auto-adoptable, so re-judging it would buy nothing and cost tokens."""
+    with tempfile.TemporaryDirectory() as d:
+        rep, sent = _e2e(Path(d), [lambda shas: _mixed_reply(shas, {"sha002"})],
+                         touches=True)
+    assert rep["clearly_safe"] == []
+    assert rep["unconfirmed"] == [], "a commit that failed another gate was re-sampled"
+    assert len(sent) == 1, f"the confirmation round ran anyway: {[_shas_in(b) for b in sent]}"
+    row = next(c for c in rep["commits"] if c["sha"] == "sha002")
+    assert row["decision"] == "human" and row["agreement"] is None
+    md = A.render_md(rep)
+    assert "not-probed" in md, "an un-run confirmation must not render as confirmed"
+
+
+def test_an_unassessed_range_never_reaches_the_confirmation_round():
+    """A commit the judge never classified is not an adopt-candidate, so it costs no
+    re-sample either — the not-assessed path and the #6 path must not interact."""
+    with tempfile.TemporaryDirectory() as d:
+        rep, sent = _e2e(Path(d), [lambda shas: _truncated_payload(shas, keep=3)])
+    assert rep["clearly_safe"] == []
+    assert rep["unconfirmed"] == []
+    assert set(rep["not_assessed"]) == {"sha003", "sha004"}
+    assert len(sent) == 1, "an unassessed range spent confirmation calls"
+
+
+def test_the_confirmation_reaches_the_gatekeeper_note_and_the_pr_body():
+    """The disclosure has to reach the two places a human actually reads — the same
+    shape #5's reachability disagreement is held to."""
+    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
+    assert 'rep.get("unconfirmed")' in gk
+    assert "JUDGEMENT DID NOT REPRODUCE across independent samples" in gk
+    assert '"unconfirmed": n_unconf' in gk
+    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
+    assert 'a.get("unconfirmed")' in pn
+    assert "DID NOT REPRODUCE" in pn
+    assert "none averaged" in pn
+
+
+def test_the_render_survives_a_report_that_predates_the_confirmation():
+    """An archived report has no `unconfirmed` key and no per-row `agreement`. It must
+    render, and its rows must say the confirmation DID NOT RUN — never that it passed."""
+    rep = _provenance_rep(assessor="a" * 12, assessed_at="2026-07-01T00:00:00Z")
+    rep.pop("unconfirmed", None)
+    md = A.render_md(rep)
+    assert "JUDGEMENT DID NOT REPRODUCE" not in md
+    row = next(ln for ln in md.splitlines() if ln.startswith("| `aaa111`"))
+    cells = [x.strip() for x in row.split("|")]
+    assert cells[8] == "not-probed", row
+    assert cells[5] == "—" and cells[6] == "✓" and cells[7] == "not-probed", \
+        "the older columns shifted"
 
 
 if __name__ == "__main__":

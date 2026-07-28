@@ -273,6 +273,16 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
                          f"called them relevant; the deterministic check says nothing our "
                          f"emitters issue reaches the symbols they change — human decision, "
                          f"not auto-proposed)")
+            # vibeic/vibeic-eda#6. A verdict only one sample supports is the other kind of
+            # claim a reviewer would otherwise take at face value: the row reads like a
+            # judgement, and the same input judged again returns something else.
+            n_unconf = len(a.get("unconfirmed") or [])
+            if n_unconf:
+                line += (f" — ⚠ **{n_unconf} JUDGEMENT(S) DID NOT REPRODUCE** (they cleared "
+                         f"every other auto-adopt condition, so the same commit text was "
+                         f"re-judged by independent samples and the readings differed, or one "
+                         f"never arrived — every reading is printed on the row, none averaged "
+                         f"into a majority; human decision, not auto-proposed)")
             tally.append(line)
         _run(["git", "-C", str(wt), "add", ASSESS_DIR])
         title = f"[eda-fork] {date}: upstream release assessment — {len(tools)} tool(s) to review"

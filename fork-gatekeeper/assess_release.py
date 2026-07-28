@@ -15,9 +15,10 @@ upstream commit we would be pulling in and, per commit, judges:
 
 The output is a structured assessment (+ markdown) for a human-review vibe-ic PR. The
 "CLEARLY-SAFE" subset (low-risk self-contained bugfix, relevant, no overlap with our
-patches, cherry-picks clean) is flagged and drives what prepare_merge_pr proposes.
-Everything else is a human decision. Doctrine: understand + verify + adopt selectively;
-never grab-and-paste.
+patches, cherry-picks clean, reachable from a command we issue, and whose judgement
+REPRODUCED across independent samples) is flagged and drives what prepare_merge_pr
+proposes. Everything else is a human decision. Doctrine: understand + verify + adopt
+selectively; never grab-and-paste.
 
 WHAT "CLEARLY-SAFE" ACTUALLY TRIGGERS (this docstring used to misstate it): it is NOT
 inert-until-enabled. It is consumed by prepare_merge_pr, gated on GK_MERGE_PR, which
@@ -334,11 +335,15 @@ def classify_commits(tool: str, role: str, commits: list[dict]) -> dict:
 
 
 # ── combine → assessment ──────────────────────────────────────────────────────
-def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None,
-                  reach: dict | None = None) -> bool:
-    """The narrow gate for auto-adopt: an unambiguous, self-contained, relevant, low-risk
-    bugfix that does NOT overlap our patches, cherry-picks cleanly, AND touches code
-    something we run can actually reach. Anything less → human.
+def _passes_static_gate(cls: dict, touches_our_files: bool, clean_pick: bool | None,
+                        reach: dict | None = None) -> bool:
+    """Everything the auto-adopt gate asks EXCEPT whether the judgement reproduces.
+
+    Split out so the re-sample in assess() can be spent on exactly the commits that
+    already pass every other condition (vibeic/vibeic-eda#6) — one commit out of 105 on
+    the range that motivated it — instead of on the range. This is NOT the gate; the
+    gate is `_clearly_safe`, and nothing but assess()'s candidate pre-filter may call
+    this. Passing it is a necessary condition for auto-adopt, never a sufficient one.
 
     `relevant` is the model's opinion. `reach` is a program's (see reachability.py).
     When they DISAGREE — the model says relevant, the surface analysis says nothing we
@@ -355,6 +360,92 @@ def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None,
             and cls.get("recommend") == "adopt"
             and not touches_our_files
             and clean_pick is True)
+
+
+def _clearly_safe(cls: dict, touches_our_files: bool, clean_pick: bool | None,
+                  reach: dict | None = None, agreement: dict | None = None) -> bool:
+    """The narrow gate for auto-adopt: an unambiguous, self-contained, relevant, low-risk
+    bugfix that does NOT overlap our patches, cherry-picks cleanly, touches code
+    something we run can actually reach, AND whose judgement REPRODUCED across
+    independent samples. Anything less → human.
+
+    `agreement` (vibeic/vibeic-eda#6) is llm_judge.confirm's per-sha result. ABSENT
+    AGREEMENT DEMOTES — unlike `reach`, where "I could not determine the surface" is
+    honestly not "unreachable" and leaves the verdict standing. Here the missing input
+    IS the finding: no agreement record means the verdict rests on ONE sample, and a
+    single sample is measurably a coin toss on exactly the borderline commits this
+    tier decides (three re-judgements of one 105-commit range returned three different
+    useful sets). A caller that forgets to confirm must get `human`, not `auto-safe`;
+    fail-closed is the whole point of this gate.
+    """
+    if not isinstance(agreement, dict):
+        return False
+    # `complete` is redundant against a record llm_judge.confirm produced (it computes
+    # agree = complete and all-match) and is asserted anyway, so that a hand-built or
+    # future-shaped record cannot claim agreement over samples that never arrived.
+    if agreement.get("agree") is not True or agreement.get("complete") is not True:
+        return False
+    return _passes_static_gate(cls, touches_our_files, clean_pick, reach)
+
+
+def _no_agreement(cands: list[dict], why: str) -> dict:
+    """Every candidate, unconfirmed, for one shared reason. NOT agreement → demoted."""
+    return {c["sha"]: {"agree": False, "complete": False, "readings": [], "detail": why}
+            for c in cands}
+
+
+def _confirm_candidates(tool: str, role: str, cands: list[dict], cls_map: dict) -> dict:
+    """Independent RE-JUDGEMENTS of only the commits that already pass every OTHER
+    clearly-safe condition (vibeic/vibeic-eda#6). → {sha: agreement dict}.
+
+    The narrowness is the design. `cands` is the output of `_passes_static_gate`, which
+    on the range that motivated this issue was 1 commit of 105 — so the whole treatment
+    costs `SAMPLES - 1` extra requests, not `SAMPLES` x the range.
+
+    The extra samples go through `classify_commits`, the SAME classifier the first
+    reading came from, so the stub and kill-switch paths are confirmed by the code that
+    produced them rather than bypassing it. A stub is deterministic by construction: it
+    agrees, and the detail line says which readings it agreed on.
+
+    Never raises, and every failure mode lands on "not confirmed" — which demotes.
+    """
+    if not cands:
+        return {}
+    try:
+        import llm_judge
+    except Exception:  # noqa: BLE001
+        return _no_agreement(cands, "the judge module could not be loaded, so this verdict "
+                                    "rests on ONE sample — not auto-adopted")
+    first = {}
+    for c in cands:
+        v = cls_map.get(c["sha"]) or {}
+        first[c["sha"]] = (bool(v.get("relevant")),
+                           v.get("risk") if v.get("risk") in ("low", "medium", "high") else "medium")
+
+    def sampler(cs, _t=tool, _r=role):
+        m = classify_commits(_t, _r, cs)
+        return {sha: (None if v.get("category") == NOT_ASSESSED
+                      else (bool(v.get("relevant")),
+                            v.get("risk") if v.get("risk") in ("low", "medium", "high") else "medium"))
+                for sha, v in m.items()}
+
+    try:
+        res = llm_judge.confirm(cands, first, sampler)
+    except Exception:  # noqa: BLE001
+        return _no_agreement(cands, "the confirmation round errored, so this verdict rests "
+                                    "on ONE sample — not auto-adopted")
+    out = {}
+    for c in cands:
+        a = res.get(c["sha"])
+        if not isinstance(a, llm_judge.Agreement):
+            out[c["sha"]] = {"agree": False, "complete": False, "readings": [],
+                             "detail": "the confirmation round returned nothing for this "
+                                       "commit — not auto-adopted"}
+            continue
+        out[c["sha"]] = {"agree": bool(a.agree), "complete": bool(a.complete),
+                         "readings": [list(r) if r is not None else None for r in a.readings],
+                         "detail": a.detail}
+    return out
 
 
 CACHE = STATE / "assessment-cache"
@@ -383,6 +474,12 @@ def _assessor_knobs() -> dict:
     for "is the prompt part of the identity?" must find a yes here, not have to
     reason about which file it lives in.
 
+    `samples` joins them for the same reason (vibeic/vibeic-eda#6): how many
+    independent judgements an auto-adopt verdict must survive decides what the
+    `decision` column says, and GK_JUDGE_SAMPLES can change it without changing a
+    byte of source. A verdict confirmed once and a verdict confirmed twice are two
+    different claims, so they must not share a cache entry.
+
     Never raises: a judge that will not import is itself a distinct assessor.
     """
     try:
@@ -391,10 +488,11 @@ def _assessor_knobs() -> dict:
         return {"model": os.environ.get("GK_JUDGE_MODEL", "?"),
                 "chunk": os.environ.get("GK_JUDGE_CHUNK", "?"),
                 "max_tokens": os.environ.get("GK_JUDGE_MAX_TOKENS", "?"),
+                "samples": os.environ.get("GK_JUDGE_SAMPLES", "?"),
                 "prompt": "judge-unimportable"}
     prompt = f"{llm_judge._SYS_IDENTITY}\n{llm_judge._SYS_TASK}"
     return {"model": llm_judge.MODEL, "chunk": llm_judge.CHUNK,
-            "max_tokens": llm_judge.MAX_TOKENS,
+            "max_tokens": llm_judge.MAX_TOKENS, "samples": llm_judge.SAMPLES,
             "prompt": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]}
 
 
@@ -569,23 +667,14 @@ def assess(tool: str) -> dict:
     todo = [c for c in commits if c["sha"] not in carried and c["sha"] not in decided]
     cls_map = classify_commits(tool, led.get("role", ""), todo)
 
-    assessed, safe = [], []
+    # ── PASS 1: the deterministic probes, per commit ──────────────────────────
+    # Everything except whether the JUDGEMENT reproduces. Splitting the loop is what
+    # keeps the #6 re-sample proportionate: it is spent on the output of this pass —
+    # the commits that already clear every other condition, 1 of 105 on the range that
+    # motivated the issue — rather than on the range.
+    probes: dict = {}
     for c in commits:
-        if c["sha"] in carried:
-            assessed.append({**c, "category": "carried", "summary":
-                             "already in our shipped ref (ancestor or cherry-picked)",
-                             "relevant": None, "risk": None, "reproduce": "",
-                             "recommend": "carried", "touches_our_patches": None,
-                             "clean_cherrypick": None, "decision": "carried"})
-            continue
-        if c["sha"] in decided:
-            rec = decided[c["sha"]]
-            assessed.append({**c, "category": "decided",
-                             "summary": str(rec.get("reason", ""))[:200],
-                             "relevant": None, "risk": None, "reproduce": "",
-                             "recommend": rec.get("decision", "skip"),
-                             "touches_our_patches": None, "clean_cherrypick": None,
-                             "decision": f"recorded:{rec.get('decision', 'skip')}"})
+        if c["sha"] in carried or c["sha"] in decided:
             continue
         cls = cls_map.get(c["sha"], _not_assessed("this commit was never sent to the judge"))
         # cheap overlap signal from the aggregate diff isn't per-commit; do a per-commit
@@ -604,10 +693,44 @@ def assess(tool: str) -> dict:
             # (vibeic/vibeic-eda#5). Adopt-candidates only, same cost bound as the
             # probes above.
             reach = _reachability(tool, c["sha_full"])
+        probes[c["sha"]] = {"cls": cls, "cand": cand, "touches": touches, "clean": clean,
+                            "reach": reach,
+                            "pre": bool(cand and _passes_static_gate(cls, touches, clean, reach))}
+
+    # ── PASS 2: ONE confirmation round, over the pre-qualified set only ───────
+    # vibeic/vibeic-eda#6. A clearly-safe verdict opens a real cherry-pick PR, and the
+    # same 105 commits judged three times returned three different `useful` sets — so
+    # the auto-adopt tier, and only it, must rest on agreeing independent samples.
+    pre = [c for c in commits if probes.get(c["sha"], {}).get("pre")]
+    agreements = _confirm_candidates(tool, led.get("role", ""), pre, cls_map)
+
+    # ── PASS 3: rows ──────────────────────────────────────────────────────────
+    assessed, safe = [], []
+    for c in commits:
+        if c["sha"] in carried:
+            assessed.append({**c, "category": "carried", "summary":
+                             "already in our shipped ref (ancestor or cherry-picked)",
+                             "relevant": None, "risk": None, "reproduce": "",
+                             "recommend": "carried", "touches_our_patches": None,
+                             "clean_cherrypick": None, "decision": "carried"})
+            continue
+        if c["sha"] in decided:
+            rec = decided[c["sha"]]
+            assessed.append({**c, "category": "decided",
+                             "summary": str(rec.get("reason", ""))[:200],
+                             "relevant": None, "risk": None, "reproduce": "",
+                             "recommend": rec.get("decision", "skip"),
+                             "touches_our_patches": None, "clean_cherrypick": None,
+                             "decision": f"recorded:{rec.get('decision', 'skip')}"})
+            continue
+        p = probes[c["sha"]]
+        cls, cand = p["cls"], p["cand"]
+        touches, clean, reach = p["touches"], p["clean"], p["reach"]
+        agr = agreements.get(c["sha"])
         row = {**c, **{k: cls.get(k) for k in
                        ("category", "summary", "relevant", "risk", "reproduce", "recommend")},
                "touches_our_patches": touches, "clean_cherrypick": clean,
-               "reachability": reach}
+               "reachability": reach, "agreement": agr}
         if reach is not None and reach.get("verdict") == "unreachable":
             # DISCLOSE the disagreement, do not resolve it silently. The judge's reason
             # travels into an auto-opened merge PR, so a reason the analysis contradicts
@@ -618,7 +741,19 @@ def assess(tool: str) -> dict:
             row["summary"] = (f"⚠ UNREACHABLE FROM OUR SURFACE — {reach.get('detail', '')} · "
                               f"the judge nonetheless called it relevant: "
                               f"\"{row['judge_summary']}\"")
-        if cand and _clearly_safe(cls, touches, clean, reach):
+        elif isinstance(agr, dict) and agr.get("agree") is not True:
+            # Same fail-closed shape as the reachability disagreement above: BOTH
+            # readings are printed and NEITHER is resolved away. Averaging to a majority
+            # and saying nothing is the failure this fixes — the row must state that the
+            # judgement did not reproduce, because that fact is what a human is being
+            # asked to decide. (A commit reaching here already passed reachability, so
+            # the two markers can never contend for the same summary cell.)
+            row["judge_summary"] = row.get("summary") or ""
+            row["sampling_conflict"] = True
+            row["summary"] = (f"⚠ JUDGEMENT DID NOT REPRODUCE — {agr.get('detail', '')} · "
+                              f"the first reading's stated reason was: "
+                              f"\"{row['judge_summary']}\"")
+        if cand and _clearly_safe(cls, touches, clean, reach, agr):
             row["decision"] = "auto-safe"
             safe.append(row["sha"])
         else:
@@ -647,10 +782,23 @@ def assess(tool: str) -> dict:
     # DISCLOSURE: adopt-candidates the model called relevant that nothing we run reaches.
     # These are NOT clearly-safe — they are human decisions, with both statements on the row.
     rep["unreachable"] = [c["sha"] for c in assessed if c.get("reachability_conflict")]
+    # DISCLOSURE: adopt-candidates whose judgement did NOT reproduce across independent
+    # samples (vibeic/vibeic-eda#6). Also human decisions, also with every reading printed.
+    rep["unconfirmed"] = [c["sha"] for c in assessed if c.get("sampling_conflict")]
+    # How many judgements each auto-adopt candidate had to survive — so a reader of an
+    # archived report can tell a once-confirmed verdict from a twice-confirmed one
+    # without reconstructing the environment it ran under.
+    rep["judge_samples"] = len(next((a.get("readings") or [] for a in agreements.values()
+                                     if a.get("readings")), [])) or None
     # Only a COMPLETE assessment is cacheable. If ANY commit came back NOT ASSESSED the
     # verdict is provisional — caching it would freeze a transient API outage, or a reply
     # that got cut off at the output cap, into a permanent record that never re-resolves.
-    if not any(c.get("_note") for c in cls_map.values()):
+    # A confirmation round that did not COMPLETE is provisional for exactly that reason:
+    # "one sample never arrived" is an outage, not a finding, and freezing it would make
+    # a transient failure permanently demote a commit with no way back. A genuine
+    # DISAGREEMENT is a finding and does cache.
+    if not any(c.get("_note") for c in cls_map.values()) \
+            and all(a.get("complete") for a in agreements.values()):
         _cache_put(tool, ckey, rep)
     if why_reassessed:
         # Deliberately set AFTER _cache_put: this explains THIS tick's miss and must
@@ -713,6 +861,23 @@ def _reach_cell(reach: dict | None, settled: bool) -> str:
             "unknown": "undetermined"}.get(v, "not-probed")
 
 
+def _agree_cell(agr: dict | None, settled: bool) -> str:
+    """Render the `agree` column — did independent judgements of this commit match?
+
+    Like the other probes it runs ONLY for commits that already cleared every other
+    clearly-safe condition, so absence means DID NOT RUN. It must never render as
+    "confirmed": an unconfirmed verdict is precisely what this column exists to expose.
+    """
+    if not isinstance(agr, dict):
+        return "n/a" if settled else "not-probed"
+    n = len(agr.get("readings") or [])
+    if agr.get("agree") is True:
+        return f"✓ {n}/{n}"
+    if not agr.get("complete"):
+        return "⚠ incomplete"
+    return "⚠ DIVERGED"
+
+
 def _provenance_lines(rep: dict) -> list[str]:
     """Was this judgement COMPUTED on this tick, or RESTORED from an earlier one?
 
@@ -732,10 +897,13 @@ def _provenance_lines(rep: dict) -> list[str]:
                 f"{('on ' + rep['replayed_at']) if rep.get('replayed_at') else 'on this tick'}, "
                 f"because the upstream range, our carried-patch ref AND the assessor are all "
                 f"unchanged. Nothing in this table was re-judged today.", ""]
+    n = rep.get("judge_samples")
+    how = (f" Each auto-adopt candidate had to survive {n} independent judgements."
+           if n else "")
     return [f"> Computed {('on ' + when) if when else 'on this tick'} by assessor "
             f"`{aid or 'unrecorded'}` — a content hash of the judge module, its system prompt, "
-            f"the model id and the chunk size. Change any of them and this range is re-judged "
-            f"rather than replayed.", ""]
+            f"the model id, the chunk size and the sample count. Change any of them and this "
+            f"range is re-judged rather than replayed.{how}", ""]
 
 
 def render_md(rep: dict) -> str:
@@ -787,9 +955,23 @@ def render_md(rep: dict) -> str:
               "NOT clearly-safe and is not auto-proposed — it is a human decision. The verdict "
               "may still be right (a NULL guard in a tool we run headless is harmless); what is "
               "wrong is the EVIDENCE, and the evidence is what travels into a merge PR.", ""]
+    # The judgement did not reproduce (vibeic/vibeic-eda#6) — same disclosure shape.
+    n_unconf = len(rep["unconfirmed"]) if "unconfirmed" in rep else \
+        len([c for c in rep.get("commits") or [] if c.get("sampling_conflict")])
+    if n_unconf:
+        L += [f"> **⚠ JUDGEMENT DID NOT REPRODUCE on {n_unconf} commit(s).** Each had already "
+              "cleared every other auto-adopt condition, so it was re-judged by independent "
+              "samples of the same commit text — and they did not return the same verdict (or "
+              "one of them never arrived). EVERY reading is on the row; none has been averaged "
+              "into a majority. Such a commit is NOT clearly-safe and is not auto-proposed. "
+              "Measured 2026-07-28: one 105-commit range judged three times at temperature=0 "
+              "returned three different useful sets, all divergence on borderline commits — a "
+              "verdict only one sample supports is a coin toss, and this tier opens a real "
+              "cherry-pick PR.", ""]
     L += [
-         "| sha | cat | risk | rel | conflict | clean-pick | reach | rec | decision | summary |",
-         "|---|---|---|---|---|---|---|---|---|---|"]
+         "| sha | cat | risk | rel | conflict | clean-pick | reach | agree | rec | decision | "
+         "summary |",
+         "|---|---|---|---|---|---|---|---|---|---|---|"]
     for c in rep["commits"]:
         # A row is SETTLED (carried / recorded decision) or NOT ASSESSED or judged. Only
         # the last kind has measurements, and the other two must say which they are —
@@ -797,22 +979,26 @@ def render_md(rep: dict) -> str:
         settled = c.get("category") in ("carried", "decided")
         blank = "n/a" if settled else (NOT_ASSESSED if c.get("category") == NOT_ASSESSED else "?")
         L.append("| `{sha}` | {category} | {risk} | {rel} | {conf} | {clean} | {reach} | "
-                 "{recommend} | **{decision}** | {summary} |".format(
+                 "{agree} | {recommend} | **{decision}** | {summary} |".format(
                      sha=c["sha"], category=c.get("category") or "?",
                      risk=c.get("risk") or blank,
                      rel={True: "yes", False: "no"}.get(c.get("relevant"), blank),
                      conf=_probe_cell(c.get("touches_our_patches"), "⚠", "—", settled),
                      clean=_probe_cell(c.get("clean_cherrypick"), "✓", "✗", settled),
                      reach=_reach_cell(c.get("reachability"), settled),
+                     agree=_agree_cell(c.get("agreement"), settled),
                      recommend=c.get("recommend") or "?", decision=c.get("decision"),
                      # 110, not 80: the not-assessed reason is the whole point of that row,
                      # and at 80 it was cut mid-word ("...stop_reason=max_token"). A
                      # model/surface disagreement gets more still — it has to carry BOTH
                      # statements, and at 110 it was cut before the half that contradicts
                      # ("…reachable only from `" — the reader never sees WHICH command,
-                     # nor that we do not issue it).
+                     # nor that we do not issue it). A sampling disagreement is the same
+                     # kind of row for the same reason: it carries EVERY reading, and a
+                     # disclosure truncated before the second reading discloses nothing.
                      summary=(c.get("summary") or c.get("title") or "")[
-                         :600 if c.get("reachability_conflict") else 110].replace("|", "\\|")))
+                         :600 if (c.get("reachability_conflict") or c.get("sampling_conflict"))
+                         else 110].replace("|", "\\|")))
     repro = [c for c in rep["commits"] if c.get("reproduce")]
     if repro:
         L += ["", "### Reproduce-before-adopt (bugfixes)"]
@@ -821,17 +1007,22 @@ def render_md(rep: dict) -> str:
     L += ["", "> Column notes: `conflict` (does it touch a file our carried patches touch), "
           "`clean-pick` (does it cherry-pick cleanly onto our branch) and `reach` (can any command "
           "our emitters issue reach the symbols it changes) are computed ONLY for adopt-candidates, "
-          "to bound gh/git cost. `not-probed` means that analysis did not run — it is never "
-          "evidence of no conflict. `n/a` means the row is already settled (carried, or a recorded "
+          "to bound gh/git cost. `agree` is narrower still — it runs only for commits that already "
+          "cleared EVERY other auto-adopt condition, which is why re-judging costs a couple of "
+          "extra requests rather than a multiple of the range. `not-probed` means that analysis "
+          "did not run — it is never evidence of no conflict, and on `agree` it is never evidence "
+          "the verdict reproduced. `n/a` means the row is already settled (carried, or a recorded "
           "decision). `reach` = `undetermined` means the check could not decide — which is NOT "
-          "'unreachable', and leaves the model's verdict standing.",
+          "'unreachable', and leaves the model's verdict standing; `agree` has no such state, "
+          "because an unconfirmed verdict is exactly the thing that must not auto-adopt.",
           "", "> Doctrine: understand every commit, confirm each bugfix reproduces in OUR version, "
           "adopt selectively. The `reach` column is that confirmation step as a PROGRAM (no model "
           "involved): it reads the symbols the patch changes, walks callers up to the tool's own "
           "command registry, and compares the result against the commands our emitters actually "
           "issue. The clearly-safe subset (self-contained low-risk bugfix, relevant, no overlap "
-          "with our patches, clean cherry-pick, and not contradicted by the reachability check) "
-          "may be auto-adopted once enabled; everything else is a human decision."]
+          "with our patches, clean cherry-pick, not contradicted by the reachability check, and "
+          "whose judgement REPRODUCED across independent samples) may be auto-adopted once "
+          "enabled; everything else is a human decision."]
     return "\n".join(L) + "\n"
 
 
