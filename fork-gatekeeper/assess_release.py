@@ -988,8 +988,15 @@ _RESOLVED_RE = re.compile(
 
 
 def parse_headline(kind: str, text: str) -> dict | None:
-    """Recover the four headline counts from a rendered document, or None if it states
-    none (an error note, a clean/not-layered stub). `kind` selects the phrasing."""
+    """Recover the four headline counts from a rendered document, `kind` selecting the
+    phrasing. None means THIS PARSER FOUND NONE — which is two different facts.
+
+    A document may carry no counts because it has none to carry (an error note, a
+    clean/not-layered stub), or because it states them in a shape no longer in
+    `_HEADLINE_RE`. Nothing in the returned value tells the two apart, so no caller may
+    read None as "states no counts" — see `states_counts`, which answers that from the
+    REPORT instead (vibeic/vibeic-eda#9).
+    """
     text = text or ""
     m = _HEADLINE_RE[kind].search(text)
     if m:
@@ -1023,6 +1030,20 @@ def parse_provenance(md: str) -> dict:
     return {k: v for k, v in got.items() if v}
 
 
+def states_counts(rep: dict) -> bool:
+    """Does this report HAVE headline counts for its documents to state?
+
+    The skip in `cross_check` has to be decided here — from the STRUCTURE of the report —
+    rather than from whether a regex matched the text (vibeic/vibeic-eda#9). Two shapes
+    legitimately render a stub with no numbers in it, and both are knowable without
+    reading a character of the render: an entry that ERRORED (`render_md` emits
+    "assessment error — …") and a fork that is CLEAN or NOT LAYERED ("nothing to
+    assess"). Everything else is an assessed range, and every document it produces states
+    four numbers — so a document of one that does not parse is a defect, not a stub.
+    """
+    return not rep.get("error") and rep.get("status") in (None, "assessed")
+
+
 def cross_check(rep: dict, documents: dict[str, str]) -> list[str]:
     """Do the documents this tick is about to publish agree with each other?
 
@@ -1033,16 +1054,32 @@ def cross_check(rep: dict, documents: dict[str, str]) -> list[str]:
     contradict each other has already lost the property that makes either one worth
     reading, and picking a winner in code would hide which reader was wrong.
 
-    A document that states no counts at all (assessment error, clean/not-layered) is
-    skipped rather than failed — there is nothing to disagree with.
+    A report that states no counts at all — an assessment error, a clean/not-layered fork
+    — is skipped: there is nothing to disagree with. That skip is `states_counts(rep)`,
+    taken BEFORE anything is parsed, and it used to be taken after: an unparseable
+    document was read as one that stated nothing (vibeic/vibeic-eda#9). Since the four
+    numbers reach the reader through three separate renders (`render_md`,
+    `gatekeeper.assessment_entry`, `pr_notify.tally_line`) and only `_HEADLINE_RE`'s
+    current wording connects them to this check, that made rewording a headline a silent
+    disarm — the guard skipped the one document whose phrasing had drifted, which is
+    exactly the document nothing else was checking. Measured on the line that shipped in
+    vibeic/vibe-ic#508 ("… — 0 clearly-safe, 108 need review", against an assessment
+    saying 1 and 2): `parse_headline` returned None and `cross_check` returned []. For an
+    assessed report, UNREADABLE IS A FAILURE.
     """
-    if rep.get("error") or rep.get("status") not in (None, "assessed"):
+    if not states_counts(rep):
         return []
     want = summary_counts(rep)
     bad = []
     for kind, text in sorted(documents.items()):
         got = parse_headline(kind, text)
         if got is None:
+            bad.append(
+                f"{rep.get('tool', '?')}: the {kind} document states no counts this "
+                f"program can read back, but the assessment it renders states "
+                + ", ".join(f"{f}={want[f]}" for f in HEADLINE) +
+                f" — the render and parse_headline('{kind}') have drifted apart, so "
+                f"this document would be published unchecked")
             continue
         for field in HEADLINE:
             if got[field] != want[field]:

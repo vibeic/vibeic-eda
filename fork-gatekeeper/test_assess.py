@@ -2281,6 +2281,223 @@ def test_a_vendored_candidate_is_not_handed_to_the_arg_bumping_harness():
     assert seen.get("cands") == ["direct"], seen
 
 
+# ── vibeic/vibeic-eda#9 — the guard's coverage is ASSERTED, not inferred ─────────────
+#
+# #7's `cross_check` reads the four counts back out of rendered text, so its reach is
+# whatever `_HEADLINE_RE` still matches. Three separate sites render those counts —
+# `assess_release.render_md`, `gatekeeper.assessment_entry`, `pr_notify.tally_line` —
+# and not one of them imports the parser, so a reworded headline used to cost nothing:
+# `parse_headline` returned None, `cross_check` read None as "this document states no
+# counts" and skipped it. Measured on the line that actually shipped in
+# vibeic/vibe-ic#508 — "108 upstream commit(s) 8.3.674 → 8.3.678 — 0 clearly-safe, 108
+# need review", against an assessment saying 1 and 2 — `parse_headline('pr', …)` was
+# None and `cross_check` returned []. The document with the wrongest number in it was
+# the one the guard declined to examine.
+#
+# Two halves below. `states_counts` moves the skip decision off the regex and onto the
+# STRUCTURE of the report, so "states none" and "unreadable" stop being the same value;
+# and `_RENDERS` is the coverage table — every render site, over every branch its text
+# can take for an assessed report, has to hand back the numbers `summary_counts` put in.
+# Reword one without teaching the parser and that goes red on the render, rather than
+# months later on a published contradiction nothing was checking.
+
+# The exact PR-body phrasing that shipped on 2026-07-28, before #7 gave `tally_line` its
+# one wording. Kept verbatim: the point of the fixture is that it is not a strawman.
+_SHIPPED_0728_PR_LINE = ("- **magic**: 108 upstream commit(s) 8.3.674 → 8.3.678 — "
+                         "0 clearly-safe, 108 need review")
+
+
+def test_a_document_the_guard_cannot_read_is_a_failure_not_a_skip():
+    """The reproduction. An assessed report HAS four numbers, so a document of it that
+    states none this program can read back is a render that drifted out of the parser's
+    reach — and the fail-safe reading of "I could not check this" is not "it agrees"."""
+    assert A.parse_headline("pr", _SHIPPED_0728_PR_LINE) is None, \
+        "the fixture is supposed to be a phrasing the parser does not know"
+    bad = A.cross_check(MAGIC_0728, {"pr": _SHIPPED_0728_PR_LINE})
+    assert bad, "the guard skipped the document with the wrongest number in it"
+    assert len(bad) == 1, bad
+    assert "pr" in bad[0] and "magic" in bad[0], bad
+    assert "outstanding=2" in bad[0], "it must state what the assessment says it should"
+    assert "parse_headline" in bad[0], "and name what to repair"
+    # ...including the degenerate case: a render that RAISED leaves the caller holding
+    # "" (`gatekeeper.tick` passes `rendered.get(tool) or ""`), which is unreadable for
+    # the same reason and was skipped for the same reason.
+    assert A.cross_check(MAGIC_0728, {"assessment": ""}), "an empty document was skipped"
+    # A document that is readable and AGREES is still clean — the failure is unreadable,
+    # not unfamiliar.
+    assert A.cross_check(MAGIC_0728, {"pr": _pn().tally_line("magic", MAGIC_0728)}) == []
+
+
+def test_the_skip_is_decided_from_the_report_not_from_the_parse():
+    """The other half, and the reason this is not "fail every unparseable document": a
+    clean / not-layered fork and an errored entry render a stub with no numbers in it BY
+    DESIGN, and that is knowable from `rep` without reading a character of the render. So
+    they stay skips, and the common case — most forks, most days — still publishes."""
+    stubs = [{"tool": "t", "error": "compare failed"},
+             {"tool": "t", "status": "clean", "commits": []},
+             {"tool": "t", "status": "not_layered", "commits": []}]
+    for rep in stubs:
+        assert not A.states_counts(rep), rep
+        md = A.render_md(rep)
+        assert A.parse_headline("assessment", md) is None, md
+        assert A.cross_check(rep, {"assessment": md}) == [], rep
+        # and the skip does not depend on WHICH document it is handed: a stub report has
+        # nothing to disagree with, whatever text arrives with it
+        assert A.cross_check(rep, {"pr": _SHIPPED_0728_PR_LINE,
+                                   "report": "", "assessment": md}) == [], rep
+    assert A.states_counts(MAGIC_0728), "an assessed range states its counts"
+    assert A.states_counts({"tool": "t", "commits": []}), \
+        "a report with no `status` key at all is the assess() shape, not a stub"
+
+
+# Every site that renders the headline counts, keyed by the phrasing `parse_headline`
+# selects on. All three are pure functions of one report, which is what makes asserting
+# the guard's coverage cost nothing.
+_RENDERS = {
+    "assessment": lambda rep: A.render_md(rep),
+    "report": lambda rep: _gk().assessment_entry(rep, 1, rep.get("latest"))["note"],
+    "pr": lambda rep: _pn().tally_line(rep.get("tool", "t"), rep),
+}
+
+# Report shapes that reach every branch the three renders can take for an ASSESSED range.
+# A coverage table proven on one report shape is a coverage table for one report shape.
+_READABLE_REPS = {
+    # the 2026-07-28 range: 108 commits, 1 safe / 2 carried / 1 decided / 2 open
+    "the real range": MAGIC_0728,
+    # replayed: `render_md` leads with the REPLAYED banner instead of the ordinary
+    # provenance line, above the same headline
+    "replayed from cache": {**MAGIC_0728, "cached": True,
+                            "replayed_at": "2026-07-28T05:32:00Z"},
+    # nothing left to do — the daily report drops the two zeros for "nothing
+    # outstanding", a SECOND phrasing that only `_RESOLVED_RE` reads
+    "resolved": _rep(commit_count=3, carried=["a", "b"], decided=["c"]),
+    # a range with no commits at all: every number is zero, in every document
+    "empty range": _rep(commit_count=0),
+    # every disclosure at once. The warnings are appended AFTER the counts in both the
+    # report note and the PR line, so this is also the test that they do not push the
+    # numbers out of the parser's reach.
+    "every disclosure": _rep(commit_count=7, clearly_safe=["s"], carried=["c"],
+                             decided=["d"], outstanding=["o", "p"], not_assessed=["n"],
+                             unreachable=["u"], unconfirmed=["v"],
+                             commits=[{"sha": "aaa", "decision": "human",
+                                       "category": "bugfix", "recommend": "manual"}]),
+    # counted from the ROWS, no summary lists (`summary_counts` step 2)
+    "rows only": _rep(commit_count=5, commits=[
+        {"sha": "a1", "decision": "auto-safe", "category": "bugfix"},
+        {"sha": "a2", "decision": "carried", "category": "carried"},
+        {"sha": "a3", "decision": "recorded:skip", "category": "decided"},
+        {"sha": "a4", "decision": "human", "recommend": "manual", "category": "feature"},
+        {"sha": "a5", "decision": "human", "recommend": "skip", "category": "ci"}],
+        **{k: None for k in ("clearly_safe", "carried", "decided", "outstanding")}),
+    # neither list nor row: the INFERRED banner renders above the table, and the numbers
+    # it warns about still have to parse out of the headline it precedes
+    "inferred": _rep(commit_count=9, commits=[],
+                     **{k: None for k in ("clearly_safe", "carried", "decided",
+                                          "outstanding")}),
+}
+
+
+def test_every_render_site_stays_readable_by_the_guard():
+    """THE coverage assertion (vibeic/vibeic-eda#9).
+
+    For every report that states counts, every document this program renders must give
+    those counts back — so `cross_check` is guarding all three publications and not
+    silently skipping one. Reword `render_md`, `assessment_entry` or `tally_line` without
+    teaching `_HEADLINE_RE` and this goes red on the render itself.
+
+    What it does NOT prove: that no FOURTH render site exists. Nothing here can see a
+    site that was never added to `_RENDERS` — the kinds are pinned against the parser's
+    own table below, which catches a new phrasing, not a new caller of an old one.
+    """
+    assert set(_RENDERS) == set(A._HEADLINE_RE), \
+        "a phrasing the parser knows that no render in this table produces (or vice versa)"
+    for name, rep in sorted(_READABLE_REPS.items()):
+        assert A.states_counts(rep), name
+        n = A.summary_counts(rep)
+        want = {f: n[f] for f in A.HEADLINE}
+        docs = {}
+        for kind, render in sorted(_RENDERS.items()):
+            text = render(rep)
+            got = A.parse_headline(kind, text)
+            assert got is not None, (
+                f"{name}: the {kind} render states counts parse_headline cannot read — "
+                f"a render and the guard have drifted apart: {text[:300]!r}")
+            assert got == want, f"{name}/{kind}: {got} != {want}"
+            docs[kind] = text
+        # and the guard, handed all three at once, both READ and cleared them
+        assert A.cross_check(rep, docs) == [], name
+
+
+def test_a_tick_whose_assessment_is_reworded_publishes_neither():
+    """End to end, on the production path: the guard is armed by the RENDER, so a render
+    the parser cannot read must stop the tick.
+
+    The injected wording states the CORRECT numbers, deliberately. #7 already catches a
+    document that disagrees; what went unnoticed is a document that cannot be checked at
+    all, and the fail-safe reading of that is "this day's triage is unverified" — not
+    "the numbers were probably fine". The repair is to teach `_HEADLINE_RE` the new
+    wording, which is precisely the work the silent skip used to excuse.
+    """
+    def _reworded(rep):
+        n = A.summary_counts(rep)
+        return (f"## {rep['tool']} — selective-merge assessment\n"
+                f"Range **{rep['base_release']} → {rep['latest']}** · {n['commits']} "
+                f"upstream commit(s).\n"
+                f"{n['clearly_safe']} can be auto-adopted; {n['carried']} are carried, "
+                f"{n['decided']} decided, and {n['outstanding']} need review.\n")
+
+    assert A.parse_headline("assessment", _reworded(MAGIC_0728)) is None
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        try:
+            _tick_fixture(state, MAGIC_0728, render=_reworded)
+        except Exception as e:            # gatekeeper.CountsDisagree
+            assert type(e).__name__ == "CountsDisagree", repr(e)
+            assert "nothing published" in str(e)
+        else:
+            raise AssertionError("the tick published a document nothing could check")
+        assert list((state / "reports").glob("*")) == [], "a report was published"
+        assert not (state / "reports" / "assessments").exists(), \
+            "an assessment was published that the gate could not read"
+        led = json.loads((state / "ledger" / "magic.json").read_text())
+        assert not led.get("sync_log"), "the ledger recorded a tick that never published"
+
+
+def test_a_clean_fork_still_publishes_its_unparseable_row():
+    """The common case, on the row #8 changed. A CLEAN row states no counts, and #8's
+    `behind_commits` clause did not change that — it parses to None before and after —
+    so a fix of the shape "fail every document that does not parse" would take a working
+    tick down on most forks on most days. It publishes, and the row it publishes is a
+    SKIP when handed to the guard.
+
+    Two levels, and only the second is mutation-controlled: `tick` today hands the gate a
+    row only on the ASSESSED branch, so no mutation of `cross_check` alone can make a
+    CLEAN day fail. The published-row assertion below closes that by taking the route a
+    future rewiring would take — the real clean report, the real published row.
+    """
+    led = {"tool": "Zeta", "integrated": True, "behind_releases": 0,
+           "upstream": "them/Zeta", "image_version": "0.2.30", "base_release": "v2.2.0",
+           "upstream_latest_release": "v2.2.0", "upstream_default_branch": "master",
+           "behind_commits": 57}
+    with tempfile.TemporaryDirectory() as t:
+        state = Path(t)
+        _, summary = _tick_fixture(state, None, ledgers={"Zeta": led})
+        assert summary["counts"]["CLEAN"] == 1, summary["counts"]
+        assert (state / "reports" / f"{summary['date']}.json").is_file(), \
+            "a CLEAN day published nothing"
+        assert json.loads((state / "ledger" / "Zeta.json").read_text())["sync_log"]
+        row = next(r for r in summary["results"] if r["tool"] == "Zeta")
+    assert "57 upstream commit(s) on master" in row["note"], row["note"]
+    assert A.parse_headline("report", row["note"]) is None, \
+        "#8's clause did not make a CLEAN row state the four counts"
+    # the report `assess()` returns for such a fork, against the row the tick published
+    clean = {"tool": "Zeta", "status": "clean", "commits": [],
+             "base_release": "v2.2.0", "latest": "v2.2.0"}
+    assert A.cross_check(clean, {"report": row["note"],
+                                 "assessment": A.render_md(clean)}) == [], \
+        "the published CLEAN row was failed for stating counts it never had"
+
+
 if __name__ == "__main__":
     # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
     # `assess_release` and restores NONE of them, so whichever test used it
