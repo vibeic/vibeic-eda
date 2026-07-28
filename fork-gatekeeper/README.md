@@ -15,6 +15,20 @@ advances.
    smoke-regresses it (`build_and_regress.sh`, `verify_yosys.sh`).
 3. **Publish** (`build_page.py`) — renders the fork status page for the site.
 
+### One derivation of the headline counts
+
+A tick publishes the same four numbers — clearly-safe / already-carried / previously
+decided / needing a human — in three places: the daily report, the per-tool assessment
+table, and the review PR's body. They all come from `assess_release.summary_counts()`
+and nowhere else. Each site used to derive them for itself and two of the three answered
+by subtraction, so one tick could publish three different triage results for one range
+(vibeic/vibeic-eda#7). Before anything is written the rendered documents are parsed back
+and compared (`assess_release.cross_check`); a tick whose documents disagree publishes
+NOTHING and exits non-zero. `python3 gatekeeper.py --verify [date]` runs the same
+comparison over an already-published day — use it after any manual re-assessment, which
+re-renders the assessment under its date-stamped filename and leaves the report that
+summarised the previous one in place.
+
 ## Reviewer-side gate: redundancy precheck (`pr_precheck.py`)
 
 Before landing ANY fork PR, run:

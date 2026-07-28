@@ -25,6 +25,13 @@ Flow each day (only for the forks in FORKS.json):
   5. regenerate the vibeic.ai monitor page
 
     python3 gatekeeper.py            # one tick
+    python3 gatekeeper.py --verify [YYYY-MM-DD]
+        Re-check an ALREADY-PUBLISHED day: does the daily report state the same counts
+        as the assessment filed for the same date and tool, and do both name the same
+        judgement? Reads only — no upstream fetch, no assessment, no PR. Exits 1 on a
+        disagreement. Run it after any manual re-assessment: re-rendering an assessment
+        over its date-stamped filename leaves the report that summarised the previous
+        one in place, and that pair is what vibeic/vibeic-eda#7 was filed about.
 
 regression.json (optional): {"image_build": {"cmd": "bash build_and_regress.sh", "cwd": "…"}}
 The cmd should: rebase each candidate's vibeic branch onto its new release, bump the
@@ -59,6 +66,16 @@ try:
     import assess_release  # selective-merge assessment engine (per-commit triage)
 except Exception:  # noqa: BLE001
     assess_release = None
+
+
+class CountsDisagree(RuntimeError):
+    """Two documents of one tick state different counts for the same assessment.
+
+    vibeic/vibeic-eda#7. Raised INSTEAD of publishing either of them. The tick exits
+    non-zero, cron.log records it, and the day's report is absent rather than wrong —
+    an operator who finds no report goes looking; one who finds two contradicting
+    numbers stops reading the report at all.
+    """
 
 
 def _now_date() -> str:
@@ -105,6 +122,88 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
         return {}
 
 
+def assessment_entry(rep: dict, nr: int, latest) -> dict:
+    """The daily report's row for a fork that was ASSESSED — verdict, note, counts.
+
+    A pure function of the assessment report so the sync-log summary can be exercised
+    without a tick, a ledger, or the network. It used to be an inline branch of `tick()`,
+    which is why the tests that were supposed to pin its arithmetic asserted on the
+    SOURCE TEXT of this file instead of on what it computes — and a test that greps for
+    `cc - safe` stays green while the number it produces is wrong, and goes red on a
+    refactor that changes nothing.
+    """
+    if rep.get("error"):
+        return {"verdict": "DEFERRED",
+                "note": f"{nr} new release(s) → {latest}; assessment error: {rep['error']}"}
+    # CONSUME the assessment's own classification — via the ONE derivation in
+    # assess_release, never a private re-derivation. This block used to compute "needs
+    # human" for itself as `commit_count - clearly_safe`, which silently discards the two
+    # categories the assessment already resolved: commits our ref CARRIES (by ancestry or
+    # cherry-pick patch-id) and commits with a RECORDED decision. Measured on magic
+    # 8.3.674 → 8.3.676: 2 carried + 1 recorded skip = nothing outstanding, yet this note
+    # reported "3 need human review" and the range was re-proposed on 07-23, 07-24, 07-26.
+    #
+    # Reading `outstanding` when present repaired the common case and left the split in
+    # place (vibeic/vibeic-eda#7): the fallback here subtracted only `safe`, the one in
+    # render_md subtracted `safe + carried + decided`, and pr_notify's never looked at
+    # `outstanding` at all — so one tick could publish three different answers.
+    # `summary_counts` is now the only place the question is answered, and it reaches
+    # arithmetic only when neither the summary list nor the per-commit rows exist.
+    n = assess_release.summary_counts(rep)
+    cc, safe = n["commits"], n["clearly_safe"]
+    carried, decided, n_open = n["carried"], n["decided"], n["outstanding"]
+    # Commits the AI judge never reached a conclusion about. The operator must be told
+    # the analysis did not run, rather than reading its absence as a triage result — see
+    # the 2026-07-28 magic assessment, where a truncated judge reply published 105 rows
+    # of fabricated "high risk".
+    n_na = n["not_assessed"]
+    # vibeic/vibeic-eda#5: adopt-candidates the model called relevant that nothing we run
+    # can reach. DISCLOSED, never resolved away — the verdict may still be right, but its
+    # stated evidence is not true of our fork.
+    n_unreach = n["unreachable"]
+    # vibeic/vibeic-eda#6: adopt-candidates whose judgement did not reproduce across
+    # independent samples. DISCLOSED, never averaged into a majority.
+    n_unconf = n["unconfirmed"]
+    entry = {"verdict": "DEFERRED",
+             "assessed": {"commits": cc, "clearly_safe": safe,
+                          "carried": carried, "decided": decided,
+                          "outstanding": n_open, "not_assessed": n_na,
+                          "unreachable": n_unreach, "unconfirmed": n_unconf,
+                          # WHICH assessment this report summarises. Without it the daily
+                          # report and the assessment filed under the same date are
+                          # indistinguishable when they are two different vintages — the
+                          # 2026-07-28 pair was exactly that, and nothing on either
+                          # document said so. `verify_documents` compares these stamps.
+                          "assessor": rep.get("assessor"),
+                          "assessed_at": rep.get("assessed_at"),
+                          "replayed": bool(rep.get("cached")),
+                          "derived": n["derived"]}}
+    resolved = f"{carried} already carried, {decided} previously decided"
+    entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
+                     f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
+                     f"selective-merge assessment filed (not auto-merged)")
+    if n_na:
+        entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
+                          f"commit(s) NOT ASSESSED (no classification made)")
+    if n_unreach:
+        entry["note"] += (f" — {n_unreach} commit(s) the judge called relevant are "
+                          f"UNREACHABLE from any command our emitters issue "
+                          f"(model/surface disagreement → human decision, not "
+                          f"auto-proposed)")
+    if n_unconf:
+        entry["note"] += (
+            f" — {n_unconf} commit(s) cleared every other auto-adopt condition but "
+            f"their JUDGEMENT DID NOT REPRODUCE across independent samples "
+            f"(every reading is on the row → human decision, not auto-proposed)")
+    if n_open == 0 and safe == 0:
+        # Nothing is outstanding: reporting DEFERRED here is what turned settled work
+        # into a recurring proposal.
+        entry["verdict"] = "RESOLVED"
+        entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → "
+                         f"{latest}: {resolved} — nothing outstanding")
+    return entry
+
+
 def tick() -> dict:
     print(f"[{_now_iso()}] gatekeeper tick — re-seeding ledgers…")
     disc.main()
@@ -127,15 +226,18 @@ def tick() -> dict:
     # the clearly-safe subset is flagged, everything else is a human decision. Assessments
     # are filed as a vibe-ic review PR (see _maybe_notify).
     assessments = {}   # tool -> assessment report
+    rendered = {}      # tool -> the assessment markdown, rendered ONCE (vibeic/vibeic-eda#7)
     if candidates and assess_release is not None:
-        adir = STATE / "reports" / "assessments"
-        adir.mkdir(parents=True, exist_ok=True)
         for led in candidates:
             try:
                 rep = assess_release.assess(led["tool"])
                 assessments[led["tool"]] = rep
-                (adir / f"{date}-{led['tool']}.md").write_text(assess_release.render_md(rep))
-                (adir / f"{date}-{led['tool']}.json").write_text(json.dumps(rep, ensure_ascii=False))
+                # Rendered here, PUBLISHED later — the assessment file, the daily report
+                # and the review PR must be one atomic publication, so nothing is written
+                # until every document has been checked against the others. Rendering
+                # once (rather than again per consumer) is the other half: two renders of
+                # "the" assessment are two chances to render two different reports.
+                rendered[led["tool"]] = assess_release.render_md(rep)
             except Exception as e:  # noqa: BLE001 — assessment must never break the tick
                 print(f"  [assess] {led['tool']} error (ignored): {e}")
 
@@ -181,6 +283,8 @@ def tick() -> dict:
         hres = _run_harness(cfg, candidates)
 
     results = []
+    conflicts: list[str] = []    # cross-document count disagreements (vibeic/vibeic-eda#7)
+    pending_ledgers: list[tuple] = []   # written only once the documents agree
     for p, led in leds.items():
         tool = led["tool"]
         nr = led.get("behind_releases") or 0
@@ -212,69 +316,15 @@ def tick() -> dict:
                 entry["note"] = f"{s} → target {latest}: {detail}"
         elif tool in assessments:
             rep = assessments[tool]
-            entry["verdict"] = "DEFERRED"
-            if rep.get("error"):
-                entry["note"] = f"{nr} new release(s) → {latest}; assessment error: {rep['error']}"
-            else:
-                # CONSUME the assessment's own classification. This line used
-                # to re-derive "needs human" as `commit_count - clearly_safe`,
-                # which silently discards the two categories the assessment
-                # already resolved: commits our ref CARRIES (by ancestry or
-                # cherry-pick patch-id) and commits with a RECORDED decision.
-                # Measured on magic 8.3.674 → 8.3.676: 2 carried + 1 recorded
-                # skip = nothing outstanding, yet this note reported "3 need
-                # human review" and the range was re-proposed on 07-23, 07-24
-                # and 07-26. `assess_release` computes `outstanding` (and the
-                # markdown report prints it correctly); only this summary went
-                # its own way — a producer/consumer split inside one tool.
-                cc = rep.get("commit_count", 0)
-                safe = len(rep.get("clearly_safe") or [])
-                carried = len(rep.get("carried") or [])
-                decided = len(rep.get("decided") or [])
-                outstanding = rep.get("outstanding")
-                # Fall back to the old arithmetic ONLY when the assessment did
-                # not report `outstanding` (an older cached report): unknown
-                # must read as "needs review", never as "nothing to do".
-                n_open = len(outstanding) if outstanding is not None else cc - safe
-                # Commits the AI judge never reached a conclusion about. The operator must
-                # be told the analysis did not run, rather than reading its absence as a
-                # triage result — see the 2026-07-28 magic assessment, where a truncated
-                # judge reply published 105 rows of fabricated "high risk".
-                n_na = len(rep.get("not_assessed") or [])
-                # vibeic/vibeic-eda#5: adopt-candidates the model called relevant that
-                # nothing we run can reach. DISCLOSED, never resolved away — the verdict
-                # may still be right, but its stated evidence is not true of our fork.
-                n_unreach = len(rep.get("unreachable") or [])
-                # vibeic/vibeic-eda#6: adopt-candidates whose judgement did not reproduce
-                # across independent samples. DISCLOSED, never averaged into a majority.
-                n_unconf = len(rep.get("unconfirmed") or [])
-                entry["assessed"] = {"commits": cc, "clearly_safe": safe,
-                                     "carried": carried, "decided": decided,
-                                     "outstanding": n_open, "not_assessed": n_na,
-                                     "unreachable": n_unreach, "unconfirmed": n_unconf}
-                resolved = f"{carried} already carried, {decided} previously decided"
-                entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
-                                 f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
-                                 f"selective-merge assessment filed (not auto-merged)")
-                if n_na:
-                    entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
-                                      f"commit(s) NOT ASSESSED (no classification made)")
-                if n_unreach:
-                    entry["note"] += (f" — {n_unreach} commit(s) the judge called relevant are "
-                                      f"UNREACHABLE from any command our emitters issue "
-                                      f"(model/surface disagreement → human decision, not "
-                                      f"auto-proposed)")
-                if n_unconf:
-                    entry["note"] += (
-                        f" — {n_unconf} commit(s) cleared every other auto-adopt condition but "
-                        f"their JUDGEMENT DID NOT REPRODUCE across independent samples "
-                        f"(every reading is on the row → human decision, not auto-proposed)")
-                if n_open == 0 and safe == 0:
-                    # Nothing is outstanding: reporting DEFERRED here is what
-                    # turned settled work into a recurring proposal.
-                    entry["verdict"] = "RESOLVED"
-                    entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → "
-                                     f"{latest}: {resolved} — nothing outstanding")
+            entry.update(assessment_entry(rep, nr, latest))
+            # CROSS-DOCUMENT CHECK (vibeic/vibeic-eda#7). Both documents are now
+            # rendered; parse the numbers back OUT of each and require them to agree.
+            # Checking the rendered text rather than the ints they were built from is
+            # the point — it is what a formatter that drops a field, or a caller that
+            # pairs this report with a different assessment, cannot slip past.
+            # Disagreement is collected, never reconciled: see the abort below.
+            conflicts.extend(assess_release.cross_check(
+                rep, {"assessment": rendered.get(tool) or "", "report": entry["note"]}))
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))
@@ -285,10 +335,34 @@ def tick() -> dict:
 
         led.setdefault("sync_log", []).append(entry)
         led["last_sync"] = date
-        p.write_text(json.dumps(led, indent=2, ensure_ascii=False) + "\n")
+        pending_ledgers.append((p, led))
         results.append({"tool": tool, **entry})
         print(f"  {tool:16} {entry['verdict']:11} {entry['note'][:78]}")
 
+    # ── THE GATE (vibeic/vibeic-eda#7) ───────────────────────────────────────
+    # Nothing has been written yet. A tick whose documents contradict each other
+    # publishes NOTHING and exits loudly: an operator who is shown two numbers for one
+    # assessment learns to trust neither, and the fail-safe reading of a disagreement is
+    # that the day's triage is unknown — not that one of the two answers may be picked.
+    # Deliberately NOT wrapped in the "assessment must never break the tick" try: an
+    # assessment that fails to compute degrades to a reported error, but an assessment
+    # that computes two different results is a defect in this program.
+    if conflicts:
+        for c in conflicts:
+            print(f"  [FATAL] cross-document count mismatch — {c}")
+        raise CountsDisagree(
+            f"{len(conflicts)} cross-document count mismatch(es) on {date}; "
+            f"nothing published (no report, no assessment, no PR)")
+
+    for p, led in pending_ledgers:
+        p.write_text(json.dumps(led, indent=2, ensure_ascii=False) + "\n")
+    if rendered:
+        adir = STATE / "reports" / "assessments"
+        adir.mkdir(parents=True, exist_ok=True)
+        for t, md in rendered.items():
+            (adir / f"{date}-{t}.md").write_text(md)
+            (adir / f"{date}-{t}.json").write_text(
+                json.dumps(assessments[t], ensure_ascii=False))
     REPORTS.mkdir(parents=True, exist_ok=True)
     # the ledgers were seeded BEFORE promote; a successful promote ships a NEW image
     # version, so surface the actually-shipped version (parsed from the 'promoted' note)
@@ -306,15 +380,87 @@ def tick() -> dict:
                "results": results}
     (REPORTS / f"{date}.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (REPORTS / f"{date}.md").write_text(_report_md(summary))
+    # ROUND TRIP. The pre-publication gate compared what we MEANT to write; this
+    # compares what is ON DISK, which is the only thing anyone reads. It costs a few
+    # file reads and it is the half that survives a serialization bug — and, run later
+    # as `--verify`, the half that catches a day whose assessment was regenerated
+    # underneath a report that was not.
+    disk = verify_documents(date)
+    if disk:
+        for c in disk:
+            print(f"  [FATAL] published documents disagree — {c}")
+        raise CountsDisagree(f"{len(disk)} mismatch(es) between the report and the "
+                             f"assessments published for {date}")
     try:
         build_page.build(build_page.DEFAULT_OUT)
     except Exception as e:
         print(f"  (page rebuild failed: {e})")
-    _maybe_notify(summary, fresh)   # cached (unchanged-range) assessments file no new PR
+    _maybe_notify(summary, fresh, rendered)   # cached (unchanged-range) assessments file no new PR
     return summary
 
 
-def _maybe_notify(summary: dict, assessments: dict | None = None):
+def verify_documents(date: str) -> list[str]:
+    """Do the documents PUBLISHED for `date` agree with each other?
+
+    Re-reads `reports/<date>.json` and every `reports/assessments/<date>-<tool>.md` and
+    compares, per tool, the counts the daily report states against the counts the
+    assessment states — plus the PROVENANCE stamp, which is what tells two vintages of
+    one date apart when their numbers happen to coincide.
+
+    That last part is the 2026-07-28 case. The 05:32 tick wrote a report and an
+    assessment that agreed with each other (0 clearly-safe, 105 needing review, from a
+    judge reply that had been truncated). Four fixes landed by 06:53; the range was
+    re-judged at 07:07 and the assessment for that date was re-rendered from the new
+    verdict (1 clearly-safe, 2 needing review) — over the SAME date-stamped filename,
+    while the daily report kept its 05:32 content. Neither file said which assessment it
+    described, so the pair was indistinguishable from a tick that had contradicted
+    itself. Run this after any manual re-assessment and it names the split.
+
+    Returns [] when they agree; one line per disagreement otherwise. Never raises — a
+    missing or unreadable document is reported, not thrown.
+    """
+    out: list[str] = []
+    rp = REPORTS / f"{date}.json"
+    try:
+        summary = json.loads(rp.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        return [f"cannot read the daily report {rp}: {e}"]
+    if assess_release is None:
+        return ["assess_release is not importable — the published counts cannot be parsed"]
+    adir = REPORTS / "assessments"
+    for r in summary.get("results") or []:
+        got = r.get("assessed")
+        if not isinstance(got, dict):
+            continue                       # this fork filed no assessment for that date
+        tool = r.get("tool", "?")
+        ap = adir / f"{date}-{tool}.md"
+        try:
+            md = ap.read_text()
+        except OSError as e:
+            out.append(f"{tool}: the report summarises an assessment that is not on disk "
+                       f"at {ap} ({e})")
+            continue
+        want = assess_release.parse_headline("assessment", md)
+        if want is None:
+            out.append(f"{tool}: {ap.name} states no counts — the report summarises "
+                       f"numbers the assessment does not carry")
+            continue
+        for field in assess_release.HEADLINE:
+            if got.get(field) != want[field]:
+                out.append(f"{tool}: the daily report says {field}={got.get(field)}, "
+                           f"{ap.name} says {want[field]}")
+        # PROVENANCE: same date, same tool, different judgement.
+        stamp = assess_release.parse_provenance(md)
+        for field in ("assessor", "assessed_at"):
+            if stamp.get(field) and got.get(field) and stamp[field] != got[field]:
+                out.append(f"{tool}: the daily report summarises the assessment computed "
+                           f"{field}={got[field]}, but {ap.name} on disk is "
+                           f"{field}={stamp[field]} — two vintages of one date")
+    return out
+
+
+def _maybe_notify(summary: dict, assessments: dict | None = None,
+                  rendered: dict | None = None):
     """On an actionable day — a MERGED promote, or a new upstream release — open a PR on
     vibe-ic. When there are selective-merge assessments (behind forks), the PR carries the
     per-commit triage for human review (adopt the clearly-safe subset, decide the rest);
@@ -336,9 +482,16 @@ def _maybe_notify(summary: dict, assessments: dict | None = None):
     try:
         if assess_tools and hasattr(pr_notify, "open_assessment_pr"):
             subset = {t: assessments[t] for t in assess_tools}
-            rendered = ({t: assess_release.render_md(a) for t, a in subset.items()}
-                        if assess_release else {})
-            outcomes.append(("assess",) + tuple(pr_notify.open_assessment_pr(summary, subset, rendered)))
+            # The PR carries the EXACT bytes that were checked and written, not a second
+            # render of "the" assessment (vibeic/vibeic-eda#7). Two renders are two
+            # chances to publish two reports; and re-rendering here would have re-run
+            # the classifier's formatter after the gate that cleared it.
+            md = {t: (rendered or {}).get(t) for t in subset}
+            missing = [t for t, v in md.items() if not v]
+            if missing and assess_release:
+                for t in missing:
+                    md[t] = assess_release.render_md(subset[t])
+            outcomes.append(("assess",) + tuple(pr_notify.open_assessment_pr(summary, subset, md)))
         if c.get("MERGED", 0) > 0 or uncovered:
             outcomes.append(("sync",) + tuple(pr_notify.open_pr(summary, _report_md(summary))))
         if not outcomes:
@@ -369,4 +522,14 @@ def _report_md(s: dict) -> str:
 
 
 if __name__ == "__main__":
+    if "--verify" in sys.argv:
+        # Re-check an ALREADY-PUBLISHED day, without running a tick: no upstream fetch,
+        # no assessment, no PR. `--verify [date]` (default: today).
+        _rest = [a for a in sys.argv[1:] if not a.startswith("--")]
+        _date = _rest[0] if _rest else _now_date()
+        _bad = verify_documents(_date)
+        for _c in _bad:
+            print(f"[FATAL] {_date}: {_c}")
+        print(f"{_date}: {'DISAGREE — ' + str(len(_bad)) + ' mismatch(es)' if _bad else 'documents agree'}")
+        sys.exit(1 if _bad else 0)
     tick()

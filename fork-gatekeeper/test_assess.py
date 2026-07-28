@@ -682,13 +682,18 @@ def test_incomplete_assessment_is_not_cached():
 
 
 def test_gatekeeper_and_pr_body_report_the_incomplete_judgement():
-    """The disclosure has to reach the two places a human actually reads."""
-    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    assert 'rep.get("not_assessed")' in gk
-    assert "NOT ASSESSED" in gk
-    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
-    assert 'a.get("not_assessed")' in pn
-    assert "NOT ASSESSED" in pn
+    """The disclosure has to reach the two places a human actually reads.
+
+    Driven through the real note builder and the real tally builder. This test used to
+    grep both source files for `a.get("not_assessed")` — which passes whether or not the
+    string reaches a reader, and fails on a rename that changes nothing.
+    """
+    rep = _rep(commit_count=4, clearly_safe=[], carried=[], decided=[],
+               outstanding=["a", "b", "c", "d"], not_assessed=["c", "d"])
+    note = _gk().assessment_entry(rep, 1, "v2")["note"]
+    assert "NOT ASSESSED" in note and "2 commit(s) NOT ASSESSED" in note
+    line = _pn().tally_line("magic", rep)
+    assert "NOT ASSESSED" in line and "2 commit(s) NOT" in line
 
 
 # ── the summary must CONSUME the assessment's classification (vibe-ic#369) ──
@@ -699,41 +704,77 @@ def test_gatekeeper_and_pr_body_report_the_incomplete_judgement():
 # 1 recorded skip = nothing outstanding, yet it reported "3 need human
 # review" and the settled range was re-proposed on 07-23, 07-24 and 07-26.
 
-def _note_for(rep):
-    """Drive the real summary branch with a synthetic assessment report."""
-    import importlib.util, sys as _s
+def _load(name):
+    """Import one of the sibling modules by path, fresh, without a package."""
+    import importlib.util
+    import sys as _s
     from pathlib import Path as _P
     spec = importlib.util.spec_from_file_location(
-        "_gk", _P(__file__).resolve().parent / "gatekeeper.py")
-    gk = importlib.util.module_from_spec(spec)
-    _s.modules["_gk"] = gk
-    spec.loader.exec_module(gk)
-    return gk
+        f"_{name}", _P(__file__).resolve().parent / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    _s.modules[f"_{name}"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _gk():
+    return _load("gatekeeper")
+
+
+def _pn():
+    return _load("pr_notify")
+
+
+def _rep(**kw):
+    """A synthetic assessment report — the shape assess() returns."""
+    base = {"tool": "magic", "status": "assessed", "base_release": "v1", "latest": "v2",
+            "commit_count": 0, "clearly_safe": [], "carried": [], "decided": [],
+            "outstanding": [], "commits": []}
+    return {**base, **kw}
 
 
 def test_369_carried_and_decided_are_not_counted_as_open_work():
-    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    # the crude re-derivation must be gone from the summary branch
-    assert 'f"{safe} clearly-safe, {cc - safe} need human review' not in src
-    assert 'rep.get("outstanding")' in src
-    assert '"carried": carried' in src and '"decided": decided' in src
+    """2 carried + 1 recorded skip + nothing else = nothing outstanding, and the note
+    must say so rather than re-deriving `commit_count - clearly_safe` = 3."""
+    entry = _gk().assessment_entry(
+        _rep(commit_count=3, carried=["a", "b"], decided=["c"], outstanding=[]), 2, "8.3.676")
+    assert entry["verdict"] == "RESOLVED", entry
+    assert "nothing outstanding" in entry["note"]
+    assert entry["assessed"] == {**entry["assessed"], "carried": 2, "decided": 1,
+                                 "outstanding": 0, "clearly_safe": 0}
 
 
 def test_369_unknown_outstanding_still_reads_as_needing_review():
-    """An older cached report without `outstanding` must fall back to the
-    conservative arithmetic — unknown may never read as 'nothing to do'."""
-    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    assert "if outstanding is not None else cc - safe" in src
+    """A report carrying no `outstanding` key at all must never read as 'nothing to
+    do' — and, per vibeic/vibeic-eda#7, must first look for the answer in the ROWS
+    before it resorts to arithmetic."""
+    rows = [{"decision": "human", "recommend": "manual"},
+            {"decision": "human", "recommend": "skip"},
+            {"decision": "carried"}]
+    rep = _rep(commit_count=3, carried=["a"], commits=rows)
+    rep.pop("outstanding")
+    n = A.summary_counts(rep)
+    assert n["outstanding"] == 1, "the rows say exactly one commit needs a decision"
+    assert n["derived"] == [], "an exact recount must not be reported as inferred"
+    # and with NEITHER the list nor the rows, the arithmetic that remains errs toward
+    # review: 5 commits, 1 safe, 1 carried, 1 decided -> 2 open, never 0.
+    bare = _rep(commit_count=5, clearly_safe=["s"], carried=["c"], decided=["d"], commits=[])
+    bare.pop("outstanding")
+    n2 = A.summary_counts(bare)
+    assert n2["outstanding"] == 2 and "outstanding" in n2["derived"], n2
+    assert "INFERRED" in A.render_md(bare), "an inferred count must say it was inferred"
 
 
 def test_369_nothing_outstanding_is_not_reported_as_deferred():
     """DEFERRED on a fully-resolved range is what turned settled work into a
     recurring proposal."""
-    src = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    assert 'entry["verdict"] = "RESOLVED"' in src
-    i = src.index('entry["verdict"] = "RESOLVED"')
-    window = src[max(0, i - 400):i]
-    assert "n_open == 0" in window and "safe == 0" in window
+    entry = _gk().assessment_entry(
+        _rep(commit_count=2, carried=["a"], decided=["b"]), 1, "v2")
+    assert entry["verdict"] == "RESOLVED"
+    # ...and a range with a clearly-safe commit is NOT resolved: there is work to offer.
+    entry2 = _gk().assessment_entry(
+        _rep(commit_count=2, carried=["a"], clearly_safe=["b"]), 1, "v2")
+    assert entry2["verdict"] == "DEFERRED", entry2
 
 
 # ── the cache must identify the ASSESSOR too (vibeic/vibeic-eda#4) ───────────
@@ -1227,13 +1268,12 @@ def test_reach_column_says_not_probed_when_it_did_not_run():
 
 
 def test_the_disagreement_reaches_the_gatekeeper_note_and_the_pr_body():
-    """The disclosure has to reach the two places a human actually reads."""
-    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    assert 'rep.get("unreachable")' in gk
-    assert "UNREACHABLE from any command our emitters issue" in gk
-    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
-    assert 'a.get("unreachable")' in pn
-    assert "UNREACHABLE from our command surface" in pn
+    """The disclosure has to reach the two places a human actually reads — driven
+    through the real builders, not grepped out of their source."""
+    rep = _rep(commit_count=2, outstanding=["a", "b"], unreachable=["a"])
+    note = _gk().assessment_entry(rep, 1, "v2")["note"]
+    assert "1 commit(s) the judge called relevant are UNREACHABLE" in note
+    assert "UNREACHABLE from our command surface" in _pn().tally_line("magic", rep)
 
 
 def test_the_reachability_check_is_part_of_the_assessor_identity():
@@ -1650,15 +1690,13 @@ def test_an_unassessed_range_never_reaches_the_confirmation_round():
 
 def test_the_confirmation_reaches_the_gatekeeper_note_and_the_pr_body():
     """The disclosure has to reach the two places a human actually reads — the same
-    shape #5's reachability disagreement is held to."""
-    gk = (Path(__file__).resolve().parent / "gatekeeper.py").read_text()
-    assert 'rep.get("unconfirmed")' in gk
-    assert "JUDGEMENT DID NOT REPRODUCE across independent samples" in gk
-    assert '"unconfirmed": n_unconf' in gk
-    pn = (Path(__file__).resolve().parent / "pr_notify.py").read_text()
-    assert 'a.get("unconfirmed")' in pn
-    assert "DID NOT REPRODUCE" in pn
-    assert "none averaged" in pn
+    shape #5's reachability disagreement is held to, and driven the same way."""
+    rep = _rep(commit_count=2, outstanding=["a", "b"], unconfirmed=["a"])
+    entry = _gk().assessment_entry(rep, 1, "v2")
+    assert "JUDGEMENT DID NOT REPRODUCE across independent samples" in entry["note"]
+    assert entry["assessed"]["unconfirmed"] == 1
+    line = _pn().tally_line("magic", rep)
+    assert "DID NOT REPRODUCE" in line and "none averaged" in line
 
 
 def test_the_render_survives_a_report_that_predates_the_confirmation():
@@ -1673,6 +1711,215 @@ def test_the_render_survives_a_report_that_predates_the_confirmation():
     assert cells[8] == "not-probed", row
     assert cells[5] == "—" and cells[6] == "✓" and cells[7] == "not-probed", \
         "the older columns shifted"
+
+
+# ── one derivation of the headline counts (vibeic/vibeic-eda#7) ──────────────
+# The 2026-07-28 magic tick published three different answers to one question:
+# "108 upstream commits — how many need a human?". The assessment table said 105,
+# the daily report said 105, and the PR body the same tick opened said 108. Re-run
+# on the repaired assessment (1 clearly-safe, 2 outstanding) the split widens: 2 / 2
+# / 107. Each site derived the number for itself, and two of the three derivations
+# were subtraction.
+
+# The real cached verdict for magic 8.3.674 → 8.3.678, assessor b38988077cdc95ed,
+# reduced to the fields the documents read. Kept as a FIXTURE because the numbers are
+# what regressed: 108 commits of which 2 are carried, 1 has a recorded skip, 1 is
+# clearly-safe and 2 need a human — the other 102 are `rec=skip` CI/build commits that
+# need no adoption decision and must not be counted as open work.
+MAGIC_0728 = {
+    "tool": "magic", "status": "assessed", "base_release": "8.3.674", "latest": "8.3.678",
+    "commit_count": 108, "our_patch_files": 59,
+    "assessor": "b38988077cdc95ed", "assessed_at": "2026-07-27T23:07:21Z",
+    "clearly_safe": ["be83d2954d53"],
+    "outstanding": ["86fbd2b50f81", "3f1747b1fb91"],
+    "carried": ["a22b7508acfe", "cc4da9a05fde"],
+    "decided": ["42b346e31887"],
+    "not_assessed": [], "unreachable": ["3f1747b1fb91"], "unconfirmed": [],
+    "commits": [{"sha": "be83d2954d53", "title": "t", "decision": "auto-safe",
+                 "category": "bugfix", "recommend": "adopt"}],
+}
+
+
+def test_every_document_of_one_tick_states_the_same_counts():
+    """The regression, on the range that produced it."""
+    md = A.render_md(MAGIC_0728)
+    entry = _gk().assessment_entry(MAGIC_0728, 4, "8.3.678")
+    line = _pn().tally_line("magic", MAGIC_0728)
+
+    want = {"clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 2}
+    assert A.parse_headline("assessment", md) == want, md.splitlines()[2]
+    assert A.parse_headline("report", entry["note"]) == want, entry["note"]
+    assert A.parse_headline("pr", line) == want, line
+    for field, n in want.items():
+        assert entry["assessed"][field] == n, entry["assessed"]
+    # and the check that would have caught it agrees they agree
+    assert A.cross_check(MAGIC_0728, {"assessment": md, "report": entry["note"],
+                                      "pr": line}) == []
+
+
+def test_the_pr_body_no_longer_answers_with_subtraction():
+    """`commit_count - clearly_safe` was UNCONDITIONAL in the PR body — it never read
+    `outstanding`, not even as a fallback, so it was wrong even on a complete report."""
+    line = _pn().tally_line("magic", MAGIC_0728)
+    assert "107" not in line, line
+    assert "2 need human review" in line, line
+
+
+def test_the_structured_value_is_reached_before_any_arithmetic():
+    """A `cc - safe`-shaped answer means the structured field was missed. The rows are
+    the structured field when the summary list is gone, so arithmetic must not run."""
+    rows = [{"decision": "auto-safe"}, {"decision": "carried"},
+            {"decision": "recorded:skip"}, {"decision": "human", "recommend": "manual"},
+            {"decision": "human", "recommend": "skip"}]
+    rep = {"tool": "t", "status": "assessed", "commit_count": 5, "commits": rows}
+    n = A.summary_counts(rep)
+    assert (n["clearly_safe"], n["carried"], n["decided"], n["outstanding"]) == (1, 1, 1, 1)
+    assert n["derived"] == [], "the rows were available and arithmetic ran anyway"
+    # a corrupt (non-list) summary field must fall through to the rows, not blow up
+    n2 = A.summary_counts({**rep, "outstanding": 4})
+    assert n2["outstanding"] == 1, n2
+
+
+def test_an_unknown_count_still_reads_as_needing_review():
+    """The fail-safe DIRECTION of the old fallback is kept: with nothing to read, no
+    commit may be claimed safe or settled, so everything unaccounted-for is open."""
+    n = A.summary_counts({"tool": "t", "status": "assessed", "commit_count": 9})
+    assert n["clearly_safe"] == 0 and n["carried"] == 0 and n["decided"] == 0
+    assert n["outstanding"] == 9, n
+    assert set(n["derived"]) >= {"clearly_safe", "carried", "decided", "outstanding"}
+
+
+def test_cross_check_names_the_field_and_both_readings():
+    """It must say WHICH number disagrees and what each document claims — a bare
+    'documents disagree' sends the reader back to diffing two files by hand."""
+    md = A.render_md(MAGIC_0728)
+    stale = A.render_md({**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105})
+    bad = A.cross_check(MAGIC_0728, {"assessment": stale})
+    assert any("outstanding" in b and "105" in b and "2" in b for b in bad), bad
+    assert any("clearly_safe" in b for b in bad), bad
+    assert A.cross_check(MAGIC_0728, {"assessment": md}) == []
+
+
+def test_a_document_that_states_no_counts_is_skipped_not_failed():
+    """An assessment error, or a clean/not-layered stub, has nothing to disagree with."""
+    err = {"tool": "t", "error": "compare failed"}
+    assert A.cross_check(err, {"assessment": A.render_md(err)}) == []
+    clean = {"tool": "t", "status": "clean", "commits": []}
+    assert A.cross_check(clean, {"assessment": A.render_md(clean)}) == []
+    # ...and the RESOLVED phrasing of the daily report, which states no clearly-safe or
+    # outstanding number because both are zero, is parsed as the zeros it asserts.
+    resolved = _rep(commit_count=3, carried=["a", "b"], decided=["c"])
+    note = _gk().assessment_entry(resolved, 2, "v2")["note"]
+    assert A.parse_headline("report", note) == {"clearly_safe": 0, "carried": 2,
+                                                "decided": 1, "outstanding": 0}
+    assert A.cross_check(resolved, {"report": note,
+                                    "assessment": A.render_md(resolved)}) == []
+
+
+def test_the_provenance_stamp_tells_two_vintages_of_one_date_apart():
+    """The 2026-07-28 pair. Two assessments of one date, rendered under one filename,
+    with nothing on either document saying which judgement it described."""
+    md = A.render_md(MAGIC_0728)
+    assert A.parse_provenance(md) == {"assessor": "b38988077cdc95ed",
+                                      "assessed_at": "2026-07-27T23:07:21Z"}
+    entry = _gk().assessment_entry(MAGIC_0728, 4, "8.3.678")
+    assert entry["assessed"]["assessor"] == "b38988077cdc95ed"
+    assert entry["assessed"]["assessed_at"] == "2026-07-27T23:07:21Z"
+    # a report predating provenance pinning states neither, and must not be compared
+    assert A.parse_provenance(A.render_md({k: v for k, v in MAGIC_0728.items()
+                                           if k not in ("assessor", "assessed_at")})) == {}
+
+
+def _tick_fixture(state: Path, rep, render=None):
+    """Run a REAL tick against a prepared state dir — no network, no PR, no page.
+
+    `disc.main` (which re-seeds the ledgers over the GitHub API) and `assess` (which
+    spends the judge) are the only things stubbed; everything from the summary branch
+    to the files on disk is the production path.
+    """
+    (state / "ledger").mkdir(parents=True, exist_ok=True)
+    (state / "ledger" / "magic.json").write_text(json.dumps({
+        "tool": "magic", "integrated": True, "behind_releases": 4,
+        "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
+        "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
+        "pinned_ref_full": "19185c197fba" + "0" * 28}))
+    os.environ["GK_STATE_DIR"] = str(state)
+    merge_pr = os.environ.pop("GK_MERGE_PR", None)   # never open a real cherry-pick PR
+    try:
+        gk = _gk()
+        gk.disc = type("D", (), {"main": staticmethod(lambda: None)})()
+        gk.pr_notify = None
+        gk.build_page = type("B", (), {"DEFAULT_OUT": None,
+                                       "build": staticmethod(lambda *a: None)})()
+
+        class _Shim:
+            def __getattr__(self, k):
+                return getattr(A, k)
+
+            def assess(self, tool):
+                return rep
+
+            if render is not None:
+                def render_md(self, r):
+                    return render(r)
+        gk.assess_release = _Shim()
+        return gk, gk.tick()
+    finally:
+        os.environ.pop("GK_STATE_DIR", None)
+        if merge_pr is not None:
+            os.environ["GK_MERGE_PR"] = merge_pr
+
+
+def test_a_tick_whose_documents_disagree_publishes_neither():
+    """The gate. A renderer that drifts — or an assessment regenerated from another
+    vintage — must stop the tick, not produce a report beside a table that contradicts
+    it. Injected by rendering the STALE 05:32 verdict (0 clearly-safe, 105 open) while
+    the report summarises the repaired one (1, 2): the 2026-07-28 pair exactly."""
+    stale = {**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105}
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        try:
+            _tick_fixture(state, MAGIC_0728, render=lambda r: A.render_md(stale))
+        except Exception as e:            # gatekeeper.CountsDisagree
+            assert type(e).__name__ == "CountsDisagree", repr(e)
+            assert "nothing published" in str(e)
+        else:
+            raise AssertionError("the tick published two contradicting documents")
+        assert list((state / "reports").glob("*.md")) == [], "a report was published"
+        assert list((state / "reports").glob("*.json")) == [], "a report was published"
+        assert not (state / "reports" / "assessments").exists(), \
+            "an assessment was published beside a report that contradicts it"
+        led = json.loads((state / "ledger" / "magic.json").read_text())
+        assert not led.get("sync_log"), "the ledger recorded a tick that never published"
+
+
+def test_a_tick_whose_documents_agree_publishes_both_and_verifies_on_disk():
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        gk, summary = _tick_fixture(state, MAGIC_0728)
+        date = summary["date"]
+        report = json.loads((state / "reports" / f"{date}.json").read_text())
+        got = next(r for r in report["results"] if r["tool"] == "magic")
+        assert got["assessed"]["clearly_safe"] == 1 and got["assessed"]["outstanding"] == 2
+        md = (state / "reports" / "assessments" / f"{date}-magic.md").read_text()
+        assert A.parse_headline("assessment", md) == {"clearly_safe": 1, "carried": 2,
+                                                      "decided": 1, "outstanding": 2}
+        # the round trip the tick runs on itself
+        os.environ["GK_STATE_DIR"] = str(state)
+        try:
+            gk2 = _gk()
+            assert gk2.verify_documents(date) == []
+            # ...and it CATCHES a later re-render that the report was never regenerated
+            # for — the 2026-07-28 failure, reproduced on the published files.
+            stale = {**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105,
+                     "assessor": "0" * 16, "assessed_at": "2026-07-27T21:32:00Z"}
+            (state / "reports" / "assessments" / f"{date}-magic.md").write_text(
+                A.render_md(stale))
+            bad = gk2.verify_documents(date)
+            assert any("outstanding" in b for b in bad), bad
+            assert any("two vintages of one date" in b for b in bad), bad
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
 
 
 if __name__ == "__main__":

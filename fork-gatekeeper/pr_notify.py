@@ -27,10 +27,20 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-from _nda_tokens import find as _nda_find
+sys.path.insert(0, str(Path(__file__).parent))
+from _nda_tokens import find as _nda_find      # noqa: E402
+
+try:
+    # The ONE derivation of the headline counts (vibeic/vibeic-eda#7). Imported, never
+    # re-implemented: this module publishing its own arithmetic is what put a third
+    # number in front of the reviewer who reads the PR body first.
+    import assess_release as _assess           # noqa: E402
+except Exception:  # noqa: BLE001
+    _assess = None
 
 REPO = Path(os.environ.get("GK_VIBEIC_REPO", "/home/reyerchu/vibe-ic"))
 GH_REPO = "vibeic/vibe-ic"
@@ -206,6 +216,57 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _run(["git", "-C", str(REPO), "branch", "-D", branch])   # local branch not needed (origin has it)
 
 
+def tally_line(tool: str, a: dict) -> str | None:
+    """One fork's line in the review PR's body. None if the counts cannot be derived.
+
+    Pure, so the numbers a reviewer reads FIRST can be tested without a git worktree or
+    a GitHub call — which is why they were not, and how this line kept its own arithmetic
+    for as long as it did.
+    """
+    if a.get("error"):
+        return (f"- **{tool}**: could not enumerate the new release — {a['error']} "
+                f"(needs manual review)")
+    # vibeic/vibeic-eda#7: this line used to compute `commit_count - clearly_safe`
+    # UNCONDITIONALLY — it never read `outstanding` at all, not even as a fallback. On
+    # 2026-07-28 that put "108 need review" in the PR body of the very tick whose
+    # attached table said 105 and whose daily report said 105; re-run on the repaired
+    # assessment it would have said 107 against their 2. The PR body is the first and
+    # often only thing a reviewer reads, so it was the copy most likely to be believed
+    # and the only one nothing derived from the assessment.
+    if _assess is None:
+        return None
+    n = _assess.summary_counts(a)
+    line = (f"- **{tool}**: {n['commits']} upstream commit(s) {a.get('base_release')} → "
+            f"{a.get('latest')} — {n['clearly_safe']} clearly-safe, {n['carried']} already "
+            f"carried, {n['decided']} previously decided, {n['outstanding']} "
+            f"need human review")
+    # An incomplete judgment must be visible in the PR BODY, not only in the attached
+    # per-commit table. Otherwise the summary a reviewer reads first presents "N need
+    # review" as a triage result when nothing was triaged.
+    if n["not_assessed"]:
+        line += (f" — ⚠ **the judge did not complete: {n['not_assessed']} commit(s) NOT "
+                 f"ASSESSED** (no classification was made for them; this is missing "
+                 f"analysis, not a risk finding)")
+    # vibeic/vibeic-eda#5. A commit the model called relevant that nothing we run can
+    # reach is the disagreement worth surfacing FIRST — it is the one whose stated
+    # justification a reviewer would otherwise take at face value.
+    if n["unreachable"]:
+        line += (f" — ⚠ **{n['unreachable']} UNREACHABLE from our command surface** (the "
+                 f"judge called them relevant; the deterministic check says nothing our "
+                 f"emitters issue reaches the symbols they change — human decision, "
+                 f"not auto-proposed)")
+    # vibeic/vibeic-eda#6. A verdict only one sample supports is the other kind of claim
+    # a reviewer would otherwise take at face value: the row reads like a judgement, and
+    # the same input judged again returns something else.
+    if n["unconfirmed"]:
+        line += (f" — ⚠ **{n['unconfirmed']} JUDGEMENT(S) DID NOT REPRODUCE** (they cleared "
+                 f"every other auto-adopt condition, so the same commit text was "
+                 f"re-judged by independent samples and the readings differed, or one "
+                 f"never arrived — every reading is printed on the row, none averaged "
+                 f"into a majority; human decision, not auto-proposed)")
+    return line
+
+
 def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
     """Open a vibe-ic REVIEW PR carrying the selective-merge assessments for the behind
     forks: one markdown per tool under tools/vibeic-eda/upstream-assessments/, plus a body
@@ -247,42 +308,20 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
         adir.mkdir(parents=True, exist_ok=True)
         tally = []
         for t in tools:
-            (adir / f"{date}-{t}.md").write_text(rendered.get(t) or f"## {t}\n(no render)\n")
-            a = assessments[t]
-            if a.get("error"):
-                tally.append(f"- **{t}**: could not enumerate the new release — {a['error']} "
-                             f"(needs manual review)")
-                continue
-            cc, safe = a.get("commit_count", 0), len(a.get("clearly_safe") or [])
-            line = (f"- **{t}**: {cc} upstream commit(s) {a.get('base_release')} → "
-                    f"{a.get('latest')} — {safe} clearly-safe, {cc - safe} need review")
-            # An incomplete judgment must be visible in the PR BODY, not only in the
-            # attached per-commit table. Otherwise the summary a reviewer reads first
-            # presents "N need review" as a triage result when nothing was triaged.
-            n_na = len(a.get("not_assessed") or [])
-            if n_na:
-                line += (f" — ⚠ **the judge did not complete: {n_na} commit(s) NOT ASSESSED** "
-                         f"(no classification was made for them; this is missing analysis, "
-                         f"not a risk finding)")
-            # vibeic/vibeic-eda#5. A commit the model called relevant that nothing we run
-            # can reach is the disagreement worth surfacing FIRST — it is the one whose
-            # stated justification a reviewer would otherwise take at face value.
-            n_unreach = len(a.get("unreachable") or [])
-            if n_unreach:
-                line += (f" — ⚠ **{n_unreach} UNREACHABLE from our command surface** (the judge "
-                         f"called them relevant; the deterministic check says nothing our "
-                         f"emitters issue reaches the symbols they change — human decision, "
-                         f"not auto-proposed)")
-            # vibeic/vibeic-eda#6. A verdict only one sample supports is the other kind of
-            # claim a reviewer would otherwise take at face value: the row reads like a
-            # judgement, and the same input judged again returns something else.
-            n_unconf = len(a.get("unconfirmed") or [])
-            if n_unconf:
-                line += (f" — ⚠ **{n_unconf} JUDGEMENT(S) DID NOT REPRODUCE** (they cleared "
-                         f"every other auto-adopt condition, so the same commit text was "
-                         f"re-judged by independent samples and the readings differed, or one "
-                         f"never arrived — every reading is printed on the row, none averaged "
-                         f"into a majority; human decision, not auto-proposed)")
+            md = rendered.get(t) or f"## {t}\n(no render)\n"
+            (adir / f"{date}-{t}.md").write_text(md)
+            line = tally_line(t, assessments[t])
+            if line is None:
+                return (False, "assess_release is not importable — refusing to publish a "
+                               "tally this module would have to derive for itself")
+            # The PR body and the table it links are one publication and must not be able
+            # to leave here disagreeing. `rendered` and `assessments` arrive as two
+            # separately-built maps, so this also catches a caller that pairs a table with
+            # a DIFFERENT report — the shape of the 2026-07-28 divergence.
+            bad = _assess.cross_check(assessments[t], {"pr": line, "assessment": md})
+            if bad:
+                return (False, "refusing to open a PR whose body and attached assessment "
+                               "disagree: " + "; ".join(bad[:3]))
             tally.append(line)
         _run(["git", "-C", str(wt), "add", ASSESS_DIR])
         title = f"[eda-fork] {date}: upstream release assessment — {len(tools)} tool(s) to review"

@@ -51,6 +51,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -878,6 +879,179 @@ def _agree_cell(agr: dict | None, settled: bool) -> str:
     return "⚠ DIVERGED"
 
 
+# ── ONE derivation of the headline counts (vibeic/vibeic-eda#7) ──────────────
+# Every document a tick publishes states the same four numbers, and each site used to
+# derive them for itself:
+#
+#   assess_release.render_md   len(outstanding), else commit_count - safe - carried - decided
+#   gatekeeper.py:231-238      len(outstanding), else commit_count - safe
+#   pr_notify.open_assessment_pr                  commit_count - safe   (UNCONDITIONALLY —
+#                                                 it never read `outstanding` at all)
+#
+# Three readers of one report, three answers. On the 2026-07-28 magic assessment the
+# tick published "2 need human review" in the assessment table, "2" in the daily report
+# and "107 need review" in the vibe-ic PR body it opened the same minute — and on a
+# cached report predating the `outstanding` field, 104 / 107 / 107. A count nobody owns
+# is a count that drifts, so the derivation lives here once and the documents render it.
+HEADLINE = ("clearly_safe", "carried", "decided", "outstanding")
+
+# How to recount a category from the per-commit rows when the summary list is missing.
+# The rows are the SAME structured record the lists were built from, so this is a second
+# reading of the classification, not an estimate — which is why it sits ahead of any
+# arithmetic in `summary_counts`.
+_ROW_PREDICATES = {
+    "clearly_safe": lambda c: c.get("decision") == "auto-safe",
+    "carried": lambda c: c.get("decision") == "carried",
+    "decided": lambda c: str(c.get("decision") or "").startswith("recorded:"),
+    "outstanding": lambda c: c.get("decision") == "human" and c.get("recommend") != "skip",
+    "not_assessed": lambda c: c.get("category") == NOT_ASSESSED,
+    "unreachable": lambda c: bool(c.get("reachability_conflict")),
+    "unconfirmed": lambda c: bool(c.get("sampling_conflict")),
+}
+
+
+def summary_counts(rep: dict) -> dict:
+    """The headline counts of one assessment — the single source every document renders.
+
+    Reads the STRUCTURED value wherever one exists, in descending order of directness:
+
+      1. the summary list itself (`rep["outstanding"]` &c) — exact;
+      2. failing that, a recount over `rep["commits"]` by the `decision`/`recommend`
+         columns — also exact, and available on every report ever cached, because the
+         rows are what the lists were derived from in the first place;
+      3. only when BOTH are absent, arithmetic — and then `derived` is set so the
+         documents can say the number was inferred rather than measured.
+
+    Step 2 is the repair. The old fallbacks were reached whenever a summary list was
+    missing, and they guessed with subtraction while the exact answer was sitting in the
+    rows one key away. Arithmetic-shaped counts are now reachable only for a report that
+    carries no rows at all.
+
+    The fail-safe DIRECTION of the old fallback is kept, and is why the arithmetic is
+    what it is: an unknown `clearly_safe` counts as 0 (nothing may be claimed safe when
+    we cannot tell), an unknown `carried`/`decided` counts as 0 (nothing may be claimed
+    already-resolved), and `outstanding` is whatever those leave over — so uncertainty
+    always reads as "needs review", never as "nothing to do".
+    """
+    rows = rep.get("commits")
+    rows = rows if isinstance(rows, list) else []
+    cc = rep.get("commit_count")
+    cc = cc if isinstance(cc, int) else len(rows)
+    out: dict = {"commits": cc}
+    derived = []
+    for name, pred in _ROW_PREDICATES.items():
+        v = rep.get(name)
+        if isinstance(v, list):                       # 1. the summary list
+            out[name] = len(v)
+        elif rows:                                    # 2. recount from the rows
+            out[name] = sum(1 for c in rows if isinstance(c, dict) and pred(c))
+        else:                                         # 3. unknown → fail-safe
+            out[name] = None
+            derived.append(name)
+    for name in ("clearly_safe", "carried", "decided", "not_assessed",
+                 "unreachable", "unconfirmed"):
+        if out[name] is None:
+            out[name] = 0
+    if out["outstanding"] is None:
+        out["outstanding"] = max(cc - out["clearly_safe"] - out["carried"] - out["decided"], 0)
+    out["derived"] = sorted(derived)
+    return out
+
+
+# Each document phrases the counts for its own reader; the numbers are parsed back out
+# of the RENDERED TEXT so the check tests what was published, not the ints that were
+# meant to be. A formatter that drops a field, or a caller that pairs a rendered table
+# with a different report, is exactly what this catches.
+_SUMMARY_SENTENCE = re.compile(
+    r"(?P<clearly_safe>\d+) clearly-safe,\s*(?P<carried>\d+) already carried,\s*"
+    r"(?P<decided>\d+) previously decided,\s*(?P<outstanding>\d+) need human review")
+_HEADLINE_RE = {
+    "assessment": re.compile(
+        r"Already carried:\s*(?P<carried>\d+)\*?\*?.*?"
+        r"decided \(recorded\):\s*(?P<decided>\d+)\*?\*?.*?"
+        r"clearly-safe to auto-adopt:\s*(?P<clearly_safe>\d+)\*?\*?.*?"
+        r"needs human decision:\s*(?P<outstanding>\d+)", re.S),
+    # The daily report and the PR body state it in one sentence, deliberately the SAME
+    # sentence: the PR body used to say "N need review" while the report said "N need
+    # human review", so a reader comparing them had to decide whether two different
+    # phrasings were two different questions before noticing they were two different
+    # answers. One wording, one pattern.
+    "report": _SUMMARY_SENTENCE,
+    "pr": _SUMMARY_SENTENCE,
+}
+# The daily report's "nothing left to do" phrasing states no clearly-safe/outstanding
+# number because both are zero; parse it as the zeros it asserts rather than as "no
+# counts present", or the one shape that claims a range is SETTLED goes unchecked.
+_RESOLVED_RE = re.compile(
+    r"(?P<carried>\d+) already carried,\s*(?P<decided>\d+) previously decided"
+    r"\s*—\s*nothing outstanding")
+
+
+def parse_headline(kind: str, text: str) -> dict | None:
+    """Recover the four headline counts from a rendered document, or None if it states
+    none (an error note, a clean/not-layered stub). `kind` selects the phrasing."""
+    text = text or ""
+    m = _HEADLINE_RE[kind].search(text)
+    if m:
+        return {k: int(v) for k, v in m.groupdict().items()}
+    if kind in ("report", "pr"):
+        m = _RESOLVED_RE.search(text)
+        if m:
+            return {"clearly_safe": 0, "outstanding": 0,
+                    "carried": int(m.group("carried")), "decided": int(m.group("decided"))}
+    return None
+
+
+# The provenance banner `_provenance_lines` writes, read back. Both phrasings ("Computed
+# on <t> by assessor `<id>`" and the REPLAYED banner's "COMPUTED on <t> by assessor
+# `<id>`") name the tick that DECIDED the verdict, which is the identity that has to
+# match — a replayed report and the report it replays are the same judgement.
+_PROVENANCE_RE = re.compile(
+    r"COMPUTED\s+on\s+(?P<assessed_at>\S+?)\s+by\s+assessor\s+`(?P<assessor>[^`]+)`",
+    re.I)
+
+
+def parse_provenance(md: str) -> dict:
+    """{assessor, assessed_at} recovered from a rendered assessment, {} if it says
+    neither (a report predating provenance pinning)."""
+    m = _PROVENANCE_RE.search(md or "")
+    if not m:
+        return {}
+    got = m.groupdict()
+    if got.get("assessor", "").startswith("unknown"):
+        got.pop("assessor")
+    return {k: v for k, v in got.items() if v}
+
+
+def cross_check(rep: dict, documents: dict[str, str]) -> list[str]:
+    """Do the documents this tick is about to publish agree with each other?
+
+    `documents` maps a phrasing kind (`assessment` / `report` / `pr`) to the RENDERED
+    text. Every one is parsed back and compared with `summary_counts(rep)`. Returns []
+    on agreement, else one line per disagreeing field — the caller's job is to refuse to
+    publish, not to reconcile. A tick that emits a report and an assessment whose counts
+    contradict each other has already lost the property that makes either one worth
+    reading, and picking a winner in code would hide which reader was wrong.
+
+    A document that states no counts at all (assessment error, clean/not-layered) is
+    skipped rather than failed — there is nothing to disagree with.
+    """
+    if rep.get("error") or rep.get("status") not in (None, "assessed"):
+        return []
+    want = summary_counts(rep)
+    bad = []
+    for kind, text in sorted(documents.items()):
+        got = parse_headline(kind, text)
+        if got is None:
+            continue
+        for field in HEADLINE:
+            if got[field] != want[field]:
+                bad.append(f"{rep.get('tool', '?')}: the {kind} document says "
+                           f"{field}={got[field]}, the assessment it renders says "
+                           f"{want[field]}")
+    return bad
+
+
 def _provenance_lines(rep: dict) -> list[str]:
     """Was this judgement COMPUTED on this tick, or RESTORED from an earlier one?
 
@@ -906,30 +1080,46 @@ def _provenance_lines(rep: dict) -> list[str]:
             f"range is re-judged rather than replayed.{how}", ""]
 
 
+def _derived_lines(counts: dict) -> list[str]:
+    """A count that had to be INFERRED must say so where it is read.
+
+    `summary_counts` reaches arithmetic only for a report carrying neither the summary
+    list nor the rows — nothing this codebase writes today, but archived reports are
+    read years later and a number that was computed by subtraction is a different claim
+    from one that was counted. Saying which is which is the whole reason the fail-safe
+    direction is safe to keep: an inferred count that over-states the work is honest
+    only while the reader knows it was inferred.
+    """
+    if not counts.get("derived"):
+        return []
+    return [f"> **⚠ INFERRED, not counted: {', '.join(counts['derived'])}.** This report "
+            "carries neither the summary list nor the per-commit rows those categories are "
+            "counted from, so the numbers above are arithmetic over the categories that ARE "
+            "present. They err toward 'needs review'.", ""]
+
+
 def render_md(rep: dict) -> str:
     tool = rep.get("tool", "?")
     if rep.get("error"):
         return f"### {tool}: assessment error — {rep['error']}\n"
     if rep.get("status") in ("clean", "not_layered"):
         return f"### {tool}: {rep['status']} — nothing to assess.\n"
-    n_carried = len(rep.get("carried") or [])
-    n_decided = len(rep.get("decided") or [])
-    n_safe = len(rep.get("clearly_safe") or [])
-    n_open = len(rep.get("outstanding", [])) if "outstanding" in rep else \
-        rep["commit_count"] - n_safe - n_carried - n_decided
+    n = summary_counts(rep)
+    n_carried, n_decided = n["carried"], n["decided"]
+    n_safe, n_open = n["clearly_safe"], n["outstanding"]
     L = [f"## {tool} — selective-merge assessment",
-         f"Range **{rep['base_release']} → {rep['latest']}** · {rep['commit_count']} upstream "
+         f"Range **{rep['base_release']} → {rep['latest']}** · {n['commits']} upstream "
          f"commit(s) · our branch carries patches over "
          f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
          f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**", ""]
     L += _provenance_lines(rep)
+    L += _derived_lines(n)
     # An assessment that did not complete must SAY SO, above the table, before a reader
     # starts triaging cells that no classifier ever filled in.
-    n_na = len(rep["not_assessed"]) if "not_assessed" in rep else \
-        len([c for c in rep.get("commits") or [] if c.get("category") == NOT_ASSESSED])
+    n_na = n["not_assessed"]
     if n_na:
-        L += [f"> **⚠ THE JUDGE DID NOT COMPLETE — {n_na} of {rep['commit_count']} commit(s) were "
+        L += [f"> **⚠ THE JUDGE DID NOT COMPLETE — {n_na} of {n['commits']} commit(s) were "
               "NOT ASSESSED.** Their `cat` / `risk` / `rel` cells read `not-assessed`: no "
               "classifier reached a conclusion about them. That is an ABSENCE OF ANALYSIS, not "
               "a finding — do not read those rows as triage. `conflict` and `clean-pick` are "
@@ -945,8 +1135,7 @@ def render_md(rep: dict) -> str:
               "behind by design after a selective adoption — being 'behind' a tag is not "
               "the same as owing work.", ""]
     # The doctrine's confirmation step, when it CONTRADICTS the model (vibeic/vibeic-eda#5).
-    n_unreach = len(rep["unreachable"]) if "unreachable" in rep else \
-        len([c for c in rep.get("commits") or [] if c.get("reachability_conflict")])
+    n_unreach = n["unreachable"]
     if n_unreach:  # DISCLOSED above the table, like the not-assessed banner
         L += [f"> **⚠ MODEL / SURFACE DISAGREEMENT on {n_unreach} commit(s).** The judge called "
               "them relevant; the deterministic reachability check found the symbols they "
@@ -956,8 +1145,7 @@ def render_md(rep: dict) -> str:
               "may still be right (a NULL guard in a tool we run headless is harmless); what is "
               "wrong is the EVIDENCE, and the evidence is what travels into a merge PR.", ""]
     # The judgement did not reproduce (vibeic/vibeic-eda#6) — same disclosure shape.
-    n_unconf = len(rep["unconfirmed"]) if "unconfirmed" in rep else \
-        len([c for c in rep.get("commits") or [] if c.get("sampling_conflict")])
+    n_unconf = n["unconfirmed"]
     if n_unconf:
         L += [f"> **⚠ JUDGEMENT DID NOT REPRODUCE on {n_unconf} commit(s).** Each had already "
               "cleared every other auto-adopt condition, so it was re-judged by independent "
