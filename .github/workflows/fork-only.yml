@@ -7,7 +7,15 @@
 # remembered it.
 #
 # This runs in seconds and needs no build, so there is no reason for it to be
-# anything but required.
+# anything but required.#
+# WHERE THIS ACTUALLY RUNS TODAY. Measured 2026-07-29: `actions/runs` on this
+# repo reports total_count 0 — no workflow has ever executed here, including the
+# pre-existing image-version-sync, while `actions/permissions` reports enabled.
+# So this file is registered and does not fire, and a rule enforced only here
+# would be enforced nowhere. The 05:30 fork-gatekeeper tick runs the same two
+# checks against the checked-out repo, which is what enforces the rule until
+# Actions runs. This workflow is correct and stays; it starts protecting PRs the
+# day Actions is turned on, and needs no change then.
 name: fork-only
 
 on:

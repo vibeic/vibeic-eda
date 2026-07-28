@@ -81,6 +81,22 @@ every smoke test still passes while the image quietly ships someone else's
 binary. Provenance is recorded inside each artefact during its own build —
 a tag can be moved, a file in a layer cannot.
 
+## Where the checks actually run
+
+`.github/workflows/fork-only.yml` runs `check_fork_only.py` and
+`check_pins_agree.py` on every push and PR — but measured 2026-07-29, **no
+workflow has ever executed on this repo**: `actions/runs` reports `total_count:
+0`, for every workflow including the pre-existing `image-version-sync`, while
+`actions/permissions` reports Actions enabled.
+
+So until that is resolved, the workflow is registered and does not fire. What
+actually enforces the rule is the **05:30 fork-gatekeeper tick**, which runs both
+checks against the checked-out repo and logs the verdict; a failure sets the
+tick's exit code without gating the upstream tracking it also does.
+
+`check_image_provenance.py` runs in `release.yml`, on the self-hosted runner, and
+has the same caveat.
+
 ## Adding a tool
 
 1. Fork it into `vibeic/` (owner rule, 2026-07-29 — the image consumes our forks

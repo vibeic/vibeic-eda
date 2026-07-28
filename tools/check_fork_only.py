@@ -18,6 +18,12 @@ Two things are checked, and they are different:
 `ARG` defaults are checked as well as the literal URLs, because a default that
 points upstream is what a build with no `--build-arg` will actually use.
 
+WHERE THIS RUNS. `.github/workflows/fork-only.yml` calls it on every push and PR,
+but measured 2026-07-29 no workflow has ever executed on this repo (`actions/runs`
+-> total_count 0) though Actions reports enabled. Until that changes, the thing
+that actually runs this is the 05:30 fork-gatekeeper tick, which invokes it
+against the checked-out repo and logs the verdict.
+
 WHAT THIS DOES NOT CHECK, stated so a green run is not read as more than it is:
 the base image itself (`hpretl/iic-osic-tools`) still supplies ~35 tools we do
 not use and therefore do not fork. This checks what we BUILD and what we COPY,
