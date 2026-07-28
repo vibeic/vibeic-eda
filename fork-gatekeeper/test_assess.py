@@ -1830,24 +1830,65 @@ def test_the_provenance_stamp_tells_two_vintages_of_one_date_apart():
                                            if k not in ("assessor", "assessed_at")})) == {}
 
 
-def _tick_fixture(state: Path, rep, render=None, ledgers=None, on_cross_check=None):
+def _pin_fleet(gk, where: Path, tools, extra: dict | None = None) -> Path:
+    """Point the configuration gate (vibeic/vibeic-eda#10) at a throwaway checkout whose
+    COMMITTED fleet list names exactly `tools`, and return that checkout.
+
+    The gate is exercised for real rather than stubbed — the tick tests below run through
+    the same `git show HEAD:…` comparison production runs through. What the fixture
+    supplies is a repository to compare against: without one the tests would be asserting
+    on the state of whichever checkout the suite happens to run in, which is both flaky
+    and, once this suite is run from a source tarball, meaningless.
+
+    `extra` overwrites the file AFTER the commit — that is how a test injects the
+    hand-edit this gate exists to catch. Pass a dict for a different configuration, or a
+    string for the same configuration in different bytes.
+    """
+    import subprocess
+    where.mkdir(parents=True, exist_ok=True)
+    fleet = {"org": "vibeic", "forks": [{"tool": t, "role": "test",
+                                         "upstream": f"them/{t}"} for t in tools]}
+    (where / "FORKS.json").write_text(json.dumps(fleet, indent=2) + "\n")
+    (where / "ENHANCEMENTS.json").write_text("{}\n")
+    run = lambda *a: subprocess.run(("git", "-C", str(where)) + a,  # noqa: E731
+                                    capture_output=True, check=True)
+    if not (where / ".git").exists():
+        run("init", "-q")
+    run("add", "FORKS.json", "ENHANCEMENTS.json")
+    if subprocess.run(("git", "-C", str(where), "diff", "--cached", "--quiet"),
+                      capture_output=True).returncode:
+        run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fleet")
+    if extra is not None:
+        (where / "FORKS.json").write_text(
+            extra if isinstance(extra, str) else json.dumps(extra, indent=2) + "\n")
+    gk.fleet_config.HERE = where
+    return where
+
+
+def _tick_fixture(state: Path, rep, render=None, ledgers=None, on_cross_check=None,
+                  fleet_extra=None):
     """Run a REAL tick against a prepared state dir — no network, no PR, no page.
 
     `disc.main` (which re-seeds the ledgers over the GitHub API) and `assess` (which
     spends the judge) are the only things stubbed; everything from the summary branch
-    to the files on disk is the production path.
+    to the files on disk is the production path — including the vibeic/vibeic-eda#10
+    configuration gate, which `_pin_fleet` gives a real committed fleet list to check
+    against.
     """
     (state / "ledger").mkdir(parents=True, exist_ok=True)
-    for name, led in (ledgers or {"magic": {
-            "tool": "magic", "integrated": True, "behind_releases": 4,
-            "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
-            "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
-            "pinned_ref_full": "19185c197fba" + "0" * 28}}).items():
+    leds = ledgers or {"magic": {
+        "tool": "magic", "integrated": True, "behind_releases": 4,
+        "upstream": "RTimothyEdwards/magic", "image_version": "0.2.30",
+        "base_release": "8.3.674", "upstream_latest_release": "8.3.678",
+        "pinned_ref_full": "19185c197fba" + "0" * 28}}
+    for name, led in leds.items():
         (state / "ledger" / f"{name}.json").write_text(json.dumps(led))
     os.environ["GK_STATE_DIR"] = str(state)
     merge_pr = os.environ.pop("GK_MERGE_PR", None)   # never open a real cherry-pick PR
+    gk = _gk()
+    was = gk.fleet_config.HERE
     try:
-        gk = _gk()
+        _pin_fleet(gk, state / "_src", sorted(leds), extra=fleet_extra)
         gk.disc = type("D", (), {"main": staticmethod(lambda: None)})()
         gk.pr_notify = None
         gk.build_page = type("B", (), {"DEFAULT_OUT": None,
@@ -1873,6 +1914,7 @@ def _tick_fixture(state: Path, rep, render=None, ledgers=None, on_cross_check=No
         gk.assess_release = _Shim()
         return gk, gk.tick()
     finally:
+        gk.fleet_config.HERE = was      # the module object is shared across _load calls
         os.environ.pop("GK_STATE_DIR", None)
         if merge_pr is not None:
             os.environ["GK_MERGE_PR"] = merge_pr
@@ -2243,11 +2285,13 @@ def test_a_vendored_candidate_is_not_handed_to_the_arg_bumping_harness():
         return {}
 
     gk._run_harness = _spy
+    was = gk.fleet_config.HERE
     with tempfile.TemporaryDirectory() as t:
         state = Path(t)
         os.environ["GK_STATE_DIR"] = str(state)
         os.environ["GK_RUN_HARNESS"] = "1"
         try:
+            _pin_fleet(gk, state / "_src", ["Zeta", "direct"])
             gk.STATE = Path(state)
             gk.LEDGER = Path(state) / "ledger"
             gk.REPORTS = Path(state) / "reports"
@@ -2276,6 +2320,7 @@ def test_a_vendored_candidate_is_not_handed_to_the_arg_bumping_harness():
             gk._image_build_cfg = lambda: {"cmd": "true"}
             gk.tick()
         finally:
+            gk.fleet_config.HERE = was
             os.environ.pop("GK_STATE_DIR", None)
             os.environ.pop("GK_RUN_HARNESS", None)
     assert seen.get("cands") == ["direct"], seen
@@ -2496,6 +2541,247 @@ def test_a_clean_fork_still_publishes_its_unparseable_row():
     assert A.cross_check(clean, {"report": row["note"],
                                  "assessment": A.render_md(clean)}) == [], \
         "the published CLEAN row was failed for stating counts it never had"
+# ── vibeic/vibeic-eda#10 — the configuration a tick runs on ─────────────────────
+#
+# For months the cron read a working-tree FORKS.json carrying three forks (OpenSTA,
+# ALIGN-public, ALIGN-pdk-sky130) that no commit contained. The report was a faithful
+# summary of a premise that existed on one machine; a fresh clone would have produced a
+# 12-row report whose own headline count agreed with itself.
+
+
+def _fc():
+    return _load("fleet_config")
+
+
+def _tick_and_read(state: Path, **kw):
+    """Run a tick and return (summary, published markdown)."""
+    gk, summary = _tick_fixture(state, _rep(commit_count=0), **kw)
+    return gk, summary, (state / "reports" / f"{summary['date']}.md").read_text()
+
+
+def test_a_hand_edited_fleet_list_refuses_the_tick_and_names_the_entries():
+    """The defect itself. A fork added to the file on the box and to no commit must stop
+    the tick — and the refusal must say WHICH forks, because "the fleet list differs"
+    sends the operator back to diffing two files by hand, which is the state this check
+    exists to end."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        hand_edited = {"org": "vibeic", "forks": [
+            {"tool": "magic", "role": "test", "upstream": "them/magic"},
+            {"tool": "OpenSTA", "role": "sta", "upstream": "The-OpenROAD-Project/OpenSTA"}]}
+        try:
+            _tick_fixture(state, _rep(commit_count=0), fleet_extra=hand_edited)
+        except Exception as e:  # fleet_config.FleetConfigUnversioned
+            assert type(e).__name__ == "FleetConfigUnversioned", repr(e)
+            assert "OpenSTA" in str(e), str(e)
+            assert "in no commit" in str(e), str(e)
+            assert "nothing published" in str(e), str(e)
+        else:
+            raise AssertionError("the tick published from an uncommitted fleet list")
+        assert list((state / "reports").glob("*")) == [] \
+            if (state / "reports").exists() else True, "a report was published"
+
+
+def test_the_refusal_names_a_changed_field_not_only_an_added_fork():
+    """A `role` reworded on the box is not cosmetic: `assess_release` hands it to the
+    judge as the context the classification is made in. A check that only counted
+    entries would clear it."""
+    fc = _fc()
+    committed = {"org": "vibeic", "forks": [
+        {"tool": "magic", "role": "DRC", "upstream": "them/magic"}]}
+    on_disk = {"org": "vibeic", "forks": [
+        {"tool": "magic", "role": "DRC / layout-edit", "upstream": "them/magic"}]}
+    lines = fc.describe("FORKS.json", committed, on_disk)
+    assert any("magic.role" in ln and "DRC" in ln and "layout-edit" in ln
+               for ln in lines), lines
+    # …and a repointed upstream, which changes which releases we are compared against
+    moved = {"org": "vibeic", "forks": [
+        {"tool": "magic", "role": "DRC", "upstream": "someone-else/magic"}]}
+    assert any("magic.upstream" in ln for ln in fc.describe("FORKS.json", committed, moved))
+    # a top-level key outside the fork list is reported too
+    assert any("org" in ln for ln in
+               fc.describe("FORKS.json", committed, {**committed, "org": "other"}))
+
+
+def test_the_committed_state_does_not_fire():
+    """The other half. A check that cannot pass is a check that gets deleted."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        _, summary, md = _tick_and_read(state)
+        assert summary["fleet_config"]["state"] == "committed", summary["fleet_config"]
+        assert summary["fleet_config"]["fatal"] == []
+        assert "UNCOMMITTED" not in md and "UNVERSIONED" not in md, md
+
+
+def test_the_report_names_the_configuration_that_produced_it():
+    """vibeic/vibeic-eda#7 made the report name the ASSESSOR; the same row must name the
+    CONFIGURATION. Two reports of one fleet produced from two fleet lists are otherwise
+    indistinguishable — which is exactly how three untracked forks went unnoticed."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        _, summary, md = _tick_and_read(state)
+        sha = summary["fleet_config"]["commit"]
+        assert sha and len(sha) == 40, summary["fleet_config"]
+        assert sha[:12] in md, md
+        assert "FORKS.json" in md and "committed" in md, md
+        assert summary["fleet_config"]["entries"] == 1, summary["fleet_config"]
+        # the stamp is above the counts: it is the premise they summarise
+        assert md.index("FORKS.json") < md.index("**MERGED"), md
+
+
+def test_a_report_whose_markdown_lost_the_configuration_stamp_is_caught():
+    """The round trip. The JSON twin knowing which fleet list produced the day is no use
+    to an operator reading the markdown; a formatter that drops the row leaves the
+    document people actually open naming no configuration at all."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        gk, summary, md = _tick_and_read(state)
+        assert gk.verify_documents(summary["date"]) == []
+        stamp = gk.fleet_config.stamp_line(summary["fleet_config"])
+        (state / "reports" / f"{summary['date']}.md").write_text(md.replace(stamp, ""))
+        bad = gk.verify_documents(summary["date"])
+        assert any("configuration stamp" in b for b in bad), bad
+
+
+def test_a_report_written_before_the_stamp_existed_is_skipped_not_failed():
+    """Every report published before 2026-07-28 carries no `fleet_config`. `--verify`
+    must still be usable on them — a guard that fails on all its own history is one an
+    operator stops running."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        gk, summary, md = _tick_and_read(state)
+        rp = state / "reports" / f"{summary['date']}.json"
+        old = {k: v for k, v in summary.items() if k != "fleet_config"}
+        rp.write_text(json.dumps(old))
+        (state / "reports" / f"{summary['date']}.md").write_text(
+            md.replace(gk.fleet_config.stamp_line(summary["fleet_config"]), ""))
+        assert gk.verify_documents(summary["date"]) == []
+
+
+def test_formatting_only_drift_warns_and_publishes_rather_than_refusing():
+    """A re-indented file changes no fork, no upstream and no role, so nothing audited
+    can have changed. Killing the day's report over it teaches operators that this check
+    is noise — and a check believed to be noise is a check that gets commented out."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        # the same document in different bytes: compact, keys reordered, no newline
+        reindented = ('{"forks": [{"upstream": "them/magic", "role": "test", '
+                      '"tool": "magic"}], "org": "vibeic"}')
+        gk, summary = _tick_fixture(state, _rep(commit_count=0), fleet_extra=reindented)
+        md = (state / "reports" / f"{summary['date']}.md").read_text()
+        assert summary["fleet_config"]["state"] == "formatting", summary["fleet_config"]
+        assert summary["fleet_config"]["fatal"] == []
+        assert "UNCOMMITTED (formatting only)" in md, md
+
+
+def test_a_source_tree_that_is_not_a_checkout_publishes_an_explicit_marker():
+    """Nothing can vouch for the configuration, and refusing would break every
+    deployment that is not a git checkout — the fastest route to the check being
+    deleted. The report says so instead, in its header, permanently."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        src = state / "plain"
+        src.mkdir()
+        (src / "FORKS.json").write_text(json.dumps(
+            {"org": "vibeic", "forks": [{"tool": "magic", "role": "t",
+                                         "upstream": "them/magic"}]}))
+        gk = _gk()
+        was = gk.fleet_config.HERE
+        try:
+            gk.fleet_config.HERE = src
+            st = gk.fleet_config.check()
+            assert st["state"] == "unversioned", st
+            assert st["fatal"] == [], st
+            assert "UNVERSIONED" in gk.fleet_config.stamp_line(st)
+        finally:
+            gk.fleet_config.HERE = was
+
+
+def test_the_override_publishes_but_cannot_buy_a_clean_report():
+    """An escape hatch that leaves no mark is a slower way of deleting the check."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        hand_edited = {"org": "vibeic", "forks": [
+            {"tool": "magic", "role": "test", "upstream": "them/magic"},
+            {"tool": "OpenSTA", "role": "sta", "upstream": "them/OpenSTA"}]}
+        os.environ[_fc().OVERRIDE_ENV] = "1"
+        try:
+            gk, summary = _tick_fixture(state, _rep(commit_count=0),
+                                        fleet_extra=hand_edited)
+        finally:
+            os.environ.pop(_fc().OVERRIDE_ENV, None)
+        md = (state / "reports" / f"{summary['date']}.md").read_text()
+        assert summary["fleet_config"]["state"] == "modified", summary["fleet_config"]
+        assert summary["fleet_config"]["override"] is True
+        assert "UNCOMMITTED" in md and "GK_ALLOW_UNVERSIONED_FLEET" in md, md
+
+
+def test_a_ledger_the_fleet_list_does_not_name_refuses_the_tick():
+    """The half that keeps the stamp from being decoration. The report's rows come from
+    the ledger directory, which `discover_forks.main` writes into and never prunes — so a
+    fork dropped from the fleet list keeps publishing the last verdict anyone computed
+    for it, frozen and indistinguishable from a live row. A report that names its fleet
+    list in the header while carrying rows from outside it is a worse lie than one that
+    names nothing."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        (state / "ledger").mkdir(parents=True)
+        (state / "ledger" / "ghost.json").write_text(json.dumps(
+            {"tool": "ghost", "integrated": True, "behind_releases": 0}))
+        try:
+            _tick_fixture(state, _rep(commit_count=0), ledgers={"magic": {
+                "tool": "magic", "integrated": True, "behind_releases": 0}})
+        except Exception as e:
+            assert type(e).__name__ == "FleetConfigUnversioned", repr(e)
+            assert "ghost" in str(e), str(e)
+            assert "nothing published" in str(e), str(e)
+        else:
+            raise AssertionError("a row the fleet list does not authorise was published")
+        assert list((state / "reports").glob("*.md")) == [] \
+            if (state / "reports").exists() else True
+
+
+def test_the_tick_never_writes_its_own_fleet_list():
+    """vibeic/vibeic-eda#10 constraint 3. A tick that regenerated the list from discovery
+    would take away the operator's ability to say "track this fork" and make every check
+    above vacuous — a self-populating input cannot disagree with itself.
+
+    Compared against the bytes `_pin_fleet` put there, so a tick that rewrites the file
+    is caught even though the fixture would restore it before the next run."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        _tick_fixture(state, _rep(commit_count=0))
+        assert json.loads((state / "_src" / "FORKS.json").read_text()) == {
+            "org": "vibeic",
+            "forks": [{"tool": "magic", "role": "test", "upstream": "them/magic"}]}, \
+            "the tick rewrote its own fleet list — it must be an input, never an output"
+
+
+def test_the_committed_fleet_list_carries_the_forks_the_box_was_tracking():
+    """The regression guard for #10 itself. These three were live on the machine and in
+    no commit; a checkout reset, a re-clone or a restore-from-remote would have dropped
+    them silently, because the counts are derived from the file and the file is the
+    ground truth for its own audit."""
+    forks = json.loads((Path(__file__).parent / "FORKS.json").read_text())["forks"]
+    tools = {f["tool"] for f in forks}
+    for t in ("OpenSTA", "ALIGN-public", "ALIGN-pdk-sky130"):
+        assert t in tools, f"{t} was tracked on the box and is missing from the commit"
+    assert len(tools) == len(forks), "duplicate tool in the fleet list"
+    # every fleet entry carries what the audit reads: where upstream is, and the role
+    # the judge is given as context
+    for f in forks:
+        assert f.get("upstream") and f.get("role"), f
+
+
+def test_the_fleet_list_and_the_published_page_describe_the_same_fleet():
+    """`build_page` derives the monitor page's "all N forks" from ENHANCEMENTS.json, not
+    from the fleet list — so the two drifting apart publishes a count for a fleet nobody
+    audits. Both files were hand-edited on the box together; they must land together."""
+    here = Path(__file__).parent
+    fleet = {f["tool"] for f in json.loads((here / "FORKS.json").read_text())["forks"]}
+    enh = set(json.loads((here / "ENHANCEMENTS.json").read_text()))
+    assert fleet == enh, {"only in FORKS.json": sorted(fleet - enh),
+                          "only in ENHANCEMENTS.json": sorted(enh - fleet)}
 
 
 if __name__ == "__main__":

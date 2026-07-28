@@ -61,6 +61,7 @@ REG_CFG = HERE / "regression.json"    # config ships WITH the source
 sys.path.insert(0, str(HERE))
 import discover_forks as disc  # noqa: E402
 import build_page  # noqa: E402
+import fleet_config  # noqa: E402  — is the configuration we ran on the committed one?
 try:
     import pr_notify  # opens a vibe-ic PR on actionable ticks (replaced email)
 except Exception:  # noqa: BLE001
@@ -245,6 +246,35 @@ def unassessed_drift(led: dict) -> str:
 
 
 def tick() -> dict:
+    # ── CONFIGURATION GATE (vibeic/vibeic-eda#10) ────────────────────────────
+    # Checked FIRST, before a single upstream call: a tick running on a fleet list that
+    # exists in no commit must not spend the API budget of a fleet-wide discovery to
+    # produce a report nobody can reproduce. See fleet_config for the severity split —
+    # a configuration that differs only in formatting, or that cannot be checked at all,
+    # warns and stamps rather than refusing, because a check that fires on states the
+    # operator considers normal is a check that gets commented out.
+    fleet = fleet_config.check()
+    for line in fleet.get("detail") or []:
+        print(f"  [fleet-config] {line}")
+    for name, st in fleet["files"].items():
+        if name != fleet_config.FLEET_FILE and st["state"] != "committed":
+            # Reported, not fatal: ENHANCEMENTS.json feeds the published monitor page's
+            # counts, so drift there mis-states a public page — but it reaches no verdict
+            # in this report, and stopping the audit over it would trade a wrong number
+            # on a web page for no audit at all.
+            print(f"  [fleet-config] {name} is {st['state']} — the monitor page's counts "
+                  f"come from a file that is not the committed one")
+    if fleet["fatal"]:
+        for f in fleet["fatal"]:
+            print(f"  [FATAL] {f}")
+        raise fleet_config.FleetConfigUnversioned(
+            "; ".join(fleet["fatal"]) +
+            f" — nothing published. Commit it, or set {fleet_config.OVERRIDE_ENV}=1 to "
+            f"publish anyway (the report then says so).")
+    if fleet["override"]:
+        print(f"  [fleet-config] publishing on an UNCOMMITTED fleet list because "
+              f"{fleet_config.OVERRIDE_ENV} is set; the report records it")
+
     print(f"[{_now_iso()}] gatekeeper tick — re-seeding ledgers…")
     disc.main()
     date = _now_date()
@@ -259,6 +289,22 @@ def tick() -> dict:
         leds[p] = led
         if led.get("integrated") and (led.get("behind_releases") or 0) > 0:
             candidates.append(led)
+
+    # A row the fleet list does not authorise (vibeic/vibeic-eda#10). Nothing prunes the
+    # ledger directory, so a fork dropped from the list keeps publishing the last verdict
+    # anyone computed for it — and a report that names its fleet list in the header while
+    # carrying rows from outside it is a worse lie than one that names nothing. Not
+    # repaired automatically: deleting a ledger discards its sync_log, which is the audit
+    # trail, and a tick that edits its own inputs is the shape #10 forbids.
+    phantom = fleet_config.phantom_rows(led.get("tool") for led in leds.values())
+    if phantom:
+        for t in phantom:
+            print(f"  [FATAL] {t}: a ledger is about to publish a row for a fork "
+                  f"{fleet_config.FLEET_FILE} does not name")
+        raise fleet_config.FleetConfigUnversioned(
+            f"{len(phantom)} ledger(s) not named by {fleet_config.FLEET_FILE} "
+            f"({', '.join(phantom)}) — nothing published. Either restore the entries to "
+            f"the fleet list, or remove the stale ledger(s) from {LEDGER}.")
 
     # SELECTIVE-MERGE doctrine (owner 2026-07-17): a behind fork gets ASSESSED, not blindly
     # rebased. Per candidate, enumerate the upstream commits and triage each (category /
@@ -435,6 +481,10 @@ def tick() -> dict:
                 img_ver = m.group(1)
     summary = {"date": date, "generated_at": _now_iso(),
                "image_version": img_ver,
+               # WHICH fleet list produced this (vibeic/vibeic-eda#10). The `files`
+               # sub-dict is dropped: the report states the configuration it ran on, not
+               # a second copy of the checker's working notes.
+               "fleet_config": {k: v for k, v in fleet.items() if k != "files"},
                "counts": {v: sum(1 for r in results if r["verdict"] == v)
                           for v in ("MERGED", "DEFERRED", "CLEAN", "NOT_LAYERED")},
                "results": results}
@@ -485,6 +535,24 @@ def verify_documents(date: str) -> list[str]:
         summary = json.loads(rp.read_text())
     except (OSError, json.JSONDecodeError) as e:
         return [f"cannot read the daily report {rp}: {e}"]
+    # The CONFIGURATION stamp must survive to the document people read
+    # (vibeic/vibeic-eda#10). Checking the rendered markdown rather than the dict it was
+    # built from is the point, exactly as for the counts above: a formatter that drops
+    # the row leaves a report that names no fleet list while its JSON twin does, and the
+    # markdown is the half an operator opens. Reports written before the stamp existed
+    # carry no `fleet_config` and are skipped rather than failed.
+    if summary.get("fleet_config"):
+        want = fleet_config.stamp_line(summary["fleet_config"])
+        try:
+            md = (REPORTS / f"{date}.md").read_text()
+        except OSError as e:
+            out.append(f"the daily report {date}.json has no markdown twin ({e})")
+        else:
+            if want not in md:
+                out.append(f"the daily report states it ran on "
+                           f"{summary['fleet_config'].get('state')} "
+                           f"{summary['fleet_config'].get('commit')}, but {date}.md "
+                           f"does not carry that configuration stamp")
     if assess_release is None:
         return ["assess_release is not importable — the published counts cannot be parsed"]
     adir = REPORTS / "assessments"
@@ -567,8 +635,13 @@ def _report_md(s: dict) -> str:
     lines = [f"# EDA Fork Gatekeeper — daily report {s['date']}", "",
              f"Generated {s['generated_at']}. Image `vibeic/vibeic-eda:{s.get('image_version')}`. "
              f"Policy: track **releases** (not commits); a new upstream release triggers an "
-             f"image rebuild; **option B** — auto-merge on a green rebuild, defer on red.", "",
-             f"**MERGED {c['MERGED']} · DEFERRED {c['DEFERRED']} · CLEAN {c['CLEAN']} · "
+             f"image rebuild; **option B** — auto-merge on a green rebuild, defer on red.", ""]
+    # WHICH fleet list produced this report (vibeic/vibeic-eda#10). Placed above the
+    # counts, because it is the premise those counts are a summary OF: a headline that
+    # agrees with itself says nothing about whether the right forks were audited.
+    if s.get("fleet_config"):
+        lines += [fleet_config.stamp_line(s["fleet_config"]), ""]
+    lines += [f"**MERGED {c['MERGED']} · DEFERRED {c['DEFERRED']} · CLEAN {c['CLEAN']} · "
              f"NOT_LAYERED {c['NOT_LAYERED']}**", "",
              "| Tool | Verdict | New releases | Target | Note |", "|---|---|---|---|---|"]
     order = {"MERGED": 0, "DEFERRED": 1, "CLEAN": 2, "NOT_LAYERED": 3}
