@@ -30,14 +30,17 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent          # version-controlled source
-STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+sys.path.insert(0, str(HERE))
+import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
+
+STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 FORKS = json.loads((HERE / "FORKS.json").read_text())["forks"]
 ORG = "vibeic"
@@ -377,6 +380,11 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
 
 
 def main():
+    # vibeic/vibeic-eda#12. Checked BEFORE the first upstream call: the ledger directory is
+    # shared production state (#10 proved a stale ledger publishes a frozen row that reads
+    # exactly like a live one), so a process that may not write it must not spend a
+    # fleet-wide discovery finding that out.
+    gk_state.require_writable(LEDGER, "the fork ledgers")
     LEDGER.mkdir(parents=True, exist_ok=True)
     df = _gh_file(EDA_REPO, "Dockerfile") or ""
     pins = parse_dockerfile_pins(df)
@@ -402,6 +410,7 @@ def main():
                 pass
         led = discover_one(fork, pins, image_version)
         led["sync_log"], led["last_sync"] = sync_log, last_sync
+        led[gk_state.PROVENANCE_KEY] = gk_state.provenance()
         prev.write_text(json.dumps(led, indent=2, ensure_ascii=False) + "\n")
         index.append({k: led.get(k) for k in (
             "tool", "role", "upstream", "forked_at", "pinned_ref", "vibeic_branch",
@@ -413,7 +422,9 @@ def main():
         print(f"  {fork['tool']:16} {tag}")
     (LEDGER / "index.json").write_text(json.dumps(
         {"generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-         "image_version": image_version, "forks": index}, indent=2, ensure_ascii=False) + "\n")
+         "image_version": image_version,
+         gk_state.PROVENANCE_KEY: gk_state.provenance(), "forks": index},
+        indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {len(index)} ledgers · image {image_version} → {LEDGER}")
 
 

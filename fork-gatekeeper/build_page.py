@@ -17,14 +17,18 @@ import json
 import os
 import base64
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent          # version-controlled source
-STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+sys.path.insert(0, str(HERE))
+import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
+
+STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 REPORTS = STATE / "reports"
-DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or "/home/reyerchu/vibeic.ai/eda-forks.html")
+DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or gk_state.PRODUCTION_PAGE)
 
 # --- NDA redaction at the publish boundary (BINDING) ---------------------------
 # The ledgers are seeded from the forks' own commit messages, some of which name a
@@ -61,7 +65,12 @@ def _load_ledgers() -> list[dict]:
         if p.name == "index.json":
             continue
         try:
-            out.append(json.loads(p.read_text()))
+            # The whole ledger dict is embedded into the published page, so the #12
+            # provenance block — which names a local checkout path and a hostname —
+            # comes off at the load boundary. What an internal state file records and
+            # what a public page carries are two questions, exactly as for the NDA
+            # redaction below.
+            out.append(gk_state.strip_provenance(json.loads(p.read_text())))
         except json.JSONDecodeError:
             pass
     # OpenROAD/yosys first (most active), then by pending desc
@@ -74,7 +83,7 @@ def _latest_report() -> dict | None:
     if not js:
         return None
     try:
-        return json.loads(js[-1].read_text())
+        return gk_state.strip_provenance(json.loads(js[-1].read_text()))
     except json.JSONDecodeError:
         return None
 
@@ -510,6 +519,13 @@ def build_footer_site(out: Path) -> str:
 
 
 def build(out: Path):
+    # vibeic/vibeic-eda#12. The published page is the third shared production artefact
+    # with the same exposure as the cache and the ledgers: it is derived from whatever
+    # state THIS process happened to read, so a run against an empty or scratch state
+    # directory would republish the public page from it. `--out /tmp/page.html` is the
+    # ordinary way to render one by hand and is unaffected.
+    gk_state.require_writable(out, "the published monitor page",
+                              "Render one somewhere else with --out /tmp/page.html")
     ledgers = _load_ledgers()
     report = _latest_report()
     enh = _load_enh()

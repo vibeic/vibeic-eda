@@ -28,7 +28,10 @@ from pathlib import Path
 
 from _nda_tokens import find as _nda_find
 
-STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+import gk_state  # WHERE state lives (vibeic/vibeic-eda#12). Read-only here: this module
+                 # reads a ledger and writes only a PR body into a temp file.
+
+STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"
 FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 

@@ -29,6 +29,32 @@ comparison over an already-published day — use it after any manual re-assessme
 re-renders the assessment under its date-stamped filename and leaves the report that
 summarised the previous one in place.
 
+### One process may write the production state
+
+There is ONE production cache, ONE ledger directory and ONE reports directory
+(`~/.cache/eda-fork-gatekeeper`), and every guard above reads them. Until
+vibeic/vibeic-eda#12 any process that imported these modules wrote them: on 2026-07-28
+the cron ran 05:30:01→05:32:30 and the assessment cache gained an entry stamped 07:07:21
+from a non-cron checkout, recorded nowhere. A poisoned cache entry does not make the
+day's documents disagree — it makes them agree on the wrong thing.
+
+`gk_state.py` now holds that policy for all five modules. **Reads are unchanged**:
+`--verify`, `build_page.py` and a by-hand `assess_release.py <tool>` all still see the
+production state, and a by-hand assessment still replays the cache for free. **Writes to
+the production locations require the process to say it is the production runner** —
+`run_tick.sh` exports `GK_PRODUCTION_WRITER=1`, and nothing else does. Every state file
+written now carries a `written_by` block (checkout, commit, dirty, entrypoint, pid, host,
+and whether it declared itself), stripped again at the publish boundary so it never
+reaches the public monitor page.
+
+Running anything by hand:
+
+```
+GK_STATE_DIR=/tmp/gk python3 gatekeeper.py          # own state, no permission needed
+python3 build_page.py --out /tmp/page.html          # render, don't publish
+GK_PRODUCTION_WRITER=1 python3 gatekeeper.py        # write the shared one on purpose
+```
+
 ## Reviewer-side gate: redundancy precheck (`pr_precheck.py`)
 
 Before landing ANY fork PR, run:
@@ -58,6 +84,8 @@ green. Wired via `regression.json`.
 
 | var | default | meaning |
 |---|---|---|
+| `GK_STATE_DIR` | `~/.cache/eda-fork-gatekeeper` | where cache/ledger/reports live |
+| `GK_PRODUCTION_WRITER` | unset | declares this process the production runner, so it may WRITE the shared state above (`run_tick.sh` sets it; nothing else should) |
 | `GK_FORKS_DIR` | `/home/reyerchu/vibe-ic-forks` | local clones of the fork repos |
 | `GK_EDA_CLONE` | `/home/reyerchu/vibeic-eda` | this repo's working checkout |
 | `GK_MODE` | `verify` | `verify` (staged) or `promote` (push on green) |

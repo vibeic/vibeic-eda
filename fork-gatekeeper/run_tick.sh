@@ -19,6 +19,13 @@ export HOME="${HOME:-/home/reyerchu}"
 # OUTSIDE the source tree, so running in place never dirties the repo.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export GK_STATE_DIR="${GK_STATE_DIR:-${HOME}/.cache/eda-fork-gatekeeper}"
+# THIS is the production runner (vibeic/vibeic-eda#12). GK_STATE_DIR says WHERE the state
+# is; it does not say who is entitled to overwrite it, and before #12 nothing did — any
+# checkout that imported assess_release and called assess() wrote the cache this tick
+# reads. The declaration lives here, in the cron entrypoint, and nowhere else: a run that
+# is not this script writes its own state (point GK_STATE_DIR elsewhere) or asks for the
+# shared one on purpose. Exported, so the integration harness this tick spawns inherits it.
+export GK_PRODUCTION_WRITER=1
 LOG_DIR="${GK_STATE_DIR}"
 LOCK="${LOG_DIR}/tick.lock"
 LOG="${LOG_DIR}/tick.log"

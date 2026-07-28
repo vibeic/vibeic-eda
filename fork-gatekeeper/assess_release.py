@@ -57,7 +57,10 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
-STATE = Path(os.environ.get("GK_STATE_DIR") or os.path.expanduser("~/.cache/eda-fork-gatekeeper"))
+sys.path.insert(0, str(HERE))
+import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
+
+STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"
 FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 # NOTE: the "cap the LLM payload" constant that used to sit here was dead — nothing in this
@@ -665,8 +668,15 @@ def _why_rejudged(priors: list[tuple[str | None, str | None]], qid: str, aid: st
             f"context/assessor pair ({qid}/{aid}) — re-judging, not replaying")
 
 
-def _cache_put(tool: str, key: str, rep: dict) -> None:
-    """Best-effort persist; a cache failure must never break the tick."""
+def _cache_put(tool: str, key: str, rep: dict) -> str:
+    """Best-effort persist; a cache failure must never break the tick.
+
+    Returns "" when the entry was stored, and the REASON otherwise — a silent no-op here
+    would be indistinguishable from a hit, and the whole point of the #12 refusal is that
+    it is visible in the report of the run that was refused.
+    """
+    if not gk_state.may_write(CACHE):
+        return gk_state.refusal_reason(CACHE, f"the {tool} assessment cache")
     try:
         CACHE.mkdir(parents=True, exist_ok=True)
         p = CACHE / f"{tool}.json"
@@ -678,8 +688,9 @@ def _cache_put(tool: str, key: str, rep: dict) -> None:
             blob = {}
         blob[key] = rep
         p.write_text(json.dumps(blob, ensure_ascii=False))
-    except OSError:
-        pass
+    except OSError as e:
+        return f"cache write failed: {e}"
+    return ""
 
 
 def assess(tool: str) -> dict:
@@ -890,7 +901,18 @@ def assess(tool: str) -> dict:
     # DISAGREEMENT is a finding and does cache.
     if not any(c.get("_note") for c in cls_map.values()) \
             and all(a.get("complete") for a in agreements.values()):
-        _cache_put(tool, ckey, rep)
+        # PROVENANCE (vibeic/vibeic-eda#12) travels INSIDE the stored entry, so a later
+        # reader of the cache — or of a replayed report, which carries the stored block
+        # verbatim — can say which checkout, which commit and which kind of process put
+        # it there. Built as a copy: the block is attached to `rep` only once the write
+        # actually happened, so a refused run never returns a report claiming to have
+        # written what it was refused.
+        prov = gk_state.provenance()
+        refused = _cache_put(tool, ckey, {**rep, gk_state.PROVENANCE_KEY: prov})
+        if refused:
+            rep["cache_write_refused"] = refused
+        else:
+            rep[gk_state.PROVENANCE_KEY] = prov
     if why_reassessed:
         # Deliberately set AFTER _cache_put: this explains THIS tick's miss and must
         # not be replayed later as though the next reader's tick re-judged anything.

@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import assess_release as A
+import gk_state as GK
 
 
 # A judgement the confirmation round agreed on. Every auto-adopt assertion below has to
@@ -3140,6 +3141,398 @@ def test_the_fleet_list_is_deliberately_NOT_part_of_the_assessor_identity():
     assert not any(p.name == "FORKS.json" for p in A.ASSESSOR_SOURCES), A.ASSESSOR_SOURCES
     # and the instrument that DID take the role is per-fork, which is the whole argument
     assert A.judge_context_id("magic", R_WIDE) != A.judge_context_id("netgen", R_WIDE)
+
+
+# ── vibeic/vibeic-eda#12 — one production state, writable by any process ──────────────
+#
+# `GK_STATE_DIR` defaulted to `~/.cache/eda-fork-gatekeeper` for EVERY checkout, so one
+# cache, one ledger directory and one reports directory were writable by any process that
+# imported these modules. On 2026-07-28 the cron ran 05:30:01→05:32:30 and
+# `assessment-cache/magic.json` gained an entry stamped 07:07:21 written by code at
+# 1b36787 — a non-cron process mutating the input the cron reads, recorded nowhere.
+#
+# Everything that landed that day sits downstream of that input: #4/#11 made the key a
+# claim about which judge answered which question, #10 made the tick refuse an
+# uncommitted fleet list, #7/#9 made it refuse documents that disagree. A poisoned entry
+# does not make documents disagree — it makes them agree on the wrong thing.
+#
+# The tests below relocate the PRODUCTION constants to a throwaway directory. What is
+# under test is the policy "is this the shared production location, and did this process
+# say it is the production runner", not the literal path — and relocating is what lets the
+# real refusal be exercised without going near the live cache the cron reads.
+
+def _as_production(state=None, page=None, declared=False):
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        was = (GK.PRODUCTION_STATE, GK.PRODUCTION_PAGE, os.environ.get(GK.WRITER_ENV))
+        if state is not None:
+            GK.PRODUCTION_STATE = str(state)
+        if page is not None:
+            GK.PRODUCTION_PAGE = str(page)
+        if declared:
+            os.environ[GK.WRITER_ENV] = "1"
+        else:
+            os.environ.pop(GK.WRITER_ENV, None)
+        try:
+            yield
+        finally:
+            GK.PRODUCTION_STATE, GK.PRODUCTION_PAGE = was[0], was[1]
+            os.environ.pop(GK.WRITER_ENV, None)
+            if was[2] is not None:
+                os.environ[GK.WRITER_ENV] = was[2]
+    return _cm()
+
+
+def test_a_non_production_process_cannot_write_the_shared_cache_by_default():
+    """The 07:07 write, refused. `assess()` still runs and still returns its verdict —
+    what it must not do is persist it into the state the cron reads."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod):
+            try:
+                _cache_fixture(prod, ["low"])
+                rep = A.assess("magic")
+                assert rep["clearly_safe"] == ["cc4da9a05fde"], "the run itself was broken"
+                assert not (prod / "assessment-cache").exists(), \
+                    "a non-production process wrote the production cache"
+                # ...and it SAYS so. A silent no-op here is indistinguishable from a hit,
+                # which is how a refusal gets mistaken for "nothing to do".
+                why = rep.get("cache_write_refused") or ""
+                assert "did not declare itself the production runner" in why, why
+                assert GK.WRITER_ENV in why and "GK_STATE_DIR" in why, \
+                    f"the refusal names no remedy: {why}"
+                assert GK.PROVENANCE_KEY not in rep, \
+                    "a refused run returned a report claiming it had written provenance"
+            finally:
+                _pop_state_dir()
+
+
+def test_the_same_process_writes_the_shared_cache_when_it_asks():
+    """NOT read-only for everyone (the explicit constraint on this fix). The distinction
+    is production-runner vs everything else, and everything else may still write — it has
+    to say so, and the entry then records that it did."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod, declared=True):
+            try:
+                _cache_fixture(prod, ["low"])
+                rep = A.assess("magic")
+                assert not rep.get("cache_write_refused"), rep.get("cache_write_refused")
+                blob = json.loads((prod / "assessment-cache" / "magic.json").read_text())
+                assert len(blob) == 1, blob
+                stored = next(iter(blob.values()))
+                assert stored[GK.PROVENANCE_KEY]["production"] is True
+            finally:
+                _pop_state_dir()
+
+
+def test_a_state_dir_that_is_not_production_needs_no_permission():
+    """The gate is on the LOCATION, not on writing. A run that owns its own state
+    directory is unaffected — which is what keeps the remedy in the refusal message from
+    being advice nobody can follow."""
+    with tempfile.TemporaryDirectory() as d:
+        prod, mine = Path(d) / "production", Path(d) / "mine"
+        with _as_production(state=prod):
+            try:
+                _cache_fixture(mine, ["low"])
+                rep = A.assess("magic")
+                assert not rep.get("cache_write_refused"), rep.get("cache_write_refused")
+                assert (mine / "assessment-cache" / "magic.json").is_file()
+                assert not prod.exists(), "a scratch run reached the production directory"
+            finally:
+                _pop_state_dir()
+
+
+def test_a_cache_entry_names_the_process_that_wrote_it():
+    """The provenance the 07:07 entry lacked. `assessor` says which JUDGE answered;
+    nothing said which checkout, which commit, or whether it was the cron — that was
+    reconstructed from an mtime, which does not survive a copy and which no program can
+    check."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod, declared=True):
+            try:
+                _cache_fixture(prod, ["low"])
+                A.assess("magic")
+                blob = json.loads((prod / "assessment-cache" / "magic.json").read_text())
+                prov = next(iter(blob.values()))[GK.PROVENANCE_KEY]
+                # every field is PRESENT even when undeterminable: a reader must be able
+                # to tell "we could not find out" from "this shape predates the question"
+                for k in ("at", "production", "entrypoint", "checkout", "commit",
+                          "dirty", "pid", "host"):
+                    assert k in prov, f"{k} missing from {sorted(prov)}"
+                assert prov["checkout"] == str(GK.HERE)
+                assert prov["pid"] == os.getpid()
+                assert GK.describe(prov).startswith("the production runner")
+            finally:
+                _pop_state_dir()
+    # and an entry from before provenance existed — the three live ones — must read as
+    # UNKNOWN. "No block" defaulting to "the cron" would launder exactly the entry this
+    # issue is about.
+    legacy = GK.describe(None)
+    assert "unknown" in legacy and "cron" not in legacy, legacy
+    assert "NON-production" in GK.describe({"production": False}), GK.describe({})
+
+
+def test_a_replayed_verdict_still_names_the_process_that_first_wrote_it():
+    """Detectable NEXT time, not just at the moment of the write. A cached verdict is
+    replayed for as long as the range and the judge hold still — #11 measured that as
+    days — so the provenance has to be the ORIGINAL writer's, not the replayer's."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod, declared=True):
+            try:
+                _cache_fixture(prod, ["low", "medium"])
+                first = A.assess("magic")
+                second = A.assess("magic")
+                assert second.get("cached") is True, "the replay path was not exercised"
+                assert second[GK.PROVENANCE_KEY] == first[GK.PROVENANCE_KEY]
+                # THE 07:07 ENTRY, reconstructed on disk and replayed. Overwriting the
+                # stored block is what separates "the replay reports the STORED writer"
+                # from "the replay manufactured one that happens to look right" — the two
+                # are identical while the same process does both halves.
+                p = prod / "assessment-cache" / "magic.json"
+                blob = json.loads(p.read_text())
+                key = next(iter(blob))
+                blob[key][GK.PROVENANCE_KEY] = {
+                    "at": "2026-07-27T23:07:21Z", "production": False,
+                    "entrypoint": "assess_release.py", "checkout": "/some/other/checkout",
+                    "commit": "1b36787", "dirty": True, "pid": 1, "host": "elsewhere"}
+                p.write_text(json.dumps(blob, ensure_ascii=False))
+                third = A.assess("magic")
+                assert third.get("cached") is True
+                said = GK.describe(third[GK.PROVENANCE_KEY])
+                assert "NON-production" in said and "1b36787" in said, said
+            finally:
+                _pop_state_dir()
+
+
+def test_a_tick_that_may_not_publish_refuses_before_it_spends_anything():
+    """The preflight. A tick reaching the refusal at its WRITE would already have paid for
+    a fleet-wide discovery and a judge call — so the check is ordered ahead of both, and
+    ahead of the #10 configuration gate, because it needs neither network nor filesystem
+    to answer."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod):
+            os.environ["GK_STATE_DIR"] = str(prod)
+            try:
+                gk = _gk()
+                spent = []
+
+                def _boom(*a, **k):
+                    spent.append("spent")
+                    raise AssertionError("the tick spent something before the gate")
+
+                gk.fleet_config = type("F", (), {"check": staticmethod(_boom)})()
+                gk.disc = type("D", (), {"main": staticmethod(_boom)})()
+                try:
+                    gk.tick()
+                except GK.ProductionStateWriteRefused as e:
+                    assert "ledgers and reports" in str(e), str(e)
+                else:
+                    raise AssertionError("a non-production tick was allowed to publish")
+                assert spent == [], "the gate ran after the spend"
+                assert not prod.exists(), "the refused tick created production state"
+            finally:
+                os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_the_ledger_directory_is_production_state_too():
+    """vibeic/vibeic-eda#10 proved a stale ledger publishes a frozen row indistinguishable
+    from a live one, and `LEDGER.glob('*.json')` is what both the report and the public
+    page iterate. Same exposure as the cache, so the same gate — before the first upstream
+    call, for the same reason as the tick's preflight."""
+    with tempfile.TemporaryDirectory() as d:
+        prod = Path(d) / "production"
+        with _as_production(state=prod):
+            os.environ["GK_STATE_DIR"] = str(prod)
+            try:
+                disc = _load("discover_forks")
+                called = []
+                disc._gh_file = lambda *a, **k: called.append(a) or ""
+                try:
+                    disc.main()
+                except GK.ProductionStateWriteRefused as e:
+                    assert "ledgers" in str(e), str(e)
+                else:
+                    raise AssertionError("a non-production process re-seeded the ledgers")
+                assert called == [], "discovery ran before the gate"
+                assert not (prod / "ledger").exists()
+            finally:
+                os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_a_published_tick_stamps_every_document_with_the_process_that_wrote_it():
+    """The ledger, the daily report and the assessment filed beside it all carry it. The
+    2026-07-28 pair was two vintages of one date; #9 made them cross-check their COUNTS,
+    and two documents can still agree while neither says who produced it."""
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        with _as_production(state=Path(d) / "elsewhere"):
+            gk, summary = _tick_fixture(state, MAGIC_0728)
+            date = summary["date"]
+            report = json.loads((state / "reports" / f"{date}.json").read_text())
+            led = json.loads((state / "ledger" / "magic.json").read_text())
+            for name, doc in (("report", report), ("ledger", led)):
+                prov = doc.get(GK.PROVENANCE_KEY)
+                assert isinstance(prov, dict), f"{name} carries no provenance"
+                assert prov["checkout"] == str(GK.HERE), name
+                assert prov["production"] is False, \
+                    f"{name} claims the production runner wrote it"
+
+
+def test_the_published_page_carries_no_provenance():
+    """The publish boundary. `build_page` embeds whole ledger dicts and the whole latest
+    report into the page served from vibeic.ai, so provenance — which names a local
+    checkout path and a hostname — must come off there, exactly like the NDA redaction
+    that already guards that boundary."""
+    with tempfile.TemporaryDirectory() as d:
+        state, out = Path(d) / "state", Path(d) / "site" / "eda-forks.html"
+        out.parent.mkdir(parents=True)
+        (state / "ledger").mkdir(parents=True)
+        (state / "reports").mkdir(parents=True)
+        prov = GK.provenance()
+        (state / "ledger" / "magic.json").write_text(json.dumps(
+            {"tool": "magic", "upstream": "them/magic", GK.PROVENANCE_KEY: prov}))
+        (state / "reports" / "2026-07-28.json").write_text(json.dumps(
+            {"date": "2026-07-28", "counts": {}, "results": [], GK.PROVENANCE_KEY: prov}))
+        os.environ["GK_STATE_DIR"] = str(state)
+        try:
+            bp = _load("build_page")
+            bp.build(out)
+            html = out.read_text()
+            assert "magic" in html, "the page did not render the ledger at all"
+            assert GK.PROVENANCE_KEY not in html, "provenance was published"
+            assert str(GK.HERE) not in html, "a local checkout path was published"
+            assert prov["host"] not in html, "the hostname was published"
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_the_published_page_is_production_too():
+    with tempfile.TemporaryDirectory() as d:
+        state, page = Path(d) / "state", Path(d) / "site" / "eda-forks.html"
+        (state / "ledger").mkdir(parents=True)
+        page.parent.mkdir(parents=True)
+        os.environ["GK_STATE_DIR"] = str(state)
+        with _as_production(state=Path(d) / "elsewhere", page=page):
+            try:
+                bp = _load("build_page")
+                try:
+                    bp.build(page)
+                except GK.ProductionStateWriteRefused as e:
+                    assert "monitor page" in str(e), str(e)
+                    # the remedy has to be one that applies to THIS artefact: the page
+                    # does not move because GK_STATE_DIR moved
+                    assert "--out" in str(e) and "GK_STATE_DIR" not in str(e), str(e)
+                else:
+                    raise AssertionError("a non-production process republished the page")
+                assert not page.exists()
+                # ...and rendering one by hand somewhere else is untouched
+                bp.build(Path(d) / "scratch.html")
+                assert (Path(d) / "scratch.html").is_file()
+            finally:
+                os.environ.pop("GK_STATE_DIR", None)
+
+
+def test_an_undeterminable_path_is_treated_as_production():
+    """Fail CLOSED. Guessing "not production" silently poisons the cache, which is the
+    defect; guessing "production" is a loud refusal with a one-line remedy."""
+    was = GK.production_state_dir
+    try:
+        GK.production_state_dir = lambda: (_ for _ in ()).throw(RuntimeError("no HOME"))
+        assert GK.is_production_path("/tmp/anywhere") is True
+        os.environ[GK.WRITER_ENV] = "1"
+        assert GK.may_write("/tmp/anywhere") is True, \
+            "fail-closed became fail-shut: the declared production runner was refused"
+    finally:
+        GK.production_state_dir = was
+        os.environ.pop(GK.WRITER_ENV, None)
+
+
+def test_the_cron_reaches_the_same_state_dir_it_did_before_and_declares_itself():
+    """THE regression that would silently stop the daily tick.
+
+    Runs the REAL `run_tick.sh` — its own PATH/HOME resolution, its own flock, its own
+    token lookup — with `python3` and `gh` stubbed on the PATH it builds for itself, and
+    reads back the environment the tick process was actually handed. Asserting on the
+    source text would pass against a script that no longer runs.
+    """
+    import subprocess
+    script = Path(__file__).resolve().parent / "run_tick.sh"
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        # run_tick.sh OVERWRITES PATH with ${HOME}/.local/bin first, so that is where a
+        # stub has to live for the script's own resolution to find it.
+        binx = home / ".local" / "bin"
+        binx.mkdir(parents=True)
+        seen = home / "env.txt"
+        (binx / "python3").write_text(
+            f'#!/bin/sh\nprintf "%s\\n%s\\n" "$GK_STATE_DIR" "$GK_PRODUCTION_WRITER" '
+            f'> "{seen}"\n')
+        (binx / "gh").write_text('#!/bin/sh\necho gho_stub\n')
+        for f in (binx / "python3", binx / "gh"):
+            f.chmod(0o755)
+        # PATH here only has to find `bash`; the script overwrites PATH with its own
+        # (${HOME}/.local/bin first) before it resolves anything else.
+        r = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                           timeout=120,
+                           env={"HOME": str(home), "PATH": f"{binx}:/usr/bin:/bin"})
+        assert r.returncode == 0, (r.returncode, r.stdout[-800:], r.stderr[-800:])
+        state, writer = seen.read_text().splitlines()
+        # SAME directory as before #12 — the cron's own resolution, not a re-derivation
+        assert state == str(home / ".cache" / "eda-fork-gatekeeper"), state
+        # ...and it is exactly the module's production location under that HOME
+        was = os.environ.get("HOME")
+        try:
+            os.environ["HOME"] = str(home)
+            assert Path(state) == GK.production_state_dir()
+        finally:
+            if was is not None:
+                os.environ["HOME"] = was
+        # ...and the tick process is told it is the production runner, so the same
+        # directory stays WRITABLE to it.
+        assert writer == "1", f"run_tick.sh did not declare itself: {writer!r}"
+        was_w = os.environ.get(GK.WRITER_ENV)
+        try:
+            os.environ[GK.WRITER_ENV] = writer
+            assert GK.may_write(Path(state) / "assessment-cache") is True
+        finally:
+            os.environ.pop(GK.WRITER_ENV, None)
+            if was_w is not None:
+                os.environ[GK.WRITER_ENV] = was_w
+
+
+MODULES = ("gatekeeper", "discover_forks", "build_page", "prepare_merge_pr",
+           "assess_release")
+
+
+def test_every_module_resolves_state_through_the_one_policy():
+    """Five modules each carried their own copy of the resolution line, which is how one
+    of them gets hardened while the other four keep the hole open.
+
+    Both halves are exercised by RUNNING each module's resolution, not by reading its
+    source for a pattern: the override still wins, and — the half that catches an inlined
+    default — relocating the POLICY's idea of the production location relocates all five.
+    A module that still spelled `expanduser("~/.cache/eda-fork-gatekeeper")` itself would
+    pass the first loop and fail the second.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        override, relocated = Path(d) / "override", Path(d) / "relocated"
+        os.environ["GK_STATE_DIR"] = str(override)
+        try:
+            for name in MODULES:
+                assert _load(name).STATE == override, name
+        finally:
+            os.environ.pop("GK_STATE_DIR", None)
+        with _as_production(state=relocated):
+            for name in MODULES:
+                assert _load(name).STATE == relocated, \
+                    f"{name} resolves its default without going through gk_state"
+
 
 if __name__ == "__main__":
     # vibe-ic#395 sweep. `_cache_fixture` replaces five module attributes on
