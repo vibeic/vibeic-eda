@@ -146,7 +146,19 @@ RUN git clone https://github.com/vibeic/iverilog.git /iverilog \
 #   parity vs the old run_svrf_drc.py proven on a real commercial foundry deck.
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS klayout-builder
-ARG KLAYOUT_REF=bc4e211b5e37d9ae11b57286cff3662cc5a4ab40  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
+# Pinned to branch vibeic/klayout-signoff-int. THE PIN IS THE DELIVERY — see the
+# YOSYS_REF note below; merging on the fork changes nothing until this ref moves.
+#   0.2.32  d7143145e — upstream edad8f52212f via vibeic/klayout#1: OASIS/GDS
+#           layer-name handling on reload in dbCommonReader + layLayerProperties
+#           (a layer that already exists by layer/datatype but under a different
+#           name now takes the name from the file), with the upstream unit test
+#           and testdata. The only row of the 2026-07-29 assessment that three
+#           independent judgements agreed on (3/3, auto-safe); the three that
+#           DIVERGED were left for a human and are NOT in this pin.
+#   0.2.23  bc4e211b5 — tl::Thread pthread_join heap-race ROOT-CAUSE fix:
+#           svrfdrc --threads use-after-free, TSan-proven 6 races -> 0, report
+#           byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so.
+ARG KLAYOUT_REF=d7143145e6d7a7159d9481624c633cfd415937f7
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qtbase5-dev qttools5-dev-tools ca-certificates \
