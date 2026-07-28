@@ -31,7 +31,30 @@ RUN git clone https://github.com/vibeic/OpenROAD.git /src \
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04 AS yosys-builder
-ARG YOSYS_REF=baf3472497809d6bc3ff19da7a05312064729066  # pinned; branch satfix-integration (0.2.30 / vibe-ic#354: 0.67+26, i.e. the 0.2.22 synth-fixes-integration line 330b3eb19 + ExtCdclSat `sat -select-solver` backend (kissat/cadical) forward-port — the DT1/DT2/DT3 external-CDCL fix v1.5.71 wired and 0.2.29 was supposed to deliver)
+# THE PIN IS THE DELIVERY. Landing a commit on the fork changes nothing here:
+# this ref is what gets built, so a fork merge that does not move it ships the
+# old compiler while reading as delivered. That is exactly what happened between
+# 0.2.30 and 0.2.31 — vibeic/yosys#2 landed on satfix-integration and the image
+# kept building baf3472497, seven commits behind, so every SVA run in the
+# toolchain still used the unfixed frontend. Move this ref in the same change
+# that lands the fork commit, or the fork commit is inert.
+# Pinned to branch satfix-integration.
+#   0.2.31  edb458ab8b — adds vibeic/yosys#2: procedural named properties and
+#           cover vacuity in the SVA subset, diagnostics anchored on the
+#           property rather than the module header, typedef lookup kept on the
+#           non-formal fallback of the new SVA keywords.
+#   0.2.30  baf3472497 — vibe-ic#354: 0.67+26, i.e. the 0.2.22
+#           synth-fixes-integration line 330b3eb19 plus the ExtCdclSat
+#           `sat -select-solver` (kissat/cadical) forward-port — the
+#           DT1/DT2/DT3 external-CDCL fix v1.5.71 wired and 0.2.29 was
+#           supposed to deliver.
+# The history above is on its own comment lines because `ARG` splits the rest of
+# the line into `name[=value]` tokens: a trailing `#` comment survives that (it
+# is read as an ARG name and ignored, which is why 15 other pins here carry one)
+# but a token that is exactly `=` yields a blank name and the build dies with
+# "ARG names can not be blank". Bisected — a `foo = bar` inside the comment is
+# fatal, `foo=bar` is not.
+ARG YOSYS_REF=edb458ab8b081c4cbf025a1991079b911534a896
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
       libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
@@ -276,7 +299,25 @@ COPY --from=openroad-builder /opt/or-tools /opt/or-tools
 COPY --from=openroad-builder /src/build/bin/openroad /foss/tools/openroad/bin/openroad
 # Clean-replace the base tool dirs FIRST so no stale base files survive the COPY merge —
 # e.g. the base's ghdl.so yosys plugin is built against the old ABI and would crash yosys 0.66.
-RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
+#
+# YICES IS A LODGER IN THE YOSYS DIRECTORY (vibeic-eda#13). The base ships the
+# Yices 2.7.0 binaries inside /foss/tools/yosys/bin, so the rm below deleted
+# them and every /foss/tools/bin/yices* symlink was left dangling. Nothing named
+# the missing binary: `sby` with the common default engine line `smtbmc yices`
+# just ended `rc=16 ERROR: Engine terminated without status`, which reads as a
+# property that could not be proved rather than a tool that was not there.
+# Measured in 0.2.30 before this change: all four links dangling, `yices-smt2`
+# not resolvable on PATH at all.
+#
+# They are moved out rather than re-copied because they are not ours to rebuild:
+# `ldd` shows libgmp and libc only, nothing from the yosys tree, so they carry
+# no dependency on the directory they happened to live in.
+RUN mkdir -p /foss/tools/yices/bin \
+ && for t in yices yices-sat yices-smt yices-smt2; do \
+      [ -e "/foss/tools/yosys/bin/$t" ] && cp -a "/foss/tools/yosys/bin/$t" "/foss/tools/yices/bin/$t"; \
+    done; \
+    test -x /foss/tools/yices/bin/yices-smt2 \
+ && rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=yosys-builder /foss/tools/yosys /foss/tools/yosys
 # external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
@@ -298,7 +339,8 @@ RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin
  && ln -sf /foss/tools/ngspice/bin/ngspice /foss/tools/bin/ngspice 2>/dev/null || true \
  && ln -sf /foss/tools/magic/bin/magic /foss/tools/bin/magic 2>/dev/null || true \
  && ln -sf /foss/tools/netgen/bin/netgen /foss/tools/bin/netgen 2>/dev/null || true \
- && for t in iverilog vvp iverilog-vpi vvp; do ln -sf /foss/tools/iverilog/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done
+ && for t in iverilog vvp iverilog-vpi vvp; do ln -sf /foss/tools/iverilog/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
+ && for t in yices yices-sat yices-smt yices-smt2; do ln -sf /foss/tools/yices/bin/$t /foss/tools/bin/$t; done
 # fault (AUCOHL DFT toolchain) ships from the iic-osic-tools base at
 # /usr/local/bin/fault (already on PATH). Surface it under /foss/tools/bin too so
 # its path is consistent with every other EDA tool — eda_dft invokes bare `fault`
@@ -342,6 +384,33 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       -e /opt/vibeic-forks/pyuvm \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
  && chmod -R a+rX /opt/vibeic-forks
+
+# vibeic-eda#13 — PROVE THE ENGINE ANSWERS, not merely that a file is present.
+# `--version` alone would pass against a binary that cannot solve, and this
+# defect was invisible precisely because everything downstream reads only
+# pass/fail: a dangling yices link ended every `smtbmc yices` run as
+# `rc=16 ERROR: Engine terminated without status`, which reads as a property
+# that could not be proved rather than a tool that was not there.
+#
+# So the check runs the whole real path — sby -> yosys -> smtbmc -> yices — on a
+# property with a known answer. It sits HERE, after sby's own install, and NOT
+# beside the symlink repair that fixes #13: placed there it failed the build
+# with `sby: not found`, because sby is not on PATH until this stage. A guard
+# that cannot reach the thing it guards reports on its own placement instead.
+# PATH is set explicitly: the image-wide `ENV PATH` that puts /foss/tools/bin in
+# front comes near the end of this file, so at this layer neither `yosys` nor
+# `yices-smt2` resolves. Both were found the hard way — the guard failed twice
+# on its own environment before it failed on anything real, which is the guard
+# behaving correctly and the placement being wrong.
+RUN set -eu; export PATH=/foss/tools/bin:$PATH; d=$(mktemp -d); cd "$d"; \
+    printf 'module top(input clk);\n  reg [1:0] c = 0;\n  always @(posedge clk) c <= c + 1;\n  always @(posedge clk) assert (c <= 3);\nendmodule\n' > top.sv; \
+    printf '[options]\nmode bmc\ndepth 4\n\n[engines]\nsmtbmc yices\n\n[script]\nread -formal top.sv\nprep -top top\n\n[files]\ntop.sv\n' > p.sby; \
+    yosys -V; \
+    /foss/tools/bin/yices-smt2 --version; \
+    sby -f p.sby > sby.log 2>&1 || { echo "vibeic-eda#13 GUARD: sby/yices smoke FAILED"; tail -40 sby.log; exit 1; }; \
+    grep -q "DONE (PASS" sby.log || { echo "vibeic-eda#13 GUARD: sby did not report PASS"; tail -40 sby.log; exit 1; }; \
+    cd /; rm -rf "$d"
+
 # --- NanGate45 / FreePDK45 enablement (GENERIC 45nm; tapeout_capable=false) ---
 # Re-stage the ORFS nangate45 platform into the open_pdks libs.ref/<scl>/ layout the
 # plugin's PDK resolvers expect: mcp-eda pdkConfig(), phase3_one_shot_runner _detect_pdk(),
