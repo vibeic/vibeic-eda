@@ -111,6 +111,13 @@ def parse_dockerfile_pins(text: str) -> dict:
     them; a declared-but-never-fetched submodule is correctly not integrated.
     """
     args = dict(re.findall(r"ARG\s+(\w+_REF)\s*=\s*(\S+)", text))
+    # Since the per-tool split (vibeic-eda#14) a clone reads `git clone "${YOSYS_REPO}"`
+    # and the URL lives in the ARG default. Substituting the *_REPO args in before
+    # matching keeps the URL where this parser has always looked for it: without this
+    # the regex below finds nothing and every tool silently drops to default-branch
+    # tracking, which reads exactly like a fork with no pin.
+    for _rv, _url in re.findall(r"ARG\s+(\w+_REPO)\s*=\s*(\S+)", text):
+        text = text.replace("${%s}" % _rv, _url)
     branches = {}
     for m in re.finditer(r"ARG\s+(\w+_REF)\s*=\s*\S+\s*#[^\n]*branch\s+(\S+)", text):
         branches[m.group(1)] = m.group(2)
@@ -386,11 +393,31 @@ def main():
     # fleet-wide discovery finding that out.
     gk_state.require_writable(LEDGER, "the fork ledgers")
     LEDGER.mkdir(parents=True, exist_ok=True)
-    df = _gh_file(EDA_REPO, "Dockerfile") or ""
+    # The pins moved out of the single Dockerfile when each tool got its own
+    # (vibeic-eda#14). Reading only the root file would find zero pins and fall
+    # through to the warning below — a silent downgrade to default-branch tracking
+    # for every tool, indistinguishable from "these forks have no pin".
+    parts = [_gh_file(EDA_REPO, "Dockerfile") or ""]
+    listing = gh(f"repos/{EDA_REPO}/contents/tools")
+    tool_dirs = [e["name"] for e in listing
+                 if isinstance(e, dict) and e.get("type") == "dir"] \
+                if isinstance(listing, list) else []
+    for _d in sorted(tool_dirs):
+        parts.append(_gh_file(EDA_REPO, f"tools/{_d}/Dockerfile") or "")
+    df = "\n".join(parts)
+    if tool_dirs:
+        print(f"  read pins from Dockerfile + {len(tool_dirs)} tools/*/Dockerfile")
     pins = parse_dockerfile_pins(df)
     image_version = (_gh_file(EDA_REPO, "VERSION") or "").strip() or "unknown"
     if not pins:
-        print("  WARNING: could not parse Dockerfile pins (falling back to default-branch tracking)")
+        # Before the per-tool split an empty parse could mean "no ARG pins yet".
+        # Now the layout guarantees eight, so empty means the parser no longer
+        # matches the files — and default-branch tracking would publish a page
+        # that looks identical to a healthy one while measuring something else.
+        print("  WARNING: could not parse ANY pin from Dockerfile or tools/*/Dockerfile.")
+        print("           That is a parser/layout mismatch, not a repo without pins.")
+        print("           Falling back to default-branch tracking; rows derived this")
+        print("           way state a branch head, NOT what the image ships.")
     direct = set(pins)
     pins = expand_vendored_pins(pins)
     for name in sorted(set(pins) - direct):
