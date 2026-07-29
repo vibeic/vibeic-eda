@@ -43,6 +43,10 @@ TOOLS = {
     "iverilog":    ["IVERILOG_REF"],
     "klayout":     ["KLAYOUT_REF"],
     "verilator":   ["VERILATOR_REF"],
+    "gtkwave":     ["GTKWAVE_REF"],
+    "xschem":      ["XSCHEM_REF"],
+    "slang":       ["SLANG_REF"],
+    "xyce":        ["XYCE_REF"],
 }
 
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
@@ -99,7 +103,17 @@ def main() -> int:
             bad.append(f"{tool}: Dockerfile has no {var}, so the composed image "
                        f"never copies this tool in")
             continue
+        # The tag carries a RECIPE component too — a digest of the tool's own
+        # Dockerfile — so that changing HOW a tool is built moves the tag even
+        # when the source commit does not. This check did not know about it, so
+        # it reported all eight tools as disagreeing while nothing was wrong:
+        # the loudest possible false alarm, and the shape that gets a check
+        # deleted rather than fixed.
         want_tag = "-".join((tool_args.get(k) or "?")[:7] for k in keys)
+        rf = ROOT / "tools" / tool / "Dockerfile"
+        if rf.is_file():
+            import hashlib
+            want_tag += "-" + hashlib.sha256(rf.read_bytes()).hexdigest()[:6]
         want = f"ghcr.io/vibeic/eda-tool-{tool}:{want_tag}"
         if pulled != want:
             bad.append(f"{tool}: Dockerfile pulls a tag the pins do not produce\n"

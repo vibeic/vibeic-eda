@@ -52,6 +52,10 @@ variable "LVS_RECIPE" { default = "e2e322" }
 variable "IVERILOG_RECIPE" { default = "940079" }
 variable "KLAYOUT_RECIPE" { default = "636653" }
 variable "VERILATOR_RECIPE" { default = "8c0ab6" }
+variable "GTKWAVE_RECIPE" { default = "77703c" }
+variable "XSCHEM_RECIPE" { default = "382491" }
+variable "SLANG_RECIPE" { default = "b569b8" }
+variable "XYCE_RECIPE" { default = "9d3df7" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -69,6 +73,10 @@ variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9
 variable "IVERILOG_REF"    { default = "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b" }
 variable "KLAYOUT_REF"     { default = "39b6a09249a97b9739f46d9404018bbd69675751" }
 variable "VERILATOR_REF"   { default = "d9f46707510f7d0ad67579aee755c2aabbf1230e" }
+variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
+variable "XSCHEM_REF" { default = "c8b26a17d8d53ce7fbd9e7d45ab6bb03e75996e0" }
+variable "SLANG_REF" { default = "24809c8e0b94d0915fe05b44d98c2df7a8e80c3e" }
+variable "XYCE_REF" { default = "a592a42ae7472151d1c8e3bca0ca62d27476f2f3" }
 
 function "short" {
   params = [ref]
@@ -155,9 +163,38 @@ target "verilator" {
   tags     = tool_tags("verilator", VERILATOR_REF, VERILATOR_RECIPE)
 }
 
+target "gtkwave" {
+  inherits = ["_tool"]
+  context  = "tools/gtkwave"
+  args     = { GTKWAVE_REF = GTKWAVE_REF }
+  tags     = tool_tags("gtkwave", GTKWAVE_REF, GTKWAVE_RECIPE)
+}
+
+target "xschem" {
+  inherits = ["_tool"]
+  context  = "tools/xschem"
+  args     = { XSCHEM_REF = XSCHEM_REF }
+  tags     = tool_tags("xschem", XSCHEM_REF, XSCHEM_RECIPE)
+}
+
+target "slang" {
+  inherits = ["_tool"]
+  context  = "tools/slang"
+  args     = { SLANG_REF = SLANG_REF }
+  tags     = tool_tags("slang", SLANG_REF, SLANG_RECIPE)
+}
+
+target "xyce" {
+  inherits = ["_tool"]
+  context  = "tools/xyce"
+  args     = { XYCE_REF = XYCE_REF }
+  tags     = tool_tags("xyce", XYCE_REF, XYCE_RECIPE)
+}
+
 group "tools" {
   targets = ["openroad", "yosys", "sat-solvers", "ngspice",
-             "lvs", "iverilog", "klayout", "verilator"]
+             "lvs", "iverilog", "klayout", "verilator",
+             "gtkwave", "xschem", "slang", "xyce"]
 }
 
 # The release image. No `contexts` block and no dependency on the tool targets:
@@ -191,6 +228,10 @@ target "eda-local" {
     "ghcr.io/vibeic/eda-tool-iverilog:${short(IVERILOG_REF)}-${IVERILOG_RECIPE}"      = "target:iverilog"
     "ghcr.io/vibeic/eda-tool-klayout:${short(KLAYOUT_REF)}-${KLAYOUT_RECIPE}"        = "target:klayout"
     "ghcr.io/vibeic/eda-tool-verilator:${short(VERILATOR_REF)}-${VERILATOR_RECIPE}"    = "target:verilator"
+    "ghcr.io/vibeic/eda-tool-gtkwave:${short(GTKWAVE_REF)}-${GTKWAVE_RECIPE}" = "target:gtkwave"
+    "ghcr.io/vibeic/eda-tool-xschem:${short(XSCHEM_REF)}-${XSCHEM_RECIPE}" = "target:xschem"
+    "ghcr.io/vibeic/eda-tool-slang:${short(SLANG_REF)}-${SLANG_RECIPE}" = "target:slang"
+    "ghcr.io/vibeic/eda-tool-xyce:${short(XYCE_REF)}-${XYCE_RECIPE}" = "target:xyce"
   }
 }
 
