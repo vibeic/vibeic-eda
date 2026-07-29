@@ -144,3 +144,61 @@ def test_the_ci_finding_does_not_fail_the_tick():
     assert "ci_rc=$?" in block
     assert "guard_rc=1" not in block, \
         "the CI finding must not be folded into the tick's failure code"
+
+
+def test_every_checker_in_this_directory_is_called_by_something():
+    """A gate that exists and is never invoked is the same as no gate.
+
+    `check_image_claims.py` landed in 6f04ab6 with PDKS.json, tests and a
+    baseline — and nothing ever called it. It sat unwired through four releases,
+    and the defect it exists to catch (a dependency nobody declared) is exactly
+    the shape of the defect it WAS: a program nobody wired.
+
+    Found by sweeping every program this session added and asking what invokes
+    it, not by anything failing. So the sweep becomes a test.
+
+    Stated limit: this asks whether a name appears in an invoking file, which
+    catches "nobody calls it at all" and not "called with the wrong arguments".
+    That is the failure that actually happened, twice.
+    """
+    # EVERY sibling and every shell script, not a hand-listed few. My first
+    # version named three callers and flagged `_nda_tokens` and `reachability`,
+    # which are imported by `build_page.py` and `assess_release.py` — files not
+    # on my list. A sweep with a hand-maintained scope finds what the author
+    # remembered, which is the failure it is looking for.
+    callers = []
+    for f in sorted(TICK.parent.glob("*.py")) + sorted(TICK.parent.glob("*.sh")):
+        if f.name.startswith("test_"):
+            continue
+        callers.append((f.name, f.read_text(errors="replace")))
+    for f in sorted((TICK.parent.parent / "tools").glob("*.py")):
+        callers.append((f.name, f.read_text(errors="replace")))
+    assert callers, "found no caller files — the sweep examined nothing"
+
+    #: Modules that are libraries or entry points rather than gates. Each is a
+    #: decision someone can point at, which is the whole argument of #28.
+    NOT_A_GATE = {
+        "run_tick", "gatekeeper", "daily_merge", "daily_release", "assess",
+        "assess_release", "llm_judge", "build_page", "inventory",
+        "check_pins_current",      # imported by daily_release, not shelled out
+        "_gate_denominator", "_record_adjudication",
+        # HUMAN-INVOKED BY DESIGN, and the distinction matters. Its own
+        # docstring says "before you land ANY fork PR, run this" — it takes a
+        # repo and a PR number, so a tick with no PR in hand has nothing to
+        # give it. Unwired-and-intended is a different state from
+        # unwired-and-forgotten, and this set is where that gets written down
+        # rather than inferred from silence.
+        "pr_precheck",
+    }
+
+    missing = []
+    for f in sorted((TICK.parent).glob("*.py")):
+        stem = f.stem
+        if stem.startswith("test_") or stem in NOT_A_GATE:
+            continue
+        # …and a file does not count as its own caller.
+        if not any(stem in text for name, text in callers if name != f.name):
+            missing.append(f.name)
+    assert not missing, (
+        "these live in fork-gatekeeper/ and nothing invokes them, so they have "
+        "never run: " + ", ".join(missing))

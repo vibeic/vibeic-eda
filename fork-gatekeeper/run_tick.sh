@@ -285,6 +285,35 @@ else
     log "[provenance] nothing was checked, which is not a clean result"
 fi
 
+# --- WHAT THE IMAGE SAYS ABOUT ITSELF (vibeic-eda#28) ---
+# PDKS.json declares every PDK the image ships and where its version can be read
+# back OUT of the image. This is the only guard with jurisdiction over them: every
+# other one checks what we CLONE, and the PDKs arrive pre-installed in the base,
+# so they are invisible to all of them by construction. open_pdks produces the
+# libs.tech trees every DRC and LVS verdict is computed against.
+#
+# I LANDED THIS CHECK AND DID NOT WIRE IT. It has existed since 6f04ab6 and has
+# never run — a gate that exists and is not called is the same as no gate, which
+# is the defect it was written to prevent, one level up. Found by sweeping every
+# program this session added for whether anything actually invokes it.
+#
+# Non-fatal like its neighbours: the tick's job is upstream tracking, and one
+# undeclared PDK must not stop that. Loud in the log, and a missing checker
+# reports rather than passes.
+CLAIMS_OUT="${LOG_DIR}/image-claims.txt"
+if [ -f "${DIR}/check_image_claims.py" ] && [ -n "${REACH_IMG}" ]; then
+    log "[claims] ${REACH_IMG}"
+    python3 "${DIR}/check_image_claims.py" "${REACH_IMG}" \
+        > "${CLAIMS_OUT}" 2>&1
+    claims_rc=$?
+    tail -1 "${CLAIMS_OUT}" | sed 's/^/[claims]   /' | tee -a "${LOG}"
+    [ "${claims_rc}" != "0" ] && log "[claims] rc=${claims_rc} — a PDK the image ships is undeclared, or a declared one is gone"
+else
+    echo "MISSING: fork-gatekeeper/check_image_claims.py or no released image — nothing was checked" \
+        > "${CLAIMS_OUT}"
+    log "[claims] nothing was checked, which is not a clean result"
+fi
+
 # --- DID CI RUN AT ALL? (vibe-ic#550, extended to this repo 2026-07-29) ---
 # #550 was filed against vibe-ic: Actions disabled at the ACCOUNT level, 561
 # commits landed with no CI, and nothing noticed for nine days because
