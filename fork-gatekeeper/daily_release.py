@@ -171,8 +171,18 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     artefacts". Measured: those four branches carry 0 commits of ours;
     `yosys satfix-integration` carries 34.
 
+    A BRANCH THAT DOES NOT EXIST UPSTREAM IS OURS, CONCLUSIVELY. That case used
+    to return None, and the docstring above recorded a measurement — "yosys
+    satfix-integration carries 34" — that the code as written could no longer
+    reproduce: the comparison is `upstream:<branch>...vibeic:<branch>`, and
+    upstream has no branch of that name, so it 404s. Every one of our own
+    integration branches took the same path. `klayout vibeic/klayout-signoff-int`
+    and `yosys satfix-integration` both answered "could not tell" about branches
+    that exist nowhere else.
+
     None -> could not tell, which is treated as not-ours: the fail-safe direction
-    is to leave a pin alone and say so.
+    is to leave a pin alone and say so. It must stay reachable, but it must not
+    be reached by the branches this whole system exists to ship.
     """
     meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
                 "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
@@ -182,9 +192,18 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     rc, out, _ = _sh(["gh", "api",
                       f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
                       "--jq", ".ahead_by"], timeout=120)
-    if rc != 0 or not out.strip().isdigit():
-        return None
-    return int(out.strip()) > 0
+    if rc == 0 and out.strip().isdigit():
+        return int(out.strip()) > 0
+    # The compare failed. Distinguish "upstream has no such branch" — which
+    # answers the question rather than leaving it open — from a transport or
+    # permission failure, which does not.
+    up_rc, _, _ = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
+                       "--jq", ".name"], timeout=120)
+    ours_rc, _, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/branches/{branch}",
+                         "--jq", ".name"], timeout=120)
+    if ours_rc == 0 and up_rc != 0:
+        return True
+    return None
 
 
 def _gh_tip(repo: str, branch: str) -> str:
@@ -549,7 +568,7 @@ def main(argv=None) -> int:
     # Only a STALE verdict moves a pin. CURRENT is nothing to do; anything else
     # is a pin we could not resolve, and an unresolved pin is reported, never
     # bumped on a guess.
-    moved, unresolved, upstream_bump = [], [], []
+    moved, unresolved, upstream_bump, undecidable = [], [], [], []
     for repo, pin in sorted(pins.items()):
         v = check_one(repo, pin)
         if v["verdict"] == "CURRENT":
@@ -568,18 +587,32 @@ def main(argv=None) -> int:
                "behind": v.get("behind"), "branch_is_ours": ours}
         if ours:
             moved.append(row)
-        else:
+        elif ours is False:
             # Not stale — a deliberate pin on upstream history. Reported so it is
             # visible, never advanced on its own.
             upstream_bump.append(row)
+        else:
+            # UNKNOWN IS NOT A NEGATIVE. This used to fall in with the branch
+            # above and print "that branch carries none of our commits" — a
+            # statement of fact asserted from a `None`, about branches like
+            # `yosys satfix-integration` that exist nowhere but our fork. Both
+            # outcomes leave the pin alone; only one of them is entitled to say
+            # why.
+            undecidable.append(row)
 
     print(f"daily_release: {len(pins)} pin(s), {len(moved)} tool(s) with a new "
           f"version, {len(upstream_bump)} awaiting an upstream decision, "
-          f"{len(unresolved)} unresolved")
+          f"{len(undecidable)} undecidable, {len(unresolved)} unresolved")
     for u in upstream_bump:
         print(f"  {u['repo']:<20} {u['from']} -> {u['to']}  ({u['branch']}) "
               f"NOT MOVED — that branch carries none of our commits, so this is "
               f"an upstream version bump, not a stale pin")
+    for u in undecidable:
+        print(f"  {u['repo']:<20} {u['from']} -> {u['to']}  ({u['branch']}) "
+              f"NOT MOVED — could not determine whether that branch carries our "
+              f"commits. The pin is left alone because unknown is not a licence "
+              f"to move it, NOT because the branch was found to be upstream's.",
+              file=sys.stderr)
     for m in moved:
         print(f"  {m['repo']:<20} {m['from']} -> {m['to']}  ({m['branch']})")
     for u in unresolved:
@@ -587,6 +620,7 @@ def main(argv=None) -> int:
 
     result = {"program": "daily_release", "moved": moved,
               "upstream_bump_available": upstream_bump,
+              "undecidable": undecidable,
               "unresolved": unresolved, "built": [], "version": None}
 
     # THE COMPOSED IMAGE IS AN ARTEFACT TOO. Checking only the per-tool
@@ -806,12 +840,34 @@ def main(argv=None) -> int:
                 _sh(["docker", "push", "ghcr.io/vibeic/vibeic-eda:latest"],
                     timeout=7200)
                 (root / "VERSION").write_text(new + "\n", encoding="utf-8")
+                # RECOMPUTE. `fp` above was measured before `rewrite_pin` and
+                # `retag_images` edited the root Dockerfile, and those edits feed
+                # `compose_recipe_hash`. Recording the pre-edit value made the
+                # record IRREPRODUCIBLE: the shipped tree hashes to something
+                # else, so every later run reads "this pin set has never been
+                # released" and cuts another version. Measured on 0.2.45 — the
+                # released tree computes e4e0a5f6 while the file it shipped
+                # records 94d85fda, and the next run started composing 0.2.46
+                # with nothing whatsoever changed.
+                #
+                # This is the program's own stated refusal — "it will not cut an
+                # image version when no tool changed" — defeated by the order of
+                # two writes. The decision fingerprint (early) and the RECORDED
+                # fingerprint (here) answer different questions and only the
+                # second has to match the tree that shipped.
+                fp_final = pins_fingerprint({
+                    **pinned_refs(root),
+                    **{f"recipe:{k}": recipe_hash(root, k) for k in targets},
+                    "recipe:__compose__": compose_recipe_hash(root)})
                 (root / "RELEASED.json").write_text(json.dumps(
                     {"_comment": "What the last PUBLISHED image was built from. "
                                  "A pin set not matching this has never been "
-                                 "released, however current the pins look.",
-                     "version": new, "pins_fingerprint": fp,
-                     "pins": {k: v for k, v in sorted(pins.items())}},
+                                 "released, however current the pins look. The "
+                                 "fingerprint is measured AFTER every edit this "
+                                 "run made, so a later run can reproduce it from "
+                                 "the tree that shipped.",
+                     "version": new, "pins_fingerprint": fp_final,
+                     "pins": {k: v for k, v in sorted(pinned_refs(root).items())}},
                     indent=2) + "\n", encoding="utf-8")
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")

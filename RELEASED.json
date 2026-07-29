@@ -1,7 +1,7 @@
 {
-  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look.",
+  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit the release made, so a later run can reproduce it from the tree that shipped.",
   "version": "0.2.45",
-  "pins_fingerprint": "94d85fda3c69",
+  "pins_fingerprint": "e4e0a5f63d1b",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",

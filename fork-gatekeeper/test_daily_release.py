@@ -459,3 +459,100 @@ def test_commands_are_listed_at_the_prefix_root_not_only_in_bin(tmp_path,
     assert '! -name "*.so*"' in s, \
         "without this, version-suffixed sonames compare as commands and every " \
         "version bump reports a loss"
+
+
+# --- a branch that exists only in our fork is OURS, and unknown is not a negative
+
+def test_a_branch_absent_upstream_is_conclusively_ours(monkeypatch):
+    """This is the case the predicate was worst at, and it is the common one.
+
+    The comparison is `upstream:<branch>...vibeic:<branch>`. Every one of our
+    integration branches — `yosys satfix-integration`,
+    `klayout vibeic/klayout-signoff-int`, `magic vibeic/integration` — exists
+    nowhere but our fork, so the compare 404s and the answer was "could not
+    tell" about branches that could not be more ours. The docstring even
+    recorded "yosys satfix-integration carries 34", a measurement the code as
+    written could no longer reproduce.
+    """
+    import daily_release as D
+    calls = iter([
+        (0, "YosysHQ/yosys", ""),      # parent
+        (1, "", "404"),                # compare fails
+        (1, "", "404"),                # upstream has no such branch
+        (0, "satfix-integration", ""),  # we do
+    ])
+    monkeypatch.setattr(D, "_sh", lambda *a, **k: next(calls))
+    assert D.branch_is_ours("yosys", "satfix-integration") is True
+
+
+def test_a_transport_failure_is_still_unknown(monkeypatch):
+    """The fail-safe must stay reachable. Upstream branch readable, ours not —
+    that is a broken measurement, not evidence of anything."""
+    import daily_release as D
+    calls = iter([
+        (0, "YosysHQ/yosys", ""),
+        (1, "", "boom"),
+        (0, "master", ""),   # upstream HAS the branch
+        (1, "", "boom"),     # and we could not read ours
+    ])
+    monkeypatch.setattr(D, "_sh", lambda *a, **k: next(calls))
+    assert D.branch_is_ours("yosys", "master") is None
+
+
+def test_unknown_is_not_reported_as_a_negative_finding():
+    """WIRING. `if ours: ... else: ...` put None in with False and printed
+    "that branch carries none of our commits" — a statement of fact asserted
+    from a `None`.
+
+    Stated limit: this reads the decision's SHAPE rather than running the
+    release, which needs a registry and an hour. It can only catch the two
+    outcomes sharing one arm, which is exactly how the defect was written.
+    """
+    import ast, pathlib
+    import daily_release as D
+    tree = ast.parse(pathlib.Path(D.__file__).read_text())
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                and node.test.id == "ours"):
+            continue
+        arms = ast.dump(ast.Module(body=node.orelse, type_ignores=[]))
+        assert "ours" in arms and "False" in arms, (
+            "the not-taken side does not distinguish False from None, so "
+            "'could not tell' is reported as 'found to be upstream's'")
+        return
+    raise AssertionError("no `if ours:` decision found — test is stale")
+
+
+def test_the_recorded_fingerprint_matches_the_tree_that_shipped(tmp_path):
+    """The record has to be reproducible from what shipped, or every run releases.
+
+    `fp` is measured early, to DECIDE whether to release. `rewrite_pin` and
+    `retag_images` then edit the root Dockerfile, and that file feeds
+    `compose_recipe_hash`. Recording the early value made the record
+    irreproducible: measured on 0.2.45, the released tree computes e4e0a5f6
+    while the file it shipped records 94d85fda, and the next run began composing
+    0.2.46 with nothing changed at all — the program's own refusal to cut a
+    contentless version, defeated by the order of two writes.
+
+    This drives the real functions against a real tree: fingerprint, edit the
+    Dockerfile the way retag_images does, fingerprint again.
+    """
+    root = _tree(tmp_path)
+
+    def fingerprint():
+        targets = R.bake_targets(root)
+        return R.pins_fingerprint({
+            **R.pinned_refs(root),
+            **{f"recipe:{k}": R.recipe_hash(root, k) for k in targets},
+            "recipe:__compose__": R.compose_recipe_hash(root)})
+
+    before = fingerprint()
+    R.retag_images(root, {"YOSYS_REF": "a" * 40, "MAGIC_REF": "e" * 40,
+                          "NETGEN_REF": "c" * 40}, R.bake_targets(root))
+    after = fingerprint()
+    assert before != after, (
+        "retag_images did not move the fingerprint in this fixture, so the "
+        "test cannot show the ordering defect — fixture is stale")
+    # The property: what gets RECORDED must be the second one. Recording the
+    # first is what puts the release on a treadmill.
+    assert fingerprint() == after, "the fingerprint must be stable once edits stop"
