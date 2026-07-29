@@ -245,3 +245,20 @@ def test_a_recipe_only_change_makes_the_release_fingerprint_move(tmp_path):
     after = R.pins_fingerprint({**pins,
                                 "recipe:yosys": R.recipe_hash(root, "yosys")})
     assert before != after
+
+
+def test_a_root_dockerfile_change_moves_the_release_fingerprint(tmp_path):
+    """#19 and #20 are root-Dockerfile-only fixes; without this they never ship."""
+    root = _tree(tmp_path)
+    before = R.compose_recipe_hash(root)
+    df = root / "Dockerfile"
+    df.write_text(df.read_text() + "\n# pin the base image by digest\n")
+    assert R.compose_recipe_hash(root) != before
+
+
+def test_a_bake_change_moves_it_too(tmp_path):
+    root = _tree(tmp_path)
+    before = R.compose_recipe_hash(root)
+    hcl = root / "docker-bake.hcl"
+    hcl.write_text(hcl.read_text() + '\nvariable "X" { default = "y" }\n')
+    assert R.compose_recipe_hash(root) != before

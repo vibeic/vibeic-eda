@@ -266,6 +266,30 @@ def write_recipe_vars(eda_root: Path, targets: Dict[str, List[str]]) -> List[str
     return moved
 
 
+def compose_recipe_hash(eda_root: Path) -> str:
+    """Digest of what builds the COMPOSED image: the root Dockerfile and bake.
+
+    Three levels of this file have now had the same hole. The tool artefacts were
+    keyed on the source commit and ignored the tool Dockerfile (#21). The release
+    fingerprint was keyed on pins and ignored the tool recipes. And it still
+    ignored the root Dockerfile and `docker-bake.hcl`, which are what turn eight
+    artefacts into an image — so a fix touching only those, which is what #19 and
+    #20 both are, would leave the release reporting "already released" forever.
+
+    Measured before fixing, by appending one comment line to the root Dockerfile:
+    the fingerprint did not move.
+
+    `docker-bake.hcl` is included even though `write_recipe_vars` writes to it —
+    that write runs first and is idempotent, so the digest is stable across runs
+    that change nothing.
+    """
+    h = hashlib.sha256()
+    for name in ("Dockerfile", "docker-bake.hcl"):
+        f = eda_root / name
+        h.update(f.read_bytes() if f.is_file() else b"missing")
+    return h.hexdigest()[:6]
+
+
 def artefact_tag(eda_root: Path, target: str, ref_vars: List[str],
                  refs: Dict[str, str]) -> Optional[str]:
     """The full artefact reference: every source commit, then the recipe."""
@@ -464,7 +488,8 @@ def main(argv=None) -> int:
     # #18 shape one layer up.
     fp = pins_fingerprint({**pins,
                            **{f"recipe:{k}": recipe_hash(root, k)
-                              for k in targets}})
+                              for k in targets},
+                           "recipe:__compose__": compose_recipe_hash(root)})
     rec = released_record(root)
     unreleased = rec.get("pins_fingerprint") != fp
     if unreleased:

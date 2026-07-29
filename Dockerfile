@@ -162,7 +162,17 @@ RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
 # ===========================================================================
-FROM hpretl/iic-osic-tools:latest
+# THE BASE IS PINNED BY DIGEST (#20). Sixteen forks are pinned to 40-character
+# SHAs and were, until now, built onto `:latest` — a moving tag, so a daily
+# rebuild could change ~90% of the image with no pin moving and nothing
+# recording it. This digest is the one every image up to 0.2.34 was actually
+# built from, so pinning it changes nothing today and makes tomorrow honest.
+#
+# Adopting a NEW base is deliberately not the fork rule: we do not control this
+# image and cannot review it commit by commit, so it is a considered bump with a
+# smoke pass behind it, never an automatic merge.
+ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
+FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="vibeic-eda"
 LABEL org.opencontainers.image.description="Forked+enhanced OSS EDA toolchain (vibeic): iic-osic-tools base + vibeic/* patched EDA-tool forks with gatekeeper-verified FAIL->PASS proofs (see FIX_STATUS.md)."
 LABEL org.opencontainers.image.source="https://github.com/vibeic"
@@ -187,6 +197,25 @@ COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/
 # They are moved out rather than re-copied because they are not ours to rebuild:
 # `ldd` shows libgmp and libc only, nothing from the yosys tree, so they carry
 # no dependency on the directory they happened to live in.
+# eqy (equivalence checking) and mcy (mutation coverage) are separate YosysHQ
+# projects that the base image installs INTO the yosys prefix. `rm -rf` below
+# takes them with it, and their symlinks in /foss/tools/bin were left pointing at
+# nothing — five dangling links advertising tools the image no longer had (#19).
+# Rescued the same way yices is, one line down.
+#
+# They locate their support files relative to their own script, so they are
+# restored INTO our yosys prefix rather than beside it: eqy then finds our
+# yosys's share/yosys/python3, which is the yosys it will actually drive.
+# mcy-dash and mcy-gui fail on --help in the BASE image too (`config.mcy not
+# found`), so they are carried without being claimed to work.
+RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
+ && for t in eqy mcy mcy-dash mcy-gui; do \
+      [ -e "/foss/tools/yosys/bin/$t" ] && cp -a "/foss/tools/yosys/bin/$t" "/foss/rescue/bin/$t"; \
+    done; \
+    cp -a /foss/tools/yosys/share/mcy /foss/rescue/share/mcy \
+ && cp -a /foss/tools/yosys/share/yosys/python3/eqy_job.py /foss/rescue/eqy_job.py \
+ && test -x /foss/rescue/bin/eqy
+
 RUN mkdir -p /foss/tools/yices/bin \
  && for t in yices yices-sat yices-smt yices-smt2; do \
       [ -e "/foss/tools/yosys/bin/$t" ] && cp -a "/foss/tools/yosys/bin/$t" "/foss/tools/yices/bin/$t"; \
@@ -195,6 +224,21 @@ RUN mkdir -p /foss/tools/yices/bin \
  && rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
+
+# Put eqy/mcy back on top of OUR yosys, and repoint the last dangling link:
+# /foss/tools/bin/sby pointed into the deleted prefix while the working sby comes
+# from our own SBY_REF build at /usr/local/bin. It won on PATH, so the break was
+# invisible — a link that dangles is a worse failure than one that is absent,
+# because it reads as installed.
+RUN cp -a /foss/rescue/bin/. /foss/tools/yosys/bin/ \
+ && cp -a /foss/rescue/share/mcy /foss/tools/yosys/share/mcy \
+ && cp -a /foss/rescue/eqy_job.py /foss/tools/yosys/share/yosys/python3/eqy_job.py \
+ && rm -rf /foss/rescue \
+ && ln -sf /usr/local/bin/sby /foss/tools/bin/sby \
+ && /foss/tools/yosys/bin/eqy --help >/dev/null \
+ && /foss/tools/yosys/bin/mcy --help >/dev/null \
+ && n=0; for f in /foss/tools/bin/*; do [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink $f)"; n=$((n+1)); }; done; \
+    [ "$n" = "0" ] || { echo "refusing: $n dangling symlink(s) in /foss/tools/bin"; exit 1; }
 # external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
 COPY --from=img-sat-solvers /usr/local/bin/kissat /foss/tools/bin/kissat
 COPY --from=img-sat-solvers /usr/local/bin/cadical /foss/tools/bin/cadical
