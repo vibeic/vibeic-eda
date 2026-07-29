@@ -584,9 +584,15 @@ def main(argv=None) -> int:
             old, new = peek_version(root)
             tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
             print(f"  composing {tag} from the pinned artefacts …", flush=True)
+            # `--progress plain` because the default TTY renderer emits almost
+            # nothing to a redirected log. A compose that wedged after
+            # `task-delete` was indistinguishable from one making quiet progress:
+            # no CPU, no disk, no network, three lines of log, and the only way to
+            # tell was reading dockerd's journal. A build that cannot be watched
+            # cannot be diagnosed.
             bake = ["docker", "buildx", "bake", "-f",
-                    str(root / "docker-bake.hcl"), "--load",
-                    "--set", f"eda.tags={tag}", "eda"]
+                    str(root / "docker-bake.hcl"), "--load", "--progress",
+                    "plain", "--set", f"eda.tags={tag}", "eda"]
             rc, _, err = _sh(bake, cwd=root)
             if rc != 0:
                 print("  registry compose failed once; retrying before "

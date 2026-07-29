@@ -230,20 +230,31 @@ RUN mkdir -p /foss/tools/yices/bin \
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
 
-# Put eqy/mcy back on top of OUR yosys, and repoint the last dangling link:
-# /foss/tools/bin/sby pointed into the deleted prefix while the working sby comes
-# from our own SBY_REF build at /usr/local/bin. It won on PATH, so the break was
-# invisible — a link that dangles is a worse failure than one that is absent,
-# because it reads as installed.
+# Put eqy/mcy back on top of OUR yosys, and DELETE the last dangling link rather
+# than repointing it.
+#
+# `/foss/tools/bin/sby` pointed into the deleted prefix while the working sby
+# comes from our own SBY_REF build at /usr/local/bin, which wins on PATH — so the
+# break was invisible. Repointing the link at /usr/local/bin/sby looks like the
+# tidier fix and breaks sby: it finds its modules relative to the path it was
+# INVOKED by, so running it as /foss/tools/bin/sby sends it looking in
+# /foss/tools/share/yosys/python3 and it dies with `No module named
+# 'sby_cmdline'`. That failed the vibeic-eda#13 sby/yices guard, which is the
+# guard doing exactly its job.
+#
+# The dangling link was accidentally protective: PATH skips a link it cannot
+# execute, so the real sby ran. Deleting it keeps that behaviour and stops the
+# image advertising a tool at a path that cannot work.
+#
+# eqy and mcy are verified at the END of this file, not here: eqy resolves its
+# modules through PYTHONPATH, which the stock base sets only in a LOGIN shell,
+# and a Dockerfile RUN is not one. Checking here tested the tool under conditions
+# no user has.
 RUN cp -a /foss/rescue/bin/. /foss/tools/yosys/bin/ \
  && cp -a /foss/rescue/share/mcy /foss/tools/yosys/share/mcy \
  && cp -a /foss/rescue/eqy_job.py /foss/tools/yosys/share/yosys/python3/eqy_job.py \
  && rm -rf /foss/rescue \
- && ln -sf /usr/local/bin/sby /foss/tools/bin/sby \
- && /foss/tools/yosys/bin/eqy --help >/dev/null \
- && /foss/tools/yosys/bin/mcy --help >/dev/null \
- && n=0; for f in /foss/tools/bin/*; do [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink $f)"; n=$((n+1)); }; done; \
-    [ "$n" = "0" ] || { echo "refusing: $n dangling symlink(s) in /foss/tools/bin"; exit 1; }
+ && rm -f /foss/tools/bin/sby
 # external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
 COPY --from=img-sat-solvers /usr/local/bin/kissat /foss/tools/bin/kissat
 COPY --from=img-sat-solvers /usr/local/bin/cadical /foss/tools/bin/cadical
@@ -559,3 +570,36 @@ USER 1000
 # dirs into a global ENV PATH so tools resolve WITHOUT a login shell or a per-command export.
 # Additive only (login shells still re-prepend via profile.d — harmless duplicate).
 ENV PATH=/headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/foss/tools/kactus2:/foss/tools/klayout:/foss/tools/osic-multitool:${PATH}
+
+# NO DANGLING SYMLINKS. `/foss/tools/bin` is what PATH resolves through, and our
+# installs `rm -rf` five base prefixes before replacing them — which is how eqy
+# and mcy vanished while their links stayed, advertising tools the image did not
+# have (#19). A link that dangles is a worse failure than one that is absent: it
+# reads as installed.
+#
+# LAST INSTRUCTION IN THE FILE ON PURPOSE. My first attempt put this immediately
+# after the yosys restore and it failed the build listing magic, netgen, ngspice,
+# iverilog and sby — every one of them a tool whose COPY comes LATER. The check
+# was right and the position was wrong: "nothing dangles" is only answerable once
+# everything is installed.
+# --- bare `docker exec` PYTHONPATH (same gap as the PATH line above) ---
+# The stock base exports PYTHONPATH only from profile.d, i.e. for LOGIN shells,
+# so `docker exec <c> eqy` — and any non-login invocation, which is what the
+# Vibe-IC MCP uses — cannot import eqy_job and dies. PATH was already baked into
+# ENV here for exactly this reason; PYTHONPATH was not, and eqy is the tool that
+# exposed it. Additive: login shells still re-prepend via profile.d.
+ENV PYTHONPATH=/foss/tools/yosys/share/yosys/python3:${PYTHONPATH}
+
+# eqy and mcy through the LINK in /foss/tools/bin, which is how anyone invokes
+# them, and in a NON-LOGIN shell, which is what `docker exec` gives. Verifying
+# via the real path under a login shell — my first two attempts — passes on an
+# image where both would fail for a user.
+RUN /foss/tools/bin/eqy --help >/dev/null \
+ && /foss/tools/bin/mcy --help >/dev/null \
+ && echo "eqy and mcy run from /foss/tools/bin without a login shell"
+
+RUN n=0; for f in /foss/tools/bin/*; do \
+      [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink "$f")"; n=$((n+1)); }; \
+    done; \
+    [ "$n" = "0" ] || { echo "refusing to ship $n dangling symlink(s)"; exit 1; }; \
+    echo "no dangling symlinks in /foss/tools/bin"
