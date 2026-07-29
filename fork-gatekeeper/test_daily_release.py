@@ -262,3 +262,25 @@ def test_a_bake_change_moves_it_too(tmp_path):
     hcl = root / "docker-bake.hcl"
     hcl.write_text(hcl.read_text() + '\nvariable "X" { default = "y" }\n')
     assert R.compose_recipe_hash(root) != before
+
+
+def test_branch_is_ours_true_when_we_are_ahead(monkeypatch):
+    calls = iter([(0, "MikePopoloski/slang", ""), (0, "34", "")])
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: next(calls))
+    assert R.branch_is_ours("slang", "satfix-integration") is True
+
+
+def test_branch_is_ours_false_for_a_pure_upstream_mirror(monkeypatch):
+    """#23/#25 pinned four tools to what the image ships; master is upstream's."""
+    calls = iter([(0, "MikePopoloski/slang", ""), (0, "0", "")])
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: next(calls))
+    assert R.branch_is_ours("slang", "master") is False
+
+
+def test_branch_is_ours_is_none_when_it_cannot_tell(monkeypatch):
+    """Fail-safe: unknown must not read as ours, or the pin gets advanced."""
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "", ""))
+    assert R.branch_is_ours("mirror-repo", "master") is None
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "up/stream", "")
+                        if "repos/vibeic/x" == a[0][2] else (1, "", "boom"))
+    assert R.branch_is_ours("x", "master") is None

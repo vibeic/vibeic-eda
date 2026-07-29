@@ -90,6 +90,37 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False):
         return 1, "", str(exc)
 
 
+def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
+    """Does this branch carry any commit of ours, or is it an upstream mirror?
+
+    A pin behind a branch WE build on is stale. A pin behind a branch that is a
+    pure mirror of upstream is a DECISION someone made about which upstream
+    version to ship, and advancing it adopts a new one.
+
+    Caught before it did damage: vibeic-eda#23/#25 pinned slang, xschem, Xyce and
+    sv-elab to the commits the IMAGE SHIPS, read out of each tool's own SOURCES
+    file, precisely so the change would be "build from our fork" and not "and
+    also upgrade the tool". The next release wanted to move all four to
+    `master` — a four-tool version bump smuggled under "build 6 absent
+    artefacts". Measured: those four branches carry 0 commits of ours;
+    `yosys satfix-integration` carries 34.
+
+    None -> could not tell, which is treated as not-ours: the fail-safe direction
+    is to leave a pin alone and say so.
+    """
+    meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
+                "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
+    if not meta:
+        return None
+    owner = meta.split("/")[0]
+    rc, out, _ = _sh(["gh", "api",
+                      f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
+                      "--jq", ".ahead_by"], timeout=120)
+    if rc != 0 or not out.strip().isdigit():
+        return None
+    return int(out.strip()) > 0
+
+
 def _gh_tip(repo: str, branch: str) -> str:
     rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/commits/{branch}",
                       "--jq", ".sha"], timeout=120)
@@ -452,7 +483,7 @@ def main(argv=None) -> int:
     # Only a STALE verdict moves a pin. CURRENT is nothing to do; anything else
     # is a pin we could not resolve, and an unresolved pin is reported, never
     # bumped on a guess.
-    moved, unresolved = [], []
+    moved, unresolved, upstream_bump = [], [], []
     for repo, pin in sorted(pins.items()):
         v = check_one(repo, pin)
         if v["verdict"] == "CURRENT":
@@ -465,18 +496,31 @@ def main(argv=None) -> int:
             unresolved.append({"repo": repo,
                                "why": f"tip of {v['branch']} unreadable"})
             continue
-        moved.append({"repo": repo, "branch": v["branch"], "arg": args_of.get(repo),
-                      "from": pin[:9], "to": tip[:9], "sha": tip,
-                      "behind": v.get("behind")})
+        ours = branch_is_ours(repo, v["branch"])
+        row = {"repo": repo, "branch": v["branch"], "arg": args_of.get(repo),
+               "from": pin[:9], "to": tip[:9], "sha": tip,
+               "behind": v.get("behind"), "branch_is_ours": ours}
+        if ours:
+            moved.append(row)
+        else:
+            # Not stale — a deliberate pin on upstream history. Reported so it is
+            # visible, never advanced on its own.
+            upstream_bump.append(row)
 
     print(f"daily_release: {len(pins)} pin(s), {len(moved)} tool(s) with a new "
-          f"version, {len(unresolved)} unresolved")
+          f"version, {len(upstream_bump)} awaiting an upstream decision, "
+          f"{len(unresolved)} unresolved")
+    for u in upstream_bump:
+        print(f"  {u['repo']:<20} {u['from']} -> {u['to']}  ({u['branch']}) "
+              f"NOT MOVED — that branch carries none of our commits, so this is "
+              f"an upstream version bump, not a stale pin")
     for m in moved:
         print(f"  {m['repo']:<20} {m['from']} -> {m['to']}  ({m['branch']})")
     for u in unresolved:
         print(f"  {u['repo']:<20} UNRESOLVED — {u['why']}", file=sys.stderr)
 
     result = {"program": "daily_release", "moved": moved,
+              "upstream_bump_available": upstream_bump,
               "unresolved": unresolved, "built": [], "version": None}
 
     # THE COMPOSED IMAGE IS AN ARTEFACT TOO. Checking only the per-tool
