@@ -18,9 +18,9 @@
 # `tools/check_fork_only.py` fails the build on anything else.
 
 FROM ubuntu:24.04 AS build
-ARG KISSAT_REPO=https://github.com/arminbiere/kissat.git
+ARG KISSAT_REPO=https://github.com/vibeic/kissat.git
 ARG KISSAT_REF=8af8e56f174b778aef3aa45af9f739b2a5f492c2   # tag rel-4.0.4
-ARG CADICAL_REPO=https://github.com/arminbiere/cadical.git
+ARG CADICAL_REPO=https://github.com/vibeic/cadical.git
 ARG CADICAL_REF=c60730422e758ef1cebe7aeddf2dda31c996bf04    # tag rel-3.0.1
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git ca-certificates \

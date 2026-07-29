@@ -99,7 +99,7 @@ ARG ORFS_REF=v3.0
 # asap7 (ASU/ARM 7nm predictive, BSD). Both are re-staged into the open_pdks
 # libs.ref/<scl>/ layout in the runtime stage below.
 RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \
-      https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts.git /orfs \
+      https://github.com/vibeic/OpenROAD-flow-scripts.git /orfs \
  && git -C /orfs sparse-checkout set flow/platforms/nangate45 flow/platforms/asap7
 
 # ---------------------------------------------------------------------------
@@ -126,13 +126,13 @@ ARG ASAP7SC_REF=main
 ARG ASAP7PDK_REF=main
 ARG ASAP7KL_REF=main
 RUN git clone --depth 1 --branch ${ASAP7SC_REF} --filter=blob:none --sparse \
-      https://github.com/The-OpenROAD-Project/asap7sc7p5t_28.git /a7sc \
+      https://github.com/vibeic/asap7sc7p5t_28.git /a7sc \
  && git -C /a7sc sparse-checkout set CDL/LVS \
  && git clone --depth 1 --branch ${ASAP7PDK_REF} --filter=blob:none --sparse \
-      https://github.com/The-OpenROAD-Project/asap7_pdk_r1p7.git /a7pdk \
+      https://github.com/vibeic/asap7_pdk_r1p7.git /a7pdk \
  && git -C /a7pdk sparse-checkout set models/hspice \
  && git clone --depth 1 --branch ${ASAP7KL_REF} \
-      https://github.com/laurentc2/ASAP7_for_KLayout.git /a7kl \
+      https://github.com/vibeic/ASAP7_for_KLayout.git /a7kl \
  && test -f /a7sc/CDL/LVS/asap7sc7p5t_28_R.cdl \
  && test -f /a7pdk/models/hspice/7nm_TT_160803.pm \
  && test -f /a7kl/asap7.lyt
