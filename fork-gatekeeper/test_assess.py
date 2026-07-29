@@ -3565,3 +3565,65 @@ if __name__ == "__main__":
         print(f"  ✓ {name}")
         passed += 1
     print(f"ALL {passed} PASS")
+
+
+# --- owner ruling 2026-07-29: merge all upstream commits, not only releases ---
+
+def test_a_fork_behind_by_commits_alone_is_a_candidate():
+    """OWNER RULING (2026-07-29): "daily merge all new commits from upstream for
+    forked tools." The gate used to read `behind_releases` alone, and the
+    projects that matter most do not tag: OpenROAD's tags stop at v2.0, and
+    yosys / verilator / iverilog / ngspice / cocotb / pyuvm / sby just move
+    master. Their `behind_releases` is permanently 0, so they were NEVER
+    candidates — not assessed and skipped, never entered.
+
+    Measured the day this changed: 2 candidates out of 21 forks, while the
+    never-entered ones were 1065 commits behind between them — 87% of the gap.
+    That is how vibe-ic#551 happened: upstream fixed an `rsz::stitchTrees`
+    segfault on 2026-07-13 and nothing here could see it.
+
+    Asserted on the SOURCE of both gates rather than by driving `assess()`,
+    because driving it needs a git fixture and this property is about a
+    condition, not about a run. Both gates must read `behind_commits`; either
+    one still reading releases alone reinstates the hole.
+    """
+    gk_src = Path(_gk().__file__).read_text()
+    as_src = Path(A.__file__).read_text()
+    for name, src in (("gatekeeper.py", gk_src), ("assess_release.py", as_src)):
+        assert "behind_commits" in src, (
+            f"{name} does not consider behind_commits; a fork behind a project "
+            f"that cuts no releases would be invisible again")
+    # The property is that the gate is an OR of BOTH counters, not that some
+    # phrase is absent — my first version asserted the release phrase was gone,
+    # which is wrong: the OR still contains it, so the assertion was vacuous in
+    # one direction and false in the other.
+    import re as _re
+    gate = _re.search(r"behind = \((.{0,200}?)\n.{0,120}?\)", gk_src, _re.S)
+    assert gate, "the candidate gate is no longer a named `behind` expression"
+    body = gate.group(0)
+    assert "behind_releases" in body and "behind_commits" in body, (
+        f"the candidate gate does not OR both counters:\n{body}")
+
+
+def test_a_genuinely_level_fork_is_still_clean():
+    """CONTROL. Without this the widened gate is indistinguishable from one that
+    calls every fork a candidate, which would make the tick assess the whole
+    fleet forever. Both counters at zero must still be clean."""
+    as_src = Path(A.__file__).read_text()
+    assert '(led.get("behind_releases") or 0) == 0' in as_src
+    assert '(led.get("behind_commits") or 0) == 0' in as_src, (
+        "the clean check no longer requires commit distance to be zero too, so "
+        "either every fork is dirty or the commit gap is ignored")
+
+
+def test_an_assessment_that_returned_nothing_is_named_not_counted_as_fresh():
+    """A None assessment is a HOLE, not a fresh one. It happens when the
+    assessor is stubbed, times out, or raises after its key is set. Treating it
+    as fresh crashes the tick; treating it as cached hides it. It must be
+    dropped from both sets AND named, so a tool nobody assessed cannot read as
+    a tool with nothing to assess."""
+    src = Path(_gk().__file__).read_text()
+    assert "NOT ASSESSED" in src, (
+        "a None assessment is no longer named; a tool nobody assessed would "
+        "read as one with nothing to assess")
+    assert "not isinstance(r, dict)" in src

@@ -237,8 +237,13 @@ def unassessed_drift(led: dict) -> str:
     "has never been triaged" turned out to be true of every CLEAN fork, not only the
     misclassified one).
 
-    DISCLOSED, not acted on. The owner's directive is to track releases; this changes
-    what the reader is told, not what the gatekeeper does, and it spends nothing.
+    SUPERSEDED IN PART (owner ruling, 2026-07-29): the directive is now "daily merge
+    all new commits from upstream for forked tools", so commit drift IS acted on and
+    a fork behind by commits alone is a candidate. This disclosure stays because it
+    is still the honest sentence for a row whose merge has not run yet, and because
+    it is what surfaced the gap in the first place. The line above it used to read
+    "the owner's directive is to track releases"; that is no longer true and saying
+    so here matters more than the two words it costs.
     """
     n = led.get("behind_commits") or 0
     if not n:
@@ -299,7 +304,27 @@ def tick() -> dict:
             continue
         led = json.loads(p.read_text())
         leds[p] = led
-        if led.get("integrated") and (led.get("behind_releases") or 0) > 0:
+        # OWNER RULING (2026-07-29): "daily merge all new commits from upstream
+        # for forked tools." This supersedes the release-tracking-only doctrine
+        # that `unassessed_drift` below still describes as the owner's directive
+        # — that docstring predates this ruling and is corrected there.
+        #
+        # The old gate read `behind_releases` alone, and the projects that matter
+        # most do not tag releases: OpenROAD's tags stop at v2.0, and yosys /
+        # verilator / iverilog / ngspice / cocotb / pyuvm / sby just move master.
+        # Their `behind_releases` is permanently 0, so they were NEVER
+        # candidates — not "assessed and skipped", never entered. Measured the
+        # day this changed: 2 candidates out of 21 forks, while the never-entered
+        # ones were 1065 commits behind between them, 87% of the whole gap.
+        #
+        # That is how vibe-ic#551 happened: upstream fixed an `rsz::stitchTrees`
+        # segfault on 2026-07-13 and nothing here could see it, because OpenROAD
+        # could not become a candidate. `behind_commits` was already computed and
+        # stored by discover_forks — the number sat in the ledger, unread by the
+        # one condition that decides whether anyone looks.
+        behind = ((led.get("behind_releases") or 0) > 0
+                  or (led.get("behind_commits") or 0) > 0)
+        if led.get("integrated") and behind:
             candidates.append(led)
 
     # A row the fleet list does not authorise (vibeic/vibeic-eda#10). Nothing prunes the
@@ -343,6 +368,19 @@ def tick() -> dict:
     # ref) is NOT news: we already filed its review PR and already offered its clearly-safe
     # set on the tick that first produced it. Re-filing would reopen the same PR every day.
     # Only FRESH assessments drive PR-opening; cached ones still show in the report/summary.
+    # A None assessment is a HOLE, not a fresh one. `assess()` can return None —
+    # a stubbed assessor in a test, a harness that timed out, an assessor that
+    # raised into the `except` above after the key was set. Treating it as fresh
+    # crashes here; treating it as cached hides it. It is dropped from BOTH sets
+    # and named, so a tool nobody assessed cannot be read as a tool with nothing
+    # to assess. Surfaced when the owner ruling of 2026-07-29 widened the
+    # candidate gate from 2 forks to 10 and the extra eight walked into it.
+    unassessed = sorted(t for t, r in assessments.items() if not isinstance(r, dict))
+    for t in unassessed:
+        print(f"  [assess] {t:16} NOT ASSESSED — the assessor returned nothing; "
+              f"this is a gap in the measurement, not a clean fork")
+        assessments.pop(t, None)
+
     fresh = {t: r for t, r in assessments.items() if not r.get("cached")}
     for t in sorted(set(assessments) - set(fresh)):
         a = assessments[t]

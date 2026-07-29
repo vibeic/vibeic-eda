@@ -715,7 +715,13 @@ def assess(tool: str) -> dict:
 
     if not led.get("integrated"):
         return {"tool": tool, "status": "not_layered", "commits": []}
-    if (led.get("behind_releases") or 0) == 0:
+    # OWNER RULING (2026-07-29): "daily merge all new commits from upstream for
+    # forked tools." A fork with no new RELEASE is not a clean fork — it can be
+    # hundreds of commits behind a project that does not tag at all. Returning
+    # "clean" for those is what kept OpenROAD (772 behind) out of every
+    # assessment ever run. `behind_commits` is already in the ledger.
+    if ((led.get("behind_releases") or 0) == 0
+            and (led.get("behind_commits") or 0) == 0):
         return {"tool": tool, "status": "clean", "commits": [],
                 "base_release": led.get("base_release"), "latest": led.get("upstream_latest_release")}
 
