@@ -58,7 +58,22 @@ GIT_URL = re.compile(r"https://[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-/]+?(?:\.git)?(?=[
 COPY_FROM = re.compile(r"^\s*COPY\s+--from=([^\s]+)", re.I | re.M)
 ARG_LINE = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.I | re.M)
 
-OURS_ARTEFACT = re.compile(r"^ghcr\.io/vibeic/eda-tool-[a-z0-9][a-z0-9._-]*(:.+)?$", re.I)
+#: Our own published artefact. `([:@].*)?` for the same reason ALLOWED_BASE below
+#: carries it, and found the same way — by probing rather than by reading: pinned
+#: by DIGEST, `ghcr.io/vibeic/eda-tool-yosys@sha256:...` was reported as "that
+#: artefact was not built by us", about an artefact we built and published.
+#:
+#: It was latent only because every `ARG IMG_*` still names a TAG. The base moved
+#: to a digest in 0.2.36 and this check punished that; the artefacts are the next
+#: thing to be pinned that way, and the guard would have punished that too. Fixing
+#: one of the two and leaving its twin is how the same bug gets rediscovered.
+#:
+#: What still bounds the suffix is the anchoring, not the suffix pattern: `^` plus
+#: a literal `ghcr.io/vibeic/eda-tool-` prefix, and a name class that excludes `/`.
+#: So `ghcr.io/vibeic/eda-tool-yosys/evil@…`, `…-tool-yosysEVIL@…` and
+#: `evil.io/ghcr.io/vibeic/eda-tool-yosys@…` are all still rejected — probed in
+#: `.github/workflows/fork-only.yml`, in both directions.
+OURS_ARTEFACT = re.compile(r"^ghcr\.io/vibeic/eda-tool-[a-z0-9][a-z0-9._-]*([:@].*)?$", re.I)
 
 #: A `COPY --from` naming a stage defined in the same file is internal wiring,
 #: not an external artefact. Stage names carry no dots or slashes.

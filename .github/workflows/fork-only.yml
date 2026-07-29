@@ -82,6 +82,45 @@ jobs:
           probe 1 "the default is the real source" \
             'ARG R=https://github.com/upstream/thing.git\nFROM alpine\n'
 
+          # A reference pinned by DIGEST must be accepted, for the base and for
+          # our own artefacts alike. Both allow-patterns ended in `(:.*)?`, which
+          # matches `name:tag` and NOT `name@sha256:…`; the base moved to a digest
+          # in 0.2.36 and check_fork_only went red on main, calling the image the
+          # composing stage itself uses "not one of our artefacts". A guard that
+          # fires because the repository got STRICTER is the kind that gets
+          # switched off, so the accept side is pinned here and not only the
+          # reject side.
+          #
+          # EVERY ALLOW PROBE CARRIES A REAL COPY --from. An ALLOWED base does not
+          # increment `examined`, so a probe whose Dockerfile holds nothing else
+          # exits 2 ("nothing was examined") — which is not a pass and does not
+          # prove the base was accepted. Drop the COPY line and these probes go on
+          # reporting green while asserting nothing.
+          probe 0 "reference" \
+            'ARG B=hpretl/iic-osic-tools@sha256:7371bae5\nFROM ${B} AS s\nCOPY --from=ghcr.io/vibeic/eda-tool-yosys:abc /a /a\n'
+          probe 0 "reference" \
+            'FROM hpretl/iic-osic-tools:latest AS s\nCOPY --from=ghcr.io/vibeic/eda-tool-yosys:abc /a /a\n'
+          probe 0 "reference" \
+            'FROM alpine\nCOPY --from=ghcr.io/vibeic/eda-tool-yosys@sha256:dead /a /a\n'
+
+          # The power that widening must NOT cost. `([:@].*)?` accepts anything
+          # after the separator, so what bounds it is the anchoring — `^`, a
+          # literal prefix, and a name class with no `/` — not the suffix. Each
+          # of these differs from an allowed reference only in ways the anchoring
+          # is supposed to catch, and each must still be rejected.
+          probe 1 "not one of our artefacts" \
+            'FROM hpretl/iic-osic-tools-evil@sha256:dead AS s\nCOPY --from=s /a /a\n'
+          probe 1 "not one of our artefacts" \
+            'FROM evil.io/hpretl/iic-osic-tools@sha256:dead AS s\nCOPY --from=s /a /a\n'
+          probe 1 "not one of our artefacts" \
+            'FROM hpretl/iic-osic-tools/evil@sha256:dead AS s\nCOPY --from=s /a /a\n'
+          probe 1 "was not built by us" \
+            'FROM alpine\nCOPY --from=ghcr.io/evil/eda-tool-yosys@sha256:dead /a /a\n'
+          probe 1 "was not built by us" \
+            'FROM alpine\nCOPY --from=ghcr.io/vibeic/eda-tool-yosys/evil@sha256:dead /a /a\n'
+          probe 1 "was not built by us" \
+            'FROM alpine\nCOPY --from=ghcr.io/vibeic/eda-toolkit@sha256:dead /a /a\n'
+
           # An EXPIRED exception must fail. PENDING_FORKS.json's whole value is
           # the deadline; if an expired entry still passed, the file would be a
           # permanent allowlist wearing a date.

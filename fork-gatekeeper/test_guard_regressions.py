@@ -73,6 +73,14 @@ def test_inventory_source_has_no_undefined_global():
     `collect()` needs a container to execute, so the defect lived in a line no
     test reached. Compiling the module and comparing its global loads against
     what it defines finds an undefined name without running anything.
+
+    NARROWER THAN IT LOOKS, and kept deliberately. This reads one module and only
+    ALL-CAPS names, so it is a check for the shape of THIS defect, not for the
+    class. Measured: revert the fix and it fails; rename the same defect to a
+    lowercase `repo_root`, or put an undefined constant in `build_page.py`, and it
+    passes both times. `test_no_undefined_globals.py` is the general form — proper
+    scope analysis via `symtable`, every name, all 28 modules — and it catches all
+    three. That one is the guard; this one stays as the named regression for #27.
     """
     import ast
     src = (_ROOT / "fork-gatekeeper" / "inventory.py").read_text()
