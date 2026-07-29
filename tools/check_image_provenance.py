@@ -39,6 +39,8 @@ PRIMARY = {
     "sat-solvers": "KISSAT_REF", "ngspice": "NGSPICE_REF",
     "lvs": "MAGIC_REF", "iverilog": "IVERILOG_REF",
     "klayout": "KLAYOUT_REF", "verilator": "VERILATOR_REF",
+    "gtkwave": "GTKWAVE_REF", "xschem": "XSCHEM_REF",
+    "slang": "SLANG_REF", "xyce": "XYCE_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
 

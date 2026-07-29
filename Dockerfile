@@ -37,6 +37,10 @@ ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab-940079
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-636653
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670-8c0ab6
+ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-77703c
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c8b26a1-382491
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:24809c8-b569b8
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:a592a42-9d3df7
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -55,6 +59,10 @@ FROM ${IMG_LVS} AS img-lvs
 FROM ${IMG_IVERILOG} AS img-iverilog
 FROM ${IMG_KLAYOUT} AS img-klayout
 FROM ${IMG_VERILATOR} AS img-verilator
+FROM ${IMG_GTKWAVE} AS img-gtkwave
+FROM ${IMG_XSCHEM} AS img-xschem
+FROM ${IMG_SLANG} AS img-slang
+FROM ${IMG_XYCE} AS img-xyce
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +284,18 @@ COPY --from=img-iverilog /foss/tools/iverilog /foss/tools/iverilog
 # Removing the directory would orphan any co-tenant the base keeps there,
 # which is exactly what happened to eqy and mcy under yosys (#19).
 COPY --from=img-verilator /foss/tools/verilator /foss/tools/verilator
+
+# Forked on 2026-07-28 and still consumed from the BASE image until now: the
+# fork existed and nothing built from it. check_fork_only cannot see that — it
+# checks what we build and copy, and says in its own docstring that it is blind
+# to the tools the base supplies. The COPY overwrites the base directory in
+# place, so the base build is replaced rather than shadowed on PATH.
+
+COPY --from=img-gtkwave /foss/tools/gtkwave /foss/tools/gtkwave
+COPY --from=img-xschem /foss/tools/xschem /foss/tools/xschem
+COPY --from=img-slang /foss/tools/slang /foss/tools/slang
+COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
+
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
 # build.sh emits the Qt-less db-lib + pymod + db_plugins/liblefdef.so into its -build dir.
 COPY --from=img-klayout /klayout/bld /foss/tools/klayout-vibeic
@@ -293,6 +313,10 @@ COPY --from=img-lvs /vibeic/provenance/lvs.json /vibeic/provenance/lvs.json
 COPY --from=img-iverilog /vibeic/provenance/iverilog.json /vibeic/provenance/iverilog.json
 COPY --from=img-klayout /vibeic/provenance/klayout.json /vibeic/provenance/klayout.json
 COPY --from=img-verilator /vibeic/provenance/verilator.json /vibeic/provenance/verilator.json
+COPY --from=img-gtkwave /vibeic/provenance/gtkwave.json /vibeic/provenance/gtkwave.json
+COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.json
+COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
+COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \

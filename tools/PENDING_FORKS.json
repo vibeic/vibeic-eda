@@ -6,7 +6,7 @@
     "The six that were pending here (kissat, cadical, ASAP7_for_KLayout,",
     "asap7_pdk_r1p7, asap7sc7p5t_28, OpenROAD-flow-scripts) were blocked by",
     "GitHub's fork API returning 403 'You cannot fork this repository at this",
-    "time'. That block is on the FORK endpoint only — creating a repo in the org",
+    "time'. That block is on the FORK endpoint only \u2014 creating a repo in the org",
     "and pushing refs into it works, and the rate limit was 4988/5000 at the time,",
     "so it was never budget. They were mirrored that way instead.",
     "",
@@ -14,10 +14,17 @@
     "asap7sc7p5t_28 carries only CDL/LVS, the subtree the image sparse-checks-out.",
     "Its full history is 2.8 GB and the push fails HTTP 500 on large files. A",
     "change there cannot go upstream as a normal PR until it is re-forked",
-    "properly — see that repo's README.",
+    "properly \u2014 see that repo's README.",
     "",
     "check_fork_only reads this file. An entry here is a NAMED, DATED exception,",
     "never a silent allowlist, and an expired one FAILS the build."
   ],
-  "pending": []
+  "pending": [
+    {
+      "source": "trilinos/Trilinos",
+      "used_by": "tools/xyce \u2014 Xyce cannot be configured or linked without it",
+      "reason": "Fork blocked: `gh repo fork trilinos/Trilinos` returns HTTP 403 'You cannot fork this repository at this time'. The mirror route used for the six sources in 9861b90 is not a drop-in here either: at 853 MB this is the size range where that commit reported the content API failing on large files. Xyce ITSELF builds from vibeic/Xyce; this is its build dependency, statically linked and not shipped as its own artefact.",
+      "expires": "2026-08-12"
+    }
+  ]
 }
