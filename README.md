@@ -97,6 +97,16 @@ reach a user yet. They are named rather than netted out of a total, because "21
 tracked" and "15 shipping" answer different questions and only one of them is
 about what you pull.
 
+**"Ships" here means the image CONTAINS the build — not that the flow runs it,
+which is a third question and the answer is not 15.** Two of those fifteen are
+in the image and inert: `verilator` resolves on `PATH` to the base image's April
+5.048 while our 5.051 sits unreferenced (#18), and our `klayout` fork's LEF/DEF
+plugin is loaded by nothing but `svrfdrc` (#17). Both were found by
+`fork-gatekeeper/fork_reaches_flow_check.py`, which resolves what the flow would
+invoke and asks whether it lands in a path we copied from our own artefact. The
+distinction is exactly what let those two hide: every count on this page was
+right about them.
+
 The org-side count cannot be reproduced from this checkout, so it is dated
 instead of asserted:
 
