@@ -556,3 +556,79 @@ def test_the_recorded_fingerprint_matches_the_tree_that_shipped(tmp_path):
     # The property: what gets RECORDED must be the second one. Recording the
     # first is what puts the release on a treadmill.
     assert fingerprint() == after, "the fingerprint must be stable once edits stop"
+
+
+# --- vibeic-eda#17: a checker that cries wolf gets ignored
+
+def _fake_docker(out_by_script):
+    """Answer each `docker run ... -lc <script>` from a prefix->output map."""
+    def run(cmd, timeout=600):
+        script = cmd[-1]
+        for key, val in out_by_script.items():
+            if key in script:
+                return 0, val, ""
+        return 0, "", ""
+    return run
+
+
+def test_yices2_is_not_a_command_and_never_was(monkeypatch):
+    """The target ships four binaries and none is called `yices2`.
+
+    Every run reported "yices2: not on PATH" about a tool that is present, ours
+    and symlinked four ways — measured, all four resolve into /foss/tools/yices,
+    copied from img-yices2, provenance naming vibeic/yices2 at the pin. A finding
+    that is always there and always wrong trains everyone to skim the report.
+    """
+    assert "yices2" in F._MULTI_BINARY
+    assert F._MULTI_BINARY["yices2"] == ("yices", "yices-sat", "yices-smt",
+                                         "yices-smt2")
+
+
+def test_a_deliberate_non_install_is_not_a_finding(tmp_path, monkeypatch):
+    """sv-elab installs no command ON PURPOSE (vibeic-eda#24)."""
+    df = tmp_path / "Dockerfile"
+    df.write_text("COPY --from=img-sv-elab /x /foss/tools/slang-yosys-plugin\n"
+                  "COPY --from=img-yosys /y /foss/tools/yosys\n")
+    monkeypatch.setattr(F, "_sh", _fake_docker({
+        "command -v": "sv-elab NONE\nyosys /foss/tools/yosys/bin/yosys "
+                      "/foss/tools/yosys/bin/yosys\n"}))
+    findings = F.check("img", df)
+    assert not [f for f in findings if f["tool"] == "sv-elab"], \
+        "an intended state reported forever is a finding nobody reads"
+
+
+def test_it_still_fires_when_a_tool_we_build_is_not_the_one_that_runs(tmp_path,
+                                                                     monkeypatch):
+    """The power the fix must NOT cost.
+
+    Verified against real images too: the same corrected checker still reports
+    klayout on 0.2.44 and 0.2.39, and only 0.2.45 — the release that swapped the
+    prefix — comes back clean.
+    """
+    df = tmp_path / "Dockerfile"
+    df.write_text("COPY --from=img-klayout /b /foss/tools/klayout-vibeic\n")
+    monkeypatch.setattr(F, "_sh", _fake_docker({
+        "command -v": "klayout /foss/tools/klayout/klayout "
+                      "/foss/tools/klayout/klayout\n"}))
+    findings = F.check("img", df)
+    bad = [f for f in findings if f["tool"] == "klayout"]
+    assert bad and bad[0]["we_build_it"], \
+        "the check lost the defect it exists to find"
+
+
+def test_a_source_installed_tool_needs_its_source_tree_present(tmp_path,
+                                                               monkeypatch):
+    """sby lands in /usr/local/bin via `make install`, which path containment
+    cannot attribute. The weaker claim — our source tree is in the image — is
+    made explicitly, and its absence is still a finding."""
+    df = tmp_path / "Dockerfile"
+    df.write_text("COPY --from=img-yosys /y /foss/tools/yosys\n")
+    monkeypatch.setattr(F, "_sh", _fake_docker({
+        "command -v": "sby /usr/local/bin/sby /usr/local/bin/sby\n",
+        "-d /opt/vibeic-forks/sby": "sby\n"}))
+    assert not [f for f in F.check("img", df) if f["tool"] == "sby"]
+
+    monkeypatch.setattr(F, "_sh", _fake_docker({
+        "command -v": "sby /usr/local/bin/sby /usr/local/bin/sby\n"}))
+    bad = [f for f in F.check("img", df) if f["tool"] == "sby"]
+    assert bad and "did not come from us" in bad[0]["problem"]

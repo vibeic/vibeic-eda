@@ -61,8 +61,40 @@ RC_OK, RC_NOT_OURS, RC_NOTHING = 0, 1, 2
 
 #: Targets whose tag is composed from more than one binary, so the command name
 #: cannot be derived from the target name.
+#:
+#: `yices2` was missing and cost this program its credibility for weeks: the
+#: target ships `yices`, `yices-sat`, `yices-smt` and `yices-smt2`, and NOTHING
+#: is named `yices2`. So every run reported "yices2: not on PATH in the composed
+#: image" about a tool that is present, ours, and symlinked four ways — measured:
+#: all four resolve to /foss/tools/yices/bin, copied from `img-yices2`, and the
+#: in-image provenance names vibeic/yices2 at the pinned commit.
 _MULTI_BINARY = {"lvs": ("magic", "netgen"),
-                 "sat-solvers": ("kissat", "cadical")}
+                 "sat-solvers": ("kissat", "cadical"),
+                 "yices2": ("yices", "yices-sat", "yices-smt", "yices-smt2")}
+
+#: Targets that deliberately install NO command. Reporting these as "not on
+#: PATH" is true and useless — it is the intended state, recorded elsewhere with
+#: its reason, and a finding that never goes away is a finding nobody reads.
+#:
+#: sv-elab IS the slang yosys plugin. yosys 0.67+ carries the slang frontend
+#: itself, so installing ours puts a second copy in the process and the
+#: duplicated statics double-free at exit (vibeic-eda#24). The fork stays tracked
+#: and its artefact stays built; only the install is declined.
+_NO_COMMAND = {"sv-elab": "vibeic-eda#24 — a second slang frontend in one "
+                          "process double-frees at exit; the artefact is built "
+                          "and pinned, the install is declined"}
+
+#: Commands installed from OUR source tree rather than copied from an artefact,
+#: so path containment cannot see them. The claim this program can make about
+#: them is weaker and is stated as such: the source tree we build from is
+#: present in the image at the named path.
+#:
+#: sby is `make -C /opt/vibeic-forks/sby install PREFIX=/usr/local`, which lands
+#: in /usr/local/bin — a path no `COPY --from=img-*` mentions. The check reported
+#: it as "the base image's, which may be intended". It is not the base's:
+#: measured, `sby --version` reports v0.67-26-g7422136 against the pin
+#: 742213689, i.e. our commit.
+_INSTALLED_FROM_SOURCE = {"sby": "/opt/vibeic-forks/sby"}
 
 #: Commands that are not tool targets but belong in the sweep: shipped by the
 #: root Dockerfile directly, or buddy tools of a target.
@@ -179,6 +211,16 @@ def check(image: str, dockerfile: Path) -> List[dict]:
         return [{"tool": "*", "problem": f"could not run {image}: "
                                         f"{err.strip()[-200:]}"}]
 
+    # Which source trees of ours are present, for the tools installed by `make
+    # install` rather than copied. Asked once, in the image, not assumed.
+    src_present = {}
+    if _INSTALLED_FROM_SOURCE:
+        probe = "; ".join(f'[ -d {p} ] && echo {t}'
+                          for t, p in _INSTALLED_FROM_SOURCE.items())
+        _, sout, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash",
+                          image, "-lc", probe])
+        src_present = {ln.strip() for ln in sout.splitlines() if ln.strip()}
+
     for ln in out.splitlines():
         parts = ln.split()
         if len(parts) < 2 or parts[0] not in FLOW_TOOLS:
@@ -186,11 +228,26 @@ def check(image: str, dockerfile: Path) -> List[dict]:
         tool, path = parts[0], parts[1]
         real = parts[2] if len(parts) > 2 else path
         if path == "NONE":
+            if tool in _NO_COMMAND:
+                # Intended, and recorded with its reason. A permanent finding is
+                # one nobody reads, and it drowns the findings that matter.
+                continue
             findings.append({"tool": tool, "resolved": None,
                              "problem": "not on PATH in the composed image"})
             continue
         if any(real == d or real.startswith(d.rstrip("/") + "/")
                for d in all_dests):
+            continue
+        if tool in _INSTALLED_FROM_SOURCE:
+            src = _INSTALLED_FROM_SOURCE[tool]
+            if tool in src_present:
+                continue
+            findings.append({
+                "tool": tool, "resolved": real,
+                "problem": f"installed from our source tree, but {src} is not "
+                           f"in the image — so what is on PATH did not come "
+                           f"from us",
+                "we_build_it": True})
             continue
         # It resolves somewhere we did not copy from any artefact. If we built
         # this tool at all, the flow is running someone else's build of it.
