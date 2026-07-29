@@ -193,6 +193,36 @@ def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
     return sorted(seen)
 
 
+def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
+                     targets: Dict[str, List[str]]) -> Dict[str, str]:
+    """target -> tag, for every pinned artefact that does not exist yet.
+
+    THE REBUILD TRIGGER IS ABSENCE, NOT MOVEMENT. An earlier version rebuilt
+    whatever moved DURING THIS RUN, which is not the same question and fails in
+    the one case that matters: a run interrupted between moving the pin and
+    building the artefact. That happened on 2026-07-29 — the pins were rewritten,
+    the OpenROAD build was killed, and the next run said "every pin is already
+    its fork's tip, nothing to do" while the artefact for that pin did not exist
+    anywhere. Exactly the state the whole chain is built to prevent, produced by
+    the chain itself.
+
+    Asking whether the artefact EXISTS makes the release idempotent and
+    self-healing: interrupt it anywhere, run it again, and it resumes.
+    """
+    missing: Dict[str, str] = {}
+    for target, ref_vars in targets.items():
+        shorts = [refs_now[v][:SHORT] for v in ref_vars if v in refs_now]
+        if len(shorts) != len(ref_vars):
+            continue
+        ref = f"ghcr.io/vibeic/eda-tool-{target}:{'-'.join(shorts)}"
+        if _sh(["docker", "image", "inspect", ref], timeout=60)[0] == 0:
+            continue
+        if _sh(["docker", "manifest", "inspect", ref], timeout=180)[0] == 0:
+            continue
+        missing[target] = ref
+    return missing
+
+
 def bump_version(eda_root: Path) -> Tuple[str, str]:
     """Next version, above BOTH the VERSION file and every tag that exists.
 
@@ -271,7 +301,17 @@ def main(argv=None) -> int:
     result = {"program": "daily_release", "moved": moved,
               "unresolved": unresolved, "built": [], "version": None}
 
-    if moved and not a.dry_run:
+    refs_all = {f"{args_of[r]}_REF": s for r, s in pins.items() if r in args_of}
+    # Computed on a dry run too: `docker image/manifest inspect` only reads, and
+    # a preview that cannot see a missing artefact previews a rosier release than
+    # the real one.
+    absent = missing_artefacts(root, refs_all, targets)
+    if absent:
+        print(f"  {len(absent)} pinned artefact(s) do not exist yet: "
+              f"{', '.join(sorted(absent))}")
+    result["absent_artefacts"] = sorted(absent)
+
+    if (moved or absent) and not a.dry_run:
         for m in moved:
             if not m["arg"]:
                 unresolved.append({"repo": m["repo"],
@@ -286,9 +326,10 @@ def main(argv=None) -> int:
             print(f"  retag {t}")
 
         if not a.no_build:
-            build = sorted({t for t, rv in targets.items()
-                            if any(f"{m['arg']}_REF" in rv for m in moved
-                                   if m.get("arg"))})
+            build = sorted(missing_artefacts(root, refs_now, targets))
+            if build:
+                print(f"  artefacts to build (absent, not merely moved): "
+                      f"{', '.join(build)}")
             for t in build:
                 print(f"  building {t} …", flush=True)
                 # `--push` is what makes the next hop incremental FOR ANYONE
@@ -364,9 +405,12 @@ def main(argv=None) -> int:
         print(f"[NEEDS HUMAN] {len(unresolved)} pin(s) could not be resolved; "
               f"they were left alone and are NOT in this release", file=sys.stderr)
         return RC_NEEDS_HUMAN
-    if not moved:
-        print("[PASS] every pin is already its fork's tip — no tool has a new "
-              "version, so no image version was cut")
+    if not moved and not absent:
+        print("[PASS] every pin is its fork's tip and every pinned artefact "
+              "exists — nothing to rebuild, so no image version was cut")
+    elif a.dry_run:
+        print(f"[DRY RUN] would move {len(moved)} pin(s) and build "
+              f"{len(absent)} absent artefact(s)")
     return RC_OK
 
 
