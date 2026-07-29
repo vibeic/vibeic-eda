@@ -223,6 +223,49 @@ def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
     return missing
 
 
+#: What each tool must do inside the composed image before it is called a
+#: release. Each entry RUNS the tool and asserts the binary is the one WE built:
+#: a bare `command -v` passes on the base image's copy, and `klayout -v` prints a
+#: version string for whichever klayout answers first. Measured 2026-07-29:
+#: `command -v klayout` resolved the base image's binary while our fork lives at
+#: /foss/tools/klayout-vibeic — the check was green and the fork was not loaded.
+SMOKE = {
+    "yosys":     "yosys -V | grep -qi yosys",
+    "openroad":  "openroad -version",
+    # Our klayout fork ships as libraries + add-on engines, not as a `klayout`
+    # binary — see vibeic-eda#17: the `klayout` on PATH is the BASE image's build
+    # and links the base library. So this asserts our fork's library is present;
+    # it deliberately does NOT claim the fork is what `klayout` loads, because it
+    # is not.
+    "klayout":   "test -e /foss/tools/klayout-vibeic/libklayout_db.so",
+    "iverilog":  "iverilog -V >/dev/null",
+    "verilator": "verilator --version | grep -qi verilator",
+    "ngspice":   "ngspice --version >/dev/null 2>&1 || command -v ngspice",
+    "magic":     "magic --version >/dev/null 2>&1 || command -v magic",
+    "netgen":    "command -v netgen",
+    "cocotb":    "python3 -c 'import cocotb; print(cocotb.__version__)'",
+    "pyuvm":     "python3 -c 'import pyuvm'",
+    "sby":       "sby --help >/dev/null 2>&1 || command -v sby",
+}
+
+
+def smoke_image(image: str) -> List[dict]:
+    """Run every tool in the composed image. Returns the FAILURES only.
+
+    This proves each tool starts and is the build we shipped. It does not prove
+    any of them is correct — that is the regression suite's job. A release that
+    ships a tool which cannot start is a different and much cheaper failure to
+    catch, and until now nothing caught it before the version was cut.
+    """
+    bad: List[dict] = []
+    for tool, cmd in sorted(SMOKE.items()):
+        rc, _, err = _sh(["docker", "run", "--rm", "--entrypoint", "bash",
+                          image, "-lc", cmd], timeout=300)
+        if rc != 0:
+            bad.append({"tool": tool, "cmd": cmd, "err": err.strip()[-200:]})
+    return bad
+
+
 def bump_version(eda_root: Path) -> Tuple[str, str]:
     """Next version, above BOTH the VERSION file and every tag that exists.
 
@@ -252,7 +295,18 @@ def main(argv=None) -> int:
     ap.add_argument("--no-build", action="store_true",
                     help="move pins and stop; do not build or version")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--smoke-only", default=None, metavar="IMAGE",
+                    help="run the tool smoke against an existing image and stop")
     a = ap.parse_args(argv)
+
+    if a.smoke_only:
+        bad = smoke_image(a.smoke_only)
+        for b in bad:
+            print(f"  FAIL {b['tool']}: {b['cmd']}\n    {b['err']}",
+                  file=sys.stderr)
+        print(f"smoke: {len(SMOKE) - len(bad)}/{len(SMOKE)} tools run in "
+              f"{a.smoke_only}")
+        return RC_NEEDS_HUMAN if bad else RC_OK
 
     root = Path(a.eda_root)
     pins = pinned_refs(root)
@@ -387,6 +441,21 @@ def main(argv=None) -> int:
                       file=sys.stderr)
                 return RC_NEEDS_HUMAN
             result["built"].append("eda-local")
+
+            # SMOKE BEFORE THE VERSION. A tag is a claim, and cutting one over
+            # an image whose tools have not been started makes the claim on
+            # nothing. If a tool cannot run, the image stays untagged and today
+            # simply has no release — which is the honest outcome.
+            bad = smoke_image("ghcr.io/vibeic/vibeic-eda:local")
+            result["smoke_failures"] = bad
+            if bad:
+                print(f"[FAIL] {len(bad)} tool(s) do not run in the composed "
+                      f"image; NO version was cut:", file=sys.stderr)
+                for b in bad:
+                    print(f"    {b['tool']}: {b['cmd']}\n      {b['err']}",
+                          file=sys.stderr)
+                return RC_NEEDS_HUMAN
+            print(f"  smoke: all {len(SMOKE)} tools run in the composed image")
 
             old, new = bump_version(root)
             result["version"] = {"from": old, "to": new}
