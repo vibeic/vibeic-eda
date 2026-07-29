@@ -47,6 +47,7 @@ Exit: 0 released or nothing to do, 1 something needed a human, 2 nothing checked
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -179,6 +180,22 @@ def retag_images(eda_root: Path, refs_now: Dict[str, str],
     if touched:
         root_df.write_text(text, encoding="utf-8")
     return touched
+
+
+def pins_fingerprint(pins: Dict[str, str]) -> str:
+    """A stable digest of the whole pin set — what a released image was built from."""
+    blob = ";".join(f"{k}={v}" for k, v in sorted(pins.items()))
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+def released_record(eda_root: Path) -> dict:
+    f = eda_root / "RELEASED.json"
+    if not f.is_file():
+        return {}
+    try:
+        return json.loads(f.read_text())
+    except ValueError:
+        return {}
 
 
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
@@ -355,6 +372,25 @@ def main(argv=None) -> int:
     result = {"program": "daily_release", "moved": moved,
               "unresolved": unresolved, "built": [], "version": None}
 
+    # THE COMPOSED IMAGE IS AN ARTEFACT TOO. Checking only the per-tool
+    # artefacts left the exact hole this program is about, one level up: after a
+    # run built and published both tools and was then interrupted before
+    # composing, the next run said "every pin is its fork's tip and every pinned
+    # artefact exists — nothing to rebuild" while no image had ever been made
+    # from those pins. Reproduced it on 2026-07-29, in this file, hours after
+    # fixing the same shape for tool artefacts.
+    #
+    # An image tag is a version number, not a content hash, so "does the image
+    # exist" cannot be asked of the registry. RELEASED.json records what the last
+    # published image was built FROM; a pin set that does not match it has never
+    # been released.
+    fp = pins_fingerprint(pins)
+    rec = released_record(root)
+    unreleased = rec.get("pins_fingerprint") != fp
+    if unreleased:
+        print(f"  pin set {fp} has not been released "
+              f"(last released: {rec.get('pins_fingerprint') or 'never'})")
+
     refs_all = {f"{args_of[r]}_REF": s for r, s in pins.items() if r in args_of}
     # Computed on a dry run too: `docker image/manifest inspect` only reads, and
     # a preview that cannot see a missing artefact previews a rosier release than
@@ -365,7 +401,7 @@ def main(argv=None) -> int:
               f"{', '.join(sorted(absent))}")
     result["absent_artefacts"] = sorted(absent)
 
-    if (moved or absent) and not a.dry_run:
+    if (moved or absent or unreleased) and not a.dry_run:
         for m in moved:
             if not m["arg"]:
                 unresolved.append({"repo": m["repo"],
@@ -492,6 +528,14 @@ def main(argv=None) -> int:
                     print(f"  PUSH FAILED — {new} exists here and nowhere "
                           f"else:\n{perr[-800:]}", file=sys.stderr)
             result["pushed"] = pushed
+            if pushed:
+                (root / "RELEASED.json").write_text(json.dumps(
+                    {"_comment": "What the last PUBLISHED image was built from. "
+                                 "A pin set not matching this has never been "
+                                 "released, however current the pins look.",
+                     "version": new, "pins_fingerprint": fp,
+                     "pins": {k: v for k, v in sorted(pins.items())}},
+                    indent=2) + "\n", encoding="utf-8")
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
 
@@ -504,12 +548,13 @@ def main(argv=None) -> int:
         print(f"[NEEDS HUMAN] {len(unresolved)} pin(s) could not be resolved; "
               f"they were left alone and are NOT in this release", file=sys.stderr)
         return RC_NEEDS_HUMAN
-    if not moved and not absent:
-        print("[PASS] every pin is its fork's tip and every pinned artefact "
-              "exists — nothing to rebuild, so no image version was cut")
+    if not moved and not absent and not unreleased:
+        print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
+              "and this pin set is already released — nothing to do")
     elif a.dry_run:
-        print(f"[DRY RUN] would move {len(moved)} pin(s) and build "
-              f"{len(absent)} absent artefact(s)")
+        print(f"[DRY RUN] would move {len(moved)} pin(s), build {len(absent)} "
+              f"absent artefact(s), and "
+              f"{'cut a release' if unreleased else 'cut no release'}")
     return RC_OK
 
 
