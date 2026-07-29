@@ -3416,6 +3416,111 @@ def test_a_published_tick_stamps_every_document_with_the_process_that_wrote_it()
                     f"{name} claims the production runner wrote it"
 
 
+#: An inventory as `inventory.collect()` returns one, small enough to read and wide
+#: enough to reach every branch of `render_inventory`: one row per fork state, a
+#: duplicate upstream, and all three divergence channels populated.
+_INV_STUB = {
+    "image": "stub/vibeic-eda:0",
+    "a": [
+        {"dir": "yosys", "origin": "ours", "upstream": "YosysHQ/yosys", "state": "forked",
+         "forks": ["yosys"], "used": True, "desc_en": "Synthesis", "desc_zh": "合成"},
+        {"dir": "klayout", "origin": "ours", "upstream": "KLayout/klayout", "state": "forked",
+         "forks": ["klayout", "klayout-2"], "used": True, "desc_en": "Layout", "desc_zh": "佈局"},
+        {"dir": "cvc", "origin": "base", "upstream": "d-m-bailey/cvc", "state": "no",
+         "forks": [], "used": False, "desc_en": "ERC", "desc_zh": "電性檢查"},
+        {"dir": "volare", "origin": "base", "upstream": "", "state": "pip",
+         "forks": [], "used": True, "desc_en": "PDK fetcher", "desc_zh": "PDK 下載"},
+        {"dir": "bin", "origin": "base", "upstream": "", "state": "not-a-tool",
+         "forks": [], "used": True, "desc_en": "PATH dir", "desc_zh": "PATH 目錄"},
+        {"dir": "mystery", "origin": "base", "upstream": "", "state": "unknown-upstream",
+         "forks": [], "used": False, "desc_en": "", "desc_zh": ""},
+    ],
+    "b": [{"tool": "xschem", "upstream": "StefanSchippers/xschem", "forks": [], "used": True,
+           "desc_en": "Schematic capture", "desc_zh": "電路圖", "reason_en": "", "reason_zh": ""}],
+    "c": [{"dir": "sky130A", "upstream": "RTimothyEdwards/open_pdks", "forks": ["open_pdks"],
+           "desc_en": "Sky130 PDK", "desc_zh": "Sky130 製程包"}],
+    "n_fork_repos": 3, "n_distinct_upstreams": 2,
+    "dupes": {"klayout/klayout": ["klayout", "klayout-2"]},
+    "missing_notes": ["mystery"], "stale_notes": ["removed-tool"],
+    "unmeasured": ["could not list /foss/pdks in stub/vibeic-eda:0"],
+}
+
+
+def _offline_inventory(bp):
+    """Stop `build()` from MEASURING the inventory in tests that are not about it.
+
+    `build()` now calls `inventory.collect()`, which is ~50 live GitHub API calls (the
+    org's repos, then one per fork for its parent, then the upstream metadata) plus a
+    `docker run` per image. Measured when that landed: the two publish-boundary tests
+    below went from 0.36s to 87.44s, and they assert nothing about the inventory — they
+    guard what may cross into the published page. A unit test that spends the process's
+    API budget to reach an assertion about provenance redaction is a test that will one
+    day fail for a rate limit and be read as a redaction bug.
+
+    So the measurement is stubbed here and the section gets its OWN test rather than
+    being exercised as a side effect of an unrelated one.
+    """
+    bp.inventory = type("_StubInv", (), {"collect": staticmethod(
+        lambda *_a, **_k: dict(_INV_STUB))})
+    bp._image_ref = lambda: _INV_STUB["image"]
+    return bp
+
+
+def test_the_inventory_section_passes_text_not_markup_to__bi():
+    """`_bi` escapes both of its arguments, so an HTML entity written by the caller is
+    escaped twice and the reader sees the literal characters.
+
+    This SHIPPED. Measured on https://vibeic.ai/eda-forks.html before the fix, three
+    captions carried pre-escaped entities into `_bi` and the served HTML contained:
+
+        &amp;quot;no&amp;quot;                &amp;quot;could not determine&amp;quot;
+        &amp;quot;does not exist&amp;quot;     &amp;quot;which sky130A is this&amp;quot;
+        &amp;quot;open_pdks produced it&amp;quot;   &amp;#39;s
+
+    which a browser renders as `&quot;no&quot;` and `project&#39;s`. It is easy to
+    reintroduce because the surrounding template is raw HTML where those entities are
+    correct — the two conventions sit three lines apart in the same f-string.
+
+    Asserted on the rendered output rather than on the source, so it also holds for a
+    caption added later or for note text arriving from TOOL_NOTES.json.
+    """
+    bp = _load("build_page")
+    html = bp.render_inventory(dict(_INV_STUB))
+    for bad in ("&amp;quot;", "&amp;#39;", "&amp;amp;", "&amp;lt;", "&amp;gt;"):
+        assert bad not in html, (
+            f"{bad} in the rendered page: a caller passed an HTML entity to _bi, which "
+            f"escapes it again and prints it as literal text")
+
+
+def test_the_inventory_section_reports_every_divergence_it_finds():
+    """The section's whole claim is that it AUDITS rather than describes: a directory
+    with no note, a note for a directory that is gone, and anything it could not measure
+    are reported instead of quietly contributing no row. Computing those three lists and
+    dropping them would leave a page that looks complete and reads like an audit — the
+    exact failure this replaced a pasted table to avoid — so the claim is asserted on the
+    output, not trusted.
+
+    The assertions name the REPORT's own wording, not just the tool. A first draft of
+    this test asserted `"mystery" in html`, which passed with the whole divergence list
+    deleted from the renderer — `mystery` is also an ordinary row in table A, so the
+    check was measuring the row and reading it as the report. A test that stays green
+    with the thing it guards removed is the defect it is supposed to catch, one level up.
+    """
+    bp = _load("build_page")
+    html = bp.render_inventory(dict(_INV_STUB))
+    assert "no note for image directory: mystery" in html, \
+        "a directory with no note was not REPORTED (it may still render as a row)"
+    assert "a note exists for 'removed-tool'" in html, \
+        "a note for a directory not in the image was not reported"
+    assert "could not list /foss/pdks" in html, "an unmeasured section did not say so"
+    assert "absent, not empty" in html, \
+        "the page did not say how to read a row affected by a failed measurement"
+    # and the states that are NOT "no" stay distinguishable from it
+    assert "pip-installed" in html and "upstream unconfirmed" in html, \
+        "a state meaning 'could not determine' was collapsed into 'no'"
+    assert "duplicates" in html, "duplicate forks of one upstream were counted as coverage"
+
+
 def test_the_published_page_carries_no_provenance():
     """The publish boundary. `build_page` embeds whole ledger dicts and the whole latest
     report into the page served from vibeic.ai, so provenance — which names a local
@@ -3433,7 +3538,7 @@ def test_the_published_page_carries_no_provenance():
             {"date": "2026-07-28", "counts": {}, "results": [], GK.PROVENANCE_KEY: prov}))
         os.environ["GK_STATE_DIR"] = str(state)
         try:
-            bp = _load("build_page")
+            bp = _offline_inventory(_load("build_page"))
             bp.build(out)
             html = out.read_text()
             assert "magic" in html, "the page did not render the ledger at all"
@@ -3452,7 +3557,7 @@ def test_the_published_page_is_production_too():
         os.environ["GK_STATE_DIR"] = str(state)
         with _as_production(state=Path(d) / "elsewhere", page=page):
             try:
-                bp = _load("build_page")
+                bp = _offline_inventory(_load("build_page"))
                 try:
                     bp.build(page)
                 except GK.ProductionStateWriteRefused as e:

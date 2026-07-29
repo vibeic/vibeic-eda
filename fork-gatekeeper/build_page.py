@@ -482,7 +482,20 @@ function enhBlock(tool){
 # ---------------------------------------------------------------------------
 
 def _bi(en: str, zh: str, tag: str = "span", cls: str = "") -> str:
-    """Bilingual cell, matching the page's existing data-en/data-zh switch."""
+    """Bilingual cell, matching the page's existing data-en/data-zh switch.
+
+    PASS TEXT, NOT MARKUP. Both arguments are escaped here, so an HTML entity
+    written by the caller is escaped a second time: `&quot;` becomes `&amp;quot;`
+    and the reader sees the literal characters `&quot;` on the page. The first
+    draft of the three captions below did exactly that and it shipped -- measured
+    on the live page, which carried `&amp;quot;no&amp;quot;` and `&amp;#39;s`.
+
+    The trap is that the surrounding template is raw HTML where entities ARE
+    correct, so the two conventions sit three lines apart. Anything routed
+    through here takes a plain `"` and a plain `'`; only text written directly
+    into a `data-en="..."` attribute in the template needs `&quot;`.
+    `test_the_inventory_section_passes_text_not_markup_to__bi` pins it.
+    """
     c = f' class="{cls}"' if cls else ""
     return (f'<{tag}{c} data-en="{_esc_attr(en)}" data-zh="{_esc_attr(zh)}">'
             f'{_esc_html(en)}</{tag}>')
@@ -587,6 +600,42 @@ def render_inventory(inv: dict) -> str:
             f"redundant copies, not coverage.",
             f"其中 {len(names)} 個是同一個上游（{up}）的重複 fork，不是覆蓋範圍。") + "</p>"
 
+    # The three captions are bound HERE rather than inline below, and the reason is
+    # not style: they are the only prose in this function that needs a literal quote
+    # mark, an f-string expression part may not contain a backslash, and the one way
+    # to write a quote inline is therefore an HTML entity — which `_bi` would escape
+    # a second time and print as literal text. That is exactly the defect that
+    # shipped. Bound out here they take a plain `"` and a plain `'`.
+    cap_a = _bi(
+        f"{len(a)} directories, {n_used} used by the flow, {n_fork} forked. Three "
+        f'states are kept distinct from "no", because collapsing them turns "could '
+        f'not determine" into "does not exist": pip-installed packages are not git '
+        f"clones and forking their repo would not change what is installed; an "
+        f"unconfirmed upstream is not an absent fork; and bin/sak/fpga are not tools.",
+        f"{len(a)} 個目錄，流程使用 {n_used} 個，已 fork {n_fork} 個。三種狀態和「no」分開，"
+        f"因為混在一起就是把「查不到」變成「不存在」：pip 安裝的不是 git clone，fork 它的 repo "
+        f"不會改變安裝內容；上游未確認不等於沒有 fork；bin/sak/fpga 不是工具。")
+    n_used_b = sum(1 for r in b if r.get("used"))
+    gap_b_names = "" if not gap_b else " — " + ", ".join(r["tool"] for r in gap_b)
+    cap_b = _bi(
+        f"From the project's own metadata, not a README. We use {n_used_b} of "
+        f"{len(b)}. Used but not forked: {len(gap_b)}{gap_b_names}.",
+        f"來自該專案自己的 metadata，不是 README。{len(b)} 個中我們用 {n_used_b} 個。"
+        f"用了但沒 fork：{len(gap_b)} 個{gap_b_names}。")
+    cap_c = _bi(
+        "Tables A and B are both built per tool, and PDKs are not tools — so PDK "
+        "data sat outside the frame of both while the rule covering it was already "
+        "in force. A rule that no audit can see is a rule that is not being audited. "
+        "This table also states its own limit: it matches a directory to an upstream "
+        "repository, and cannot establish which commit the data came from — PDKs "
+        'carry no pin and no provenance file, so "which sky130A is this" is '
+        'unanswerable beyond "open_pdks produced it".',
+        "A 表和 B 表都是以工具為單位建的，而 PDK 不是工具——所以在涵蓋它的規則早已生效的情況下，"
+        "PDK 資料一直在兩張表的視野之外。一個沒有任何稽核看得到的規則，就是沒在被稽核的規則。"
+        "這張表也寫明自己的極限：它只能把目錄對到上游 repo，無法確認資料來自哪個 commit——"
+        "PDK 沒有 pin 也沒有 provenance 檔，所以「這個 sky130A 是哪一版」目前答不出來，"
+        "只能答「open_pdks 產的」。")
+
     return f'''<section>
     <div class="fork-wrap">
         <div class="section-header" style="text-align:left">
@@ -596,20 +645,20 @@ def render_inventory(inv: dict) -> str:
         </div>
         {warn}
         <h3>{_bi("A · Every directory in the image", "A · 映像裡的每一個目錄", "span")} <span style="opacity:.6">({len(a)})</span></h3>
-        <p class="fork-caption">{_bi(f"{len(a)} directories, {n_used} used by the flow, {n_fork} forked. Three states are kept distinct from &quot;no&quot;, because collapsing them turns &quot;could not determine&quot; into &quot;does not exist&quot;: pip-installed packages are not git clones and forking their repo would not change what is installed; an unconfirmed upstream is not an absent fork; and bin/sak/fpga are not tools.", f"{len(a)} 個目錄，流程使用 {n_used} 個，已 fork {n_fork} 個。三種狀態和「no」分開，因為混在一起就是把「查不到」變成「不存在」：pip 安裝的不是 git clone，fork 它的 repo 不會改變安裝內容；上游未確認不等於沒有 fork；bin/sak/fpga 不是工具。")}</p>
+        <p class="fork-caption">{cap_a}</p>
         <div class="fork-wrap"><table class="fork-table"><thead><tr>
           <th>{_bi("directory","目錄")}</th><th>{_bi("function","功能")}</th><th>{_bi("origin","來源")}</th><th>{_bi("forked","有無 fork")}</th><th>{_bi("used","有用")}</th>
         </tr></thead><tbody>{rows_a()}</tbody></table></div>
         {dupe_note}
 
         <h3>{_bi("B · Every tool IIC-OSIC-TOOLS ships", "B · IIC-OSIC-TOOLS 帶的每一個工具", "span")} <span style="opacity:.6">({len(b)})</span></h3>
-        <p class="fork-caption">{_bi(f"From the project&#39;s own metadata, not a README. We use {sum(1 for r in b if r.get('used'))} of {len(b)}. Used but not forked: {len(gap_b)}{'' if not gap_b else ' — ' + ', '.join(r['tool'] for r in gap_b)}.", f"來自該專案自己的 metadata，不是 README。{len(b)} 個中我們用 {sum(1 for r in b if r.get('used'))} 個。用了但沒 fork：{len(gap_b)} 個{'' if not gap_b else ' — ' + ', '.join(r['tool'] for r in gap_b)}。")}</p>
+        <p class="fork-caption">{cap_b}</p>
         <div class="fork-wrap"><table class="fork-table"><thead><tr>
           <th>{_bi("tool","工具")}</th><th>{_bi("function","功能")}</th><th>{_bi("used","有用")}</th><th>{_bi("forked","有無 fork")}</th><th>{_bi("why not, if unused","不用的理由")}</th>
         </tr></thead><tbody>{rows_b()}</tbody></table></div>
 
         <h3>{_bi("C · PDK data", "C · PDK 資料", "span")} <span style="opacity:.6">({len(c)})</span></h3>
-        <p class="fork-caption">{_bi("Tables A and B are both built per tool, and PDKs are not tools — so PDK data sat outside the frame of both while the rule covering it was already in force. A rule that no audit can see is a rule that is not being audited. This table also states its own limit: it matches a directory to an upstream repository, and cannot establish which commit the data came from — PDKs carry no pin and no provenance file, so &quot;which sky130A is this&quot; is unanswerable beyond &quot;open_pdks produced it&quot;.", "A 表和 B 表都是以工具為單位建的，而 PDK 不是工具——所以在涵蓋它的規則早已生效的情況下，PDK 資料一直在兩張表的視野之外。一個沒有任何稽核看得到的規則，就是沒在被稽核的規則。這張表也寫明自己的極限：它只能把目錄對到上游 repo，無法確認資料來自哪個 commit——PDK 沒有 pin 也沒有 provenance 檔，所以「這個 sky130A 是哪一版」目前答不出來，只能答「open_pdks 產的」。")}</p>
+        <p class="fork-caption">{cap_c}</p>
         <div class="fork-wrap"><table class="fork-table"><thead><tr>
           <th>{_bi("PDK","PDK")}</th><th>{_bi("contents","內容")}</th><th>{_bi("upstream","上游")}</th><th>{_bi("forked","有無 fork")}</th>
         </tr></thead><tbody>{rows_c()}</tbody></table></div>
@@ -688,11 +737,21 @@ def _image_ref() -> str:
     measured while reporting the wrong one.
 
     The fallback matters because VERSION and the published image can disagree —
-    they do right now (VERSION 0.2.30, published 0.2.32), which is its own bug.
-    Whichever tag is used is printed in the section's own prose, so the page
-    always names what it measured rather than implying it measured the current
-    release. Falling back silently would be the worse failure: a table measured
-    from :latest while the page claims to describe VERSION.
+    they do right now, and the three numbers involved are all different. Measured
+    2026-07-29 against the GHCR tag list rather than recalled:
+
+        VERSION                     0.2.30
+        newest tag on ghcr          0.2.31
+        newest tag anywhere         0.2.32 — local only, from 595febb, unpublished
+
+    So the image this resolves to is a release behind what is published and two
+    behind what exists, and Table A renders 57 directories rather than 58 because
+    0.2.30 predates `yices`. Whichever tag is used is printed in the section's own
+    prose, so the page always names what it measured rather than implying it
+    measured the current release. Falling back silently would be the worse
+    failure: a table measured from :latest while the page claims to describe
+    VERSION. The drift itself belongs to `version-sync`, which has never run
+    (Actions disabled account-wide, vibe-ic#550).
     """
     forced = os.environ.get("GK_INVENTORY_IMAGE")
     if forced:
