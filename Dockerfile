@@ -23,14 +23,14 @@
 # `tools/check_fork_only.py` in the `fork-only` workflow, not by review — the
 # rule previously held only as long as whoever edited 605 lines remembered it.
 
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:1bade74
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:edb458a
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:386a308
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:6e9f78f
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:19185c1-0334b7d
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:42a15a5
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:d714314
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:0782026
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:be20c3a
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -72,10 +72,10 @@ FROM ${IMG_VERILATOR} AS img-verilator
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=297211d359e81f6d48465e82752ef1866d1c8b0d  # branch vibeic/parallel-regression-dispatch (PLL1)
+ARG COCOTB_REF=7cf68236c4672685e3d593e69aa83b693266c670  # branch vibeic/parallel-regression-dispatch (PLL1)
 ARG COCOTB_COVERAGE_REF=be916da99520662f77cfccb8dd17861c8f986ce0  # branch vibeic/integration is V15 crv scalability + V36 rank + V10/V11/V35 bins-closure; union verified per-definition (20/20, 0 dropped)
-ARG PYUVM_REF=f6ccec0ecebe504b209ac0cad74dc0716888a96f  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
-ARG SBY_REF=37298228f565ab35549bd7b27c0551ddefb55802  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
+ARG PYUVM_REF=04add2a48c0701dee8e1c84cdd70737f5a3815c1  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
+ARG SBY_REF=742213689ee1bff65bc34e27011438edf8ce09f2  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
 RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone https://github.com/vibeic/pyuvm.git            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \

@@ -43,16 +43,16 @@ variable "TAG" { default = "dev" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "1bade74e7224d9c631b13dec626d258af3f65196" }
-variable "YOSYS_REF"       { default = "edb458ab8b081c4cbf025a1991079b911534a896" }
+variable "OPENROAD_REF"    { default = "386a3088146a944d8574200813e5b87e0b5e15c2" }
+variable "YOSYS_REF"       { default = "b35f2c6d5867a6be5ae625cec835ee050b4d4580" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
-variable "NGSPICE_REF"     { default = "6e9f78fb5dd56fa56c4d5599ca5c11717a4403ea" }
-variable "MAGIC_REF"       { default = "19185c197fbaa4a91ec52877a2c13ec08a97b7ed" }
+variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
+variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
-variable "IVERILOG_REF"    { default = "42a15a5c6125f093dbe8f664a5826d0cada86109" }
-variable "KLAYOUT_REF"     { default = "d7143145e6d7a7159d9481624c633cfd415937f7" }
-variable "VERILATOR_REF"   { default = "0782026557405c5ee7967a4975e9e6f20ee82154" }
+variable "IVERILOG_REF"    { default = "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b" }
+variable "KLAYOUT_REF"     { default = "39b6a09249a97b9739f46d9404018bbd69675751" }
+variable "VERILATOR_REF"   { default = "be20c3a91aa4596378e6634b8d137d3270632ce3" }
 
 function "short" {
   params = [ref]

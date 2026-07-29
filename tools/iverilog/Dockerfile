@@ -19,7 +19,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG IVERILOG_REPO=https://github.com/vibeic/iverilog.git
-ARG IVERILOG_REF=42a15a5c6125f093dbe8f664a5826d0cada86109  # pinned; branch vibeic/sv-tb-coverage (0.2.27: ff-verified descendant of 110cadd5 — no fix dropped; adds vibe-ic#125 $dumpvars/$dumpports forward-ref bind-against-completed-scope + graft guard test, plus SDF INCREMENT/COND/scale/mtm honouring + forward-ref elab)
+ARG IVERILOG_REF=fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b  # pinned; branch vibeic/sv-tb-coverage (0.2.27: ff-verified descendant of 110cadd5 — no fix dropped; adds vibe-ic#125 $dumpvars/$dumpports forward-ref bind-against-completed-scope + graft guard test, plus SDF INCREMENT/COND/scale/mtm honouring + forward-ref elab)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf gperf flex bison ca-certificates \
  && rm -rf /var/lib/apt/lists/*

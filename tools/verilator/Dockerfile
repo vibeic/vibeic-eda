@@ -19,7 +19,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG VERILATOR_REPO=https://github.com/vibeic/verilator.git
-ARG VERILATOR_REF=0782026557405c5ee7967a4975e9e6f20ee82154  # pinned; branch vibeic/sv-tb-coverage (id 12: pow2-base Pow lowering + $countbits var-ctrl)
+ARG VERILATOR_REF=be20c3a91aa4596378e6634b8d137d3270632ce3  # pinned; branch vibeic/sv-tb-coverage (id 12: pow2-base Pow lowering + $countbits var-ctrl)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf flex bison ca-certificates help2man perl python3 \
       libfl2 libfl-dev zlib1g zlib1g-dev \
