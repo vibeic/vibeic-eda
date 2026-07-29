@@ -23,10 +23,32 @@ FROM openroad/ubuntu24.04-dev:latest AS build
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
 ARG OPENROAD_REF=92b079b47a1c1c470eb9fb0d32613a0b27379ad6  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
+# `build --stamp` in the USER rc, because `etc/Build.sh` builds its bazel
+# argument list from a closed set (`--jobs`, `--config=opt` from -lto,
+# `--//:platform=`) with no pass-through, so `--config=release` cannot be handed
+# to it. Bazel reads ~/.bazelrc automatically and this stage runs as root; the
+# workspace `.bazelrc` already supplies
+# `--workspace_status_command=tools/workspace_status.sh`, so `--stamp` is the
+# only missing half. Without it the binary reports `bazel-nostamp` — upstream's
+# documented placeholder for a dev build — and cannot say which commit it is
+# (vibeic-eda#22), which matters for a toolchain whose whole discipline is
+# answering that question.
+#
+# Verified before building, since a full OpenROAD build is an hour: the clone
+# below is FULL (no --depth), the fork carries the 26Q3-style tags
+# workspace_status.sh matches on, and `git describe --tags --match
+# '[0-9][0-9]Q[0-9]' 92b079b47` already yields `26Q3-951-g92b079b47a`. A shallow
+# clone or a tagless fork would have stamped `unknown` and looked like a fix.
+#
+# `-cmake="-DCMAKE_BUILD_TYPE=Release"` is gone from the invocation: it has been
+# dead since upstream made Bazel the default, where Build.sh collects
+# cmakeOptions and never uses them. It read as "we build Release" and meant
+# nothing.
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
- && ./etc/Build.sh -threads=$(nproc) -cmake="-DCMAKE_BUILD_TYPE=Release" \
+ && printf 'build --stamp\n' > /root/.bazelrc \
+ && ./etc/Build.sh -threads=$(nproc) \
       -prefix=/vibeic-openroad
 
 # ---------------------------------------------------------------------------

@@ -64,8 +64,25 @@ RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 SHORT = 7
 
 
-def _sh(cmd, cwd=None, timeout=7200):
+def _sh(cmd, cwd=None, timeout=7200, stream=False):
+    """Run a command. `stream=True` lets its output through to OUR stdout.
+
+    Capturing is right for the short API calls, and wrong for the two builds:
+    with `capture_output=True` nothing reaches the log until the process exits,
+    so `--progress plain` — added precisely to make a build watchable — changed
+    nothing. A compose wedged twice with no CPU, no disk and no network, and the
+    only way to place it was reading dockerd's journal, because its own progress
+    was sitting in a buffer that would only be flushed by the exit that never
+    came.
+
+    Streaming gives up the captured text for the failure message. The output is
+    in the log instead, which is more than the tail we were printing.
+    """
     try:
+        if stream:
+            sys.stdout.flush()
+            p = subprocess.run(cmd, cwd=cwd, timeout=timeout)
+            return p.returncode, "", "(output streamed to the log above)"
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                            timeout=timeout)
         return p.returncode, p.stdout, p.stderr
@@ -541,9 +558,16 @@ def main(argv=None) -> int:
                 # a run that moved a pin would build the artefact and tag it with
                 # the commit it replaced.
                 want = artefact_tag(root, t, targets[t], refs_now)
+                # `--progress plain` here too. I added it to the compose after a
+                # wedged build was indistinguishable from a quiet one, and left
+                # the TOOL builds — the LONGER of the two — still writing nothing
+                # to the log. Fixing one instance of a defect and not its sibling
+                # is how the sibling gets found the hard way.
                 rc, _, err = _sh(["docker", "buildx", "bake", "-f",
                                   str(root / "docker-bake.hcl"), "--push",
-                                  "--set", f"{t}.tags={want}", t], cwd=root)
+                                  "--progress", "plain",
+                                  "--set", f"{t}.tags={want}", t], cwd=root,
+                                 stream=True)
                 if rc != 0:
                     print(f"[FAIL] {t} did not build; the release stops here so "
                           f"a broken tool is not tagged as a version:\n"
@@ -593,12 +617,12 @@ def main(argv=None) -> int:
             bake = ["docker", "buildx", "bake", "-f",
                     str(root / "docker-bake.hcl"), "--load", "--progress",
                     "plain", "--set", f"eda.tags={tag}", "eda"]
-            rc, _, err = _sh(bake, cwd=root)
+            rc, _, err = _sh(bake, cwd=root, stream=True)
             if rc != 0:
                 print("  registry compose failed once; retrying before "
                       "downgrading (a transient must not cost reproducibility)",
                       flush=True)
-                rc, _, err = _sh(bake, cwd=root)
+                rc, _, err = _sh(bake, cwd=root, stream=True)
             if rc != 0:
                 # NO LOCAL FALLBACK. There used to be one — compose `eda-local`,
                 # which redirects each tool to a freshly built target — and it

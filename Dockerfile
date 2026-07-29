@@ -29,7 +29,7 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b-7444a2
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b-7ac820
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6-74a892
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-be7db2
@@ -627,7 +627,21 @@ ENV PATH=/headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/foss/tools/kactus
 # Vibe-IC MCP uses — cannot import eqy_job and dies. PATH was already baked into
 # ENV here for exactly this reason; PYTHONPATH was not, and eqy is the tool that
 # exposed it. Additive: login shells still re-prepend via profile.d.
-ENV PYTHONPATH=/foss/tools/yosys/share/yosys/python3:${PYTHONPATH}
+# NO trailing `:${PYTHONPATH}`. Nothing defines PYTHONPATH at this point, so it
+# expanded to empty and left `…/python3:` — and an EMPTY element in PYTHONPATH
+# means the CURRENT WORKING DIRECTORY. Measured in 0.2.37: one empty entry in
+# `sys.path`. In a container where designs are run from arbitrary project
+# directories, a stray `os.py` or `random.py` beside a netlist would shadow the
+# stdlib for every tool written in Python.
+#
+# buildkit warned about it — `UndefinedVar: Usage of undefined variable
+# '$PYTHONPATH' (line 591)` — and I could not see the warning, because until
+# this same release the build output was captured and discarded rather than
+# streamed. The fix that made builds watchable is what surfaced it.
+#
+# Login shells still prepend the full list via profile.d; this is the additive
+# entry that makes `docker exec` work.
+ENV PYTHONPATH=/foss/tools/yosys/share/yosys/python3
 
 # eqy and mcy through the LINK in /foss/tools/bin, which is how anyone invokes
 # them, and in a NON-LOGIN shell, which is what `docker exec` gives. Verifying
