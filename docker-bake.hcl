@@ -43,7 +43,7 @@ variable "TAG" { default = "dev" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "483d0cb4622efd114c0ae8fd7f920fb58577cc04" }
+variable "OPENROAD_REF"    { default = "92b079b47a1c1c470eb9fb0d32613a0b27379ad6" }
 variable "YOSYS_REF"       { default = "b35f2c6d5867a6be5ae625cec835ee050b4d4580" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -52,7 +52,7 @@ variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
 variable "IVERILOG_REF"    { default = "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b" }
 variable "KLAYOUT_REF"     { default = "39b6a09249a97b9739f46d9404018bbd69675751" }
-variable "VERILATOR_REF"   { default = "be20c3a91aa4596378e6634b8d137d3270632ce3" }
+variable "VERILATOR_REF"   { default = "d9f46707510f7d0ad67579aee755c2aabbf1230e" }
 
 function "short" {
   params = [ref]

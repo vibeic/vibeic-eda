@@ -22,7 +22,7 @@ FROM openroad/ubuntu24.04-dev:latest AS build
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_REF=483d0cb4622efd114c0ae8fd7f920fb58577cc04  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
+ARG OPENROAD_REF=92b079b47a1c1c470eb9fb0d32613a0b27379ad6  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
