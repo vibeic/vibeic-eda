@@ -88,6 +88,53 @@ def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
     return out
 
 
+def provenance_drift(image: str, pins: Dict[str, str]) -> List[dict]:
+    """Tools whose in-image provenance names a DIFFERENT commit than the pin.
+
+    Path containment proves ORIGIN; this proves CURRENCY. The two are separate
+    failures and only one of them is visible from where the binary sits: an image
+    can hold our build of the right tool from the wrong commit, and every path
+    check passes.
+
+    The provenance file is written INSIDE each tool artefact, so it travels with
+    the bytes — a tag can be moved, a file in the image cannot.
+
+    A worked non-finding, recorded because the reasoning is the point: 0.2.31's
+    `sby --version` reports `v0.67-21-g3729822` against a pin of `742213689`,
+    five commits ahead. That is not drift — `SBY_REF` moved at 10:11 and the
+    image was built at 04:21, so the image simply predates the pin. Comparing
+    today's source against an older binary is how a stale image gets reported as
+    a defect, and this function is only meaningful run against a FRESH image.
+    """
+    rc, out, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
+                      "-lc", "cat /vibeic/provenance/*.json 2>/dev/null"])
+    if rc != 0 or not out.strip():
+        # NOT CHECKED is its own state. Returning this as a drift row made
+        # 0.2.31 — which predates provenance entirely — report "1 tool built
+        # from a commit the pins no longer name", which is a finding about
+        # nothing. A probe that found nothing must not look like a pass OR like
+        # a finding.
+        return [{"tool": "*", "not_checked": True,
+                 "problem": "the image carries no provenance files — nothing "
+                            "was compared, which is not a clean result"}]
+    drift: List[dict] = []
+    for ln in out.splitlines():
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        tool, ref = d.get("tool", ""), d.get("ref", "")
+        repo = (d.get("repo") or "").rstrip("/").removesuffix(".git").split("/")[-1]
+        pin = pins.get(repo) or pins.get(tool)
+        if not pin or not ref:
+            continue
+        if ref != pin:
+            drift.append({"tool": tool, "built_from": ref[:9], "pin": pin[:9],
+                          "problem": "the image was built from a different "
+                                     "commit than the pin now names"})
+    return drift
+
+
 def check(image: str, dockerfile: Path) -> List[dict]:
     ours = copied_paths(dockerfile)
     all_dests = sorted({d for v in ours.values() for d in v})
@@ -148,6 +195,9 @@ def main(argv=None) -> int:
         return RC_NOTHING
 
     findings = check(a.image, df)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from check_pins_current import pinned_refs               # noqa: E402
+    drift = provenance_drift(a.image, pinned_refs(df.parent))
     ours_missing = [f for f in findings if f.get("we_build_it")]
 
     print(f"fork_reaches_flow: {len(FLOW_TOOLS)} tool(s) checked in {a.image}, "
@@ -158,11 +208,26 @@ def main(argv=None) -> int:
         for o in f.get("ours", []):
             print(f"              ours is at: {o}")
 
+    for d in drift:
+        print(f"  {d['tool']:<11} {d.get('built_from','?'):<10} vs pin "
+              f"{d.get('pin','?'):<10} {d['problem']}")
+
     if a.json:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
         Path(a.json).write_text(json.dumps(
             {"program": "fork_reaches_flow_check", "image": a.image,
-             "findings": findings}, indent=2) + "\n", encoding="utf-8")
+             "findings": findings, "provenance_drift": drift}, indent=2) + "\n",
+            encoding="utf-8")
+
+    unchecked = [d for d in drift if d.get("not_checked")]
+    real_drift = [d for d in drift if not d.get("not_checked")]
+    if unchecked:
+        print(f"[NOT CHECKED] provenance: {unchecked[0]['problem']}",
+              file=sys.stderr)
+    if real_drift:
+        print(f"[{'FAIL' if a.strict else 'REPORT'}] {len(real_drift)} tool(s) "
+              f"in the image were built from a commit the pins no longer name",
+              file=sys.stderr)
 
     if ours_missing:
         print(f"[{'FAIL' if a.strict else 'REPORT'}] {len(ours_missing)} tool(s) "
