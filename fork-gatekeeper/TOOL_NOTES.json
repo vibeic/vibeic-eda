@@ -1,0 +1,568 @@
+{
+ "_comment": [
+  "Curated notes for the tool inventory. Everything MEASURABLE is measured at build",
+  "time by build_page.py -- the directories in the image, the org's forks and their",
+  "parents, the upstream tool metadata. This file holds only what measurement cannot",
+  "answer: what a tool is for, whether our flow uses it, and why not if it does not.",
+  "",
+  "Keeping the two apart is the point. A pasted count goes stale silently; a judgement",
+  "cannot be derived at all. So the generator joins them and REPORTS every divergence:",
+  "a directory in the image with no note here, and a note here for a directory that no",
+  "longer exists. Neither is allowed to render as a normal row."
+ ],
+ "tools": {
+  "align": {
+   "desc_en": "Analog layout automation",
+   "desc_zh": "類比佈局自動化",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "bin": {
+   "desc_en": "Shared PATH directory (not a tool)",
+   "desc_zh": "共用 PATH 目錄（非工具）",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "charlib": {
+   "desc_en": "Standard-cell library characterisation",
+   "desc_zh": "標準元件庫特性化",
+   "used": false,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "covered": {
+   "desc_en": "Verilog coverage",
+   "desc_zh": "Verilog 覆蓋率",
+   "used": false,
+   "reason_en": "Verilog coverage. We use verilator coverage, which we do ship.",
+   "reason_zh": "Verilog 覆蓋率；我們用 verilator coverage（已用）"
+  },
+  "cvc_rv": {
+   "desc_en": "C-to-RTL equivalence",
+   "desc_zh": "C 對 RTL 等價驗證",
+   "used": false,
+   "reason_en": "C-to-RTL equivalence. We have no C reference model; equivalence runs through yosys equiv.",
+   "reason_zh": "C 對 RTL 等價；我們沒有 C 參考模型，等價用 yosys equiv"
+  },
+  "fpga": {
+   "desc_en": "FPGA vendor-tool shim (not a tool dir)",
+   "desc_zh": "FPGA 廠商工具外殼",
+   "used": false,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "gaw3-xschem": {
+   "desc_en": "Waveform viewer (GUI)",
+   "desc_zh": "波形檢視（GUI）",
+   "used": false,
+   "reason_en": "GUI. The fleet is headless; waveforms are read programmatically by cocotb/verilator.",
+   "reason_zh": "GUI；fleet 是 headless，波形由 cocotb/verilator 程式化判讀"
+  },
+  "gds3d": {
+   "desc_en": "GDS 3D viewer (GUI)",
+   "desc_zh": "GDS 3D 檢視（GUI）",
+   "used": false,
+   "reason_en": "GUI viewer. GDS correctness is established by KLayout DRC plus geometric assertions, not by looking at it.",
+   "reason_zh": "GUI 檢視；GDS 正確性由 KLayout DRC + 幾何斷言證明，不靠目視"
+  },
+  "ghdl": {
+   "desc_en": "VHDL simulator",
+   "desc_zh": "VHDL 模擬器",
+   "used": false,
+   "reason_en": "The flow's input is Verilog/SystemVerilog; there are no VHDL sources.",
+   "reason_zh": "流程輸入是 Verilog/SystemVerilog，無 VHDL 來源"
+  },
+  "ghdl-yosys-plugin": {
+   "desc_en": "VHDL front end for yosys",
+   "desc_zh": "VHDL→yosys 前端",
+   "used": false,
+   "reason_en": "Same reason: there is no VHDL to feed yosys.",
+   "reason_zh": "同上 —— 沒有 VHDL 要餵給 yosys"
+  },
+  "gtkwave": {
+   "desc_en": "Waveform viewer",
+   "desc_zh": "波形檢視器",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "irsim": {
+   "desc_en": "Switch-level simulation (GUI)",
+   "desc_zh": "開關階層模擬（GUI）",
+   "used": false,
+   "reason_en": "GUI switch-level simulation. Timing is signed off by OpenSTA.",
+   "reason_zh": "GUI 開關階層模擬；時序由 OpenSTA 簽核"
+  },
+  "iverilog": {
+   "desc_en": "Verilog simulator",
+   "desc_zh": "Verilog 模擬器",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "kactus2": {
+   "desc_en": "IP-XACT packaging (GUI)",
+   "desc_zh": "IP-XACT 封裝（GUI）",
+   "used": false,
+   "reason_en": "IP-XACT GUI. Our IP contracts are the L-layer JSON.",
+   "reason_zh": "IP-XACT GUI；我們的 IP 契約走 L 層 JSON"
+  },
+  "kepler-formal": {
+   "desc_en": "Formal property verification",
+   "desc_zh": "形式性質驗證",
+   "used": false,
+   "reason_en": "An alternative formal engine. Step 5 uses SymbiYosys, which we have forked.",
+   "reason_zh": "形式驗證替代品；step 5 用 SymbiYosys（已 fork）"
+  },
+  "klayout": {
+   "desc_en": "Layout / DRC engine",
+   "desc_zh": "佈局/DRC 引擎",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "klayout-vibeic": {
+   "desc_en": "KLayout, our build with the native svrfdrc DRC engine",
+   "desc_zh": "klayout（我們的 svrfdrc 原生 DRC 建置）",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "klayout_gdsfactory8": {
+   "desc_en": "KLayout + gdsfactory 8",
+   "desc_zh": "klayout + gdsfactory 8",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "klayout_gdsfactory9": {
+   "desc_en": "KLayout + gdsfactory 9",
+   "desc_zh": "klayout + gdsfactory 9",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "libman": {
+   "desc_en": "Liberty management",
+   "desc_zh": "Liberty 管理",
+   "used": false,
+   "reason_en": "Liberty management. We read the PDK liberty directly.",
+   "reason_zh": "Liberty 管理；直接讀 PDK liberty"
+  },
+  "magic": {
+   "desc_en": "Layout editing + parasitic extraction",
+   "desc_zh": "佈局編輯 + 寄生萃取",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "netgen": {
+   "desc_en": "LVS comparison",
+   "desc_zh": "LVS 比對",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "ngspice": {
+   "desc_en": "SPICE simulation",
+   "desc_zh": "SPICE 模擬",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "ngspyce": {
+   "desc_en": "ngspice Python bindings",
+   "desc_zh": "ngspice Python 綁定",
+   "used": false,
+   "reason_en": "Python bindings. We invoke ngspice directly.",
+   "reason_zh": "Python 綁定；我們直接呼叫 ngspice"
+  },
+  "nvc": {
+   "desc_en": "VHDL simulator",
+   "desc_zh": "VHDL 模擬器",
+   "used": false,
+   "reason_en": "VHDL simulator, same reason as ghdl and redundant with it.",
+   "reason_zh": "VHDL 模擬器；同 ghdl，且重複"
+  },
+  "openems": {
+   "desc_en": "Electromagnetic field solver",
+   "desc_zh": "電磁場求解",
+   "used": false,
+   "reason_en": "Electromagnetic field solving, not needed by the digital flow.",
+   "reason_zh": "電磁場求解；數位流程不需要"
+  },
+  "openroad": {
+   "desc_en": "Digital place and route",
+   "desc_zh": "數位 PnR",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "openroad-librelane": {
+   "desc_en": "?",
+   "desc_zh": "?",
+   "used": false,
+   "reason_en": "LibreLane flow wrapper. Our Phase 3 drives OpenROAD directly.",
+   "reason_zh": "LibreLane 流程包裝；我們的 Phase 3 直接驅動 OpenROAD"
+  },
+  "openvaf": {
+   "desc_en": "Verilog-A compiler",
+   "desc_zh": "Verilog-A 編譯器",
+   "used": false,
+   "reason_en": "Verilog-A compilation. The PDKs already provide compiled device models.",
+   "reason_zh": "Verilog-A 編譯；PDK 已提供編譯好的元件模型"
+  },
+  "osic-multitool": {
+   "desc_en": "IIC script collection",
+   "desc_zh": "IIC 腳本集",
+   "used": false,
+   "reason_en": "IIC script collection, overlapping what our programs/ already does.",
+   "reason_zh": "IIC 腳本集；與我們的 programs/ 重疊"
+  },
+  "padring": {
+   "desc_en": "IO pad-ring generator",
+   "desc_zh": "IO pad ring 產生器",
+   "used": false,
+   "reason_en": "IO pad ring. Current designs have no pad frame; they are core-only.",
+   "reason_zh": "IO pad ring；目前設計無 pad frame（純核心）"
+  },
+  "palace": {
+   "desc_en": "Finite-element electromagnetics",
+   "desc_zh": "有限元電磁",
+   "used": false,
+   "reason_en": "Finite-element electromagnetics, outside the digital flow.",
+   "reason_zh": "有限元電磁；不在數位流程"
+  },
+  "pulp": {
+   "desc_en": "PULP platform RTL",
+   "desc_zh": "PULP 平台 RTL",
+   "used": false,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "pyopus": {
+   "desc_en": "Circuit optimisation",
+   "desc_zh": "電路最佳化",
+   "used": false,
+   "reason_en": "Circuit optimisation. Analog sizing is handled by the A2-A4 corner sweep.",
+   "reason_zh": "電路最佳化；類比尺寸由 A2-A4 corner sweep 處理"
+  },
+  "qflow": {
+   "desc_en": "Complete digital flow",
+   "desc_zh": "完整數位流程",
+   "used": false,
+   "reason_en": "A complete alternative flow. We build on OpenROAD, and running both would create two sources of truth.",
+   "reason_zh": "完整替代流程；我們建在 OpenROAD 上，兩套並用會產生兩個真相來源"
+  },
+  "qucs-s": {
+   "desc_en": "Circuit simulation (GUI)",
+   "desc_zh": "電路模擬（GUI）",
+   "used": false,
+   "reason_en": "GUI circuit simulation. Batch runs go through ngspice/Xyce, both of which we use.",
+   "reason_zh": "GUI 電路模擬；批次走 ngspice/Xyce（已用）"
+  },
+  "rftoolkit": {
+   "desc_en": "RF design toolkit",
+   "desc_zh": "RF 設計工具",
+   "used": false,
+   "reason_en": "RF design, outside the flow's scope.",
+   "reason_zh": "RF 設計；不在流程範圍"
+  },
+  "riscv-gnu-toolchain": {
+   "desc_en": "RISC-V cross-compiler",
+   "desc_zh": "RISC-V 交叉編譯器",
+   "used": false,
+   "reason_en": "C cross-compilation. The flow compiles no software.",
+   "reason_zh": "交叉編譯 C；流程不編譯軟體"
+  },
+  "sak": {
+   "desc_en": "Swiss-army script collection",
+   "desc_zh": "瑞士刀腳本集",
+   "used": false,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "slang": {
+   "desc_en": "SystemVerilog front end",
+   "desc_zh": "SystemVerilog 前端",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "slang-yosys-plugin": {
+   "desc_en": "slang front end for yosys",
+   "desc_zh": "slang→yosys 前端",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "spicebind": {
+   "desc_en": "SPICE bindings",
+   "desc_zh": "SPICE 綁定",
+   "used": false,
+   "reason_en": "SPICE bindings. We call the simulator directly.",
+   "reason_zh": "SPICE 綁定；直接呼叫模擬器"
+  },
+  "spike": {
+   "desc_en": "RISC-V ISA simulator",
+   "desc_zh": "RISC-V ISA 模擬器",
+   "used": false,
+   "reason_en": "RISC-V ISA simulator. The flow runs no software.",
+   "reason_zh": "RISC-V ISA 模擬器；流程不跑軟體"
+  },
+  "surelog": {
+   "desc_en": "SystemVerilog parser",
+   "desc_zh": "SystemVerilog 解析器",
+   "used": false,
+   "reason_en": "SystemVerilog parser, already covered by yosys's slang front end.",
+   "reason_zh": "SV 解析器；yosys 的 slang 前端已覆蓋"
+  },
+  "surfer": {
+   "desc_en": "Waveform viewer (GUI)",
+   "desc_zh": "波形檢視（GUI）",
+   "used": false,
+   "reason_en": "GUI waveforms, same reason as gaw3.",
+   "reason_zh": "GUI 波形；同 gaw3"
+  },
+  "svck": {
+   "desc_en": "SystemVerilog lint",
+   "desc_zh": "SystemVerilog lint",
+   "used": false,
+   "reason_en": "SystemVerilog lint. Ours runs through our own gates, because the criteria have to be measurable by the 63x8 matrix.",
+   "reason_zh": "SV lint；我們的 lint 由自家 gate 執行，判準要能被 63x8 矩陣量測"
+  },
+  "uv": {
+   "desc_en": "Python package manager",
+   "desc_zh": "Python 套件管理",
+   "used": false,
+   "reason_en": "Python package manager. The image ships its dependencies pre-installed.",
+   "reason_zh": "Python 套件管理；映像已預裝依賴"
+  },
+  "vacask": {
+   "desc_en": "Circuit simulator",
+   "desc_zh": "電路模擬器",
+   "used": false,
+   "reason_en": "Another circuit simulator, already covered by ngspice and Xyce.",
+   "reason_zh": "又一個電路模擬器；ngspice + Xyce 已覆蓋"
+  },
+  "verible": {
+   "desc_en": "SystemVerilog lint / format",
+   "desc_zh": "SV lint/格式化",
+   "used": false,
+   "reason_en": "SystemVerilog lint/format, same reason as svck.",
+   "reason_zh": "SV lint/格式化；同 svck"
+  },
+  "verilator": {
+   "desc_en": "Compiled Verilog simulator",
+   "desc_zh": "Verilog 編譯模擬器",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "verilator-vibeic": {
+   "desc_en": "Verilator, our build",
+   "desc_zh": "verilator（我們的建置）",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "veryl": {
+   "desc_en": "Veryl hardware language",
+   "desc_zh": "Veryl 硬體語言",
+   "used": false,
+   "reason_en": "Veryl language. The flow's input is not Veryl.",
+   "reason_zh": "Veryl 語言；流程輸入不是 Veryl"
+  },
+  "vlsirtools": {
+   "desc_en": "VLSIR interchange format",
+   "desc_zh": "VLSIR 交換格式",
+   "used": false,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "xcircuit": {
+   "desc_en": "Schematic capture (GUI)",
+   "desc_zh": "電路圖編輯（GUI）",
+   "used": false,
+   "reason_en": "GUI schematics. The analog path uses xschem, which we do use.",
+   "reason_zh": "GUI 電路圖；類比走 xschem（已用）"
+  },
+  "xschem": {
+   "desc_en": "Schematic capture",
+   "desc_zh": "電路圖編輯",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "xyce": {
+   "desc_en": "Parallel SPICE",
+   "desc_zh": "平行 SPICE",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "yices": {
+   "desc_en": "SMT solver (used by sby)",
+   "desc_zh": "SMT 求解器（由 sby 使用）",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "yosys": {
+   "desc_en": "RTL synthesis",
+   "desc_zh": "RTL 合成",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "bender": {
+   "desc_en": "Hardware dependency manager",
+   "desc_zh": "硬體相依性管理",
+   "used": false,
+   "reason_en": "Hardware dependency management. Our dependencies are declared in the L-layer JSON.",
+   "reason_zh": "硬體相依性管理；我們的相依由 L 層 JSON 宣告"
+  },
+  "icestorm": {
+   "desc_en": "Lattice iCE40 FPGA bitstream",
+   "desc_zh": "Lattice iCE40 FPGA 位元流",
+   "used": false,
+   "reason_en": "Lattice FPGA bitstream. Our FPGA path is Intel Quartus.",
+   "reason_zh": "Lattice FPGA 位元流；我們的 FPGA 路徑是 Intel Quartus"
+  },
+  "nextpnr": {
+   "desc_en": "FPGA place and route",
+   "desc_zh": "FPGA 佈局繞線",
+   "used": false,
+   "reason_en": "FPGA place and route, same reason as icestorm.",
+   "reason_zh": "FPGA 佈局繞線；同 icestorm"
+  },
+  "open_pdks": {
+   "desc_en": "PDK installer",
+   "desc_zh": "PDK 安裝器",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "riscv-pk": {
+   "desc_en": "RISC-V proxy kernel",
+   "desc_zh": "RISC-V proxy kernel",
+   "used": false,
+   "reason_en": "RISC-V proxy kernel, same reason.",
+   "reason_zh": "RISC-V proxy kernel；同上"
+  },
+  "sv2v": {
+   "desc_en": "SystemVerilog to Verilog",
+   "desc_zh": "SystemVerilog→Verilog",
+   "used": false,
+   "reason_en": "SystemVerilog to Verilog conversion. yosys reads SystemVerilog directly.",
+   "reason_zh": "SV→Verilog 轉換；yosys 直接吃 SystemVerilog"
+  },
+  "trilinos": {
+   "desc_en": "Numerical solver library",
+   "desc_zh": "數值求解程式庫",
+   "used": false,
+   "reason_en": "A numerical library (a Xyce dependency), not a standalone tool.",
+   "reason_zh": "數值程式庫（Xyce 的相依），非獨立工具"
+  },
+  "yices2": {
+   "desc_en": "SMT solver",
+   "desc_zh": "SMT 求解器",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  },
+  "yosys_eqy": {
+   "desc_en": "Equivalence checking (EQY)",
+   "desc_zh": "等價驗證（EQY）",
+   "used": false,
+   "reason_en": "Equivalence checking. We use yosys equiv, which we do ship.",
+   "reason_zh": "等價驗證；我們用 yosys equiv（已用）"
+  },
+  "yosys_mcy": {
+   "desc_en": "Mutation coverage (MCY)",
+   "desc_zh": "突變覆蓋率（MCY）",
+   "used": false,
+   "reason_en": "Mutation coverage. Our mutation testing is the in-house gate_cli_mutation_probe.",
+   "reason_zh": "突變覆蓋率；我們的突變測試是自建的 gate_cli_mutation_probe"
+  },
+  "yosys_sby": {
+   "desc_en": "Formal verification (SymbiYosys)",
+   "desc_zh": "形式驗證（SymbiYosys）",
+   "used": true,
+   "reason_en": "",
+   "reason_zh": ""
+  }
+ },
+ "pdks": {
+  "sky130A": {
+   "desc_en": "SkyWater 130nm, open sign-off",
+   "desc_zh": "SkyWater 130nm，開源簽核用",
+   "upstream": "RTimothyEdwards/open_pdks"
+  },
+  "gf180mcuD": {
+   "desc_en": "GlobalFoundries 180nm MCU",
+   "desc_zh": "GlobalFoundries 180nm MCU",
+   "upstream": "RTimothyEdwards/open_pdks"
+  },
+  "ihp-sg13g2": {
+   "desc_en": "IHP SG13G2 130nm BiCMOS",
+   "desc_zh": "IHP SG13G2 130nm BiCMOS",
+   "upstream": "IHP-GmbH/IHP-Open-PDK"
+  },
+  "ihp-sg13cmos5l": {
+   "desc_en": "IHP SG13 CMOS 5V",
+   "desc_zh": "IHP SG13 CMOS 5V",
+   "upstream": "IHP-GmbH/IHP-Open-PDK"
+  },
+  "asap7": {
+   "desc_en": "ASAP7 7nm predictive PDK",
+   "desc_zh": "ASAP7 7nm 預測性 PDK",
+   "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7"
+  },
+  "nangate45": {
+   "desc_en": "Nangate 45nm open cell library",
+   "desc_zh": "Nangate 45nm 開放元件庫",
+   "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts"
+  },
+  "ciel": {
+   "desc_en": "PDK version manager",
+   "desc_zh": "PDK 版本管理器",
+   "upstream": "fossi-foundation/ciel"
+  },
+  "versions.txt": {
+   "desc_en": "(file, not a PDK)",
+   "desc_zh": "（檔案，非 PDK）",
+   "upstream": ""
+  }
+ },
+ "not_a_tool": [
+  "bin",
+  "sak",
+  "fpga"
+ ],
+ "pip_installed": [
+  "charlib",
+  "klayout_gdsfactory8",
+  "klayout_gdsfactory9",
+  "vlsirtools"
+ ],
+ "upstream_aliases": {
+  "klayout-vibeic": "klayout",
+  "verilator-vibeic": "verilator",
+  "yices": "yices2",
+  "sby": "yosys_sby",
+  "align": "__none__",
+  "slang-yosys-plugin": "slang-yosys-plugin"
+ },
+ "extra_upstream": {
+  "klayout-vibeic": "KLayout/klayout",
+  "verilator-vibeic": "verilator/verilator",
+  "yices": "SRI-CSL/yices2",
+  "align": "ALIGN-analoglayout/ALIGN-public",
+  "sby": "YosysHQ/sby",
+  "openroad-librelane": "The-OpenROAD-Project/OpenROAD",
+  "slang-yosys-plugin": "povik/sv-elab"
+ }
+}

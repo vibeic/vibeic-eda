@@ -43,7 +43,7 @@ variable "TAG" { default = "dev" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "386a3088146a944d8574200813e5b87e0b5e15c2" }
+variable "OPENROAD_REF"    { default = "483d0cb4622efd114c0ae8fd7f920fb58577cc04" }
 variable "YOSYS_REF"       { default = "b35f2c6d5867a6be5ae625cec835ee050b4d4580" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
