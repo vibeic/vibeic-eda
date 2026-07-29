@@ -99,6 +99,60 @@ fi
 # Reporting only — it never adopts, and it does NOT gate the tick, for the same
 # reason the source guards do not: a survey that cannot run must not stop the
 # fork monitoring.
+# ---------------------------------------------------------------------------
+# THE DAILY DELIVERY CHAIN (owner rulings, 2026-07-29)
+#
+#   "daily merge all new commit from upstream for forked tools" / "每天自動合併、
+#    不等人"  and  "只要有任何一個工具有新版，我們的 image 也就重新再出一版 …
+#    最晚會在隔天早上的 5 點半，提供一個 daily 的新版 updated docker image"
+#
+# Four hops, and every one of them has been the place the work stopped:
+#
+#   upstream -> fork branch   daily_merge.py       merge everything, no PR
+#   fork branch -> pin        daily_release.py     move the pin at all 3 sites
+#   pin -> tool artefact      daily_release.py     rebuild what changed
+#   artefact -> image         daily_release.py     recompose + cut a version
+#
+# On 2026-07-29 `vibeic/yosys#2` was merged and every run that day still used the
+# pre-merge yosys, because hop 2 never happened and nothing looked. Running these
+# in the tick is what makes the rulings take effect; until this block existed
+# they were a policy nobody executed.
+#
+# NEITHER GATES THE TICK. A fork that conflicts is left at its previous tip and
+# reported; upstream tracking and the gatekeeper round still run. What must never
+# happen is a SILENT skip, so both write their own log and a non-zero exit is
+# carried into the tick's exit code rather than discarded.
+MERGE_OUT="${LOG_DIR}/daily-merge.txt"
+if [ -f "${DIR}/daily_merge.py" ]; then
+    log "[merge] merging all upstream commits into every fork"
+    python3 "${DIR}/daily_merge.py" --json "${LOG_DIR}/daily-merge.json" \
+        > "${MERGE_OUT}" 2>&1
+    merge_rc=$?
+    head -1 "${MERGE_OUT}" | sed 's/^/[merge]   /' | tee -a "${LOG}"
+    grep -E "CONFLICT|NEEDS_HUMAN|FAILED|NO_UPSTREAM" "${MERGE_OUT}" \
+        | sed 's/^/[merge]   /' | tee -a "${LOG}" || true
+else
+    echo "MISSING: fork-gatekeeper/daily_merge.py — nothing was merged" > "${MERGE_OUT}"
+    log "[merge] MISSING — nothing was merged, which is not a clean result"
+    merge_rc=1
+fi
+
+RELEASE_OUT="${LOG_DIR}/daily-release.txt"
+if [ -f "${DIR}/daily_release.py" ]; then
+    log "[release] moving pins to their fork tips, rebuilding what changed"
+    python3 "${DIR}/daily_release.py" --json "${LOG_DIR}/daily-release.json" \
+        > "${RELEASE_OUT}" 2>&1
+    release_rc=$?
+    head -1 "${RELEASE_OUT}" | sed 's/^/[release]   /' | tee -a "${LOG}"
+    grep -E "VERSION|building|composing|UNRESOLVED|FAIL" "${RELEASE_OUT}" \
+        | sed 's/^/[release]   /' | tee -a "${LOG}" || true
+else
+    echo "MISSING: fork-gatekeeper/daily_release.py — nothing was released" \
+        > "${RELEASE_OUT}"
+    log "[release] MISSING — no image was cut, which is not a clean result"
+    release_rc=1
+fi
+
 INBOUND_OUT="${LOG_DIR}/inbound-survey.txt"
 if [ -f "${DIR}/inbound_survey.py" ]; then
     log "[inbound] surveying upstream fixes our pins lack"
@@ -123,5 +177,9 @@ python3 gatekeeper.py >>"${LOG}" 2>&1
 rc=$?
 # A guard failure must not be erased by a successful tick.
 [ "${guard_rc}" != "0" ] && [ "${rc}" = "0" ] && rc=3
+# Nor by a merge or a release that needed a human. A tick that merged nothing and
+# cut no image because a fork conflicted has not had a clean day.
+[ "${merge_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=4
+[ "${release_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=5
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}

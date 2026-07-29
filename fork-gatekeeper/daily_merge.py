@@ -66,11 +66,32 @@ def _sh(args: List[str], cwd: Optional[Path] = None, timeout: int = 900):
         return 127, "", f"{type(exc).__name__}: {exc}"
 
 
+#: vibeic repo -> upstream slug, for the sources that are mirrors rather than
+#: forks. Kept small and explicit: every entry is a repo the image clones, and
+#: adding one by hand is the price of the fork API refusing us.
+MIRROR_UPSTREAMS = {
+    "kissat": "arminbiere/kissat",
+    "cadical": "arminbiere/cadical",
+    "ASAP7_for_KLayout": "laurentc2/ASAP7_for_KLayout",
+    "asap7_pdk_r1p7": "The-OpenROAD-Project/asap7_pdk_r1p7",
+    "asap7sc7p5t_28": "The-OpenROAD-Project/asap7sc7p5t_28",
+    "OpenROAD-flow-scripts": "The-OpenROAD-Project/OpenROAD-flow-scripts",
+}
+
+
 def _upstream_url(repo: str) -> str:
     """Upstream of a vibeic fork, asked of GitHub rather than hard-coded."""
     rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}",
                       "--jq", ".parent.full_name // empty"], timeout=120)
     slug = out.strip()
+    if not slug:
+        # Six sources are PUSH MIRRORS, not GitHub forks: the fork API answered
+        # 403 for all six on 2026-07-29 with 4988/5000 budget left, so they were
+        # created as repos and pushed. GitHub records no `parent` for those, and
+        # a program that reads the parent therefore sees nothing. The upstream is
+        # still a fact — it is just a fact GitHub is not holding for us, so we
+        # hold it here rather than reporting the mirror as unsurveyable.
+        slug = MIRROR_UPSTREAMS.get(repo, "")
     return f"https://github.com/{slug}.git" if slug else ""
 
 
@@ -130,6 +151,13 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
     def durable(b: str) -> tuple:
         return (bool(re.search(r"\d{4}-\d{2}-\d{2}", b)),      # dated -> last
                 bool(re.search(r"\b(fix|tmp|temp|wip|test)\b", b, re.I)),
+                # `integration` is this fleet's build-branch convention
+                # (openroad-integration, satfix-integration, klayout-signoff-int,
+                # batch-honesty-integration). Preferring the SHORTER name picked
+                # today's throwaway `vibeic/fin-bazel-fix` over
+                # `vibeic/openroad-integration` — same commit, so delivery was
+                # unaffected, but merging into it would have split the fork.
+                not re.search(r"int(egration)?$", b, re.I),
                 len(b))
     return sorted(hits, key=durable)[0]
 
@@ -169,7 +197,14 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
                        detail="GitHub records no parent for this repo — a push "
                               "mirror, not a fork; upstream must be set by hand")
             return res
-        _sh(["git", "-C", str(src), "remote", "add", "upstream", url])
+        # `add` FAILS when the remote exists with an empty URL, which is what a
+        # mirror's checkout looks like — and the failure surfaced one step later
+        # as `git fetch upstream` -> "fatal: no path specified", a message about
+        # a URL rather than about the missing parent it actually was.
+        rc_add, _, _ = _sh(["git", "-C", str(src), "remote", "add",
+                            "upstream", url])
+        if rc_add != 0:
+            _sh(["git", "-C", str(src), "remote", "set-url", "upstream", url])
         out = url
     parent = out.strip()
 
@@ -180,6 +215,18 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
         # so a stale remote-tracking ref makes `origin/<branch>` an invalid
         # reference for a branch that plainly exists — measured on the first
         # dry-run, which reported WORKTREE_FAILED for six forks that were fine.
+        # WIDEN THE REFSPEC FIRST. Six of these checkouts were cloned
+        # `--single-branch`, so `remote.origin.fetch` names ONE branch and
+        # `git fetch origin` never brings any other. `origin/<build-branch>` is
+        # then an invalid reference for a branch that plainly exists on the fork
+        # — which is what six WORKTREE_FAILED rows were, and reading them as
+        # "the branch is missing" would have been exactly backwards.
+        #
+        # It also makes local counts lie: OpenROAD kept a stale
+        # `origin/vibeic/openroad-integration` from an older clone that fetch
+        # never updated, and measuring against it reported 791 commits behind
+        # upstream for a branch that had already been merged.
+        _sh(["git", "-C", str(src), "remote", "set-branches", "origin", "*"])
         _sh(["git", "-C", str(src), "fetch", "origin", "--prune"], timeout=1800)
         rc, _, err = _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
                          timeout=1800)
@@ -187,9 +234,25 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
             res.update(state="FETCH_FAILED", detail=err.strip()[:200])
             return res
 
+        # The upstream default branch, asked rather than assumed. Defaulting to
+        # `master` made sby and ALIGN-pdk-sky130 report COUNT_FAILED against a
+        # branch upstream does not have — the count was fine, the branch name
+        # was invented.
         rc, out, _ = _sh(["git", "-C", str(src), "symbolic-ref",
                           "refs/remotes/upstream/HEAD"])
-        up = out.strip().split("/")[-1] if rc == 0 and out.strip() else "master"
+        up = out.strip().split("/")[-1] if rc == 0 and out.strip() else ""
+        if not up:
+            slug = parent.rstrip("/").removesuffix(".git").split("github.com/")[-1]
+            _, api, _ = _sh(["gh", "api", f"repos/{slug}",
+                             "--jq", ".default_branch // empty"], timeout=120)
+            up = api.strip()
+        if not up or _sh(["git", "-C", str(src), "rev-parse", "--verify",
+                          f"upstream/{up}"])[0] != 0:
+            for cand in ("master", "main", "develop"):
+                if _sh(["git", "-C", str(src), "rev-parse", "--verify",
+                        f"upstream/{cand}"])[0] == 0:
+                    up = cand
+                    break
 
         rc, _, err = _sh(["git", "-C", str(src), "worktree", "add", "--detach",
                           str(wt), f"origin/{branch}"], timeout=1800)
@@ -197,9 +260,41 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
             res.update(state="WORKTREE_FAILED", detail=err.strip()[:200])
             return res
 
+        # A SHALLOW clone cannot be counted and must not be merged. The shared
+        # OpenROAD checkout is grafted at one commit, and `rev-list --count` over
+        # it reported 42508 commits behind where GitHub's compare says 19. A
+        # merge computed against a graft is worse than a wrong number: it has no
+        # true merge base. Deepen first; the cost is once per clone.
+        rc, sh_out, _ = _sh(["git", "-C", str(src), "rev-parse",
+                             "--is-shallow-repository"])
+        if sh_out.strip() == "true":
+            rc, _, err = _sh(["git", "-C", str(src), "fetch", "--unshallow",
+                              "origin"], timeout=3600)
+            if rc != 0:
+                _sh(["git", "-C", str(src), "fetch", "--depth=2147483647",
+                     "origin"], timeout=3600)
+            _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
+                timeout=3600)
+            rc, sh_out, _ = _sh(["git", "-C", str(src), "rev-parse",
+                                 "--is-shallow-repository"])
+            if sh_out.strip() == "true":
+                res.update(state="SHALLOW_NEEDS_HUMAN",
+                           detail="clone is shallow and could not be deepened; "
+                                  "any count or merge over it is meaningless")
+                return res
+
         rc, out, _ = _sh(["git", "rev-list", "--count",
                           f"HEAD..upstream/{up}"], wt)
-        behind = int(out.strip() or 0) if rc == 0 else -1
+        if rc != 0 or not out.strip().isdigit():
+            # My first version stored -1 here and printed `WOULD_MERGE -1
+            # commit(s)`. That reads as a merge decision when it is a FAILED
+            # MEASUREMENT, which is the exact confusion this program exists to
+            # stop. A count we could not take is a state of its own.
+            res.update(state="COUNT_FAILED",
+                       detail=f"could not count HEAD..upstream/{up} — the "
+                              f"branch may not exist on upstream")
+            return res
+        behind = int(out.strip())
         res["took"] = behind
         if behind == 0:
             res.update(state="ALREADY_CURRENT", detail=f"level with upstream/{up}")
