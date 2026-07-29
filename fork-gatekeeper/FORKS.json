@@ -1,5 +1,7 @@
 {
-  "_comment": "The vibeic org's forked open-source EDA tools + their upstream sources. Discovered from the vibeic GitHub org (fork=true, parent recorded). This is the registry the fork-gatekeeper tracks.",
+  "_comment": [
+    "The vibeic org's forked open-source EDA tools + their upstream sources. Discovered from the vibeic GitHub org (fork=true, parent recorded). This is the registry the fork-gatekeeper tracks."
+  ],
   "org": "vibeic",
   "forks": [
     {
@@ -11,6 +13,31 @@
       "tool": "ALIGN-public",
       "role": "analog place & route — SPICE netlist to GDS; ships in the image since 0.2.27 as the venv at /foss/tools/align, built from source rather than installed from PyPI",
       "upstream": "ALIGN-analoglayout/ALIGN-public"
+    },
+    {
+      "tool": "ASAP7_for_KLayout",
+      "role": "ASAP7 KLayout layer map — without it DRC reads the wrong layers",
+      "upstream": "laurentc2/ASAP7_for_KLayout"
+    },
+    {
+      "tool": "asap7_pdk_r1p7",
+      "role": "ASAP7 7nm predictive PDK data — /foss/pdks/asap7",
+      "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7"
+    },
+    {
+      "tool": "asap7sc7p5t_28",
+      "role": "ASAP7 7.5-track standard cells — the library PnR places",
+      "upstream": "The-OpenROAD-Project/asap7sc7p5t_28"
+    },
+    {
+      "tool": "cadical",
+      "role": "SAT solver — the other smtbmc backend; shipped alongside kissat",
+      "upstream": "arminbiere/cadical"
+    },
+    {
+      "tool": "ciel",
+      "role": "PDK version manager — installs and pins the open PDKs",
+      "upstream": "fossi-foundation/ciel"
     },
     {
       "tool": "cocotb",
@@ -28,9 +55,19 @@
       "upstream": "gtkwave/gtkwave"
     },
     {
+      "tool": "IHP-Open-PDK",
+      "role": "PDK data — /foss/pdks/ihp-sg13g2 and ihp-sg13cmos5l; the SG13G2 spm cell runs on it",
+      "upstream": "IHP-GmbH/IHP-Open-PDK"
+    },
+    {
       "tool": "iverilog",
       "role": "RTL simulation",
       "upstream": "steveicarus/iverilog"
+    },
+    {
+      "tool": "kissat",
+      "role": "SAT solver — one of the two smtbmc backends behind sby",
+      "upstream": "arminbiere/kissat"
     },
     {
       "tool": "klayout",
@@ -53,9 +90,19 @@
       "upstream": "danchitnis/ngspice-sf-mirror"
     },
     {
+      "tool": "open_pdks",
+      "role": "PDK installer — produces /foss/pdks/sky130A and gf180mcuD; every DRC and LVS run reads its libs.tech",
+      "upstream": "fossi-foundation/open-pdks"
+    },
+    {
       "tool": "OpenROAD",
       "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop",
       "upstream": "The-OpenROAD-Project/OpenROAD"
+    },
+    {
+      "tool": "OpenROAD-flow-scripts",
+      "role": "Nangate45 platform data — /foss/pdks/nangate45",
+      "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts"
     },
     {
       "tool": "OpenSTA",
