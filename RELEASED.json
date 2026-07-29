@@ -1,0 +1,23 @@
+{
+  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look.",
+  "version": "0.2.33",
+  "pins_fingerprint": "e63819db2a81",
+  "pins": {
+    "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
+    "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
+    "OpenROAD": "92b079b47a1c1c470eb9fb0d32613a0b27379ad6",
+    "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
+    "cocotb": "4b3383fec9df0d1ea8c617e38dc438de0ed68540",
+    "cocotb-coverage": "be916da99520662f77cfccb8dd17861c8f986ce0",
+    "iverilog": "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b",
+    "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
+    "klayout": "39b6a09249a97b9739f46d9404018bbd69675751",
+    "magic": "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b",
+    "netgen": "0334b7dfb1d6adce0a8079f5552f68982815d3d9",
+    "ngspice": "2d15ecb34c1b606cf653bafbdd21315b6bc21962",
+    "pyuvm": "04add2a48c0701dee8e1c84cdd70737f5a3815c1",
+    "sby": "742213689ee1bff65bc34e27011438edf8ce09f2",
+    "verilator": "d9f46707510f7d0ad67579aee755c2aabbf1230e",
+    "yosys": "b35f2c6d5867a6be5ae625cec835ee050b4d4580"
+  }
+}
