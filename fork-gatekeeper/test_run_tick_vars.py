@@ -50,14 +50,31 @@ def test_no_variable_is_assigned_in_a_branch_and_read_outside_it():
 
 
 def test_the_check_catches_the_revision_it_was_written_for():
-    """A guard that cannot fail is not a guard. The pre-fix tick must trip it."""
-    pre = subprocess.run(
-        ["git", "show", "HEAD~2:fork-gatekeeper/run_tick.sh"],
+    """A guard that cannot fail is not a guard — some past revision must trip it.
+
+    Pinned to `HEAD~2` at first, which was true for exactly two commits and then
+    failed as a red suite on unrelated work. A test anchored to a MOVING relative
+    revision measures how much has landed since, not the thing it names. It now
+    walks this file's own history and asserts that at least one past revision
+    carried the defect, which stays true however far HEAD moves.
+    """
+    revs = subprocess.run(
+        ["git", "log", "--format=%H", "--", "fork-gatekeeper/run_tick.sh"],
         capture_output=True, text=True, cwd=str(TICK.parent.parent))
-    if pre.returncode != 0 or not pre.stdout.strip():
+    shas = [s for s in revs.stdout.split() if s][:40]
+    if not shas:
         import pytest
-        pytest.skip("pre-fix revision not reachable from this checkout")
-    assert any(v == "REACH_IMG" for v, _, _ in _scan(pre.stdout.splitlines()))
+        pytest.skip("no history for run_tick.sh in this checkout")
+    for sha in shas:
+        old = subprocess.run(
+            ["git", "show", f"{sha}:fork-gatekeeper/run_tick.sh"],
+            capture_output=True, text=True, cwd=str(TICK.parent.parent))
+        if old.returncode == 0 and any(
+                v == "REACH_IMG" for v, _, _ in _scan(old.stdout.splitlines())):
+            return
+    raise AssertionError(
+        "no revision of run_tick.sh in the last %d trips the check — either the "
+        "history is shallow or the check stopped working" % len(shas))
 
 
 def test_the_tick_still_parses():
