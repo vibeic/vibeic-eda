@@ -227,6 +227,24 @@ fi
 # shipped, is documented, behaves correctly, and executes nowhere is this repo's
 # own failure applied to a gate. The tick is the one thing that reliably runs,
 # which is the same reasoning that moved the source guards here.
+# Did we take something AWAY? Every other check here asks what we added — that
+# sources are ours, that a pin is coherent, that the flow runs our build. Three
+# times this week a replacement removed a co-tenant instead: eqy/mcy and sby with
+# the yosys prefix (#19), the yices solvers with the same rm -rf (#25), and the
+# slang plugin left behind by a yosys upgrade (#24). Nothing was looking.
+CAP_OUT="${LOG_DIR}/capability-lost.txt"
+if [ -f "${DIR}/check_no_capability_lost.py" ] && [ -n "${REACH_IMG}" ]; then
+    log "[capability] ${REACH_IMG}"
+    python3 "${DIR}/check_no_capability_lost.py" "${REACH_IMG}" \
+        --json "${LOG_DIR}/capability-lost.json" > "${CAP_OUT}" 2>&1 || true
+    head -1 "${CAP_OUT}" | sed 's/^/[capability]   /' | tee -a "${LOG}"
+    grep "LOST:" "${CAP_OUT}" | sed 's/^/[capability]   /' | tee -a "${LOG}" || true
+else
+    echo "MISSING: check_no_capability_lost.py or no released image — nothing was checked" \
+        > "${CAP_OUT}"
+    log "[capability] nothing was checked, which is not a clean result"
+fi
+
 PROV_OUT="${LOG_DIR}/image-provenance.txt"
 if [ -f "${DIR}/../tools/check_image_provenance.py" ] && [ -n "${REACH_IMG}" ]; then
     log "[provenance] ${REACH_IMG}"
