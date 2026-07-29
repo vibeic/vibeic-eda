@@ -12,7 +12,7 @@
 # repo reports total_count 0 — no workflow has ever executed here, including the
 # pre-existing image-version-sync, while `actions/permissions` reports enabled.
 # So this file is registered and does not fire, and a rule enforced only here
-# would be enforced nowhere. The 05:30 fork-gatekeeper tick runs the same two
+# would be enforced nowhere. The 05:30 fork-gatekeeper tick runs the same
 # checks against the checked-out repo, which is what enforces the rule until
 # Actions runs. This workflow is correct and stays; it starts protecting PRs the
 # day Actions is turned on, and needs no change then.
@@ -34,6 +34,12 @@ jobs:
 
       - name: A tool's commit must say the same thing in all three places
         run: python3 tools/check_pins_agree.py
+
+      # Offline on purpose. The README's two GitHub rows need a token this job
+      # does not need for anything else, and they report as UNVERIFIED here
+      # rather than passing; the 05:30 tick runs the same checker with --online.
+      - name: Every count in the README must still reproduce
+        run: python3 tools/check_doc_counts.py
 
       # A checker that examined nothing exits 2 and says so. Asserting the
       # negative case here means a future refactor that renames Dockerfiles out
@@ -79,17 +85,102 @@ jobs:
           # An EXPIRED exception must fail. PENDING_FORKS.json's whole value is
           # the deadline; if an expired entry still passed, the file would be a
           # permanent allowlist wearing a date.
+          #
+          # The probe SYNTHESISES its own entry against its own throwaway
+          # Dockerfile. It used to re-date the real file's entries and check the
+          # real sat-solvers Dockerfile, which quietly stopped testing anything
+          # the day that list was emptied and every source became ours: there was
+          # no exception left to expire, so check_fork_only correctly returned 0
+          # and the probe failed while nothing was wrong. A guard that depends on
+          # production data having a particular shape is not a guard — it is a
+          # second copy of that data, and it goes stale the same way.
           cp tools/PENDING_FORKS.json /tmp/pf.bak
-          python3 - <<'EOF'
-          import json, pathlib
-          f = pathlib.Path("tools/PENDING_FORKS.json")
-          d = json.loads(f.read_text())
-          for e in d.get("pending", []):
-              e["expires"] = "2000-01-01"
-          f.write_text(json.dumps(d, indent=2))
+          printf 'ARG R=https://github.com/upstream/thing.git\nFROM alpine\n' > /tmp/exp.Dockerfile
+          pending() {   # pending <expiry> -> write a PENDING_FORKS.json with one entry
+            python3 - "$1" <<'EOF'
+          import json, pathlib, sys
+          pathlib.Path("tools/PENDING_FORKS.json").write_text(json.dumps({"pending": [
+              {"source": "upstream/thing", "used_by": "a probe, not the build",
+               "reason": "synthesised by the fork-only workflow", "expires": sys.argv[1]}]}, indent=2))
           EOF
-          set +e; out=$(python3 tools/check_fork_only.py tools/sat-solvers/Dockerfile 2>&1); rc=$?; set -e
+          }
+          # Positive control FIRST. Without it, a check_fork_only that ignored
+          # PENDING_FORKS entirely would fail the expired case for the wrong
+          # reason and still look correct here.
+          pending 2999-01-01
+          set +e; out=$(python3 tools/check_fork_only.py /tmp/exp.Dockerfile 2>&1); rc=$?; set -e
+          [ "$rc" = "0" ] || fail "an UNexpired exception returned rc=$rc; it must be honoured
+          $out"
+          echo "$out" | grep -q "pending fork" || fail "an honoured exception was not reported as pending: $out"
+          echo "  ok: unexpired exception is honoured, and says so"
+
+          pending 2000-01-01
+          set +e; out=$(python3 tools/check_fork_only.py /tmp/exp.Dockerfile 2>&1); rc=$?; set -e
           cp /tmp/pf.bak tools/PENDING_FORKS.json
-          [ "$rc" = "1" ] || fail "an expired exception returned rc=$rc; it must fail"
+          [ "$rc" = "1" ] || fail "an expired exception returned rc=$rc; it must fail
+          $out"
           echo "$out" | grep -q "EXPIRED" || fail "expiry failure did not name the expiry: $out"
           echo "  ok: expired exception fails"
+
+          # And the file it just restored must be the file it saved.
+          cmp -s /tmp/pf.bak tools/PENDING_FORKS.json || fail "the probe did not restore PENDING_FORKS.json"
+          echo "  ok: PENDING_FORKS.json restored"
+
+      # check_doc_counts has four ways to be uselessly green, and each is
+      # asserted separately. Probes 2 and 3 are the reason it exists at all: the
+      # cheapest ways to "fix" a failing count are to delete the command that
+      # produced it, or to replace it with one that cannot disagree. Both leave
+      # the number in place and unchecked, and both must fail exactly as loudly
+      # as a wrong number.
+      - name: The README-count guard must reject each way of going stale
+        run: |
+          python3 - <<'EOF'
+          import pathlib, subprocess, sys
+
+          README = pathlib.Path("README.md").read_text()
+          TMP = pathlib.Path("/tmp/doc.md")
+          failures = []
+
+          def probe(label, expect_rc, needle, doc):
+              TMP.write_text(doc)
+              p = subprocess.run([sys.executable, "tools/check_doc_counts.py", str(TMP)],
+                                 capture_output=True, text=True)
+              out = p.stdout + p.stderr
+              if p.returncode != expect_rc:
+                  failures.append(f"{label}: expected rc={expect_rc}, got {p.returncode}\n{out}")
+              elif needle not in out:
+                  failures.append(f"{label}: expected a message containing {needle!r}\n{out}")
+              else:
+                  print(f"  ok: {label}")
+
+          def mutate(old, new):
+              # A probe that silently matched nothing would assert nothing, and
+              # would keep reporting ok after the README was rewritten past it.
+              assert README.count(old) == 1, f"probe target is not unique: {old!r}"
+              return README.replace(old, new)
+
+          # 1. A count that no longer matches what the repository says.
+          probe("wrong number", 1, "the repository says", mutate("| **8** |", "| **9** |"))
+
+          # 2. A count whose command was deleted. The claim survives, the binding
+          #    does not — and deleting the command is the cheapest way to "fix" a
+          #    red build, so it must fail exactly as loudly as a wrong number.
+          probe("command deleted, claim kept", 1, "no longer parses",
+                mutate("`ls tools/*/Dockerfile \\| wc -l`", "(obvious)"))
+
+          # 3. A command that cannot fail. Swapping the command for `echo 8`
+          #    keeps every row green forever and measures nothing — the original
+          #    defect, reintroduced through the mechanism built to prevent it.
+          probe("constant instead of a measurement", 1, "names nothing in this repository",
+                mutate("| per-tool build artefacts (`tools/<name>/`) | **8** | `ls tools/*/Dockerfile \\| wc -l` |",
+                       "| per-tool build artefacts | **8** | `echo 8` |"))
+
+          # 4. A document with no fences compared nothing, which is not a pass.
+          probe("nothing to compare", 2, "nothing was compared", "# no counts here\n")
+
+          if failures:
+              print("\nA guard that cannot fail is not a guard:", file=sys.stderr)
+              for f in failures:
+                  print(f"  {f}", file=sys.stderr)
+              sys.exit(1)
+          EOF

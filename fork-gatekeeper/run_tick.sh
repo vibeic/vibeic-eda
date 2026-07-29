@@ -68,10 +68,21 @@ export GK_MERGE_PR="${GK_MERGE_PR:-1}"
 GUARD_OUT="${LOG_DIR}/source-guards.txt"
 : > "${GUARD_OUT}"
 guard_rc=0
-for g in check_fork_only.py check_pins_agree.py; do
+# check_doc_counts.py gets `--online` HERE and nowhere else. Two of the README's
+# counts are properties of the GitHub org (its fork count, and how many distinct
+# upstreams those forks have) — no checkout can verify them, and they are the two
+# most likely to rot, since forking one repo changes both. This tick already holds
+# a `gh` token and already runs daily, so it is the only place that can notice.
+# The PR workflow runs the same checker offline, where those rows report as
+# unverified rather than passing.
+for g in check_fork_only.py check_pins_agree.py check_doc_counts.py; do
+    case "${g}" in
+        check_doc_counts.py) extra=(--online) ;;
+        *)                   extra=() ;;
+    esac
     if [ -f "${DIR}/../tools/${g}" ]; then
-        log "[guard] ${g}"
-        if ! python3 "${DIR}/../tools/${g}" >>"${GUARD_OUT}" 2>&1; then
+        log "[guard] ${g} ${extra[*]}"
+        if ! python3 "${DIR}/../tools/${g}" "${extra[@]}" >>"${GUARD_OUT}" 2>&1; then
             guard_rc=1
         fi
     else

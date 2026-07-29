@@ -16,15 +16,18 @@ separate ways, and each failure produced output indistinguishable from a correct
 answer — which is why none of them surfaced on their own.
 
 1. **`gh repo list` truncates, and a truncated list does not announce itself —
-   it just looks like a smaller org.** The default limit returns 30 of the org's
-   53 repos; `--limit 100` happens to return all 53 today, purely because 53 < 100.
-   `gh api --paginate` reports 53 repos and **45 forks** and cannot silently
-   truncate. An earlier draft of this list said `--limit 100` reported 14; that
-   number does not reproduce on the current org (measured: 30 at the default,
-   53 at `--limit 100`) and has been removed rather than guessed at. The fix
-   stands on its own: 53 is one repo-creation away from the boundary, and a
-   count that goes quietly wrong at a threshold is the same failure as (2)
-   and (3).
+   it just looks like a smaller org.** The default limit returns 30 repos
+   whatever the org's size; `--limit 100` returns all of them only for as long
+   as the org stays under 100. `gh api --paginate` cannot silently truncate.
+   An earlier draft of this list said `--limit 100` reported 14; that number does
+   not reproduce and has been removed rather than guessed at.
+
+   Measured 2026-07-29: **60 repos, 45 forks** (30 at the `gh repo list` default).
+   The repo total is deliberately not load-bearing anywhere — it moved 53 → 57 → 60
+   during a single afternoon while the pending upstream sources were being mirrored
+   into the org, which is precisely why a threshold-shaped count (`--limit 100`)
+   is the wrong instrument regardless of today's value. The fork total held at 45
+   across all three readings.
 2. **The list endpoint returns `parent: null` for every row.** Only the
    single-repo endpoint populates it. Comparing against the list's `parent`
    yields "nothing is forked", which is byte-identical to a genuinely unforked

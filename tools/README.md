@@ -66,20 +66,39 @@ docker buildx bake eda-local    # the release image, from tools built right now
 without pushing first) and also its limit. A green `eda-local` says the
 composition works; it says nothing about what a release would contain.
 
-## The four checks, and what each one cannot see
+## The five checks, and what each one cannot see
 
 | check | asserts | blind to |
 |---|---|---|
 | `check_fork_only.py` | every source and artefact is `vibeic/` | the base image's own ~35 tools, which we do not fork |
 | `check_pins_agree.py` | the three places a pin is written say the same thing | whether that commit exists |
 | `check_image_provenance.py` | the **built image** contains the pinned commits | tools the base supplies |
+| `check_doc_counts.py` | every count in `README.md` still reproduces from the repo | whether the *sentence* around the number means what it says |
 | `release.yml` smoke test | the tools run | *whose build* they came from |
 
-The last two exist because of the same failure: delete one `COPY` line and the
-base image's own copy of that tool survives, so every command still runs and
-every smoke test still passes while the image quietly ships someone else's
-binary. Provenance is recorded inside each artefact during its own build —
-a tag can be moved, a file in a layer cannot.
+`check_image_provenance.py` and the smoke test exist because of the same failure:
+delete one `COPY` line and the base image's own copy of that tool survives, so
+every command still runs and every smoke test still passes while the image
+quietly ships someone else's binary. Provenance is recorded inside each artefact
+during its own build — a tag can be moved, a file in a layer cannot.
+
+`check_doc_counts.py` exists because the counts in the root `README.md` were the
+one part of this repo with no generator behind it, and every one of them was
+wrong: *15 forked repos* (45 fork repos over 21 upstreams), *13 of them ship*
+(15 do), *12 pinned as `ARG`s* (the per-tool split moved the pins into three
+places), and *ALIGN is not yet shipped in any image* (it had shipped since
+0.2.27). The README now states each count next to the command that produces it,
+inside `<!-- counts:local -->` / `<!-- counts:github -->` fences, and the checker
+runs those commands. The README's own table is the test; a count that cannot be
+regenerated cannot be written down.
+
+Its blind spot is worth stating plainly, because a green run reads as more than
+it is: it compares a number to a command's output. It cannot tell you the command
+measures the right thing. The first draft of the "vibeic repos cloned by the
+build" row returned the correct 15 by counting `.../ngspice` and `.../ngspice.git`
+as two repositories — a right answer from a broken measurement, which is the
+failure this whole directory keeps finding. Review the command in a diff, not
+just the colour of the run.
 
 ## Where the checks actually run
 
@@ -90,9 +109,18 @@ workflow has ever executed on this repo**: `actions/runs` reports `total_count:
 `actions/permissions` reports Actions enabled.
 
 So until that is resolved, the workflow is registered and does not fire. What
-actually enforces the rule is the **05:30 fork-gatekeeper tick**, which runs both
-checks against the checked-out repo and logs the verdict; a failure sets the
-tick's exit code without gating the upstream tracking it also does.
+actually enforces the rule is the **05:30 fork-gatekeeper tick**, which runs the
+three repo-only checks against the checked-out repo and logs the verdict; a
+failure sets the tick's exit code without gating the upstream tracking it also
+does.
+
+`check_doc_counts.py` runs in both places, but not identically: the workflow runs
+it offline, and the tick adds `--online` because it already holds a `gh` token.
+The two GitHub rows in the README (the org's fork count and its distinct-upstream
+count) are the numbers most likely to rot and the only ones no checkout can
+verify, so the daily tick is the one thing that can notice. Offline they are
+reported as **not verified** rather than skipped silently — a network-dependent
+number that quietly counts as checked is worse than one openly marked as dated.
 
 `check_image_provenance.py` runs in `release.yml`, on the self-hosted runner, and
 has the same caveat.
@@ -108,8 +136,13 @@ has the same caveat.
    (BuildKit does not expand variables in `COPY --from=`, hence the alias.)
 5. An entry in fork-gatekeeper's `FORKS.json` so the 05:30 cron tracks upstream.
 
+6. Nothing, for the counts in the root `README.md` — `check_doc_counts.py` will
+   tell you which ones moved and by how much. Update the stated numbers, never
+   the commands, unless the command itself is what got the answer wrong.
+
 `check_fork_only.py` fails the build if the source is not ours;
-`check_pins_agree.py` fails it if you miss step 3 or 4.
+`check_pins_agree.py` fails it if you miss step 3 or 4; `check_doc_counts.py`
+fails it if you miss step 6.
 
 ## PENDING_FORKS.json
 

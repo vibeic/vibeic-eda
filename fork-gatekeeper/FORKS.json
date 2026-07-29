@@ -4,12 +4,12 @@
   "forks": [
     {
       "tool": "ALIGN-pdk-sky130",
-      "role": "ALIGN sky130 PDK — carries our channel-length fix (not yet shipped in the image)",
+      "role": "ALIGN sky130 PDK — carries our channel-length (L) and width (W) sizing fixes; ships in the image since 0.2.27, and the build fails unless a layout generated at L=500nm measures 500nm",
       "upstream": "ALIGN-analoglayout/ALIGN-pdk-sky130"
     },
     {
       "tool": "ALIGN-public",
-      "role": "analog place & route — SPICE netlist to GDS (not yet shipped in the image)",
+      "role": "analog place & route — SPICE netlist to GDS; ships in the image since 0.2.27 as the venv at /foss/tools/align, built from source rather than installed from PyPI",
       "upstream": "ALIGN-analoglayout/ALIGN-public"
     },
     {

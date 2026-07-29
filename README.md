@@ -50,12 +50,91 @@ Full scoreboard with per-fix proofs: [`FIX_STATUS.md`](./FIX_STATUS.md).
 
 ## The forks it carries
 
-The `vibeic` org currently holds **15 forked tool repos**. **13 of them ship in this
-image**; the two ALIGN repos are forked but **not yet shipped in any image** (see
-[below](#forked-but-not-yet-shipped-in-the-image)).
+"How many forks?" has more than one right answer, so every count below states the
+command that reproduces it. The numbers this section used to carry — *15 forked
+repos, 13 shipping, 12 pinned as `ARG`s* — were pasted, and all three were wrong
+by the time anyone read them. `fork-gatekeeper/inventory.py` already exists
+because the fork **status page** shipped "all 15 forks" above a 21-row ledger;
+this file was the same failure one directory over. So the counts now live in
+tables that [`tools/check_doc_counts.py`](./tools/check_doc_counts.py) executes
+and fails on drift.
 
-Of the 13 that ship: **12 are pinned as Dockerfile `ARG`s**, plus **one more pinned as a
-git submodule** (OpenSTA — see the note below).
+<!-- counts:local -->
+
+| in this repository | count | reproduce (at the repo root) |
+|---|---|---|
+| upstream projects the fork-gatekeeper tracks | **21** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| `vibeic/*` sources the build clones | **20** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
+| per-tool build artefacts (`tools/<name>/`) | **8** | `ls tools/*/Dockerfile \| wc -l` |
+| `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
+| source refs pinned across all Dockerfiles | **20** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **16** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+
+<!-- /counts:local -->
+
+Those 20 cloned sources and the 21 tracked projects are **not the same set**, so
+the join is derived rather than eyeballed — the checker prints it:
+
+```bash
+python3 tools/check_doc_counts.py
+# shipping: 15 of 21 tracked forks reach the image; the other 6 are named in the
+#           doc (gtkwave, slang, sv-elab, xschem, Xyce, yices2)
+# the build clones 20 vibeic sources, 14 of which are tracked forks
+```
+
+Read that as three facts. Fourteen of the cloned sources are tracked forks;
+adding **OpenSTA**, which has no clone URL because it arrives as OpenROAD's
+`src/sta` submodule (‡ below), makes **15 of the 21 tracked forks reach this
+image**. The
+other **6 cloned sources are not forks at all** — they are mirrors of upstream
+data and solver repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos)
+created when GitHub's fork API refused, and a mirror carries `fork = false`, so
+it cannot appear in a fork registry however thoroughly it is ours. And **6
+tracked projects do not ship**: `gtkwave`, `slang`, `sv-elab`, `xschem`, `Xyce`,
+`yices2`. Each is forked because we depend on it, but the image still takes all
+six from the iic-osic-tools base, so a fix landed in one of those forks would not
+reach a user yet. They are named rather than netted out of a total, because "21
+tracked" and "15 shipping" answer different questions and only one of them is
+about what you pull.
+
+The org-side count cannot be reproduced from this checkout, so it is dated
+instead of asserted:
+
+<!-- counts:github -->
+
+| in the `vibeic` org, measured 2026-07-29 | count | reproduce |
+|---|---|---|
+| repos with `fork = true` | **45** | `gh api --paginate 'orgs/vibeic/repos?per_page=100' --jq '[.[] \| select(.fork)] \| length'` |
+| distinct upstream projects behind them | **21** | `gh api --paginate 'orgs/vibeic/repos?per_page=100' --jq '.[] \| select(.fork) \| .name' \| xargs -I@ gh api repos/vibeic/@ --jq .parent.full_name \| sort -u \| wc -l` |
+
+<!-- /counts:github -->
+
+**45 and 21 differ by a defect, not by a definition.** Twenty-five of the 45 repos
+are `sv-elab` and `sv-elab-1` … `sv-elab-24`: one upstream, forked 25 times on
+2026-07-28 inside 5 m 14 s, every copy 850 KB and identical. Twenty-four are
+redundant. They are named here rather than averaged into a tidier number, and
+they are left in place because deleting a repo is irreversible and is the owner's
+call. **21 is the count that means *projects*,** and it agrees with `FORKS.json`
+in both directions — nothing declared that the org does not have, nothing forked
+that is undeclared. Full detail:
+[`docs/TOOL_INVENTORY.md`](./docs/TOOL_INVENTORY.md).
+
+The second command costs one API call per fork on purpose: the repo-**list**
+endpoint returns `parent: null` on every row, and only the single-repo endpoint
+populates it. A count taken from the list's `parent` reads "nothing is forked",
+which is byte-identical to a genuinely unforked org.
+
+**Both org numbers count only what GitHub calls a fork, and that is now a real
+undercount.** When the fork API refuses — it throttles with a 403 that has
+nothing to do with rate limits — the source is mirrored into `vibeic/` instead,
+and a mirror carries `fork = false`. Six of the build's sources arrived that way
+and are invisible to both commands above however thoroughly they are ours. The
+guarantee that every source is ours is therefore asserted by
+[`check_fork_only.py`](./tools/check_fork_only.py), which reads the Dockerfiles
+rather than the org (*31 references across 9 files, 31 ours, 0 pending*), and the
+named-and-dated exception list in
+[`tools/PENDING_FORKS.json`](./tools/PENDING_FORKS.json) is currently empty.
+Read the org counts as a description of the org, not as the fork-only guarantee.
 
 | Tool | What our fork adds | Branch |
 |---|---|---|
@@ -72,6 +151,8 @@ git submodule** (OpenSTA — see the note below).
 | **cocotb-coverage** | CRV scalability, bin ranking, bins-closure | `vibeic/integration` |
 | **pyuvm** | RAL accessors, TLM comparators, sequencer arbitration | `vibeic/integration` |
 | **sby** (SymbiYosys) | consolidated formal fixes + package layout; version-drift fixes at root | `vibeic/integration` |
+| **ALIGN-public** | analog place & route, SPICE netlist → GDS; forked to be patchable in-tree and built from source rather than installed from PyPI (clean fork, 0 commits ahead) | `master` |
+| **ALIGN-pdk-sky130** | the sky130 MOS generator honours the netlist channel length `L` instead of drawing every gate at the fixed 150 nm poly width | `main` |
 
 ‡ **OpenSTA is the special case.** It is **not** a Dockerfile `ARG`. It is pinned as
 OpenROAD's **`src/sta` git submodule**: the integration branch's `.gitmodules` was
@@ -82,8 +163,31 @@ superset commit on `vibeic/sta-timing-eco`. That is why no `ARG` mentions OpenST
 keep `.gitmodules` on `vibeic/OpenSTA`, and that commit *must* be pushed there, or the
 build fails with `upload-pack: not our ref`.
 
-**Don't read the `ARG` count as a fork count.** `grep -c '^ARG .*_REF=' Dockerfile`
-returns **16**: the 12 tool forks above, plus four refs that are *not* forks —
+### Where a pin lives
+
+There is no single "pinned tools" number, because since the per-tool split the
+pins live in three places by design:
+
+- **The per-tool artefacts** (`tools/<name>/`) — each source pinned there is
+  written down three times: the tool `Dockerfile`, the `docker-bake.hcl` variable,
+  and the composing `Dockerfile`'s `IMG_*` tag. Rather than restate the totals
+  here, ask the checker that owns them:
+
+  ```bash
+  python3 tools/check_pins_agree.py    # 18 pin(s) across 8 tool(s) agree in all three places
+  ```
+
+  Eight artefacts, ten sources — `sat-solvers` is kissat + cadical and `lvs` is
+  magic + netgen, which is why the two numbers differ. See
+  [`tools/README.md`](./tools/README.md) for why the tag **is** the pin.
+- **The `ARG *_REF` in the composing [`Dockerfile`](./Dockerfile)** (count in the
+  table above) — sources built in that file rather than copied out of an artefact.
+  Six are our forks (`cocotb`, `cocotb-coverage`, `pyuvm`, `sby`, `ALIGN-public`,
+  `ALIGN-pdk-sky130`); the other four are not forks at all and are listed just below.
+- **1 git submodule** — OpenSTA, as OpenROAD's `src/sta` (‡ above).
+
+**So `grep -c '^ARG .*_REF=' Dockerfile` is not a fork count.** Four of those ten
+are upstream refs staged as *data*, not as tools —
 
 - `ORFS_REF` (`v3.0`) — an upstream
   [OpenROAD-flow-scripts](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts)
@@ -95,20 +199,37 @@ returns **16**: the 12 tool forks above, plus four refs that are *not* forks —
 
 ### Analog auto-layout track (ALIGN)
 
-Two further `vibeic` forks exist for the analog auto-layout track. The ALIGN Docker
-stage ships in the image since `0.2.27` (staged under `/foss/tools/align`; built from
-the pinned source below).
+Two of the 15 shipping forks carry the analog auto-layout track. **ALIGN ships**,
+since `0.2.27` — a venv at `/foss/tools/align`, built from the two pinned sources
+below, reachable as `align-schematic2layout` and `align-python` on `PATH`:
 
-| Fork | Upstream | State |
+```bash
+docker exec vibeic-eda align-python -c 'import align; print(align.__version__)'   # 0.9.8
+docker exec vibeic-eda ls -d /foss/tools/align
+```
+
+(An earlier version of this section said the two ALIGN forks were "forked but not
+yet shipped in any image" and told you to treat the capability as "spike-proven,
+image-integration pending" — three paragraphs below its own sentence stating that
+the ALIGN Docker stage had shipped since `0.2.27`. A section that contradicted
+itself within one screen survived because nothing read it. That is the reason
+this file now has a checker.)
+
+| Fork | Upstream | State, measured 2026-07-29 |
 |---|---|---|
-| `vibeic/ALIGN-public` | `ALIGN-analoglayout/ALIGN-public` | clean fork, **0 commits ahead** of upstream |
-| `vibeic/ALIGN-pdk-sky130` | `ALIGN-analoglayout/ALIGN-pdk-sky130` | **1 commit ahead** (`db6d7f1a`): the sky130 MOS generator now honours the netlist channel length `L` instead of drawing every gate at the fixed 150 nm poly width |
+| `vibeic/ALIGN-public` | `ALIGN-analoglayout/ALIGN-public` | clean fork, **0 commits ahead** of upstream; forked so ALIGN is patchable in-tree and built from source rather than pulled from PyPI |
+| `vibeic/ALIGN-pdk-sky130` | `ALIGN-analoglayout/ALIGN-pdk-sky130` | **2 commits ahead**, both sizing fixes in the sky130 MOS generator: `db6d7f1a` honours the netlist channel length `L` instead of drawing every gate at the fixed 150 nm poly width, and `427b3b94` honours the netlist width `W` instead of quantising it to a 210 nm fin pitch on a planar bulk process |
 
-Treat the analog auto-layout capability as **spike-proven, image-integration pending** —
-the plan, the spike evidence, and the open blockers are in
+The `L` fix is enforced at **build** time, not asserted here: the Docker stage
+generates a real layout at a deliberately non-nominal `L = 500 nm` and fails the
+build unless the drawn poly gates measure 500 nm, then runs the PDK fork's own
+`tests/test_channel_length.py` (which ships a negative control — reverting the
+fix fails 3 of its 6 tests). If this image ever picked up upstream's sky130 PDK
+instead of our fork, it would not build.
+
+Remaining plan and open blockers:
 [`ANALOG_LAYOUT_ROADMAP.md`](./ANALOG_LAYOUT_ROADMAP.md) and the Bucket-T row of
-[`FIX_STATUS.md`](./FIX_STATUS.md). Until a tag ships it, the MCP `eda_analog_layout`
-capability gap is still open.
+[`FIX_STATUS.md`](./FIX_STATUS.md).
 
 ---
 
@@ -251,13 +372,21 @@ toolchain.
 [`fork-gatekeeper/`](./fork-gatekeeper) is the CI/maintenance tooling that keeps the
 `vibeic` forks in sync with their upstreams and rebuilds this image when a fork advances:
 
-1. **Discover** — `discover_forks.py` enumerates the vibeic org's forks and records each
-   one's upstream parent into [`FORKS.json`](./fork-gatekeeper/FORKS.json)
-   (e.g. `OpenROAD → The-OpenROAD-Project/OpenROAD`, `klayout → KLayout/klayout`).
-   The checked-in registry lists the **12 `ARG`-pinned tools** — it is deliberately
-   narrower than the org's 15 forks: OpenSTA rides in as OpenROAD's submodule rather
-   than as its own tracked ref, and the two ALIGN forks are not image-integrated yet,
-   so neither is on the rebuild-on-upstream-release path.
+1. **Discover** — [`FORKS.json`](./fork-gatekeeper/FORKS.json) is the **fleet list**:
+   the checked-in registry of the **21 upstream projects** the tick tracks, one entry
+   per upstream (e.g. `OpenROAD → The-OpenROAD-Project/OpenROAD`,
+   `klayout → KLayout/klayout`). It is maintained by hand and is *wider* than what
+   ships: 15 of the 21 reach the image, and the other six (`gtkwave`, `slang`,
+   `sv-elab`, `xschem`, `Xyce`, `yices2`) are tracked with no pin, because we depend
+   on them and want to know when upstream moves even before we build them ourselves.
+   `discover_forks.py` **reads** that list and writes the per-tool ledger — for each
+   entry it resolves the pinned ref, the fork point, and the upstream's newer
+   releases. It does not populate `FORKS.json` from the org, so adding a fork to the
+   org does not add it to the fleet: `check_fork_only.py` and the "Adding a tool"
+   checklist in [`tools/README.md`](./tools/README.md) are what keep the two in step,
+   and [`tools/check_doc_counts.py`](./tools/check_doc_counts.py) asserts the registry
+   never carries two entries for one upstream — the counts above are project counts
+   only as long as that holds.
 2. **Track & gate** — `gatekeeper.py` / `run_tick.sh` check each upstream for a new
    release; for a candidate they rebase the vibeic fork branch onto the new upstream, bump
    the corresponding `Dockerfile` ARG, docker-build the image, and smoke-regress it
@@ -279,8 +408,10 @@ sign-off deck" — never by process name, SKU, or rule id.
 
 ## Build from source
 
-The image is built entirely from source, and **all 12 tool forks are pinned to a commit
-SHA**, so the *tool* half of a rebuild is reproducible:
+The image is built entirely from source. **16 of the 20 source refs are pinned to a
+full commit SHA** — every tool, ours and upstream alike — so the *tool* half of a
+rebuild is reproducible. The four that are not are the ORFS tag and the three ASAP7
+data refs, all covered under *What is not SHA-pinned* below:
 
 ```bash
 git clone https://github.com/vibeic/vibeic-eda.git
