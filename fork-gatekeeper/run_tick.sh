@@ -174,8 +174,19 @@ fi
 # takes --strict once they are closed.
 REACH_OUT="${LOG_DIR}/fork-reaches-flow.txt"
 if [ -f "${DIR}/fork_reaches_flow_check.py" ]; then
-    REACH_IMG="ghcr.io/vibeic/vibeic-eda:local"
-    if docker image inspect "${REACH_IMG}" >/dev/null 2>&1; then
+    # The image RELEASED.json says we last published — not `:local`, which was
+    # `eda-local`'s tag and stopped being produced when the compose started
+    # tagging by version (0.2.33). The stale `:local` from before that was still
+    # on this host, so the check did not report a missing image: it quietly
+    # inspected one from hours earlier and reported it as current. `--json` and
+    # the provenance comparison are only meaningful against a FRESH image, which
+    # is precisely what that made them not be.
+    REL_VER="$(python3 -c 'import json;print(json.load(open("'"${DIR}"'/../RELEASED.json"))["version"])' 2>/dev/null || true)"
+    REACH_IMG="ghcr.io/vibeic/vibeic-eda:${REL_VER}"
+    if [ -z "${REL_VER}" ]; then
+        REACH_IMG=""
+    fi
+    if [ -n "${REACH_IMG}" ] && docker image inspect "${REACH_IMG}" >/dev/null 2>&1; then
         log "[reach] checking the composed image runs OUR builds"
         python3 "${DIR}/fork_reaches_flow_check.py" "${REACH_IMG}" \
             --json "${LOG_DIR}/fork-reaches-flow.json" > "${REACH_OUT}" 2>&1 || true
@@ -208,6 +219,24 @@ else
     echo "MISSING: fork-gatekeeper/inbound_survey.py — nothing was surveyed" \
         > "${INBOUND_OUT}"
     log "[inbound] MISSING — nothing was surveyed, which is not a clean result"
+fi
+
+# `tools/check_image_provenance.py` is wired ONLY into .github/workflows/release.yml,
+# and that workflow has never run — `actions/runs` reports total_count 0 for this
+# repo, with all three workflows `state=active` (vibe-ic#550). A guard that
+# shipped, is documented, behaves correctly, and executes nowhere is this repo's
+# own failure applied to a gate. The tick is the one thing that reliably runs,
+# which is the same reasoning that moved the source guards here.
+PROV_OUT="${LOG_DIR}/image-provenance.txt"
+if [ -f "${DIR}/../tools/check_image_provenance.py" ] && [ -n "${REACH_IMG}" ]; then
+    log "[provenance] ${REACH_IMG}"
+    python3 "${DIR}/../tools/check_image_provenance.py" "${REACH_IMG}" \
+        > "${PROV_OUT}" 2>&1 || true
+    tail -1 "${PROV_OUT}" | sed 's/^/[provenance]   /' | tee -a "${LOG}"
+else
+    echo "MISSING: tools/check_image_provenance.py or no released image — nothing was checked" \
+        > "${PROV_OUT}"
+    log "[provenance] nothing was checked, which is not a clean result"
 fi
 
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
