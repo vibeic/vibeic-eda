@@ -39,6 +39,7 @@ Exit: 0 every fork current or already current, 1 at least one needs a human,
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -83,24 +84,70 @@ def _upstream_url(repo: str) -> str:
     """Upstream of a vibeic fork, asked of GitHub rather than hard-coded."""
     rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}",
                       "--jq", ".parent.full_name // empty"], timeout=120)
-    slug = out.strip()
+    slug = out.strip() if rc == 0 else ""
+    # `gh api` prints the ERROR BODY to stdout on failure, and `--jq` leaves it
+    # there when the document has no such field. Without the rc check a missing
+    # repo produced
+    #     https://github.com/{"message":"Not Found",...}.git
+    # — a URL built out of an error message, which git would then fail to clone
+    # for a reason with nothing to do with the actual problem. Found by probing
+    # a repo that does not exist, which is the case nobody writes a test for.
+    if not slug or "/" not in slug or slug.startswith("{"):
+        slug = ""
     if not slug:
-        # Six sources are PUSH MIRRORS, not GitHub forks: the fork API answered
-        # 403 for all six on 2026-07-29 with 4988/5000 budget left, so they were
-        # created as repos and pushed. GitHub records no `parent` for those, and
-        # a program that reads the parent therefore sees nothing. The upstream is
-        # still a fact — it is just a fact GitHub is not holding for us, so we
-        # hold it here rather than reporting the mirror as unsurveyable.
-        slug = MIRROR_UPSTREAMS.get(repo, "")
+        # NINE sources are PUSH MIRRORS, not GitHub forks: the fork API answered
+        # 403 for all of them, so they were created as repos and pushed. GitHub
+        # records no `parent` for those, and a program that reads the parent
+        # therefore sees nothing. The upstream is still a fact — it is just a
+        # fact GitHub is not holding for us, so we hold it rather than reporting
+        # the mirror as unsurveyable.
+        #
+        # FORKS.json FIRST, the hard-coded map second. vibeic-eda#30 mirrored
+        # open_pdks, IHP-Open-PDK and ciel and declared all three there — and
+        # all three still reported NO_UPSTREAM, because the map below was not
+        # extended and nothing required it to be. A declaration that one program
+        # reads and another ignores is how #30 landed without doing its job.
+        # Reading the declaration means the next mirror works with no edit here.
+        slug = _declared_upstream(repo) or MIRROR_UPSTREAMS.get(repo, "")
     return f"https://github.com/{slug}.git" if slug else ""
 
 
+@functools.lru_cache(maxsize=1)
+def _declared_upstreams() -> Dict[str, str]:
+    """tool -> upstream slug, from FORKS.json. Empty when it cannot be read."""
+    f = Path(__file__).resolve().parent / "FORKS.json"
+    try:
+        return {x["tool"]: x["upstream"] for x in
+                json.loads(f.read_text())["forks"] if x.get("upstream")}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def _declared_upstream(repo: str) -> str:
+    return _declared_upstreams().get(repo, "")
+
+
 def build_branches(eda_root: Path) -> Dict[str, str]:
-    """fork repo -> the branch the image builds from, read from the Dockerfiles.
+    """fork repo -> the pinned commit, or "" for a source we track without a pin.
 
     Read rather than configured: a branch list is a second copy of a value the
     Dockerfiles already state, and the two drift the moment someone repoints a
     build without updating the list.
+
+    A PIN IS NOT THE ONLY REASON TO WATCH A SOURCE, and assuming it was made
+    vibeic-eda#30 land without doing its job. That change mirrored open_pdks,
+    IHP-Open-PDK and ciel so the daily upstream check would watch them, and
+    declared all three in FORKS.json — and this survey kept reporting 18 of 30,
+    because it enumerates from `ARG <NAME>_REF=<40 hex>` and those three have no
+    such ARG: the Dockerfile clones the PDKs by URL, and the PDKs themselves
+    arrive in the base image.
+
+    So the mirrors existed, the declaration existed, and nothing looked at them
+    — the exact gap #30 was opened to close, surviving the change that closed
+    it. FORKS.json is now the second source: a declared source with no pin is
+    surveyed with pin "", and `branch_for` falls back to the fork's default
+    branch. The upstream side is the value for those; there is no pin to report
+    and that is correct rather than missing.
     """
     out: Dict[str, str] = {}
     for df in sorted((eda_root / "tools").glob("*/Dockerfile")) + [eda_root / "Dockerfile"]:
@@ -114,6 +161,15 @@ def build_branches(eda_root: Path) -> Dict[str, str]:
             line = re.search(rf"^ARG {arg}_REF=([0-9a-f]{{40}}).*$", text, re.M)
             if line:
                 out.setdefault(repo, line.group(1))
+
+    declared = eda_root / "fork-gatekeeper" / "FORKS.json"
+    if declared.is_file():
+        try:
+            for f in json.loads(declared.read_text())["forks"]:
+                out.setdefault(f["tool"], "")
+        except (ValueError, KeyError) as exc:                  # noqa: BLE001
+            print(f"[warn] {declared} unreadable ({exc}) — surveying pinned "
+                  f"sources only, which is fewer than we track", file=sys.stderr)
     return out
 
 
@@ -129,7 +185,16 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
     refuses to start.
 
     The fork itself knows. Ask it.
+
+    NO PIN -> the fork's default branch. A source we track without pinning (the
+    three PDK mirrors, and the data mirrors the build clones by URL) still has
+    an upstream worth merging from; it just has no commit of ours to locate.
+    Returning None for these is what kept them out of the survey entirely.
     """
+    if not pin:
+        rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}",
+                          "--jq", ".default_branch"], timeout=120)
+        return out.strip() if rc == 0 and out.strip() else None
     # --paginate + per_page: the unpaginated endpoint returns the FIRST 30
     # branches. Measured: that made four forks report NO_BRANCH_AT_PIN whose pin
     # was in fact the exact tip of their build branch — a truncated list that

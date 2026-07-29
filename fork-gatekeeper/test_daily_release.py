@@ -680,3 +680,87 @@ def test_the_two_programs_share_one_implementation_of_the_question():
     """Two copies of this answer is how they came to disagree about four pins."""
     import check_pins_current as C
     assert R.branch_is_ours is C.branch_is_ours
+
+
+# --- vibeic-eda#30 landed the mirrors and the survey still ignored them
+
+def test_a_declared_source_without_a_pin_is_still_surveyed(tmp_path):
+    """#30 mirrored three PDK sources so the daily check would watch them.
+
+    It declared all three in FORKS.json, and the survey kept reporting 18 of 30
+    — because it enumerated from `ARG <NAME>_REF=<40 hex>` and the PDKs have no
+    such ARG: the Dockerfile clones them by URL. The mirrors existed, the
+    declaration existed, and nothing looked at them. That is the gap #30 was
+    opened to close, surviving the change that closed it.
+    """
+    import daily_merge as M
+    root = tmp_path
+    (root / "tools" / "yosys").mkdir(parents=True)
+    (root / "tools" / "yosys" / "Dockerfile").write_text(
+        "ARG YOSYS_REF=" + "a" * 40 + "\n"
+        'RUN git clone https://github.com/vibeic/yosys.git /y\n')
+    (root / "Dockerfile").write_text(
+        "RUN git clone https://github.com/vibeic/open_pdks.git /p\n")
+    (root / "fork-gatekeeper").mkdir()
+    (root / "fork-gatekeeper" / "FORKS.json").write_text(json.dumps(
+        {"forks": [{"tool": "yosys", "upstream": "YosysHQ/yosys"},
+                   {"tool": "open_pdks", "upstream": "fossi-foundation/open-pdks"},
+                   {"tool": "ciel", "upstream": "fossi-foundation/ciel"}]}))
+    b = M.build_branches(root)
+    assert b.get("yosys") == "a" * 40, "the pinned source must keep its pin"
+    assert "open_pdks" in b and b["open_pdks"] == "", \
+        "a declared source with no pin must be surveyed, with no pin reported"
+    assert "ciel" in b, "declared and never cloned still counts as tracked"
+
+
+def test_no_pin_falls_back_to_the_default_branch(monkeypatch):
+    """Returning None for a pinless source is what kept them out entirely."""
+    import daily_merge as M
+    monkeypatch.setattr(M, "_sh", lambda *a, **k: (0, "main\n", ""))
+    assert M.branch_for("open_pdks", "") == "main"
+
+
+def test_the_upstream_of_a_mirror_comes_from_the_declaration(monkeypatch):
+    """GitHub records no parent for a push mirror, so the fact lives in
+    FORKS.json — and reading it means the next mirror needs no code edit.
+
+    #30 added three mirrors and did not extend MIRROR_UPSTREAMS; all three
+    reported NO_UPSTREAM. A declaration one program reads and another ignores
+    is not a declaration.
+    """
+    import daily_merge as M
+    monkeypatch.setattr(M, "_sh", lambda *a, **k: (0, "", ""))   # no parent
+    monkeypatch.setattr(M, "_declared_upstreams",
+                        lambda: {"open_pdks": "fossi-foundation/open-pdks"})
+    assert M._upstream_url("open_pdks") == \
+        "https://github.com/fossi-foundation/open-pdks.git"
+
+
+def test_an_api_error_body_never_becomes_a_url(monkeypatch):
+    """`gh api` prints the error body to STDOUT, and --jq leaves it there.
+
+    Measured against a repo that does not exist:
+        https://github.com/{"message":"Not Found",...}.git
+    a URL built from an error message, which git then fails to clone for a
+    reason unrelated to the real problem.
+    """
+    import daily_merge as M
+    monkeypatch.setattr(M, "_declared_upstreams", lambda: {})
+
+    # The JSON-shaped body, caught by shape.
+    monkeypatch.setattr(M, "_sh", lambda *a, **k:
+                        (1, '{"message":"Not Found","status":"404"}', ""))
+    assert M._upstream_url("nope") == ""
+
+    # AND a failing call whose stdout is NOT JSON-shaped. The first version of
+    # this test only covered the line above, so removing the `rc == 0` guard
+    # left it green — the belt-and-braces `startswith("{")` carried it. A test
+    # that passes with the fix removed is testing the other half of the fix.
+    # …and a failing call whose stdout LOOKS like a valid slug. This is the
+    # input that isolates the rc guard: the shape checks below it pass a string
+    # with a slash and no brace, so only `rc == 0` can reject it. My first
+    # attempt used "gh: could not resolve host" — no slash — which the shape
+    # check caught, leaving the mutation undetected and the test reassuring.
+    monkeypatch.setattr(M, "_sh", lambda *a, **k: (1, "someone/else\n", ""))
+    assert M._upstream_url("nope") == "", \
+        "a non-zero rc must not be trusted, however plausible its stdout"
