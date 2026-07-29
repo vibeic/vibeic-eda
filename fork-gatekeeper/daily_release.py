@@ -283,7 +283,7 @@ def smoke_image(image: str) -> List[dict]:
     return bad
 
 
-def bump_version(eda_root: Path) -> Tuple[str, str]:
+def peek_version(eda_root: Path) -> Tuple[str, str]:
     """Next version, above BOTH the VERSION file and every tag that exists.
 
     The file drifts. Measured 2026-07-29: `VERSION` read 0.2.30 while images
@@ -299,9 +299,10 @@ def bump_version(eda_root: Path) -> Tuple[str, str]:
     patch = int(patch) + 1
     if patch > 99:                       # patch 0-99, then roll the minor
         minor, patch = str(int(minor) + 1), 0
-    new = f"{maj}.{minor}.{patch}"
-    vf.write_text(new + "\n", encoding="utf-8")
-    return old, new
+    # DECIDED, NOT WRITTEN. The file moves only after the image is smoked and
+    # pushed — a VERSION that advanced for an image nobody can pull is how the
+    # file drifted from reality in the first place (0.2.30 on disk, 0.2.32 built).
+    return old, f"{maj}.{minor}.{patch}"
 
 
 def main(argv=None) -> int:
@@ -456,79 +457,79 @@ def main(argv=None) -> int:
             # for iterating on a tool, wrong for a daily release, because it
             # makes "only what changed was rebuilt" true only while the local
             # cache survives.
-            print("  composing the release image from the pinned artefacts …",
-                  flush=True)
-            # RETRY ONCE before downgrading. The first real run fell back to a
-            # local-only image because a `git clone` inside the build failed —
-            # a network blip, not a reason the registry compose is impossible.
-            # Treating any failure as "reproducible build unavailable" trades
-            # the property we just built the whole chain to get for a transient.
-            rc, _, err = _sh(["docker", "buildx", "bake", "-f",
-                              str(root / "docker-bake.hcl"), "--load", "eda"],
-                             cwd=root)
+            #
+            # THE VERSION IS DECIDED FIRST AND THE COMPOSE IS TAGGED WITH IT.
+            # An earlier version composed `eda` — which tags `:${TAG}` (default
+            # `dev`) and `:latest` — then smoked `vibeic-eda:local` and tagged
+            # THAT as the new version. `:local` is `eda-local`'s tag, so it was
+            # whatever the last local build left behind: the release would have
+            # smoked one image and published a different, older one under the
+            # new number. Caught by reading the bake file, not by any output —
+            # every step succeeds.
+            #
+            # `--set` overrides the target's tags so the compose cannot move
+            # `:latest` onto an image that has not passed the smoke yet.
+            old, new = peek_version(root)
+            tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
+            print(f"  composing {tag} from the pinned artefacts …", flush=True)
+            bake = ["docker", "buildx", "bake", "-f",
+                    str(root / "docker-bake.hcl"), "--load",
+                    "--set", f"eda.tags={tag}", "eda"]
+            rc, _, err = _sh(bake, cwd=root)
             if rc != 0:
                 print("  registry compose failed once; retrying before "
                       "downgrading (a transient must not cost reproducibility)",
                       flush=True)
-                rc, _, err = _sh(["docker", "buildx", "bake", "-f",
-                                  str(root / "docker-bake.hcl"), "--load",
-                                  "eda"], cwd=root)
+                rc, _, err = _sh(bake, cwd=root)
             if rc != 0:
-                # 600 characters of a buildkit failure is the tail of the
-                # failing step's COMMAND, not its error — measured 2026-07-29,
-                # where the truncation hid the cause entirely and sent me to
-                # reproduce three clones that were fine. Keep enough to see it.
-                print(f"  compose from the registry failed; falling back to a "
-                      f"LOCAL-ONLY image. This one is not reproducible "
+                print(f"  compose from the registry failed twice; falling back "
+                      f"to a LOCAL-ONLY image, which is not reproducible "
                       f"elsewhere:\n{err[-6000:]}", file=sys.stderr)
                 result["registry_composed"] = False
                 rc, _, err = _sh(["docker", "buildx", "bake", "-f",
                                   str(root / "docker-bake.hcl"), "--load",
+                                  "--set", f"eda-local.tags={tag}",
                                   "eda-local"], cwd=root)
+                if rc != 0:
+                    print(f"[FAIL] no image was composed; no version was cut so "
+                          f"nothing claims to be a release:\n{err[-6000:]}",
+                          file=sys.stderr)
+                    return RC_NEEDS_HUMAN
             else:
                 result["registry_composed"] = True
-            if rc != 0:
-                print(f"[FAIL] the image did not compose; no version was cut so "
-                      f"nothing claims to be a release:\n{err[-1500:]}",
-                      file=sys.stderr)
-                return RC_NEEDS_HUMAN
-            result["built"].append("eda-local")
 
-            # SMOKE BEFORE THE VERSION. A tag is a claim, and cutting one over
-            # an image whose tools have not been started makes the claim on
-            # nothing. If a tool cannot run, the image stays untagged and today
-            # simply has no release — which is the honest outcome.
-            bad = smoke_image("ghcr.io/vibeic/vibeic-eda:local")
+            # SMOKE BEFORE THE VERSION IS REAL. A tag is a claim, and cutting one
+            # over an image whose tools have never been started makes the claim
+            # on nothing. The tag is removed on failure, so a bad image cannot be
+            # left carrying a version number.
+            bad = smoke_image(tag)
             result["smoke_failures"] = bad
             if bad:
+                _sh(["docker", "rmi", tag])
                 print(f"[FAIL] {len(bad)} tool(s) do not run in the composed "
-                      f"image; NO version was cut:", file=sys.stderr)
+                      f"image; the tag was removed and NO version was cut:",
+                      file=sys.stderr)
                 for b in bad:
                     print(f"    {b['tool']}: {b['cmd']}\n      {b['err']}",
                           file=sys.stderr)
                 return RC_NEEDS_HUMAN
-            print(f"  smoke: all {len(SMOKE)} tools run in the composed image")
+            print(f"  smoke: all {len(SMOKE)} tools run in {tag}")
 
-            old, new = bump_version(root)
-            result["version"] = {"from": old, "to": new}
-            tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
-            rc, _, _ = _sh(["docker", "tag",
-                            "ghcr.io/vibeic/vibeic-eda:local", tag])
-            result["tagged"] = (rc == 0)
-
-            # AND PUSH IT. The ruling is "提供一個 daily 的新版 updated docker
-            # image" — a tag that exists only on the build host provides nothing
-            # to anyone. This is the same mistake as the tool artefacts, which
-            # were all built locally and none published, one level up.
-            pushed = False
-            if rc == 0:
-                prc, _, perr = _sh(["docker", "push", tag], timeout=7200)
-                pushed = prc == 0
-                if not pushed:
-                    print(f"  PUSH FAILED — {new} exists here and nowhere "
-                          f"else:\n{perr[-800:]}", file=sys.stderr)
+            prc, _, perr = _sh(["docker", "push", tag], timeout=7200)
+            pushed = prc == 0
+            if not pushed:
+                print(f"  PUSH FAILED — {new} exists here and nowhere else:"
+                      f"\n{perr[-800:]}", file=sys.stderr)
             result["pushed"] = pushed
+            result["version"] = {"from": old, "to": new}
+
             if pushed:
+                # `latest` moves only after a smoke pass AND a successful push,
+                # so it can never point at something nobody could pull.
+                _sh(["docker", "tag", tag, "ghcr.io/vibeic/vibeic-eda:latest"])
+                _sh(["docker", "push", "ghcr.io/vibeic/vibeic-eda:latest"],
+                    timeout=7200)
+                (root / "VERSION").write_text(new + "\n", encoding="utf-8")
                 (root / "RELEASED.json").write_text(json.dumps(
                     {"_comment": "What the last PUBLISHED image was built from. "
                                  "A pin set not matching this has never been "

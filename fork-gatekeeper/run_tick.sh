@@ -153,6 +153,34 @@ else
     release_rc=1
 fi
 
+# Does the tool the flow INVOKES come from the artefact we built? Every other
+# gate stops at "the image contains our tool", which is a different claim and was
+# true for months while verilator ran the base image's April build (#18) and
+# klayout's LEF/DEF plugin was loaded by nothing but svrfdrc (#17).
+#
+# REPORT-ONLY on purpose. #17 and #18 are open and would fail it; a gate whose
+# first act is to stop every daily release is a gate someone switches off. It
+# takes --strict once they are closed.
+REACH_OUT="${LOG_DIR}/fork-reaches-flow.txt"
+if [ -f "${DIR}/fork_reaches_flow_check.py" ]; then
+    REACH_IMG="ghcr.io/vibeic/vibeic-eda:local"
+    if docker image inspect "${REACH_IMG}" >/dev/null 2>&1; then
+        log "[reach] checking the composed image runs OUR builds"
+        python3 "${DIR}/fork_reaches_flow_check.py" "${REACH_IMG}" \
+            --json "${LOG_DIR}/fork-reaches-flow.json" > "${REACH_OUT}" 2>&1 || true
+        head -1 "${REACH_OUT}" | sed 's/^/[reach]   /' | tee -a "${LOG}"
+        grep -E "resolves outside|not on PATH" "${REACH_OUT}" \
+            | sed 's/^/[reach]   /' | tee -a "${LOG}" || true
+    else
+        # No composed image is not a pass. Say which image was missing.
+        echo "MISSING IMAGE: ${REACH_IMG} — nothing was checked" > "${REACH_OUT}"
+        log "[reach] ${REACH_IMG} absent — nothing was checked, not a clean result"
+    fi
+else
+    echo "MISSING: fork-gatekeeper/fork_reaches_flow_check.py" > "${REACH_OUT}"
+    log "[reach] MISSING — nothing was checked, which is not a clean result"
+fi
+
 INBOUND_OUT="${LOG_DIR}/inbound-survey.txt"
 if [ -f "${DIR}/inbound_survey.py" ]; then
     log "[inbound] surveying upstream fixes our pins lack"
