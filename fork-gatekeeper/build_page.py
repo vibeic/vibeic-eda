@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import base64
 import re
 import sys
@@ -24,6 +25,7 @@ from pathlib import Path
 HERE = Path(__file__).parent          # version-controlled source
 sys.path.insert(0, str(HERE))
 import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
+import inventory  # noqa: E402 — the tool inventory, measured at build time
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
@@ -303,6 +305,8 @@ __NAV__
 
 __GAP__
 
+__INVENTORY__
+
 __FOOTER__
 
 <script>
@@ -462,6 +466,157 @@ function enhBlock(tool){
 
 
 # Canonical top-nav is OWNED BY THE OTHER PAGES, not by this generator. We EXTRACT the
+# ---------------------------------------------------------------------------
+# The tool inventory: three tables, MEASURED at build time by inventory.py.
+#
+# Deliberately not the same question as the ledger above. That one answers "what
+# we forked and how far behind upstream it is"; this answers "what is actually in
+# the image, what upstream ships that we skipped, and what PDK data we depend on"
+# — and the fork column is the join between them.
+#
+# Nothing here is a pasted number. This page has already shipped a stale one:
+# "all 15 forks" rendered above a 21-row ledger because the count was derived and
+# the quantifier was not. Rows, counts and fork status are all recomputed per run;
+# only the prose judgements (what a tool is for, whether we use it, why not) come
+# from TOOL_NOTES.json, because measurement cannot answer those.
+# ---------------------------------------------------------------------------
+
+def _bi(en: str, zh: str, tag: str = "span", cls: str = "") -> str:
+    """Bilingual cell, matching the page's existing data-en/data-zh switch."""
+    c = f' class="{cls}"' if cls else ""
+    return (f'<{tag}{c} data-en="{_esc_attr(en)}" data-zh="{_esc_attr(zh)}">'
+            f'{_esc_html(en)}</{tag}>')
+
+
+def _esc_attr(s: str) -> str:
+    return (str(s or "").replace("&", "&amp;").replace('"', "&quot;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _esc_html(s: str) -> str:
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _fork_cell(row: dict) -> tuple[str, str]:
+    """The fork column, with three states kept distinct from 'no'.
+
+    Collapsing them turns "could not determine" into "does not exist", which is
+    the single most common way this column has been wrong.
+    """
+    st, f = row.get("state"), row.get("forks") or []
+    if st == "not-a-tool":
+        return "—", "—"
+    if st == "pip":
+        return "n/a — pip-installed", "不適用 — pip 安裝"
+    if st == "unknown-upstream":
+        return "? — upstream unconfirmed", "？— 上游未確認"
+    if not f:
+        return "no", "no"
+    if len(f) == 1:
+        return f"yes · vibeic/{f[0]}", f"yes · vibeic/{f[0]}"
+    return (f"yes · vibeic/{f[0]} +{len(f)-1} duplicates",
+            f"yes · vibeic/{f[0]} 另有 {len(f)-1} 份重複")
+
+
+def render_inventory(inv: dict) -> str:
+    a, b, c = inv["a"], inv["b"], inv["c"]
+    n_used = sum(1 for r in a if r.get("used") and r["state"] != "not-a-tool")
+    n_fork = sum(1 for r in a if r["state"] == "forked")
+    gap_b = [r for r in b if r.get("used") and not r["forks"]]
+    dupes = inv.get("dupes") or {}
+    worst = max(dupes.items(), key=lambda kv: len(kv[1])) if dupes else None
+
+    def rows_a():
+        out = []
+        for r in a:
+            fe, fz = _fork_cell(r)
+            used = ("—" if r["state"] == "not-a-tool"
+                    else "yes" if r.get("used") else "no")
+            out.append(
+                "<tr><td><code>" + _esc_html(r["dir"]) + "</code></td><td>"
+                + _bi(r["desc_en"], r["desc_zh"]) + "</td><td>"
+                + _bi("added by us" if r["origin"] == "ours" else "base image",
+                      "我們新增" if r["origin"] == "ours" else "base 映像")
+                + "</td><td>" + _bi(fe, fz) + "</td><td>" + used + "</td></tr>")
+        return "".join(out)
+
+    def rows_b():
+        out = []
+        for r in b:
+            f = r["forks"]
+            fe = "no" if not f else f"yes · vibeic/{f[0]}" + (f" +{len(f)-1}" if len(f) > 1 else "")
+            out.append(
+                "<tr><td><code>" + _esc_html(r["tool"]) + "</code></td><td>"
+                + _bi(r["desc_en"], r["desc_zh"]) + "</td><td>"
+                + ("yes" if r.get("used") else "no") + "</td><td>" + _esc_html(fe)
+                + "</td><td>" + _bi(r["reason_en"] or "—", r["reason_zh"] or "—")
+                + "</td></tr>")
+        return "".join(out)
+
+    def rows_c():
+        out = []
+        for r in c:
+            f = r["forks"]
+            out.append(
+                "<tr><td><code>" + _esc_html(r["dir"]) + "</code></td><td>"
+                + _bi(r["desc_en"], r["desc_zh"]) + "</td><td><code>"
+                + _esc_html(r["upstream"] or "—") + "</code></td><td>"
+                + ("yes" if f else "<strong>no</strong>") + "</td></tr>")
+        return "".join(out)
+
+    # Anything the run could not measure is stated in the page, not swallowed.
+    # A section that silently drops what it failed to read looks complete because
+    # the missing thing contributed no rows.
+    warn = ""
+    problems = (inv.get("unmeasured") or []) + \
+               [f"no note for image directory: {d}" for d in inv.get("missing_notes") or []] + \
+               [f"a note exists for '{d}', which is not in the image measured "
+                f"({inv.get('image')}) — either it was removed, or the image "
+                f"predates it" for d in inv.get("stale_notes") or []]
+    if problems:
+        warn = ('<p class="fork-caption"><strong>' + _esc_html(
+            "Not everything below could be measured, or measurement and notes "
+            "disagree: " + "; ".join(problems)
+            + ". A row affected by this is absent, not empty.") + "</strong></p>")
+
+    dupe_note = ""
+    if worst:
+        up, names = worst
+        dupe_note = "<p class=\"fork-caption\">" + _bi(
+            f"{len(names)} of those forks are the same upstream ({up}) — "
+            f"redundant copies, not coverage.",
+            f"其中 {len(names)} 個是同一個上游（{up}）的重複 fork，不是覆蓋範圍。") + "</p>"
+
+    return f'''<section>
+    <div class="fork-wrap">
+        <div class="section-header" style="text-align:left">
+            <p class="eyebrow" data-en="Tool inventory" data-zh="工具清冊">Tool inventory</p>
+            <h2 data-en="Everything in the image, and everything upstream ships that we skipped" data-zh="映像裡的全部，以及上游帶了而我們沒用的全部">Everything in the image, and everything upstream ships that we skipped</h2>
+            <p data-en="The ledger above answers &quot;what we forked and how far behind it is&quot;. This answers a different question: what is actually installed, what upstream ships that we chose not to use and why, and what PDK data the flow depends on. Every row, count and fork status is measured when this page is built — the directories by listing them inside {_esc_attr(inv["image"])}, the forks and their parents from the GitHub API, the upstream list from the project&#39;s own tool metadata. Only the prose (what a tool is for, whether we use it, why not) is written by hand, because measurement cannot answer it." data-zh="上方帳本回答的是「我們 fork 了什麼、落後多少」。這裡回答另一個問題：實際裝了什麼、上游帶了什麼而我們選擇不用及其理由、流程依賴哪些 PDK 資料。每一列、每個數字、每個 fork 狀態都在產生這一頁時實測——目錄是進 {_esc_attr(inv["image"])} 裡列出來的，fork 與其上游來自 GitHub API，上游清單來自該專案自己的工具 metadata。只有敘述文字（工具做什麼、我們用不用、為什麼不用）是人工寫的，因為那不是量得出來的。">The ledger above answers "what we forked and how far behind it is". This answers a different question: what is actually installed, what upstream ships that we chose not to use and why, and what PDK data the flow depends on. Every row, count and fork status is measured when this page is built.</p>
+        </div>
+        {warn}
+        <h3>{_bi("A · Every directory in the image", "A · 映像裡的每一個目錄", "span")} <span style="opacity:.6">({len(a)})</span></h3>
+        <p class="fork-caption">{_bi(f"{len(a)} directories, {n_used} used by the flow, {n_fork} forked. Three states are kept distinct from &quot;no&quot;, because collapsing them turns &quot;could not determine&quot; into &quot;does not exist&quot;: pip-installed packages are not git clones and forking their repo would not change what is installed; an unconfirmed upstream is not an absent fork; and bin/sak/fpga are not tools.", f"{len(a)} 個目錄，流程使用 {n_used} 個，已 fork {n_fork} 個。三種狀態和「no」分開，因為混在一起就是把「查不到」變成「不存在」：pip 安裝的不是 git clone，fork 它的 repo 不會改變安裝內容；上游未確認不等於沒有 fork；bin/sak/fpga 不是工具。")}</p>
+        <div class="fork-wrap"><table class="fork-table"><thead><tr>
+          <th>{_bi("directory","目錄")}</th><th>{_bi("function","功能")}</th><th>{_bi("origin","來源")}</th><th>{_bi("forked","有無 fork")}</th><th>{_bi("used","有用")}</th>
+        </tr></thead><tbody>{rows_a()}</tbody></table></div>
+        {dupe_note}
+
+        <h3>{_bi("B · Every tool IIC-OSIC-TOOLS ships", "B · IIC-OSIC-TOOLS 帶的每一個工具", "span")} <span style="opacity:.6">({len(b)})</span></h3>
+        <p class="fork-caption">{_bi(f"From the project&#39;s own metadata, not a README. We use {sum(1 for r in b if r.get('used'))} of {len(b)}. Used but not forked: {len(gap_b)}{'' if not gap_b else ' — ' + ', '.join(r['tool'] for r in gap_b)}.", f"來自該專案自己的 metadata，不是 README。{len(b)} 個中我們用 {sum(1 for r in b if r.get('used'))} 個。用了但沒 fork：{len(gap_b)} 個{'' if not gap_b else ' — ' + ', '.join(r['tool'] for r in gap_b)}。")}</p>
+        <div class="fork-wrap"><table class="fork-table"><thead><tr>
+          <th>{_bi("tool","工具")}</th><th>{_bi("function","功能")}</th><th>{_bi("used","有用")}</th><th>{_bi("forked","有無 fork")}</th><th>{_bi("why not, if unused","不用的理由")}</th>
+        </tr></thead><tbody>{rows_b()}</tbody></table></div>
+
+        <h3>{_bi("C · PDK data", "C · PDK 資料", "span")} <span style="opacity:.6">({len(c)})</span></h3>
+        <p class="fork-caption">{_bi("Tables A and B are both built per tool, and PDKs are not tools — so PDK data sat outside the frame of both while the rule covering it was already in force. A rule that no audit can see is a rule that is not being audited. This table also states its own limit: it matches a directory to an upstream repository, and cannot establish which commit the data came from — PDKs carry no pin and no provenance file, so &quot;which sky130A is this&quot; is unanswerable beyond &quot;open_pdks produced it&quot;.", "A 表和 B 表都是以工具為單位建的，而 PDK 不是工具——所以在涵蓋它的規則早已生效的情況下，PDK 資料一直在兩張表的視野之外。一個沒有任何稽核看得到的規則，就是沒在被稽核的規則。這張表也寫明自己的極限：它只能把目錄對到上游 repo，無法確認資料來自哪個 commit——PDK 沒有 pin 也沒有 provenance 檔，所以「這個 sky130A 是哪一版」目前答不出來，只能答「open_pdks 產的」。")}</p>
+        <div class="fork-wrap"><table class="fork-table"><thead><tr>
+          <th>{_bi("PDK","PDK")}</th><th>{_bi("contents","內容")}</th><th>{_bi("upstream","上游")}</th><th>{_bi("forked","有無 fork")}</th>
+        </tr></thead><tbody>{rows_c()}</tbody></table></div>
+    </div>
+</section>'''
+
+
 # menu-anchor run from a sibling page at build time so eda-forks.html always matches the
 # rest of the site (order, labels, zh text, item set) — regenerating can never drift it.
 # Reference pages are tried in order; the first that parses wins. eda-forks.html is never
@@ -525,6 +680,32 @@ def build_footer_site(out: Path) -> str:
     return "".join(_canonical_menu(out))
 
 
+def _image_ref() -> str:
+    """The image the inventory measures, resolved to one that actually exists.
+
+    Preference order is VERSION, then :latest. Not hard-coded: a literal tag
+    would keep describing an old image after a release, and the tables would look
+    measured while reporting the wrong one.
+
+    The fallback matters because VERSION and the published image can disagree —
+    they do right now (VERSION 0.2.30, published 0.2.32), which is its own bug.
+    Whichever tag is used is printed in the section's own prose, so the page
+    always names what it measured rather than implying it measured the current
+    release. Falling back silently would be the worse failure: a table measured
+    from :latest while the page claims to describe VERSION.
+    """
+    forced = os.environ.get("GK_INVENTORY_IMAGE")
+    if forced:
+        return forced
+    v = (HERE.parent / "VERSION").read_text().strip()
+    for ref in (f"vibeic/vibeic-eda:{v}", "vibeic/vibeic-eda:latest"):
+        r = subprocess.run(["docker", "image", "inspect", ref],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            return ref
+    return f"vibeic/vibeic-eda:{v}"          # let collect() report it as unmeasured
+
+
 def build(out: Path):
     # vibeic/vibeic-eda#12. The published page is the third shared production artefact
     # with the same exposure as the cache and the ledgers: it is derived from whatever
@@ -536,6 +717,16 @@ def build(out: Path):
     ledgers = _load_ledgers()
     report = _latest_report()
     enh = _load_enh()
+    # Measured now, not pasted. If it cannot be measured the section says so
+    # rather than vanishing: a section that disappears on failure looks exactly
+    # like one that was never meant to be there.
+    try:
+        inv_html = render_inventory(inventory.collect(_image_ref()))
+    except Exception as exc:
+        inv_html = ('<section><div class="fork-wrap"><p class="fork-caption">'
+                    '<strong>Tool inventory: not rendered — the measurement failed '
+                    f'({_esc_html(str(exc)[:200])}). This is a gap in the page, not '
+                    'an empty inventory.</strong></p></div></section>')
     data = json.dumps(ledgers, ensure_ascii=False)
     nav = NAV.replace("__NAVLINKS__", build_navlinks(out))
     footer = FOOTER.replace("__FOOTER_SITE__", build_footer_site(out))
@@ -547,6 +738,7 @@ def build(out: Path):
                      .replace("__NOPEN__", str(sum(
                          1 for v in enh.values() for r in v.get("rows", [])
                          if r.get("status") in ("todo", "deferred")))))
+            .replace("__INVENTORY__", inv_html)
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
             .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
