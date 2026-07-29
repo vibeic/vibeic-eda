@@ -523,21 +523,26 @@ def main(argv=None) -> int:
                       flush=True)
                 rc, _, err = _sh(bake, cwd=root)
             if rc != 0:
-                print(f"  compose from the registry failed twice; falling back "
-                      f"to a LOCAL-ONLY image, which is not reproducible "
-                      f"elsewhere:\n{err[-6000:]}", file=sys.stderr)
+                # NO LOCAL FALLBACK. There used to be one — compose `eda-local`,
+                # which redirects each tool to a freshly built target — and it
+                # stopped working the moment the artefact tag gained its recipe
+                # component (#21): `eda-local`'s `contexts` map reconstructs tool
+                # tags from the bake expression, which now produces
+                # `eda-tool-iverilog:fe9dfab` while the root Dockerfile asks for
+                # `eda-tool-openroad:92b079b-7444a2`. The keys no longer match the
+                # FROM refs, so the redirect does not apply and `eda-local`
+                # resolves from the registry — the same thing that just failed.
+                #
+                # A fallback that does not fall back is worse than none: it turns
+                # one loud failure into two quiet ones and, when it did work, it
+                # produced an image that could not be reproduced anywhere else.
+                # A failed compose is a failed release, said once, loudly.
+                print(f"[FAIL] the image did not compose after a retry; no "
+                      f"version was cut, so nothing claims to be a release:"
+                      f"\n{err[-6000:]}", file=sys.stderr)
                 result["registry_composed"] = False
-                rc, _, err = _sh(["docker", "buildx", "bake", "-f",
-                                  str(root / "docker-bake.hcl"), "--load",
-                                  "--set", f"eda-local.tags={tag}",
-                                  "eda-local"], cwd=root)
-                if rc != 0:
-                    print(f"[FAIL] no image was composed; no version was cut so "
-                          f"nothing claims to be a release:\n{err[-6000:]}",
-                          file=sys.stderr)
-                    return RC_NEEDS_HUMAN
-            else:
-                result["registry_composed"] = True
+                return RC_NEEDS_HUMAN
+            result["registry_composed"] = True
 
             # SMOKE BEFORE THE VERSION IS REAL. A tag is a claim, and cutting one
             # over an image whose tools have never been started makes the claim
