@@ -23,7 +23,7 @@
 # `tools/check_fork_only.py` in the `fork-only` workflow, not by review — the
 # rule previously held only as long as whoever edited 605 lines remembered it.
 
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:386a308
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:483d0cb
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb
@@ -171,7 +171,7 @@ LABEL org.opencontainers.image.source="https://github.com/vibeic"
 USER root
 # --- vibeic/OpenROAD (native 24.04 build → RUNPATH /opt/or-tools, no lib bundling) ---
 COPY --from=img-openroad /opt/or-tools /opt/or-tools
-COPY --from=img-openroad /src/build/bin/openroad /foss/tools/openroad/bin/openroad
+COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/openroad
 # Clean-replace the base tool dirs FIRST so no stale base files survive the COPY merge —
 # e.g. the base's ghdl.so yosys plugin is built against the old ABI and would crash yosys 0.66.
 #

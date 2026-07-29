@@ -22,11 +22,12 @@ FROM openroad/ubuntu24.04-dev:latest AS build
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_REF=386a3088146a944d8574200813e5b87e0b5e15c2  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
+ARG OPENROAD_REF=483d0cb4622efd114c0ae8fd7f920fb58577cc04  # pinned; branch vibeic/openroad-integration (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19)
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
- && ./etc/Build.sh -threads=$(nproc) -cmake="-DCMAKE_BUILD_TYPE=Release"
+ && ./etc/Build.sh -threads=$(nproc) -cmake="-DCMAKE_BUILD_TYPE=Release" \
+      -prefix=/vibeic-openroad
 
 # ---------------------------------------------------------------------------
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
@@ -47,5 +48,15 @@ RUN mkdir -p /vibeic/provenance \
 # ---------------------------------------------------------------------------
 FROM scratch
 COPY --from=build /opt/or-tools /opt/or-tools
-COPY --from=build /src/build/bin/openroad /src/build/bin/openroad
+# THE ARTEFACT'S OWN PATH, not upstream's build layout. `etc/Build.sh`
+# defaults to BAZEL since the 2026-07-29 daily merge and installs to
+# /install/OpenROAD; the CMake tree at /src/build/bin no longer exists, and
+# the build failed here with `failed to calculate checksum of ref ...
+# /src/build/bin/openroad: not found` AFTER compiling all 11,875 targets.
+# Published at its FINAL runtime path, matching every other artefact here
+# (yosys -> /foss/tools/yosys, iverilog -> /foss/tools/iverilog). An earlier
+# attempt used /vibeic/bin/openroad and the compose step failed with `cannot
+# copy to non-directory`: /vibeic/ is the shared PROVENANCE namespace every
+# artefact writes a file into, so a payload directory cannot also live there.
+COPY --from=build /vibeic-openroad/bin/openroad /foss/tools/openroad/bin/openroad
 COPY --from=build /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
