@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_pins_current as C                                # noqa: E402
 import daily_release as R                                     # noqa: E402
 import fork_reaches_flow_check as F                           # noqa: E402
 
@@ -270,22 +271,22 @@ def test_a_bake_change_moves_it_too(tmp_path):
 
 def test_branch_is_ours_true_when_we_are_ahead(monkeypatch):
     calls = iter([(0, "MikePopoloski/slang", ""), (0, "34", "")])
-    monkeypatch.setattr(R, "_sh", lambda *a, **k: next(calls))
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
     assert R.branch_is_ours("slang", "satfix-integration") is True
 
 
 def test_branch_is_ours_false_for_a_pure_upstream_mirror(monkeypatch):
     """#23/#25 pinned four tools to what the image ships; master is upstream's."""
     calls = iter([(0, "MikePopoloski/slang", ""), (0, "0", "")])
-    monkeypatch.setattr(R, "_sh", lambda *a, **k: next(calls))
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
     assert R.branch_is_ours("slang", "master") is False
 
 
 def test_branch_is_ours_is_none_when_it_cannot_tell(monkeypatch):
     """Fail-safe: unknown must not read as ours, or the pin gets advanced."""
-    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: (0, "", ""))
     assert R.branch_is_ours("mirror-repo", "master") is None
-    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "up/stream", "")
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: (0, "up/stream", "")
                         if "repos/vibeic/x" == a[0][2] else (1, "", "boom"))
     assert R.branch_is_ours("x", "master") is None
 
@@ -474,29 +475,27 @@ def test_a_branch_absent_upstream_is_conclusively_ours(monkeypatch):
     recorded "yosys satfix-integration carries 34", a measurement the code as
     written could no longer reproduce.
     """
-    import daily_release as D
     calls = iter([
         (0, "YosysHQ/yosys", ""),      # parent
         (1, "", "404"),                # compare fails
         (1, "", "404"),                # upstream has no such branch
         (0, "satfix-integration", ""),  # we do
     ])
-    monkeypatch.setattr(D, "_sh", lambda *a, **k: next(calls))
-    assert D.branch_is_ours("yosys", "satfix-integration") is True
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
+    assert C.branch_is_ours("yosys", "satfix-integration") is True
 
 
 def test_a_transport_failure_is_still_unknown(monkeypatch):
     """The fail-safe must stay reachable. Upstream branch readable, ours not —
     that is a broken measurement, not evidence of anything."""
-    import daily_release as D
     calls = iter([
         (0, "YosysHQ/yosys", ""),
         (1, "", "boom"),
         (0, "master", ""),   # upstream HAS the branch
         (1, "", "boom"),     # and we could not read ours
     ])
-    monkeypatch.setattr(D, "_sh", lambda *a, **k: next(calls))
-    assert D.branch_is_ours("yosys", "master") is None
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
+    assert C.branch_is_ours("yosys", "master") is None
 
 
 def test_unknown_is_not_reported_as_a_negative_finding():
@@ -509,8 +508,7 @@ def test_unknown_is_not_reported_as_a_negative_finding():
     outcomes sharing one arm, which is exactly how the defect was written.
     """
     import ast, pathlib
-    import daily_release as D
-    tree = ast.parse(pathlib.Path(D.__file__).read_text())
+    tree = ast.parse(pathlib.Path(R.__file__).read_text())
     for node in ast.walk(tree):
         if not (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
                 and node.test.id == "ours"):
@@ -632,3 +630,53 @@ def test_a_source_installed_tool_needs_its_source_tree_present(tmp_path,
         "command -v": "sby /usr/local/bin/sby /usr/local/bin/sby\n"}))
     bad = [f for f in F.check("img", df) if f["tool"] == "sby"]
     assert bad and "did not come from us" in bad[0]["problem"]
+
+
+# --- vibeic-eda#29: a gate that fails on a recorded decision is a gate nobody reads
+
+def _pin_check(monkeypatch, status, behind, ours):
+    """Drive the real check_one with a fabricated compare and ownership."""
+    import check_pins_current as C
+    monkeypatch.setattr(C, "_branches", lambda repo: [("master", "sha")])
+    monkeypatch.setattr(C, "_gh", lambda path, jq=None, paginate=False:
+                        json.dumps({"status": status, "total_commits": behind}))
+    monkeypatch.setattr(C, "branch_is_ours", lambda repo, branch: ours)
+    return C.check_one("Xyce", "a" * 40)
+
+
+def test_a_pin_held_on_upstream_history_is_a_decision_not_a_defect(monkeypatch):
+    """Four pins sit on pure upstream mirrors DELIBERATELY (#23/#25).
+
+    Reported as STALE they made this program permanently red — 288 commits and
+    growing — so rc=1 became the expected value and a real stale pin arriving
+    tomorrow would change nothing anyone noticed.
+    """
+    r = _pin_check(monkeypatch, "ahead", 182, False)
+    assert r["verdict"] == "UPSTREAM_AVAILABLE"
+    assert "CHOOSE to adopt" in r["detail"]
+
+
+def test_a_pin_behind_our_own_branch_still_fails(monkeypatch):
+    """The teeth this must not cost.
+
+    Verified against the live repository too: rolling the yosys pin back onto
+    an older commit of `satfix-integration` — our own branch — reports STALE and
+    exits 1.
+    """
+    r = _pin_check(monkeypatch, "ahead", 35, True)
+    assert r["verdict"] == "STALE"
+    assert "OURS" in r["detail"]
+
+
+def test_undecidable_ownership_keeps_the_finding_but_not_the_claim(monkeypatch):
+    """Unknown is not a pass, and it is not a diagnosis either."""
+    r = _pin_check(monkeypatch, "ahead", 7, None)
+    assert r["verdict"] == "STALE_UNDECIDED"
+    assert "could not be determined" in r["detail"]
+    assert "OURS" not in r["detail"]
+
+
+def test_the_two_programs_share_one_implementation_of_the_question():
+    """Two copies of this answer is how they came to disagree about four pins."""
+    import check_pins_current as C
+    assert R.branch_is_ours is C.branch_is_ours

@@ -57,7 +57,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_pins_current import check_one, pinned_refs            # noqa: E402
+from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
+                                pinned_refs)
 
 RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 
@@ -154,56 +155,6 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
                        f"a failure so the release stops instead of hanging.")
     except Exception as exc:                                   # noqa: BLE001
         return 1, "", str(exc)
-
-
-def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
-    """Does this branch carry any commit of ours, or is it an upstream mirror?
-
-    A pin behind a branch WE build on is stale. A pin behind a branch that is a
-    pure mirror of upstream is a DECISION someone made about which upstream
-    version to ship, and advancing it adopts a new one.
-
-    Caught before it did damage: vibeic-eda#23/#25 pinned slang, xschem, Xyce and
-    sv-elab to the commits the IMAGE SHIPS, read out of each tool's own SOURCES
-    file, precisely so the change would be "build from our fork" and not "and
-    also upgrade the tool". The next release wanted to move all four to
-    `master` — a four-tool version bump smuggled under "build 6 absent
-    artefacts". Measured: those four branches carry 0 commits of ours;
-    `yosys satfix-integration` carries 34.
-
-    A BRANCH THAT DOES NOT EXIST UPSTREAM IS OURS, CONCLUSIVELY. That case used
-    to return None, and the docstring above recorded a measurement — "yosys
-    satfix-integration carries 34" — that the code as written could no longer
-    reproduce: the comparison is `upstream:<branch>...vibeic:<branch>`, and
-    upstream has no branch of that name, so it 404s. Every one of our own
-    integration branches took the same path. `klayout vibeic/klayout-signoff-int`
-    and `yosys satfix-integration` both answered "could not tell" about branches
-    that exist nowhere else.
-
-    None -> could not tell, which is treated as not-ours: the fail-safe direction
-    is to leave a pin alone and say so. It must stay reachable, but it must not
-    be reached by the branches this whole system exists to ship.
-    """
-    meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
-                "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
-    if not meta:
-        return None
-    owner = meta.split("/")[0]
-    rc, out, _ = _sh(["gh", "api",
-                      f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
-                      "--jq", ".ahead_by"], timeout=120)
-    if rc == 0 and out.strip().isdigit():
-        return int(out.strip()) > 0
-    # The compare failed. Distinguish "upstream has no such branch" — which
-    # answers the question rather than leaving it open — from a transport or
-    # permission failure, which does not.
-    up_rc, _, _ = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
-                       "--jq", ".name"], timeout=120)
-    ours_rc, _, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/branches/{branch}",
-                         "--jq", ".name"], timeout=120)
-    if ours_rc == 0 and up_rc != 0:
-        return True
-    return None
 
 
 def _gh_tip(repo: str, branch: str) -> str:

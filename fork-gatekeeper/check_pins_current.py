@@ -185,11 +185,44 @@ def check_one(repo: str, pin: str) -> dict:
                     "detail": f"pin is the tip of {branch}"}
         if status == "ahead":
             # `ahead` means the branch contains the pin and has moved past it.
-            # This is the finding: those commits are merged and not shipping.
+            # WHOSE commits they are decides whether this is a defect.
+            #
+            # This used to be one verdict, and it made the program permanently
+            # red: four pins sit on pure upstream mirrors DELIBERATELY —
+            # vibeic-eda#23/#25 pinned slang, xschem, Xyce and sv-elab to the
+            # commits the image already shipped, so that change would be "build
+            # from our fork" and not "and also upgrade four tools". Reporting a
+            # recorded decision as a failure, by 288 commits and growing, means
+            # rc=1 is the EXPECTED value — and a real stale pin arriving
+            # tomorrow changes nothing anyone would notice. That is how
+            # `fork_reaches_flow_check` lost its credibility too (#17).
+            #
+            # `branch_is_ours` is imported rather than reimplemented: two
+            # programs carrying two copies of this answer is exactly how they
+            # came to say opposite things about the same four pins (#29).
+            ours = branch_is_ours(repo, branch)
+            if ours is False:
+                return {"repo": repo, "pin": pin[:9], "branch": branch,
+                        "verdict": "UPSTREAM_AVAILABLE", "behind": behind,
+                        "ours": False,
+                        "detail": f"{branch} carries none of our commits and is "
+                                  f"{behind} commit(s) past the pin — an upstream "
+                                  f"version someone must CHOOSE to adopt, not a "
+                                  f"pin that fell behind our own work"}
+            if ours is None:
+                # Not the mirror case, and not established as ours either. It
+                # keeps its teeth — but it must not claim to know why.
+                return {"repo": repo, "pin": pin[:9], "branch": branch,
+                        "verdict": "STALE_UNDECIDED", "behind": behind,
+                        "ours": None,
+                        "detail": f"{branch} is {behind} commit(s) past the pin, "
+                                  f"and whether it carries our commits could not "
+                                  f"be determined — treated as a finding because "
+                                  f"unknown is not a pass"}
             return {"repo": repo, "pin": pin[:9], "branch": branch,
-                    "verdict": "STALE", "behind": behind,
+                    "verdict": "STALE", "behind": behind, "ours": True,
                     "detail": f"{branch} is {behind} commit(s) past the pin; "
-                              f"those commits are merged and NOT shipping"}
+                              f"those commits are OURS, merged and NOT shipping"}
         # `behind` or `diverged`: this branch does not contain the pin, so it is
         # not the branch the pin came from. Keep looking.
 
@@ -203,6 +236,56 @@ def check_one(repo: str, pin: str) -> dict:
             "detail": f"no vibeic branch reaches the pin ({len(cands[:8])} "
                       f"checked) — the pinned commit is on no branch, so the "
                       f"fork may garbage-collect it"}
+
+
+def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
+    """Does this branch carry any commit of ours, or is it an upstream mirror?
+
+    A pin behind a branch WE build on is stale. A pin behind a branch that is a
+    pure mirror of upstream is a DECISION someone made about which upstream
+    version to ship, and advancing it adopts a new one.
+
+    Caught before it did damage: vibeic-eda#23/#25 pinned slang, xschem, Xyce and
+    sv-elab to the commits the IMAGE SHIPS, read out of each tool's own SOURCES
+    file, precisely so the change would be "build from our fork" and not "and
+    also upgrade the tool". The next release wanted to move all four to
+    `master` — a four-tool version bump smuggled under "build 6 absent
+    artefacts". Measured: those four branches carry 0 commits of ours;
+    `yosys satfix-integration` carries 34.
+
+    A BRANCH THAT DOES NOT EXIST UPSTREAM IS OURS, CONCLUSIVELY. That case used
+    to return None, and the docstring above recorded a measurement — "yosys
+    satfix-integration carries 34" — that the code as written could no longer
+    reproduce: the comparison is `upstream:<branch>...vibeic:<branch>`, and
+    upstream has no branch of that name, so it 404s. Every one of our own
+    integration branches took the same path. `klayout vibeic/klayout-signoff-int`
+    and `yosys satfix-integration` both answered "could not tell" about branches
+    that exist nowhere else.
+
+    None -> could not tell, which is treated as not-ours: the fail-safe direction
+    is to leave a pin alone and say so. It must stay reachable, but it must not
+    be reached by the branches this whole system exists to ship.
+    """
+    meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
+                "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
+    if not meta:
+        return None
+    owner = meta.split("/")[0]
+    rc, out, _ = _sh(["gh", "api",
+                      f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
+                      "--jq", ".ahead_by"], timeout=120)
+    if rc == 0 and out.strip().isdigit():
+        return int(out.strip()) > 0
+    # The compare failed. Distinguish "upstream has no such branch" — which
+    # answers the question rather than leaving it open — from a transport or
+    # permission failure, which does not.
+    up_rc, _, _ = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
+                       "--jq", ".name"], timeout=120)
+    ours_rc, _, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/branches/{branch}",
+                         "--jq", ".name"], timeout=120)
+    if ours_rc == 0 and up_rc != 0:
+        return True
+    return None
 
 
 def main(argv=None) -> int:
@@ -219,12 +302,24 @@ def main(argv=None) -> int:
         return RC_NOTHING
 
     results = [check_one(r, s) for r, s in sorted(pins.items())]
-    bad = [r for r in results if r["verdict"] != "CURRENT"]
-    behind_total = sum(r.get("behind", 0) for r in results)
+    # UPSTREAM_AVAILABLE is reported, never failed on: it is a decision waiting
+    # for someone, not a pin that fell behind our own work. Everything else that
+    # is not CURRENT still fails, including the states that mean "not checked".
+    available = [r for r in results if r["verdict"] == "UPSTREAM_AVAILABLE"]
+    bad = [r for r in results
+           if r["verdict"] not in ("CURRENT", "UPSTREAM_AVAILABLE")]
+    # …and only OUR commits count as "not shipping". Counting an upstream
+    # version we chose not to adopt inflated this to 288 and made the number
+    # mean nothing.
+    behind_total = sum(r.get("behind", 0) for r in results
+                       if r["verdict"] != "UPSTREAM_AVAILABLE")
+    upstream_total = sum(r.get("behind", 0) for r in available)
 
     print(f"check_pins_current: {len(results)} pin(s), "
-          f"{len(results) - len(bad)} at their branch tip, {len(bad)} not, "
-          f"{behind_total} merged commit(s) not shipping")
+          f"{len(results) - len(bad) - len(available)} at their branch tip, "
+          f"{len(bad)} not, {len(available)} holding an upstream version "
+          f"({upstream_total} upstream commit(s) available), "
+          f"{behind_total} of OUR merged commit(s) not shipping")
     for r in sorted(results, key=lambda x: (x["verdict"] == "CURRENT", x["repo"])):
         print(f"  {r['repo']:<22} {r['pin']}  {r['verdict']:<14} {r['detail']}")
 
@@ -240,6 +335,19 @@ def main(argv=None) -> int:
               f"fork commit that no pin points at was reviewed for nothing.",
               file=sys.stderr)
         return RC_STALE
+    if available:
+        # Reported, not failed on — but not silently either. An upstream version
+        # being available is not a neutral fact forever: Xyce reached 182
+        # commits while this was indistinguishable from a defect and therefore
+        # ignored. Naming the oldest one is what turns "we are holding" into a
+        # question someone answers.
+        worst = max(available, key=lambda r: r.get("behind", 0))
+        print(f"[PASS] every pin is the tip of its build branch. "
+              f"{len(available)} pin(s) hold a deliberate upstream version "
+              f"(vibeic-eda#23/#25); the furthest is {worst['repo']} at "
+              f"{worst['behind']} upstream commit(s) — adopting one is a "
+              f"decision, and this line is the only place it gets asked.")
+        return RC_CURRENT
     print("[PASS] every pin is the tip of its build branch (this does NOT prove "
           "the image was rebuilt — that needs the artefact)")
     return RC_CURRENT
