@@ -211,6 +211,23 @@ def collect(image: str, base_image: str = "hpretl/iic-osic-tools:latest") -> dic
     not_tool = set(notes.get("not_a_tool", []))
     tnotes = notes.get("tools", {})
 
+    # Which /foss/tools/<dir> the composing Dockerfile actually replaces with one
+    # of our artefacts. Read from the file rather than assumed, so a tool that is
+    # built but not copied in does not get counted as shipped.
+    copied_from_artefact = set()
+    df = ROOT / "Dockerfile"
+    if df.is_file():
+        dft = df.read_text()
+        copied_from_artefact = set(re.findall(
+            r"^COPY --from=img-\S+ \S+ /foss/tools/([A-Za-z0-9_.-]+)", dft, re.M))
+        # Not every tool we build is a per-tool artefact. `align` is built inline
+        # in this file from a vibeic clone into a venv at /foss/tools/align, and
+        # counting only artefacts would label it "base" — replacing one wrong
+        # label with a different wrong label. Any /foss/tools/<dir> this file
+        # WRITES, by whatever means, is ours.
+        copied_from_artefact |= set(re.findall(
+            r"(?:python3 -m venv|mkdir -p|--prefix=)\s*/foss/tools/([A-Za-z0-9_.-]+)", dft))
+
     rows_a, missing_notes = [], []
     for d in sorted(tools):
         n = tnotes.get(d)
@@ -227,7 +244,26 @@ def collect(image: str, base_image: str = "hpretl/iic-osic-tools:latest") -> dic
         else:
             f = fork_of(repo, forks)
             state = "forked" if f else "no"
-        rows_a.append({"dir": d, "origin": "ours" if base and d not in base else "base",
+        # ORIGIN IS "DO WE BUILD IT", NOT "IS THE DIRECTORY NAME NEW".
+        #
+        # This used to read `d not in base`, which is a true statement about
+        # DIRECTORIES and a misleading one about PROVENANCE. `yices` was the
+        # worked example: the Dockerfile created /foss/tools/yices and copied the
+        # base image's binaries into it, so the directory was new, the contents
+        # were not, and Table A labelled the row "added by us" — a STRONGER claim
+        # than the "base" shown against gtkwave, slang, xschem and Xyce, which
+        # were in exactly the same position. The row that was most wrong looked
+        # the most confident.
+        #
+        # Deriving it from whether a per-tool artefact exists ties the label to
+        # the thing it is actually asserting. It is also self-correcting: a tool
+        # that stops being built loses the label without anyone remembering to
+        # change it.
+        builds_it = (ROOT / "tools" / d / "Dockerfile").is_file() or any(
+            (ROOT / "tools" / a / "Dockerfile").is_file()
+            for a in (alias.get(d, d), d.replace("-vibeic", ""))
+        ) or d in copied_from_artefact
+        rows_a.append({"dir": d, "origin": "ours" if builds_it else "base",
                        "upstream": repo, "state": state, "forks": f,
                        "used": n.get("used"), "desc_en": n.get("desc_en", ""),
                        "desc_zh": n.get("desc_zh", "")})

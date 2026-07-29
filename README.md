@@ -64,11 +64,11 @@ and fails on drift.
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
 | upstream projects the fork-gatekeeper tracks | **21** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
-| `vibeic/*` sources the build clones | **24** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
-| per-tool build artefacts (`tools/<name>/`) | **12** | `ls tools/*/Dockerfile \| wc -l` |
+| `vibeic/*` sources the build clones | **26** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
+| per-tool build artefacts (`tools/<name>/`) | **14** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
-| source refs pinned across all Dockerfiles | **26** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
-| …of those, pinned to a full commit SHA | **22** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| source refs pinned across all Dockerfiles | **28** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **24** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 
 <!-- /counts:local -->
 
@@ -77,14 +77,13 @@ the join is derived rather than eyeballed — the checker prints it:
 
 ```bash
 python3 tools/check_doc_counts.py
-# shipping: 19 of 21 tracked forks reach the image; the other 2 are named in the
-#           doc (sv-elab, yices2)
+# shipping: 21 of 21 tracked forks reach the image
 # the build clones 20 vibeic sources, 14 of which are tracked forks
 ```
 
-Read that as three facts. Eighteen of the cloned sources are tracked forks;
+Read that as three facts. Twenty of the cloned sources are tracked forks;
 adding **OpenSTA**, which has no clone URL because it arrives as OpenROAD's
-`src/sta` submodule (‡ below), makes **19 of the 21 tracked forks reach this
+`src/sta` submodule (‡ below), makes **21 of the 21 tracked forks reach this
 image**. The
 other **6 cloned sources are not forks at all** — they are mirrors of upstream
 data and solver repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos)
@@ -386,10 +385,12 @@ toolchain.
    the checked-in registry of the **21 upstream projects** the tick tracks, one entry
    per upstream (e.g. `OpenROAD → The-OpenROAD-Project/OpenROAD`,
    `klayout → KLayout/klayout`). It is maintained by hand and is *wider* than what
-   ships: 19 of the 21 reach the image, and the other two (`sv-elab`, `yices2`)
-   are tracked with no pin, because we depend on them and want to know when
-   upstream moves even before we build them ourselves. `gtkwave`, `slang`,
-   `xschem` and `Xyce` used to sit here too and now build from our forks.
+   ships: all 21 now reach the image. It was wider until 2026-07-29 — `gtkwave`,
+   `slang`, `xschem`, `Xyce`, `sv-elab` and `yices2` were tracked with no pin,
+   forked but consumed from the base image's build. The list being *able* to be
+   wider than what ships is still the point: a fork can be registered here before
+   anything builds from it, which is how we learn upstream moved on something we
+   depend on but have not yet taken over.
    `discover_forks.py` **reads** that list and writes the per-tool ledger — for each
    entry it resolves the pinned ref, the fork point, and the upstream's newer
    releases. It does not populate `FORKS.json` from the org, so adding a fork to the
