@@ -23,6 +23,12 @@
 # `tools/check_fork_only.py` in the `fork-only` workflow, not by review — the
 # rule previously held only as long as whoever edited 605 lines remembered it.
 
+# Declared HERE, above every FROM, because an ARG after the first FROM is
+# stage-scoped: `FROM ${BASE_IMAGE}` then resolves to blank and the build
+# fails with `base name should not be blank`. That is exactly what happened
+# on the first attempt — the IMG_* args below work for the same reason and I
+# put the new one next to the FROM it feeds instead of next to them.
+ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b-7444a2
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6-74a892
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
@@ -171,7 +177,6 @@ RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public
 # Adopting a NEW base is deliberately not the fork rule: we do not control this
 # image and cannot review it commit by commit, so it is a considered bump with a
 # smoke pass behind it, never an automatic merge.
-ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="vibeic-eda"
 LABEL org.opencontainers.image.description="Forked+enhanced OSS EDA toolchain (vibeic): iic-osic-tools base + vibeic/* patched EDA-tool forks with gatekeeper-verified FAIL->PASS proofs (see FIX_STATUS.md)."
