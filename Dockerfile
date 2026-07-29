@@ -41,6 +41,8 @@ ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-77703c
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c8b26a1-382491
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:24809c8-b569b8
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:a592a42-9d3df7
+ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:b2b718c-0656db
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -63,6 +65,8 @@ FROM ${IMG_GTKWAVE} AS img-gtkwave
 FROM ${IMG_XSCHEM} AS img-xschem
 FROM ${IMG_SLANG} AS img-slang
 FROM ${IMG_XYCE} AS img-xyce
+FROM ${IMG_YICES2} AS img-yices2
+FROM ${IMG_SV_ELAB} AS img-sv-elab
 
 
 # ---------------------------------------------------------------------------
@@ -229,12 +233,12 @@ RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
  && cp -a /foss/tools/yosys/share/yosys/python3/eqy_job.py /foss/rescue/eqy_job.py \
  && test -x /foss/rescue/bin/eqy
 
-RUN mkdir -p /foss/tools/yices/bin \
- && for t in yices yices-sat yices-smt yices-smt2; do \
-      [ -e "/foss/tools/yosys/bin/$t" ] && cp -a "/foss/tools/yosys/bin/$t" "/foss/tools/yices/bin/$t"; \
-    done; \
-    test -x /foss/tools/yices/bin/yices-smt2 \
- && rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
+# yices2 is now OUR build (tools/yices2), so nothing has to be rescued out of the
+# base's yosys prefix before it is deleted. The old step copied four binaries out
+# of /foss/tools/yosys/bin first, under a comment saying "they are not ours to
+# rebuild" — vibeic-eda#13 was those four going missing. They are ours now, and
+# the copy is gone rather than left as a no-op.
+RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
 
@@ -296,6 +300,15 @@ COPY --from=img-xschem /foss/tools/xschem /foss/tools/xschem
 COPY --from=img-slang /foss/tools/slang /foss/tools/slang
 COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
 
+# The last two of the forked-but-not-built set. yices2 was a lodger in the yosys
+# prefix (upstream builds it with --prefix=$TOOLS/yosys); it now has its own.
+# sv-elab is the yosys plugin, built against OUR yosys because it links that
+# ABI and is loaded into that exact binary.
+
+COPY --from=img-yices2 /foss/tools/yices /foss/tools/yices
+COPY --from=img-sv-elab /foss/tools/slang-yosys-plugin /foss/tools/slang-yosys-plugin
+
+
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
 # build.sh emits the Qt-less db-lib + pymod + db_plugins/liblefdef.so into its -build dir.
 COPY --from=img-klayout /klayout/bld /foss/tools/klayout-vibeic
@@ -317,6 +330,8 @@ COPY --from=img-gtkwave /vibeic/provenance/gtkwave.json /vibeic/provenance/gtkwa
 COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.json
 COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
 COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
+COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
+COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \

@@ -47,6 +47,8 @@ TOOLS = {
     "xschem":      ["XSCHEM_REF"],
     "slang":       ["SLANG_REF"],
     "xyce":        ["XYCE_REF"],
+    "yices2":      ["YICES2_REF"],
+    "sv-elab":     ["SV_ELAB_REF"],
 }
 
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)

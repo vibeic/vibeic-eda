@@ -56,6 +56,8 @@ variable "GTKWAVE_RECIPE" { default = "77703c" }
 variable "XSCHEM_RECIPE" { default = "382491" }
 variable "SLANG_RECIPE" { default = "b569b8" }
 variable "XYCE_RECIPE" { default = "9d3df7" }
+variable "YICES2_RECIPE" { default = "04c594" }
+variable "SV_ELAB_RECIPE" { default = "0656db" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -77,6 +79,8 @@ variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
 variable "XSCHEM_REF" { default = "c8b26a17d8d53ce7fbd9e7d45ab6bb03e75996e0" }
 variable "SLANG_REF" { default = "24809c8e0b94d0915fe05b44d98c2df7a8e80c3e" }
 variable "XYCE_REF" { default = "a592a42ae7472151d1c8e3bca0ca62d27476f2f3" }
+variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
+variable "SV_ELAB_REF" { default = "b2b718c5a66ad525858298466f7ecaa60497393e" }
 
 function "short" {
   params = [ref]
@@ -191,10 +195,30 @@ target "xyce" {
   tags     = tool_tags("xyce", XYCE_REF, XYCE_RECIPE)
 }
 
+target "yices2" {
+  inherits = ["_tool"]
+  context  = "tools/yices2"
+  args     = { YICES2_REF = YICES2_REF }
+  tags     = tool_tags("yices2", YICES2_REF, YICES2_RECIPE)
+}
+
+# sv-elab links against yosys' ABI, so it needs the yosys artefact as an input.
+# `contexts` gives it the same tag the composing Dockerfile pulls, so a local
+# `bake sv-elab` uses the yosys that was actually built rather than a registry
+# copy that may not exist yet.
+target "sv-elab" {
+  inherits = ["_tool"]
+  context  = "tools/sv-elab"
+  args     = { SV_ELAB_REF = SV_ELAB_REF }
+  contexts = { "ghcr.io/vibeic/eda-tool-yosys:${short(YOSYS_REF)}-${YOSYS_RECIPE}" = "target:yosys" }
+  tags     = tool_tags("sv-elab", SV_ELAB_REF, SV_ELAB_RECIPE)
+}
+
 group "tools" {
   targets = ["openroad", "yosys", "sat-solvers", "ngspice",
              "lvs", "iverilog", "klayout", "verilator",
-             "gtkwave", "xschem", "slang", "xyce"]
+             "gtkwave", "xschem", "slang", "xyce",
+             "yices2", "sv-elab"]
 }
 
 # The release image. No `contexts` block and no dependency on the tool targets:
@@ -232,6 +256,8 @@ target "eda-local" {
     "ghcr.io/vibeic/eda-tool-xschem:${short(XSCHEM_REF)}-${XSCHEM_RECIPE}" = "target:xschem"
     "ghcr.io/vibeic/eda-tool-slang:${short(SLANG_REF)}-${SLANG_RECIPE}" = "target:slang"
     "ghcr.io/vibeic/eda-tool-xyce:${short(XYCE_REF)}-${XYCE_RECIPE}" = "target:xyce"
+    "ghcr.io/vibeic/eda-tool-yices2:${short(YICES2_REF)}-${YICES2_RECIPE}" = "target:yices2"
+    "ghcr.io/vibeic/eda-tool-sv-elab:${short(SV_ELAB_REF)}-${SV_ELAB_RECIPE}" = "target:sv-elab"
   }
 }
 
