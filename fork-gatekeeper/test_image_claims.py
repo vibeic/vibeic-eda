@@ -96,3 +96,43 @@ def test_every_pdk_the_repository_declares_has_an_upstream_and_a_status():
             f"{d['name']} has no decision recorded — 'used and unowned' is the " \
             f"third state this file exists to make impossible"
         assert d.get("read_by"), f"{d['name']} does not say who reads it"
+
+
+# --- the exit code is what the tick and CI read, and nothing tested it
+
+def test_a_finding_produces_a_failing_exit_code(monkeypatch, tmp_path):
+    """Every test above asserts what `pdk_findings()` RETURNS. None asserted
+    what `main()` EXITS with — and the caller reads only the exit code.
+
+    Measured: replacing this program's `return RC_DRIFT` with `RC_OK` left the
+    whole suite green. Six tests over a gate that had stopped gating, which is
+    the same shape as the guard whose three property tests missed an
+    unreachable `if found:` one commit ago.
+    """
+    decl = [{"name": "sky130A", "upstream": "u/x", "status": "upstream",
+             "arrives": "base", "version_file": "SOURCES",
+             "version_pattern": r"open_pdks [0-9a-f]{40}", "read_by": "DRC"}]
+    monkeypatch.setattr(K, "declared", lambda root=None: decl)
+    monkeypatch.setattr(K, "pdk_findings", lambda img, d: [
+        {"kind": "undeclared", "pdk": "ghost", "problem": "ships undeclared"}])
+    monkeypatch.setattr(K, "manifest_findings", lambda img: [])
+    assert K.main(["img"]) == K.RC_DRIFT
+
+
+def test_a_clean_image_produces_a_passing_exit_code(monkeypatch):
+    """…and the other direction, or the test above is met by always failing."""
+    decl = [{"name": "sky130A", "upstream": "u/x", "status": "upstream",
+             "arrives": "base", "version_file": "SOURCES",
+             "version_pattern": r"open_pdks [0-9a-f]{40}", "read_by": "DRC"}]
+    monkeypatch.setattr(K, "declared", lambda root=None: decl)
+    monkeypatch.setattr(K, "pdk_findings", lambda img, d: [
+        {"kind": "ok", "pdk": "sky130A", "read": "open_pdks " + "a" * 40,
+         "upstream": "u/x", "status": "upstream"}])
+    monkeypatch.setattr(K, "manifest_findings", lambda img: [])
+    assert K.main(["img"]) == K.RC_OK
+
+
+def test_no_declaration_refuses_rather_than_passing(monkeypatch):
+    """An empty declaration compared nothing; that must not read as clean."""
+    monkeypatch.setattr(K, "declared", lambda root=None: [])
+    assert K.main(["img"]) == K.RC_NOTHING

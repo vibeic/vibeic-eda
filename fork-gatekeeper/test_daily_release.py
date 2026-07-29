@@ -850,3 +850,54 @@ def test_every_check_one_verdict_has_a_home_in_the_release(monkeypatch):
             (f"check_pins_current can return {v} and daily_release neither "
              f"names it nor is it in the set deliberately left to the generic "
              f"unresolved branch")
+
+
+# --- the exit code is what run_tick reads, and nothing tested it
+
+def test_capability_loss_produces_a_failing_exit_code(monkeypatch):
+    """`check_no_capability_lost` had no test of its EXIT CODE.
+
+    Measured: replacing its `return RC_LOST` with `RC_OK` left the whole suite
+    green — the gate that exists to catch "our replacement removed something"
+    could stop catching it silently. The tick reads only the exit code.
+    """
+    import check_no_capability_lost as N
+    monkeypatch.setattr(N, "base_image", lambda df: "base:1")
+    monkeypatch.setattr(N, "replaced_prefixes", lambda df: ["yosys"])
+    monkeypatch.setattr(N, "command_names", lambda img, p: ["yosys", "eqy"])
+    monkeypatch.setattr(N, "unresolvable", lambda img, names: ["eqy"])
+    assert N.main([str(Path(N.__file__).resolve().parents[1] / "Dockerfile")
+                   .replace("Dockerfile", "x")] ) in (N.RC_LOST, N.RC_NOTHING)
+
+    # …with a real Dockerfile present, the answer must be LOST specifically.
+    df = Path(N.__file__).resolve().parents[1] / "Dockerfile"
+    if df.is_file():
+        assert N.main(["img", "--dockerfile", str(df)]) == N.RC_LOST
+
+
+def test_nothing_lost_produces_a_passing_exit_code(monkeypatch):
+    """The other direction, or the test above is met by always failing."""
+    import check_no_capability_lost as N
+    df = Path(N.__file__).resolve().parents[1] / "Dockerfile"
+    if not df.is_file():
+        import pytest
+        pytest.skip("no Dockerfile in this checkout")
+    monkeypatch.setattr(N, "base_image", lambda d: "base:1")
+    monkeypatch.setattr(N, "replaced_prefixes", lambda d: ["yosys"])
+    monkeypatch.setattr(N, "command_names", lambda img, p: ["yosys"])
+    monkeypatch.setattr(N, "unresolvable", lambda img, names: [])
+    assert N.main(["img", "--dockerfile", str(df)]) == N.RC_OK
+
+
+def test_an_empty_command_list_refuses_rather_than_passing(monkeypatch):
+    """Comparing nothing is not a clean comparison — the rule this whole
+    directory is built on."""
+    import check_no_capability_lost as N
+    df = Path(N.__file__).resolve().parents[1] / "Dockerfile"
+    if not df.is_file():
+        import pytest
+        pytest.skip("no Dockerfile in this checkout")
+    monkeypatch.setattr(N, "base_image", lambda d: "base:1")
+    monkeypatch.setattr(N, "replaced_prefixes", lambda d: ["yosys"])
+    monkeypatch.setattr(N, "command_names", lambda img, p: [])
+    assert N.main(["img", "--dockerfile", str(df)]) == N.RC_NOTHING
