@@ -215,7 +215,7 @@ def collect(image: str, base_image: str = "hpretl/iic-osic-tools:latest") -> dic
     # of our artefacts. Read from the file rather than assumed, so a tool that is
     # built but not copied in does not get counted as shipped.
     copied_from_artefact = set()
-    df = ROOT / "Dockerfile"
+    df = DIR.parent / "Dockerfile"   # DIR is fork-gatekeeper/; the repo root is its parent
     if df.is_file():
         dft = df.read_text()
         copied_from_artefact = set(re.findall(
@@ -259,8 +259,8 @@ def collect(image: str, base_image: str = "hpretl/iic-osic-tools:latest") -> dic
         # the thing it is actually asserting. It is also self-correcting: a tool
         # that stops being built loses the label without anyone remembering to
         # change it.
-        builds_it = (ROOT / "tools" / d / "Dockerfile").is_file() or any(
-            (ROOT / "tools" / a / "Dockerfile").is_file()
+        builds_it = (DIR.parent / "tools" / d / "Dockerfile").is_file() or any(
+            (DIR.parent / "tools" / a / "Dockerfile").is_file()
             for a in (alias.get(d, d), d.replace("-vibeic", ""))
         ) or d in copied_from_artefact
         rows_a.append({"dir": d, "origin": "ours" if builds_it else "base",

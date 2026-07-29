@@ -99,9 +99,15 @@ def pending() -> dict:
 
 #: A base a stage may legitimately be built ON — an OS or a vendor dev image.
 #: The rule governs the TOOLS we build, not the distro underneath them.
+#:
+#: `(:.*)?` alone was wrong: it accepts `name:tag` and rejects `name@sha256:...`.
+#: The base is now pinned by DIGEST, so a builder stage on it — `align-build` —
+#: was reported as "not one of our artefacts" while being the same image the
+#: composing stage uses. A guard that fires when the repo gets STRICTER is the
+#: kind that gets switched off, and this one fired on exactly that.
 ALLOWED_BASE = re.compile(
     r"^(scratch|ubuntu|debian|alpine|alpine/git|hpretl/iic-osic-tools"
-    r"|openroad/[a-z0-9._-]+)(:.*)?$", re.I)
+    r"|openroad/[a-z0-9._-]+)([:@].*)?$", re.I)
 
 
 def stages(text: str) -> dict:
