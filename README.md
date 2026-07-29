@@ -77,24 +77,31 @@ the join is derived rather than eyeballed — the checker prints it:
 
 ```bash
 python3 tools/check_doc_counts.py
-# shipping: 21 of 21 tracked forks reach the image
+# shipping: 20 of 21 tracked forks reach the image; the other 1 are named in the doc (sv-elab)
 # the build clones 20 vibeic sources, 14 of which are tracked forks
 ```
 
 Read that as three facts. Twenty of the cloned sources are tracked forks;
 adding **OpenSTA**, which has no clone URL because it arrives as OpenROAD's
-`src/sta` submodule (‡ below), makes **21 of the 21 tracked forks reach this
+`src/sta` submodule (‡ below), gives 21 tracked forks, of which **20 reach this
 image**. The
 other **6 cloned sources are not forks at all** — they are mirrors of upstream
 data and solver repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos)
 created when GitHub's fork API refused, and a mirror carries `fork = false`, so
-it cannot appear in a fork registry however thoroughly it is ours. And **6
-tracked projects do not ship**: `gtkwave`, `slang`, `sv-elab`, `xschem`, `Xyce`,
-`yices2`. Each is forked because we depend on it, but the image still takes all
-six from the iic-osic-tools base, so a fix landed in one of those forks would not
-reach a user yet. They are named rather than netted out of a total, because "21
-tracked" and "15 shipping" answer different questions and only one of them is
-about what you pull.
+it cannot appear in a fork registry however thoroughly it is ours.
+
+The one tracked fork that does NOT reach the image is **`sv-elab`**, and that is
+a decision rather than a gap: yosys 0.67+ contains the slang frontend itself, so
+the plugin is a second copy of it in one process and the duplicated statics
+double-free at exit (#24). Nothing in the flow loads it — `resolve_slang_load_prefix`
+probes the container and emits no `-m` when slang is built in — so installing it
+would gain nothing and leave a trap for anyone running `yosys -m` by hand. The
+fork stays tracked and its artefact stays built and pinned; only the `COPY` into
+the image is gone.
+
+It is named rather than netted out of a total, because "21 tracked" and "20
+reaching the image" answer different questions and only one of them is about what
+you pull.
 
 **"Ships" here means the image CONTAINS the build — not that the flow runs it,
 which is a third question and the answer is not 15.** Two of those fifteen are

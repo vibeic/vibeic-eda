@@ -306,7 +306,22 @@ COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
 # ABI and is loaded into that exact binary.
 
 COPY --from=img-yices2 /foss/tools/yices /foss/tools/yices
-COPY --from=img-sv-elab /foss/tools/slang-yosys-plugin /foss/tools/slang-yosys-plugin
+# NOT INSTALLED — deliberately. yosys 0.67+ contains the slang frontend itself
+# (1472 slang symbols in the binary; `yosys -p "read_slang …"` works with no
+# plugin), so this .so is a SECOND copy of a frontend the process already has.
+# The duplicated statics double-free at exit: `yosys -m …/slang.so -p "help
+# read_slang"` writes a correct netlist and then aborts with
+# `double free or corruption`, exit 134 (#24).
+#
+# Nothing in the flow loads it — `synth_frontend.resolve_slang_load_prefix`
+# probes the container and returns an empty prefix when slang is built in — so
+# shipping it gains nothing and leaves a loaded gun for anyone who runs
+# `yosys -m` by hand.
+#
+# The vibeic/sv-elab fork stays tracked and its artefact stays built: the fork
+# should exist and be pinned (vibeic-eda#25 was right about that). What changes
+# is that a duplicate frontend does not go into the image.
+# COPY --from=img-sv-elab /foss/tools/slang-yosys-plugin /foss/tools/slang-yosys-plugin
 
 
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---

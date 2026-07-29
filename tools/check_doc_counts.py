@@ -217,6 +217,15 @@ SHIPPED_WITHOUT_A_CLONE_URL = {
     "OpenSTA": "OpenROAD's src/sta git submodule, via .gitmodules on the integration branch",
 }
 
+#: Forks we build and pin but deliberately do NOT install into the composed
+#: image. Each entry is a decision someone must be able to find later.
+BUILT_BUT_NOT_INSTALLED = (
+    # yosys 0.67+ ships the slang frontend itself, so this plugin is a SECOND
+    # copy of it in one process and the duplicated statics double-free at exit
+    # (vibeic-eda#24). Nothing in the flow loads it; the fork stays tracked.
+    "sv-elab",
+)
+
 CLONE_URL = re.compile(r"github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?(?=[\s\"'`]|$)")
 
 
@@ -258,7 +267,13 @@ def shipping_invariants(text: str) -> list[str]:
             bad.append(f"{tool!r} now has its own clone URL, so the exception for it "
                        f"({how}) is stale and is hiding a real count")
 
-    shipped = cloned | {t.lower() for t in SHIPPED_WITHOUT_A_CLONE_URL}
+    # `cloned` answers "do we BUILD it". The sentence this feeds says "reach the
+    # image". Two different claims, and BUILT_BUT_NOT_INSTALLED is where they
+    # diverge — without it the doc reports a tool as reaching the image while its
+    # COPY is commented out, which is the confidently-wrong number this file
+    # exists to prevent.
+    shipped = (cloned | {t.lower() for t in SHIPPED_WITHOUT_A_CLONE_URL}) \
+              - {t.lower() for t in BUILT_BUT_NOT_INSTALLED}
     unshipped = [t for t in tracked if t.lower() not in shipped]
     unnamed = [t for t in unshipped if f"`{t}`" not in text]
     if unnamed:
