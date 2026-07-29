@@ -26,7 +26,7 @@ ARG GTKWAVE_REF=7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git meson ninja-build pkg-config gperf flex bison patchelf \
       desktop-file-utils dpkg-dev ca-certificates \
-      libgtk-4-dev libbz2-dev liblzma-dev libjudy-dev zlib1g-dev \
+      libgtk-3-dev libgtk-4-dev libjson-glib-dev libbz2-dev liblzma-dev libjudy-dev zlib1g-dev \
       libgirepository1.0-dev gobject-introspection \
  && rm -rf /var/lib/apt/lists/*
 
