@@ -3,19 +3,34 @@
   "org": "vibeic",
   "forks": [
     {
-      "tool": "OpenROAD",
-      "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop",
-      "upstream": "The-OpenROAD-Project/OpenROAD"
+      "tool": "ALIGN-pdk-sky130",
+      "role": "ALIGN sky130 PDK — carries our channel-length fix (not yet shipped in the image)",
+      "upstream": "ALIGN-analoglayout/ALIGN-pdk-sky130"
     },
     {
-      "tool": "OpenSTA",
-      "role": "static timing analysis — the signoff timing engine behind phase-3 STA (clean fork, no patches of ours yet)",
-      "upstream": "The-OpenROAD-Project/OpenSTA"
+      "tool": "ALIGN-public",
+      "role": "analog place & route — SPICE netlist to GDS (not yet shipped in the image)",
+      "upstream": "ALIGN-analoglayout/ALIGN-public"
     },
     {
-      "tool": "yosys",
-      "role": "synthesis / tech-mapping / optimization",
-      "upstream": "YosysHQ/yosys"
+      "tool": "cocotb",
+      "role": "Python cosim testbench",
+      "upstream": "cocotb/cocotb"
+    },
+    {
+      "tool": "cocotb-coverage",
+      "role": "coverage for cocotb",
+      "upstream": "mciepluc/cocotb-coverage"
+    },
+    {
+      "tool": "gtkwave",
+      "role": "waveform viewer — the format reader behind every VCD/FST our cocotb and iverilog runs emit; a dump this cannot open is a failed measurement, not a passing one",
+      "upstream": "gtkwave/gtkwave"
+    },
+    {
+      "tool": "iverilog",
+      "role": "RTL simulation",
+      "upstream": "steveicarus/iverilog"
     },
     {
       "tool": "klayout",
@@ -33,34 +48,19 @@
       "upstream": "RTimothyEdwards/netgen"
     },
     {
-      "tool": "iverilog",
-      "role": "RTL simulation",
-      "upstream": "steveicarus/iverilog"
-    },
-    {
-      "tool": "verilator",
-      "role": "RTL simulation (lint / fast sim)",
-      "upstream": "verilator/verilator"
-    },
-    {
       "tool": "ngspice",
       "role": "analog / mixed-signal SPICE",
       "upstream": "danchitnis/ngspice-sf-mirror"
     },
     {
-      "tool": "sby",
-      "role": "formal (SymbiYosys)",
-      "upstream": "YosysHQ/sby"
+      "tool": "OpenROAD",
+      "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop",
+      "upstream": "The-OpenROAD-Project/OpenROAD"
     },
     {
-      "tool": "cocotb",
-      "role": "Python cosim testbench",
-      "upstream": "cocotb/cocotb"
-    },
-    {
-      "tool": "cocotb-coverage",
-      "role": "coverage for cocotb",
-      "upstream": "mciepluc/cocotb-coverage"
+      "tool": "OpenSTA",
+      "role": "static timing analysis — the signoff timing engine behind phase-3 STA (clean fork, no patches of ours yet)",
+      "upstream": "The-OpenROAD-Project/OpenSTA"
     },
     {
       "tool": "pyuvm",
@@ -68,14 +68,44 @@
       "upstream": "pyuvm/pyuvm"
     },
     {
-      "tool": "ALIGN-public",
-      "role": "analog place & route — SPICE netlist to GDS (not yet shipped in the image)",
-      "upstream": "ALIGN-analoglayout/ALIGN-public"
+      "tool": "sby",
+      "role": "formal (SymbiYosys)",
+      "upstream": "YosysHQ/sby"
     },
     {
-      "tool": "ALIGN-pdk-sky130",
-      "role": "ALIGN sky130 PDK — carries our channel-length fix (not yet shipped in the image)",
-      "upstream": "ALIGN-analoglayout/ALIGN-pdk-sky130"
+      "tool": "slang",
+      "role": "SystemVerilog front end — yosys vendors it for the modern SV path, so an elaboration it rejects is an RTL our synthesis cannot read",
+      "upstream": "MikePopoloski/slang"
+    },
+    {
+      "tool": "sv-elab",
+      "role": "yosys SystemVerilog plugin (upstream renamed povik/yosys-slang -> povik/sv-elab); the SV frontend the 0.4x->0.66 roadmap makes default",
+      "upstream": "povik/sv-elab"
+    },
+    {
+      "tool": "verilator",
+      "role": "RTL simulation (lint / fast sim)",
+      "upstream": "verilator/verilator"
+    },
+    {
+      "tool": "xschem",
+      "role": "schematic capture and SPICE netlisting — the analog A1/A2 entry point; its netlist is what ngspice simulates",
+      "upstream": "StefanSchippers/xschem"
+    },
+    {
+      "tool": "Xyce",
+      "role": "parallel SPICE — the second analog engine; a corner ngspice and Xyce disagree on is a result neither has established",
+      "upstream": "Xyce/Xyce"
+    },
+    {
+      "tool": "yices2",
+      "role": "SMT solver — the default smtbmc engine for sby, so step-5 formal proofs resolve through it; #13 was a dangling link to exactly this",
+      "upstream": "SRI-CSL/yices2"
+    },
+    {
+      "tool": "yosys",
+      "role": "synthesis / tech-mapping / optimization",
+      "upstream": "YosysHQ/yosys"
     }
   ]
 }
