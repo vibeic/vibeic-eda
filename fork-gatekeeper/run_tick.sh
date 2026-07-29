@@ -172,6 +172,15 @@ fi
 # REPORT-ONLY on purpose. #17 and #18 are open and would fail it; a gate whose
 # first act is to stop every daily release is a gate someone switches off. It
 # takes --strict once they are closed.
+# Derived ONCE, before every consumer. It used to be computed inside the
+# `if [ -f fork_reaches_flow_check.py ]` branch while two later checks read it —
+# so a missing checker left REACH_IMG unset, and under this script's `set -u`
+# that is not a silent skip but an unbound-variable abort of the whole tick.
+# A variable that three checks depend on does not belong inside one of them.
+REL_VER="$(python3 -c 'import json;print(json.load(open("'"${DIR}"'/../RELEASED.json"))["version"])' 2>/dev/null || true)"
+REACH_IMG=""
+[ -n "${REL_VER}" ] && REACH_IMG="ghcr.io/vibeic/vibeic-eda:${REL_VER}"
+
 REACH_OUT="${LOG_DIR}/fork-reaches-flow.txt"
 if [ -f "${DIR}/fork_reaches_flow_check.py" ]; then
     # The image RELEASED.json says we last published — not `:local`, which was
@@ -181,11 +190,7 @@ if [ -f "${DIR}/fork_reaches_flow_check.py" ]; then
     # inspected one from hours earlier and reported it as current. `--json` and
     # the provenance comparison are only meaningful against a FRESH image, which
     # is precisely what that made them not be.
-    REL_VER="$(python3 -c 'import json;print(json.load(open("'"${DIR}"'/../RELEASED.json"))["version"])' 2>/dev/null || true)"
-    REACH_IMG="ghcr.io/vibeic/vibeic-eda:${REL_VER}"
-    if [ -z "${REL_VER}" ]; then
-        REACH_IMG=""
-    fi
+    :  # REACH_IMG is derived above, before any of its consumers
     if [ -n "${REACH_IMG}" ] && docker image inspect "${REACH_IMG}" >/dev/null 2>&1; then
         log "[reach] checking the composed image runs OUR builds"
         python3 "${DIR}/fork_reaches_flow_check.py" "${REACH_IMG}" \
