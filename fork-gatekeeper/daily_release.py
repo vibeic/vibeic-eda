@@ -422,13 +422,29 @@ def main(argv=None) -> int:
             # cache survives.
             print("  composing the release image from the pinned artefacts …",
                   flush=True)
+            # RETRY ONCE before downgrading. The first real run fell back to a
+            # local-only image because a `git clone` inside the build failed —
+            # a network blip, not a reason the registry compose is impossible.
+            # Treating any failure as "reproducible build unavailable" trades
+            # the property we just built the whole chain to get for a transient.
             rc, _, err = _sh(["docker", "buildx", "bake", "-f",
                               str(root / "docker-bake.hcl"), "--load", "eda"],
                              cwd=root)
             if rc != 0:
+                print("  registry compose failed once; retrying before "
+                      "downgrading (a transient must not cost reproducibility)",
+                      flush=True)
+                rc, _, err = _sh(["docker", "buildx", "bake", "-f",
+                                  str(root / "docker-bake.hcl"), "--load",
+                                  "eda"], cwd=root)
+            if rc != 0:
+                # 600 characters of a buildkit failure is the tail of the
+                # failing step's COMMAND, not its error — measured 2026-07-29,
+                # where the truncation hid the cause entirely and sent me to
+                # reproduce three clones that were fine. Keep enough to see it.
                 print(f"  compose from the registry failed; falling back to a "
                       f"LOCAL-ONLY image. This one is not reproducible "
-                      f"elsewhere:\n{err[-600:]}", file=sys.stderr)
+                      f"elsewhere:\n{err[-6000:]}", file=sys.stderr)
                 result["registry_composed"] = False
                 rc, _, err = _sh(["docker", "buildx", "bake", "-f",
                                   str(root / "docker-bake.hcl"), "--load",
@@ -459,11 +475,25 @@ def main(argv=None) -> int:
 
             old, new = bump_version(root)
             result["version"] = {"from": old, "to": new}
-            rc, _, _ = _sh(["docker", "tag", "ghcr.io/vibeic/vibeic-eda:local",
-                            f"ghcr.io/vibeic/vibeic-eda:{new}"])
+            tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
+            rc, _, _ = _sh(["docker", "tag",
+                            "ghcr.io/vibeic/vibeic-eda:local", tag])
             result["tagged"] = (rc == 0)
-            print(f"  VERSION {old} -> {new}"
-                  f"{'  (tagged)' if rc == 0 else '  (TAG FAILED)'}")
+
+            # AND PUSH IT. The ruling is "提供一個 daily 的新版 updated docker
+            # image" — a tag that exists only on the build host provides nothing
+            # to anyone. This is the same mistake as the tool artefacts, which
+            # were all built locally and none published, one level up.
+            pushed = False
+            if rc == 0:
+                prc, _, perr = _sh(["docker", "push", tag], timeout=7200)
+                pushed = prc == 0
+                if not pushed:
+                    print(f"  PUSH FAILED — {new} exists here and nowhere "
+                          f"else:\n{perr[-800:]}", file=sys.stderr)
+            result["pushed"] = pushed
+            print(f"  VERSION {old} -> {new}  "
+                  f"{'published' if pushed else 'LOCAL ONLY'}")
 
     if a.json:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
