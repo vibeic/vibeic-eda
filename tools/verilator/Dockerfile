@@ -27,7 +27,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN git clone "${VERILATOR_REPO}" /verilator \
  && git config --global --add safe.directory /verilator \
  && cd /verilator && git checkout ${VERILATOR_REF} \
- && autoconf && ./configure --prefix=/foss/tools/verilator-vibeic \
+ && autoconf && ./configure --prefix=/foss/tools/verilator \
  && make -j"$(nproc)" && make install
 
 # ---------------------------------------------------------------------------
@@ -65,5 +65,5 @@ RUN mkdir -p /vibeic/provenance \
 # what it copied is what it asked for.
 # ---------------------------------------------------------------------------
 FROM scratch
-COPY --from=build /foss/tools/verilator-vibeic /foss/tools/verilator-vibeic
+COPY --from=build /foss/tools/verilator /foss/tools/verilator
 COPY --from=build /vibeic/provenance/verilator.json /vibeic/provenance/verilator.json

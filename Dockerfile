@@ -205,7 +205,17 @@ COPY --from=img-lvs /foss/tools/magic /foss/tools/magic
 COPY --from=img-lvs /foss/tools/netgen /foss/tools/netgen
 # --- vibeic/iverilog ---
 COPY --from=img-iverilog /foss/tools/iverilog /foss/tools/iverilog
-COPY --from=img-verilator /foss/tools/verilator-vibeic /foss/tools/verilator-vibeic
+# INSTALLED OVER the base image's verilator, which is the convention every
+# other tool here follows (yosys, iverilog, magic, netgen, ngspice, openroad
+# all land in /foss/tools/<tool>). verilator was the exception, so
+# /foss/tools/bin/verilator kept resolving to the base image's April 5.048
+# while our 5.051 sat unreferenced beside it (#18).
+#
+# NO `rm -rf` first, unlike the yosys line above: our build produces the same
+# seven binaries the base does, so COPY's merge replaces every one of them.
+# Removing the directory would orphan any co-tenant the base keeps there,
+# which is exactly what happened to eqy and mcy under yosys (#19).
+COPY --from=img-verilator /foss/tools/verilator /foss/tools/verilator
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
 # build.sh emits the Qt-less db-lib + pymod + db_plugins/liblefdef.so into its -build dir.
 COPY --from=img-klayout /klayout/bld /foss/tools/klayout-vibeic

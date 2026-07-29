@@ -178,3 +178,36 @@ def test_provenance_drift_is_silent_when_the_image_matches(monkeypatch):
         {"tool": "yosys", "repo": "https://github.com/vibeic/yosys.git",
          "ref": "a" * 40}), ""))
     assert F.provenance_drift("img", {"yosys": "a" * 40}) == []
+
+
+def test_artefact_tag_carries_every_ref_and_the_recipe(tmp_path):
+    root = _tree(tmp_path)
+    refs = {"MAGIC_REF": "b" * 40, "NETGEN_REF": "c" * 40}
+    tag = R.artefact_tag(root, "lvs", ["MAGIC_REF", "NETGEN_REF"], refs)
+    assert tag.startswith("ghcr.io/vibeic/eda-tool-lvs:bbbbbbb-ccccccc-")
+    assert len(tag.rsplit("-", 1)[1]) == 6, "recipe component missing"
+
+
+def test_changing_the_recipe_changes_the_tag(tmp_path):
+    """#21: a recipe-only fix produced no new tag, so it could never ship."""
+    root = _tree(tmp_path)
+    refs = {"YOSYS_REF": "a" * 40}
+    before = R.artefact_tag(root, "yosys", ["YOSYS_REF"], refs)
+    df = root / "tools" / "yosys" / "Dockerfile"
+    df.write_text(df.read_text() + "\n# install to a different prefix\n")
+    after = R.artefact_tag(root, "yosys", ["YOSYS_REF"], refs)
+    assert before != after, "the recipe changed and the artefact identity did not"
+    assert before.rsplit("-", 1)[0] == after.rsplit("-", 1)[0], \
+        "only the recipe component may move when only the recipe moved"
+
+
+def test_artefact_tag_is_none_when_a_ref_is_unknown(tmp_path):
+    """A tag built from a partial ref set would name the wrong artefact."""
+    root = _tree(tmp_path)
+    assert R.artefact_tag(root, "lvs", ["MAGIC_REF", "NETGEN_REF"],
+                          {"MAGIC_REF": "b" * 40}) is None
+
+
+def test_recipe_hash_says_so_when_there_is_no_dockerfile(tmp_path):
+    root = _tree(tmp_path)
+    assert R.recipe_hash(root, "does-not-exist") == "nofile"

@@ -166,10 +166,10 @@ def retag_images(eda_root: Path, refs_now: Dict[str, str],
     text = root_df.read_text(errors="replace")
     touched: List[str] = []
     for target, ref_vars in targets.items():
-        shorts = [refs_now[v][:SHORT] for v in ref_vars if v in refs_now]
-        if len(shorts) != len(ref_vars):
+        full = artefact_tag(eda_root, target, ref_vars, refs_now)
+        if full is None:
             continue
-        tag = "-".join(shorts)
+        tag = full.split(":", 1)[1]
         argname = "IMG_" + target.upper().replace("-", "_")
         pat = re.compile(
             rf"(^ARG\s+{argname}=\S*/eda-tool-{re.escape(target)}:)\S+", re.M)
@@ -210,6 +210,40 @@ def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
     return sorted(seen)
 
 
+def recipe_hash(eda_root: Path, target: str) -> str:
+    """Digest of the Dockerfile that BUILDS this tool.
+
+    An artefact's identity is (source commit, build recipe). The tag carried only
+    the first, so a change to HOW a tool is built produced no new tag and the
+    release reused the artefact built from the old recipe (#21).
+
+    Demonstrated rather than argued: fixing #18 — verilator's install prefix, a
+    pure recipe change with no pin move — left `daily_release` reporting
+    "nothing to do", and the corrected Dockerfile could never reach an image.
+    Worse, the root `COPY` had already moved to the new path, so the next compose
+    would have failed against an artefact that does not contain it.
+
+    Rebuilding under the SAME tag was the tempting shortcut and is the one thing
+    that must not happen: every guarantee here rests on a tag naming exactly one
+    artefact. So the recipe joins the tag, and a changed recipe simply produces a
+    tag that does not exist yet — which is the absence trigger that already works.
+    """
+    f = eda_root / "tools" / target / "Dockerfile"
+    if not f.is_file():
+        return "nofile"
+    return hashlib.sha256(f.read_bytes()).hexdigest()[:6]
+
+
+def artefact_tag(eda_root: Path, target: str, ref_vars: List[str],
+                 refs: Dict[str, str]) -> Optional[str]:
+    """The full artefact reference: every source commit, then the recipe."""
+    shorts = [refs[v][:SHORT] for v in ref_vars if v in refs]
+    if len(shorts) != len(ref_vars):
+        return None
+    return (f"ghcr.io/vibeic/eda-tool-{target}:"
+            f"{'-'.join(shorts)}-{recipe_hash(eda_root, target)}")
+
+
 def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
                      targets: Dict[str, List[str]]) -> Dict[str, str]:
     """target -> tag, for every pinned artefact that does not exist yet.
@@ -228,10 +262,9 @@ def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
     """
     missing: Dict[str, str] = {}
     for target, ref_vars in targets.items():
-        shorts = [refs_now[v][:SHORT] for v in ref_vars if v in refs_now]
-        if len(shorts) != len(ref_vars):
+        ref = artefact_tag(eda_root, target, ref_vars, refs_now)
+        if ref is None:
             continue
-        ref = f"ghcr.io/vibeic/eda-tool-{target}:{'-'.join(shorts)}"
         if _sh(["docker", "image", "inspect", ref], timeout=60)[0] == 0:
             continue
         if _sh(["docker", "manifest", "inspect", ref], timeout=180)[0] == 0:
@@ -429,9 +462,17 @@ def main(argv=None) -> int:
                 # per-tool architecture whose incrementality is an accident of
                 # local state. Measured 2026-07-29: all 8 artefacts existed
                 # locally and ghcr held none of them.
+                # `--set` because the bake file's own tag expression knows only
+                # the source commit. Overriding here keeps ONE definition of an
+                # artefact's identity — this function's — rather than two that
+                # can disagree.
+                # refs_NOW, not refs_all: refs_all is the pre-move reading, so
+                # a run that moved a pin would build the artefact and tag it with
+                # the commit it replaced.
+                want = artefact_tag(root, t, targets[t], refs_now)
                 rc, _, err = _sh(["docker", "buildx", "bake", "-f",
-                                  str(root / "docker-bake.hcl"), "--push", t],
-                                 cwd=root)
+                                  str(root / "docker-bake.hcl"), "--push",
+                                  "--set", f"{t}.tags={want}", t], cwd=root)
                 if rc != 0:
                     print(f"[FAIL] {t} did not build; the release stops here so "
                           f"a broken tool is not tagged as a version:\n"
@@ -553,9 +594,11 @@ def main(argv=None) -> int:
         print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
               "and this pin set is already released — nothing to do")
     elif a.dry_run:
+        # A release follows from ANY of the three, not from `unreleased` alone —
+        # an absent artefact means the image cannot already contain it.
         print(f"[DRY RUN] would move {len(moved)} pin(s), build {len(absent)} "
               f"absent artefact(s), and "
-              f"{'cut a release' if unreleased else 'cut no release'}")
+              f"{'cut a release' if (moved or absent or unreleased) else 'cut no release'}")
     return RC_OK
 
 
