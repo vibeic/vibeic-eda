@@ -901,3 +901,78 @@ def test_an_empty_command_list_refuses_rather_than_passing(monkeypatch):
     monkeypatch.setattr(N, "replaced_prefixes", lambda d: ["yosys"])
     monkeypatch.setattr(N, "command_names", lambda img, p: [])
     assert N.main(["img", "--dockerfile", str(df)]) == N.RC_NOTHING
+
+
+def test_check_pins_current_main_exits_non_zero_on_a_stale_pin(monkeypatch,
+                                                               tmp_path):
+    """`gate_cli_mutation_probe` reported this gate SILENT: neutering `main()`
+    reddened nothing across two test files.
+
+    Every test above drives `check_one()` and asserts the VERDICT it returns.
+    The tick and `run_tick.sh` read the EXIT CODE, and nothing exercised the
+    path between them — so the program could have started answering 0 to every
+    stale pin with the suite still green.
+    """
+    monkeypatch.setattr(C, "pinned_refs", lambda root: {"yosys": "a" * 40})
+    monkeypatch.setattr(C, "check_one", lambda repo, pin: {
+        "repo": repo, "pin": pin[:9], "branch": "vibeic/x", "verdict": "STALE",
+        "behind": 35, "ours": True,
+        "detail": "35 commit(s) past the pin; those commits are OURS"})
+    assert C.main(["--eda-root", str(tmp_path)]) == C.RC_STALE
+
+
+def test_check_pins_current_main_exits_zero_when_every_pin_is_current(
+        monkeypatch, tmp_path):
+    """The other direction, or the test above is met by a gate that always
+    fails."""
+    monkeypatch.setattr(C, "pinned_refs", lambda root: {"yosys": "a" * 40})
+    monkeypatch.setattr(C, "check_one", lambda repo, pin: {
+        "repo": repo, "pin": pin[:9], "branch": "vibeic/x",
+        "verdict": "CURRENT", "behind": 0, "detail": "pin is the tip"})
+    assert C.main(["--eda-root", str(tmp_path)]) == C.RC_CURRENT
+
+
+def test_check_pins_current_main_does_not_fail_on_a_held_upstream_version(
+        monkeypatch, tmp_path):
+    """vibeic-eda#29's whole point, at the exit-code level: a deliberate hold is
+    reported, never failed on, or rc 1 becomes the expected value again."""
+    monkeypatch.setattr(C, "pinned_refs", lambda root: {"Xyce": "a" * 40})
+    monkeypatch.setattr(C, "check_one", lambda repo, pin: {
+        "repo": repo, "pin": pin[:9], "branch": "master",
+        "verdict": "UPSTREAM_AVAILABLE", "behind": 182, "ours": False,
+        "detail": "master carries none of our commits"})
+    assert C.main(["--eda-root", str(tmp_path)]) == C.RC_CURRENT
+
+
+def test_check_pins_current_main_refuses_when_there_are_no_pins(monkeypatch,
+                                                                tmp_path):
+    """Comparing nothing is not a clean comparison."""
+    monkeypatch.setattr(C, "pinned_refs", lambda root: {})
+    assert C.main(["--eda-root", str(tmp_path)]) == C.RC_NOTHING
+
+
+def test_fork_reaches_flow_is_report_only_unless_asked(monkeypatch, tmp_path):
+    """`gate_cli_mutation_probe` reports this one SILENT, and that is CORRECT.
+
+    Its docstring says so: "Report-only by default (`--strict` to fail): #17 and
+    #18 are open, so a gate that blocks the daily release on them would be
+    switched off within a day." Neutering a main() that returns 0 by design
+    reddens nothing because there is nothing to redden.
+
+    SILENT therefore needs a reader, not an automatic fix — writing a test that
+    demands rc 1 here would enforce the opposite of the decision. What IS worth
+    pinning is that `--strict` still has teeth, so the default cannot quietly
+    become the only behaviour.
+    """
+    df = tmp_path / "Dockerfile"
+    df.write_text("COPY --from=img-klayout /b /foss/tools/klayout-vibeic\n")
+    monkeypatch.setattr(F, "check", lambda image, dockerfile: [
+        {"tool": "klayout", "resolved": "/foss/tools/klayout/klayout",
+         "problem": "resolves outside our artefact", "we_build_it": True}])
+    monkeypatch.setattr(F, "provenance_drift", lambda image, pins: [])
+    monkeypatch.setattr(F, "flow_tools", lambda df_: ("klayout",))
+
+    assert F.main(["img", "--dockerfile", str(df)]) == F.RC_OK, \
+        "the default became blocking; #17/#18 were open for weeks under it"
+    assert F.main(["img", "--dockerfile", str(df), "--strict"]) == F.RC_NOT_OURS, \
+        "--strict lost its teeth, so the report-only default is now the only one"
