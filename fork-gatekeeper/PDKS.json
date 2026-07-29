@@ -1,36 +1,76 @@
 {
-  "_comment": "Every PDK the composed image ships, where it comes from, and where its version can be READ BACK OUT OF THE IMAGE. vibeic-eda#28. A PDK is not a lesser dependency here: open_pdks produces the libs.tech trees every DRC and LVS verdict is computed against, so a change there moves sign-off results the way a change in klayout's LEF/DEF importer does — which is exactly what #17 turned out to be. Nothing in this repository named these before; the versions were legible only inside the image, and only for some of them.",
-  "_status_field": "ours = we mirror or fork it and pin it; upstream = we deliberately take the base image's copy. `upstream` is a DECISION that has to be visible, not the absence of one.",
+  "_comment": "Every PDK the composed image ships, where it comes from, and where its version can be READ BACK OUT OF THE IMAGE. vibeic-eda#28. A PDK is not a lesser dependency here: open_pdks produces the libs.tech trees every DRC and LVS verdict is computed against, so a change there moves sign-off results the way a change in klayout's LEF/DEF importer does \u2014 which is exactly what #17 turned out to be. Nothing in this repository named these before; the versions were legible only inside the image, and only for some of them.",
+  "_status_field": "status describes what the IMAGE does: ours = we build/stage it ourselves; upstream = the base image's copy is what ships. `mirror` is a separate fact \u2014 vibeic-eda#30 mirrored the three PDK sources so the daily upstream check can watch them, and that does NOT by itself change which copy the image uses. Collapsing the two would make this file say the image builds a PDK it does not.",
   "pdks": [
-    {"name": "sky130A", "upstream": "RTimothyEdwards/open_pdks", "status": "upstream",
-     "arrives": "pre-installed in the base image",
-     "version_file": "SOURCES", "version_pattern": "open_pdks [0-9a-f]{40}",
-     "read_by": "every sky130 DRC and LVS run, via libs.tech"},
-    {"name": "gf180mcuD", "upstream": "RTimothyEdwards/open_pdks", "status": "upstream",
-     "arrives": "pre-installed in the base image",
-     "version_file": "SOURCES", "version_pattern": "open_pdks [0-9a-f]{40}",
-     "read_by": "every gf180 DRC and LVS run, via libs.tech"},
-    {"name": "ihp-sg13g2", "upstream": "IHP-GmbH/IHP-Open-PDK", "status": "upstream",
-     "arrives": "pre-installed in the base image",
-     "version_file": "COMMIT", "version_pattern": "[0-9a-f]{40}",
-     "read_by": "the sg13g2 flow"},
-    {"name": "ihp-sg13cmos5l", "upstream": "IHP-GmbH/IHP-Open-PDK", "status": "upstream",
-     "arrives": "pre-installed in the base image",
-     "version_file": "COMMIT", "version_pattern": "[0-9a-f]{40}",
-     "read_by": "the sg13cmos5l flow"},
-    {"name": "ciel", "upstream": "fossi-foundation/ciel", "status": "upstream",
-     "arrives": "pre-installed in the base image",
-     "version_file": null, "version_pattern": null,
-     "read_by": "PDK fetch/versioning; not itself a sign-off input"},
-    {"name": "asap7", "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7 + asap7sc7p5t_28 + laurentc2/ASAP7_for_KLayout",
-     "status": "ours",
-     "arrives": "staged by our Dockerfile from three vibeic mirrors, each pinned by ARG",
-     "version_file": null, "version_pattern": null,
-     "read_by": "the asap7 flow (predictive 7nm, not manufacturable)"},
-    {"name": "nangate45", "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts",
-     "status": "ours",
-     "arrives": "staged by our Dockerfile from the vibeic ORFS mirror, pinned by ARG ORFS_REF",
-     "version_file": null, "version_pattern": null,
-     "read_by": "the nangate45 flow (FreePDK45, educational DRC only)"}
+    {
+      "name": "sky130A",
+      "upstream": "fossi-foundation/open-pdks",
+      "status": "upstream",
+      "arrives": "pre-installed in the base image",
+      "version_file": "SOURCES",
+      "version_pattern": "open_pdks [0-9a-f]{40}",
+      "read_by": "every sky130 DRC and LVS run, via libs.tech",
+      "mirror": "vibeic/open_pdks",
+      "upstream_note": "moved org AND renamed (underscore to hyphen); RTimothyEdwards/open_pdks is the old name"
+    },
+    {
+      "name": "gf180mcuD",
+      "upstream": "fossi-foundation/open-pdks",
+      "status": "upstream",
+      "arrives": "pre-installed in the base image",
+      "version_file": "SOURCES",
+      "version_pattern": "open_pdks [0-9a-f]{40}",
+      "read_by": "every gf180 DRC and LVS run, via libs.tech",
+      "mirror": "vibeic/open_pdks",
+      "upstream_note": "moved org AND renamed (underscore to hyphen); RTimothyEdwards/open_pdks is the old name"
+    },
+    {
+      "name": "ihp-sg13g2",
+      "upstream": "IHP-GmbH/IHP-Open-PDK",
+      "status": "upstream",
+      "arrives": "pre-installed in the base image",
+      "version_file": "COMMIT",
+      "version_pattern": "[0-9a-f]{40}",
+      "read_by": "the sg13g2 flow",
+      "mirror": "vibeic/IHP-Open-PDK"
+    },
+    {
+      "name": "ihp-sg13cmos5l",
+      "upstream": "IHP-GmbH/IHP-Open-PDK",
+      "status": "upstream",
+      "arrives": "pre-installed in the base image",
+      "version_file": "COMMIT",
+      "version_pattern": "[0-9a-f]{40}",
+      "read_by": "the sg13cmos5l flow",
+      "mirror": "vibeic/IHP-Open-PDK"
+    },
+    {
+      "name": "ciel",
+      "upstream": "fossi-foundation/ciel",
+      "status": "upstream",
+      "arrives": "pre-installed in the base image",
+      "version_file": null,
+      "version_pattern": null,
+      "read_by": "PDK fetch/versioning; not itself a sign-off input",
+      "mirror": "vibeic/ciel"
+    },
+    {
+      "name": "asap7",
+      "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7 + asap7sc7p5t_28 + laurentc2/ASAP7_for_KLayout",
+      "status": "ours",
+      "arrives": "staged by our Dockerfile from three vibeic mirrors, each pinned by ARG",
+      "version_file": null,
+      "version_pattern": null,
+      "read_by": "the asap7 flow (predictive 7nm, not manufacturable)"
+    },
+    {
+      "name": "nangate45",
+      "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts",
+      "status": "ours",
+      "arrives": "staged by our Dockerfile from the vibeic ORFS mirror, pinned by ARG ORFS_REF",
+      "version_file": null,
+      "version_pattern": null,
+      "read_by": "the nangate45 flow (FreePDK45, educational DRC only)"
+    }
   ]
 }

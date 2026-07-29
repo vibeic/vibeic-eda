@@ -63,7 +63,7 @@ and fails on drift.
 
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
-| upstream projects the fork-gatekeeper tracks | **21** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| upstream projects the fork-gatekeeper tracks | **30** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
 | `vibeic/*` sources the build clones | **26** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
 | per-tool build artefacts (`tools/<name>/`) | **14** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
@@ -72,7 +72,7 @@ and fails on drift.
 
 <!-- /counts:local -->
 
-Those 20 cloned sources and the 21 tracked projects are **not the same set**, so
+Those cloned sources and the 30 tracked projects are **not the same set**, so
 the join is derived rather than eyeballed — the checker prints it:
 
 ```bash
@@ -81,13 +81,23 @@ python3 tools/check_doc_counts.py
 # the build clones 20 vibeic sources, 14 of which are tracked forks
 ```
 
-Read that as three facts. Twenty of the cloned sources are tracked forks;
+Read that as three facts. Most of the cloned sources are tracked projects;
 adding **OpenSTA**, which has no clone URL because it arrives as OpenROAD's
-`src/sta` submodule (‡ below), gives 21 tracked forks, of which **20 reach this
-image**. The
-other **6 cloned sources are not forks at all** — they are mirrors of upstream
-data and solver repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos)
-created when GitHub's fork API refused, and a mirror carries `fork = false`, so
+`src/sta` submodule (‡ below), and the nine MIRRORS that were owned but untracked
+until 2026-07-29, gives 30 tracked projects.
+
+Three of them do **not** reach this image and that is not a gap: `open_pdks`,
+`IHP-Open-PDK` and `ciel` are the PDK sources, and the PDKs they produce arrive
+**pre-installed in the base image** rather than through a clone of ours. Mirroring
+them is what puts them under the daily upstream check — every DRC and LVS deck
+comes from `open_pdks`, and until it was tracked nothing watched it. `sv-elab` is
+the fourth: built and pinned, deliberately not installed (vibeic-eda#24). See
+`fork-gatekeeper/PDKS.json` for which PDK each one produces and who reads it.
+
+The mirrors are **not forks** — they are mirrors of upstream data, solver and PDK
+repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos, `open_pdks`,
+`IHP-Open-PDK`, `ciel`) created when GitHub's fork API refused, and a mirror
+carries `fork = false`, so
 it cannot appear in a fork registry however thoroughly it is ours.
 
 The one tracked fork that does NOT reach the image is **`sv-elab`**, and that is
