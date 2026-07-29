@@ -59,11 +59,39 @@ from typing import Dict, List
 
 RC_OK, RC_NOT_OURS, RC_NOTHING = 0, 1, 2
 
-#: Commands the flow invokes, as they appear in the plugin's programs. Named
-#: rather than discovered, because "every executable in the image" would drown
-#: the finding in base-image tooling we never claimed to build.
-FLOW_TOOLS = ("yosys", "openroad", "klayout", "iverilog", "verilator",
-              "ngspice", "magic", "netgen", "sby", "eqy", "strm2gds")
+#: Targets whose tag is composed from more than one binary, so the command name
+#: cannot be derived from the target name.
+_MULTI_BINARY = {"lvs": ("magic", "netgen"),
+                 "sat-solvers": ("kissat", "cadical")}
+
+#: Commands that are not tool targets but belong in the sweep: shipped by the
+#: root Dockerfile directly, or buddy tools of a target.
+_EXTRA = ("sby", "eqy", "strm2gds")
+
+
+def flow_tools(dockerfile: Path) -> tuple:
+    """Every command we should be able to claim, DERIVED rather than listed.
+
+    The first version was a hand-written tuple, and vibeic-eda#23 caught what
+    that costs: gtkwave, slang, xschem and Xyce were shipping the base image's
+    builds — the exact defect this file exists to find — and none of the four
+    was in the list. A check that only knows the tools you already suspected
+    finds the tools you already suspected.
+
+    So the set comes from what the composing image actually takes from our own
+    artefacts (`COPY --from=img-<target>`), which is the same source the
+    containment test uses. A tool added tomorrow is covered tomorrow, with no
+    edit here.
+
+    `_MULTI_BINARY` and `_EXTRA` remain hand-held because they cannot be
+    derived: `lvs` ships two differently-named binaries, and `sby`/`eqy` are
+    installed by the root Dockerfile rather than as targets.
+    """
+    names: list = []
+    for target in copied_paths(dockerfile):
+        names.extend(_MULTI_BINARY.get(target, (target,)))
+    names.extend(_EXTRA)
+    return tuple(dict.fromkeys(names))
 
 
 def _sh(cmd, timeout=600):
@@ -140,6 +168,7 @@ def check(image: str, dockerfile: Path) -> List[dict]:
     all_dests = sorted({d for v in ours.values() for d in v})
     findings: List[dict] = []
 
+    FLOW_TOOLS = flow_tools(dockerfile)
     script = "; ".join(
         f'p=$(command -v {t} 2>/dev/null); '
         f'echo "{t} ${{p:-NONE}} $(readlink -f "$p" 2>/dev/null)"'
@@ -200,8 +229,9 @@ def main(argv=None) -> int:
     drift = provenance_drift(a.image, pinned_refs(df.parent))
     ours_missing = [f for f in findings if f.get("we_build_it")]
 
-    print(f"fork_reaches_flow: {len(FLOW_TOOLS)} tool(s) checked in {a.image}, "
-          f"{len(FLOW_TOOLS) - len(findings)} resolve into our build, "
+    tools_checked = len(flow_tools(df))
+    print(f"fork_reaches_flow: {tools_checked} tool(s) checked in {a.image}, "
+          f"{tools_checked - len(findings)} resolve into our build, "
           f"{len(ours_missing)} we build but do not run")
     for f in findings:
         print(f"  {f['tool']:<11} {str(f.get('resolved')):<44} {f['problem']}")
