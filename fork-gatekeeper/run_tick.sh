@@ -285,6 +285,46 @@ else
     log "[provenance] nothing was checked, which is not a clean result"
 fi
 
+# --- DID CI RUN AT ALL? (vibe-ic#550, extended to this repo 2026-07-29) ---
+# #550 was filed against vibe-ic: Actions disabled at the ACCOUNT level, 561
+# commits landed with no CI, and nothing noticed for nine days because
+# `gh run list` prints nothing for "never ran" and nothing for "no match".
+#
+# Measured here, same account, same day:
+#
+#     vibeic/vibe-ic      2 runs   (both Dependency Graph, none CI)
+#     vibeic/vibeic-eda   0 runs   3 workflows, all `active`
+#     gh workflow run fork-only.yml -> HTTP 422:
+#         "Actions has been disabled for this user."
+#
+# So this repo is under the same block, has three workflows that have never
+# executed, and — unlike vibe-ic, which gained `ci_ran_at_all_check` in v1.8.2 —
+# had NO gate that could notice. The fork-only workflow landed earlier today is
+# in exactly that position: present, active, and never once run.
+#
+# The checker is REUSED from the plugin rather than reimplemented. A second
+# implementation of "did CI run" is how two programs come to disagree about the
+# same question, which is the defect vibeic-eda#29 was about.
+#
+# Non-fatal here BY DESIGN: the block is account-level and no tick can clear it,
+# so failing the tick would turn a standing owner-action into daily noise. It is
+# logged loudly, and rc 2 (could not look) stays distinct from rc 1 (no run).
+# Defined BEFORE the branch that reads it. This script runs under `set -u`,
+# and line 200 already records what that costs: a variable assigned only
+# inside a conditional and read outside aborts the whole tick rather than
+# skipping a step. Same shape, same file, so it gets the same treatment.
+CI_OUT="${LOG_DIR}/ci-ran-at-all.txt"
+CI_CHECK="${VIBE_IC_PROGRAMS:-/home/reyerchu/vibe-ic/vibe-ic-marketplace/plugins/vibe-ic/programs}/ci_ran_at_all_check.py"
+if [ -f "${CI_CHECK}" ]; then
+    python3 "${CI_CHECK}" "${DIR}/.." > "${CI_OUT}" 2>&1
+    ci_rc=$?
+    tail -1 "${CI_OUT}" | sed 's/^/[ci-ran]   /' | tee -a "${LOG}"
+    [ "${ci_rc}" != "0" ] && log "[ci-ran] rc=${ci_rc} — see vibe-ic#550; the tick does not fail on it because no tick can re-enable Actions"
+else
+    echo "MISSING: ${CI_CHECK} — whether CI ran was NOT checked" > "${CI_OUT}"
+    log "[ci-ran] nothing was checked, which is not a clean result"
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1

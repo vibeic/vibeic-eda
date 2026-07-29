@@ -79,3 +79,68 @@ def test_the_check_catches_the_revision_it_was_written_for():
 
 def test_the_tick_still_parses():
     assert subprocess.run(["bash", "-n", str(TICK)]).returncode == 0
+
+
+# --- vibe-ic#550 extended: this repo is under the same account-level block
+
+def test_ci_out_is_defined_before_the_branch_that_reads_it():
+    """`set -u` turns a conditional assignment read outside into an abort.
+
+    This file exists because REACH_IMG was assigned inside an `if` and read
+    after it, which under `set -uo pipefail` aborts the whole tick instead of
+    skipping a step. The CI-ran block has the same shape, so it gets the same
+    check rather than the same bug.
+    """
+    src = TICK.read_text()
+    assign = src.index('CI_OUT="')
+    for use in (m.start() for m in re.finditer(r'\$\{CI_OUT\}', src)):
+        assert use > assign, \
+            "CI_OUT is read before it is assigned — under set -u that aborts the tick"
+
+
+def test_the_ci_check_is_reused_not_reimplemented():
+    """Two implementations of 'did CI run' is how two programs disagree.
+
+    vibeic-eda#29 was exactly that defect one layer over: check_pins_current and
+    daily_release each carried their own copy of `branch_is_ours` and said
+    opposite things about the same four pins.
+    """
+    src = TICK.read_text()
+    assert "ci_ran_at_all_check.py" in src
+    assert "VIBE_IC_PROGRAMS" in src, \
+        "the path must be overridable, or a checkout elsewhere silently skips it"
+    # …and the tick must not grow its own version of the logic. CODE only:
+    # `actions/runs` appears twice in COMMENTS, recording the measurement that
+    # established the block, and a check that cannot tell a recorded fact from
+    # a reimplementation would have to be weakened the first time someone
+    # documented something — which is how a gate becomes decorative.
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert "actions/runs" not in code, \
+        "the tick is reimplementing the API query instead of calling the checker"
+
+
+def test_a_missing_checker_reports_rather_than_passing():
+    """A guard that cannot run is not a guard that passed — the rule this file
+    already enforces for the source guards."""
+    src = TICK.read_text()
+    i = src.index("CI_CHECK=")
+    block = src[i:i + 1400]
+    assert "MISSING:" in block
+    assert "not a clean result" in block
+
+
+def test_the_ci_finding_does_not_fail_the_tick():
+    """Deliberate, and worth pinning so nobody 'fixes' it into daily noise.
+
+    The block is account-level: no tick can re-enable Actions, so failing every
+    tick on it would train the operator to ignore the tick. It is logged loudly
+    and left non-fatal, the same treatment the source guards get for the same
+    reason.
+    """
+    src = TICK.read_text()
+    i = src.index("CI_CHECK=")
+    block = src[i:i + 1400]
+    assert "ci_rc=$?" in block
+    assert "guard_rc=1" not in block, \
+        "the CI finding must not be folded into the tick's failure code"
