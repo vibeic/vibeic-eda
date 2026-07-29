@@ -202,3 +202,76 @@ def test_every_checker_in_this_directory_is_called_by_something():
     assert not missing, (
         "these live in fork-gatekeeper/ and nothing invokes them, so they have "
         "never run: " + ", ".join(missing))
+
+
+def test_the_untracked_guard_asks_git_rather_than_matching_patterns():
+    """`git status --porcelain` already excludes ignored paths.
+
+    Reimplementing .gitignore matching would be a second copy of git's rules —
+    negations, nested ignore files, precedence — and the two disagree. vibe-ic
+    #555 proved that the expensive way: my model of what a negation inside an
+    excluded directory does was wrong, and git's answer was right.
+    """
+    src = (TICK.parent / "untracked_artefact_guard.py").read_text()
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert "status" in code and "--porcelain" in code
+    assert "fnmatch" not in code, "it is matching patterns itself"
+
+
+def test_the_untracked_guard_refuses_rather_than_deleting():
+    """A file someone is still using is not litter, and a guard that tidies up
+    behind people gets switched off."""
+    src = (TICK.parent / "untracked_artefact_guard.py").read_text()
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    for destructive in ("os.remove", "shutil.rmtree", "unlink(", "git clean"):
+        assert destructive not in code, \
+            f"the guard calls {destructive} — naming is its job, not tidying"
+
+
+def test_a_failed_status_is_not_a_clean_tree(monkeypatch):
+    """rc 2, not rc 0: an unaskable question is not a clean answer."""
+    import untracked_artefact_guard as U
+
+    class R:
+        returncode = 1
+        stdout = ""
+        stderr = "not a git repository"
+    monkeypatch.setattr(U.subprocess, "run", lambda *a, **k: R())
+    found, err = U.untracked(TICK.parent)
+    assert found is None and err
+
+
+def test_a_finding_actually_fails(monkeypatch, capsys):
+    """The behaviour, not just the properties.
+
+    My first three tests for this guard checked that it asks git, never
+    deletes, and returns rc 2 when it cannot look — all true, and none of them
+    noticed when I made `if found:` unreachable. Three green tests over a guard
+    that had stopped guarding: the exact shape this session keeps finding, in
+    the tests I wrote to prevent it.
+    """
+    import untracked_artefact_guard as U
+
+    class R:
+        returncode = 0
+        stdout = "?? stray.bak\n M tracked.py\n"
+        stderr = ""
+    monkeypatch.setattr(U.subprocess, "run", lambda *a, **k: R())
+    assert U.main([]) == U.RC_FINDING
+    out = capsys.readouterr()
+    assert "stray.bak" in out.out
+    assert "tracked.py" not in out.out, "a modified TRACKED file is not litter"
+
+
+def test_a_clean_tree_passes(monkeypatch):
+    """…and the other direction, or the test above is satisfied by rc 1 always."""
+    import untracked_artefact_guard as U
+
+    class R:
+        returncode = 0
+        stdout = " M tracked.py\n"
+        stderr = ""
+    monkeypatch.setattr(U.subprocess, "run", lambda *a, **k: R())
+    assert U.main([]) == U.RC_OK

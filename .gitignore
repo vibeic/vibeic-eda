@@ -7,3 +7,22 @@ bld/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Session artefacts, never committed (vibeic-eda 2026-07-30, same class as
+# vibe-ic#720). Sixteen of these were sitting untracked-and-unignored for eight
+# to eleven days — `.bak` copies of Dockerfile and the fork ledgers, build logs
+# from a failed 0.2.27 attempt, an ALIGN verification dump, and a ledger backup
+# directory. Untracked-but-not-ignored is the state one `git add -A` turns into
+# a commit, which is precisely why this repo forbids `-A`; a rule nobody has to
+# remember beats a rule everybody must.
+#
+# `*.log` was already here and did NOT cover `build_0.2.27.log.attempt1` —
+# `.log` is not at the end. That is the shape of the whole problem: a rule
+# written for the case its author met.
+*.bak
+*.bak.*
+*.bak-*
+*.log.*
+*.out
+_ledger_backups/
+*.merged.json

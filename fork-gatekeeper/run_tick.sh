@@ -285,6 +285,31 @@ else
     log "[provenance] nothing was checked, which is not a clean result"
 fi
 
+# --- NOTHING UNTRACKED AND UNIGNORED (2026-07-30) ---
+# Sixteen files sat here untracked-and-unignored for eight to eleven days —
+# `.bak` copies of the Dockerfile and the fork ledgers, build logs from a failed
+# 0.2.27 attempt, an ALIGN dump. That is the state one `git add -A` turns into a
+# commit, which is why this repo forbids `-A`; the prohibition is a rule
+# everyone must remember, and this is the rule nobody has to.
+#
+# `.gitignore` already carried `*.log` and did not match
+# `build_0.2.27.log.attempt1` — `.log` is not at the end. A rule written for the
+# case its author met, which is why the guard checks the OUTCOME.
+#
+# Non-fatal: the tick's job is upstream tracking, and a stray file must not stop
+# it. Loud in the log; the guard names paths and never deletes.
+UNTRACKED_OUT="${LOG_DIR}/untracked-artefacts.txt"
+if [ -f "${DIR}/untracked_artefact_guard.py" ]; then
+    python3 "${DIR}/untracked_artefact_guard.py" > "${UNTRACKED_OUT}" 2>&1
+    untracked_rc=$?
+    tail -1 "${UNTRACKED_OUT}" | sed 's/^/[untracked]   /' | tee -a "${LOG}"
+    [ "${untracked_rc}" != "0" ] && log "[untracked] rc=${untracked_rc} — ignore them or remove them; the guard will not choose"
+else
+    echo "MISSING: fork-gatekeeper/untracked_artefact_guard.py — nothing was checked" \
+        > "${UNTRACKED_OUT}"
+    log "[untracked] nothing was checked, which is not a clean result"
+fi
+
 # --- WHAT THE IMAGE SAYS ABOUT ITSELF (vibeic-eda#28) ---
 # PDKS.json declares every PDK the image ships and where its version can be read
 # back OUT of the image. This is the only guard with jurisdiction over them: every
