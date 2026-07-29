@@ -88,7 +88,40 @@ BUILD_ENV = {"BUILDKIT_STEP_LOG_MAX_SIZE": "-1",
              "BUILDKIT_PROGRESS": "plain"}
 
 
-def log_limit_effective() -> Optional[bool]:
+#: A builder whose buildkit CAN honour BUILDKIT_STEP_LOG_MAX_SIZE.
+#:
+#: With the default `docker` driver, buildkit runs inside dockerd and never sees
+#: the client's environment, so the variable is a no-op — measured, and the
+#: klayout build printed `[output clipped, log limit 2MiB reached]` with it set.
+#: The obvious fix is a dockerd drop-in plus a restart, and a restart here would
+#: have killed a running ibex route, a long-lived container, and someone else's
+#: Discourse. A `docker-container` builder lifts the limit for our builds and
+#: touches nothing else:
+#:
+#:     docker buildx create --name vibeic-builder --driver docker-container \
+#:         --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=-1 \
+#:         --driver-opt env.BUILDKIT_STEP_LOG_MAX_SPEED=-1
+#:
+#: Measured on a step emitting 90 000 lines:
+#:
+#:     default builder    kept to line   3120,  1 clip message, 232 KB
+#:     vibeic-builder     kept to line  90000,  0 clip messages, 6.6 MB
+#:
+#: Used when it exists, ignored when it does not — a release must not fail
+#: because a builder was never created on this host.
+PREFERRED_BUILDER = "vibeic-builder"
+
+
+def preferred_builder() -> Optional[str]:
+    """`PREFERRED_BUILDER` if it exists and is usable, else None."""
+    rc, out, _ = _sh(["docker", "buildx", "inspect", PREFERRED_BUILDER],
+                     timeout=120)
+    if rc != 0 or "running" not in out.lower():
+        return None
+    return PREFERRED_BUILDER
+
+
+def log_limit_effective(builder: Optional[str] = None) -> Optional[bool]:
     """Can BUILDKIT_STEP_LOG_MAX_SIZE actually take effect here?
 
     None when the driver cannot be read — not-known, which must not read as a
@@ -96,8 +129,13 @@ def log_limit_effective() -> Optional[bool]:
     layer I control while the behaviour lived one layer further out (the first
     removed our COPY of a directory the BASE image ships). The cheap defence is
     the same both times: have the program say which layer it reached.
+
+    Asks about the builder the release WILL USE, not whichever one is current.
+    Those differ the moment a preferred builder exists, and reporting on the
+    wrong one is the same class of error as the setting it reports on.
     """
-    rc, out, _ = _sh(["docker", "buildx", "inspect"], timeout=60)
+    cmd = ["docker", "buildx", "inspect"] + ([builder] if builder else [])
+    rc, out, _ = _sh(cmd, timeout=60)
     if rc != 0 or not out.strip():
         return None
     for line in out.splitlines():
@@ -524,6 +562,24 @@ def main(argv=None) -> int:
         v = check_one(repo, pin)
         if v["verdict"] == "CURRENT":
             continue
+        if v["verdict"] == "UPSTREAM_AVAILABLE":
+            # A REGRESSION I INTRODUCED ONE COMMIT EARLIER. vibeic-eda#29 split
+            # `check_one`'s STALE into STALE / UPSTREAM_AVAILABLE /
+            # STALE_UNDECIDED, and this branch tests `!= "STALE"`, so the new
+            # verdict fell into "could not resolve" and the release started
+            # reporting `[NEEDS HUMAN] 4 pin(s) could not be resolved` where it
+            # had printed nothing to do.
+            #
+            # The state already exists here — `upstream_bump` is this program's
+            # own name for the same fact — so the fix is to route it there, not
+            # to widen the STALE test. Fixing a shared vocabulary in one program
+            # and matching on the old vocabulary in the other is the same defect
+            # #29 was about, one commit later.
+            upstream_bump.append({"repo": repo, "branch": v.get("branch"),
+                                  "from": pin[:9], "to": "(not moved)",
+                                  "behind": v.get("behind"),
+                                  "branch_is_ours": False})
+            continue
         if v["verdict"] != "STALE":
             unresolved.append({"repo": repo, "why": f"{v['verdict']}: {v['detail']}"})
             continue
@@ -633,7 +689,12 @@ def main(argv=None) -> int:
             print(f"  retag {t}")
 
         if not a.no_build:
-            eff = log_limit_effective()
+            builder = preferred_builder()
+            bflag = ["--builder", builder] if builder else []
+            if builder:
+                print(f"  building on `{builder}` (docker-container), so a "
+                      f"long step's log is kept in full")
+            eff = log_limit_effective(builder)
             if eff is False:
                 print("  NOTE: the buildx driver is `docker`, so buildkit runs "
                       "inside dockerd and BUILDKIT_STEP_LOG_MAX_SIZE cannot "
@@ -669,7 +730,7 @@ def main(argv=None) -> int:
                 # the TOOL builds — the LONGER of the two — still writing nothing
                 # to the log. Fixing one instance of a defect and not its sibling
                 # is how the sibling gets found the hard way.
-                rc, _, err = _sh(["docker", "buildx", "bake", "-f",
+                rc, _, err = _sh(["docker", "buildx", "bake", *bflag, "-f",
                                   str(root / "docker-bake.hcl"), "--push",
                                   "--progress", "plain",
                                   "--set", f"{t}.tags={want}", t], cwd=root,
@@ -721,7 +782,7 @@ def main(argv=None) -> int:
             # no CPU, no disk, no network, three lines of log, and the only way to
             # tell was reading dockerd's journal. A build that cannot be watched
             # cannot be diagnosed.
-            bake = ["docker", "buildx", "bake", "-f",
+            bake = ["docker", "buildx", "bake", *bflag, "-f",
                     str(root / "docker-bake.hcl"), "--load", "--progress",
                     "plain", "--set", f"eda.tags={tag}", "eda"]
             rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,

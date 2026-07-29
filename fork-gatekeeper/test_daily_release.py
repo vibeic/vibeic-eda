@@ -764,3 +764,89 @@ def test_an_api_error_body_never_becomes_a_url(monkeypatch):
     monkeypatch.setattr(M, "_sh", lambda *a, **k: (1, "someone/else\n", ""))
     assert M._upstream_url("nope") == "", \
         "a non-zero rc must not be trusted, however plausible its stdout"
+
+
+# --- vibeic-eda#26: the log limit, lifted where it can actually be lifted
+
+def test_the_preferred_builder_is_used_when_it_exists(monkeypatch):
+    """A docker-container builder is the only place the limit can take effect.
+
+    The dockerd drop-in would also work and needs a daemon restart, which on
+    this host would have killed a running ibex route, a long-lived container
+    and someone else's Discourse. Measured on a 90 000-line step:
+
+        default builder   kept to line  3120, 1 clip message, 232 KB
+        vibeic-builder    kept to line 90000, 0 clip messages, 6.6 MB
+    """
+    monkeypatch.setattr(R, "_sh", lambda *a, **k:
+                        (0, "Name: vibeic-builder\nStatus: running\n", ""))
+    assert R.preferred_builder() == "vibeic-builder"
+
+
+def test_a_missing_builder_is_not_an_error(monkeypatch):
+    """A release must not fail because a builder was never created here."""
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (1, "", "no builder"))
+    assert R.preferred_builder() is None
+
+
+def test_a_builder_that_exists_but_is_not_running_is_not_used(monkeypatch):
+    """`inspect` succeeds on a stopped builder; using it fails the build."""
+    monkeypatch.setattr(R, "_sh", lambda *a, **k:
+                        (0, "Name: vibeic-builder\nStatus: inactive\n", ""))
+    assert R.preferred_builder() is None
+
+
+def test_the_limit_is_reported_for_the_builder_the_release_will_use(monkeypatch):
+    """Reporting on the CURRENT builder while building on another is the same
+    class of error as the setting it reports on."""
+    seen = {}
+
+    def rec(cmd, **k):
+        seen["cmd"] = cmd
+        return 0, "Driver: docker-container\n", ""
+    monkeypatch.setattr(R, "_sh", rec)
+    assert R.log_limit_effective("vibeic-builder") is True
+    assert "vibeic-builder" in seen["cmd"], \
+        "it inspected the default builder, not the one that will build"
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "Driver: docker\n", ""))
+    assert R.log_limit_effective("vibeic-builder") is False
+
+
+def test_both_bake_call_sites_pass_the_builder_flag():
+    """WIRING. Resolving a builder and not passing it changes nothing."""
+    tree = ast.parse(pathlib.Path(R.__file__).read_text())
+    bake_lists = [n for n in ast.walk(tree)
+                  if isinstance(n, (ast.List,))
+                  and "'bake'" in ast.dump(n)]
+    assert len(bake_lists) >= 2, f"expected both bake commands, got {len(bake_lists)}"
+    for n in bake_lists:
+        assert "bflag" in ast.dump(n), \
+            f"a bake command at line {n.lineno} does not pass the builder"
+
+
+def test_every_check_one_verdict_has_a_home_in_the_release(monkeypatch):
+    """A shared vocabulary changed in one program and matched on in the other.
+
+    #29 split `check_one`'s STALE into three verdicts. This program tested
+    `!= "STALE"` and therefore filed the new UPSTREAM_AVAILABLE under "could
+    not resolve" — the release went from "nothing to do" to
+    `[NEEDS HUMAN] 4 pin(s) could not be resolved`, one commit after the split.
+
+    So the property is not "handle UPSTREAM_AVAILABLE"; it is that a verdict
+    this program does not know about must not silently become a different
+    finding. Enumerated from check_pins_current's own source so a fourth verdict
+    added tomorrow fails here rather than in a release.
+    """
+    src = pathlib.Path(C.__file__).read_text()
+    verdicts = set(re.findall(r'"verdict":\s*"([A-Z_]+)"', src))
+    assert {"CURRENT", "STALE", "UPSTREAM_AVAILABLE"} <= verdicts
+
+    handled = pathlib.Path(R.__file__).read_text()
+    for v in verdicts:
+        if v in ("CURRENT", "STALE"):
+            continue
+        assert f'"{v}"' in handled or v in ("NO_BRANCHES", "COMPARE_FAILED",
+                                            "ORPHANED", "STALE_UNDECIDED"), \
+            (f"check_pins_current can return {v} and daily_release neither "
+             f"names it nor is it in the set deliberately left to the generic "
+             f"unresolved branch")
