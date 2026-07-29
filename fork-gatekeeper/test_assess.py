@@ -2775,14 +2775,46 @@ def test_the_committed_fleet_list_carries_the_forks_the_box_was_tracking():
 
 
 def test_the_fleet_list_and_the_published_page_describe_the_same_fleet():
-    """`build_page` derives the monitor page's "all N forks" from ENHANCEMENTS.json, not
+    """`build_page` derives the monitor page's fork count from ENHANCEMENTS.json, not
     from the fleet list — so the two drifting apart publishes a count for a fleet nobody
-    audits. Both files were hand-edited on the box together; they must land together."""
+    audits.
+
+    This asserted EQUALITY until 778f9f1 (PR #15), which took FORKS.json from 15 to 21
+    while the survey still covered 15. That is a legitimate state — a fork can be tracked
+    before it is surveyed — and the landing repaired the PAGE for it: "all __NFORKS__
+    forks" became "__NFORKS__ of the __NTOTAL__ forks" plus an explicit "the remaining
+    __NUNSURVEYED__ forks carry no capability rows yet". What it did not repair was this
+    test, which kept asserting the invariant the design had just replaced, and so has
+    been RED on main since. Landing a design change that intentionally breaks a test
+    without moving the test is the gate miss; deleting the test would have been the
+    second one.
+
+    So the invariant is replaced rather than relaxed, and the replacement is stronger in
+    the direction that actually catches a defect:
+
+      1. ENHANCEMENTS.json must be a SUBSET of the fleet. A survey row for a tool that
+         is not tracked is a row nobody audits — the original failure, unchanged, still
+         a hard fail.
+      2. The surplus must be DISCLOSED, not merely tolerated. The page must substitute
+         both counts and must not carry the "all N forks" quantifier, because a derived
+         number inside a false quantifier is still a false sentence. Nothing pinned that
+         repair before; it could have silently regressed on the next edit to GAP.
+    """
     here = Path(__file__).parent
     fleet = {f["tool"] for f in json.loads((here / "FORKS.json").read_text())["forks"]}
     enh = set(json.loads((here / "ENHANCEMENTS.json").read_text()))
-    assert fleet == enh, {"only in FORKS.json": sorted(fleet - enh),
-                          "only in ENHANCEMENTS.json": sorted(enh - fleet)}
+    assert enh <= fleet, {"surveyed but not tracked": sorted(enh - fleet)}
+
+    gap = _load("build_page").GAP
+    unsurveyed = sorted(fleet - enh)
+    if unsurveyed:
+        for token in ("__NTOTAL__", "__NUNSURVEYED__"):
+            assert token in gap, (
+                f"{len(unsurveyed)} tracked fork(s) are unsurveyed ({unsurveyed}) and "
+                f"the page does not substitute {token}, so it cannot say so")
+    assert "all __NFORKS__ forks" not in gap, \
+        'the page claims to cover "all" forks while deriving the count from the ' \
+        'surveyed subset — the count is right and the sentence is not'
 
 # ── the ROLE is a judge input, so it is a cache input (vibeic/vibeic-eda#11) ──
 # `assess_release` hands each fork's `role` to the judge as prompt context, and it was in
