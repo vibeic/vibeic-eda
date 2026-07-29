@@ -172,6 +172,29 @@ fi
 # REPORT-ONLY on purpose. #17 and #18 are open and would fail it; a gate whose
 # first act is to stop every daily release is a gate someone switches off. It
 # takes --strict once they are closed.
+# RE-RUN THE PIN GUARD, because `daily_release` is the thing that writes pins.
+# The guards at the top of this tick read the tree as it was BEFORE the release
+# moved anything; a disagreement introduced by the release itself would go
+# unnoticed until the next morning. That is not hypothetical — `check_pins_agree`
+# went red on main today because the artefact tag gained a RECIPE component and
+# the checker still composed the old two-part tag, and it was a PR that found it,
+# not this tick.
+#
+# Report-only: the image is already built and published by this point, so failing
+# here would not un-publish it. What it buys is knowing the same day.
+POSTPIN_OUT="${LOG_DIR}/pins-after-release.txt"
+if [ -f "${DIR}/../tools/check_pins_agree.py" ]; then
+    if python3 "${DIR}/../tools/check_pins_agree.py" > "${POSTPIN_OUT}" 2>&1; then
+        log "[pins-after] $(tail -1 "${POSTPIN_OUT}")"
+    else
+        log "[pins-after] DISAGREEMENT introduced by this release — details in ${POSTPIN_OUT}"
+        grep -E "disagrees|pulls|pins " "${POSTPIN_OUT}" | head -6 | sed 's/^/[pins-after]   /' | tee -a "${LOG}" || true
+    fi
+else
+    echo "MISSING: tools/check_pins_agree.py — nothing was re-checked" > "${POSTPIN_OUT}"
+    log "[pins-after] MISSING — nothing was re-checked, which is not a clean result"
+fi
+
 # Derived ONCE, before every consumer. It used to be computed inside the
 # `if [ -f fork_reaches_flow_check.py ]` branch while two later checks read it —
 # so a missing checker left REACH_IMG unset, and under this script's `set -u`
