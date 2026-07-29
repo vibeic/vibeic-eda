@@ -322,6 +322,13 @@ COPY --from=img-yices2 /foss/tools/yices /foss/tools/yices
 # should exist and be pinned (vibeic-eda#25 was right about that). What changes
 # is that a duplicate frontend does not go into the image.
 # COPY --from=img-sv-elab /foss/tools/slang-yosys-plugin /foss/tools/slang-yosys-plugin
+#
+# AND THE BASE'S COPY IS REMOVED. Commenting out our COPY was not enough and I
+# shipped 0.2.39 believing it was: that directory comes from the BASE image, so
+# dropping our COPY merely reverted it to the base's build — which is the copy
+# that aborts under our yosys in the first place. Verified in the published
+# image: md5 4766483813543906b01ac9b5c94d8544 (the base's), `yosys -m …` exit 134.
+RUN rm -rf /foss/tools/slang-yosys-plugin
 
 
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
