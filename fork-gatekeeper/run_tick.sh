@@ -90,6 +90,33 @@ else
     grep -E "pending|DATED" "${GUARD_OUT}" | sed 's/^/[guard]   /' | tee -a "${LOG}" || true
 fi
 
+# vibe-ic#553 — the OTHER direction. Everything below asks "should we adopt this
+# upstream commit?"; this asks "is upstream carrying a fix for a bug we still
+# ship?" Those are different questions and only the first was wired. Surfaced by
+# vibe-ic#551: an rsz::stitchTrees segfault we were about to file upstream had
+# been fixed there on 2026-07-13, 772 commits before our pin.
+#
+# Reporting only — it never adopts, and it does NOT gate the tick, for the same
+# reason the source guards do not: a survey that cannot run must not stop the
+# fork monitoring.
+INBOUND_OUT="${LOG_DIR}/inbound-survey.txt"
+if [ -f "${DIR}/inbound_survey.py" ]; then
+    log "[inbound] surveying upstream fixes our pins lack"
+    if python3 "${DIR}/inbound_survey.py" \
+            --json "${LOG_DIR}/inbound-survey.json" > "${INBOUND_OUT}" 2>&1; then
+        head -1 "${INBOUND_OUT}" | sed 's/^/[inbound]   /' | tee -a "${LOG}"
+        grep -E "SAMPLED|NOTE:" "${INBOUND_OUT}" | sed 's/^/[inbound]   /' \
+            | tee -a "${LOG}" || true
+    else
+        log "[inbound] survey FAILED — details in ${INBOUND_OUT}"
+    fi
+else
+    # Same rule as the guards above: a missing survey is not an empty gap.
+    echo "MISSING: fork-gatekeeper/inbound_survey.py — nothing was surveyed" \
+        > "${INBOUND_OUT}"
+    log "[inbound] MISSING — nothing was surveyed, which is not a clean result"
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
