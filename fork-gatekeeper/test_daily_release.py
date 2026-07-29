@@ -211,3 +211,37 @@ def test_artefact_tag_is_none_when_a_ref_is_unknown(tmp_path):
 def test_recipe_hash_says_so_when_there_is_no_dockerfile(tmp_path):
     root = _tree(tmp_path)
     assert R.recipe_hash(root, "does-not-exist") == "nofile"
+
+
+def test_bake_and_the_program_agree_on_every_recipe(tmp_path):
+    """#21's core: two expressions compose a tool tag and must not diverge."""
+    root = _tree(tmp_path)
+    hcl = root / "docker-bake.hcl"
+    hcl.write_text(hcl.read_text() +
+                   '\nvariable "YOSYS_RECIPE" { default = "stale0" }\n')
+    moved = R.write_recipe_vars(root, {"yosys": ["YOSYS_REF"]})
+    assert moved and moved[0].startswith("YOSYS_RECIPE=")
+    assert R.bake_recipe_vars(root)["YOSYS"] == R.recipe_hash(root, "yosys")
+
+
+def test_write_recipe_vars_is_idempotent(tmp_path):
+    root = _tree(tmp_path)
+    hcl = root / "docker-bake.hcl"
+    hcl.write_text(hcl.read_text() +
+                   '\nvariable "YOSYS_RECIPE" { default = "stale0" }\n')
+    R.write_recipe_vars(root, {"yosys": ["YOSYS_REF"]})
+    assert R.write_recipe_vars(root, {"yosys": ["YOSYS_REF"]}) == [], \
+        "a second pass must report nothing moved"
+
+
+def test_a_recipe_only_change_makes_the_release_fingerprint_move(tmp_path):
+    """Over pins alone, two images with different bytes share a fingerprint."""
+    root = _tree(tmp_path)
+    pins = {"yosys": "a" * 40}
+    before = R.pins_fingerprint({**pins,
+                                 "recipe:yosys": R.recipe_hash(root, "yosys")})
+    df = root / "tools" / "yosys" / "Dockerfile"
+    df.write_text(df.read_text() + "\n# a different prefix\n")
+    after = R.pins_fingerprint({**pins,
+                                "recipe:yosys": R.recipe_hash(root, "yosys")})
+    assert before != after

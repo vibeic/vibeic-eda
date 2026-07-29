@@ -38,6 +38,22 @@ variable "REGISTRY" { default = "ghcr.io/vibeic" }
 # rather than by which release happened to ship it.
 variable "TAG" { default = "dev" }
 
+# The RECIPE half of an artefact's identity: a digest of the tool's own
+# Dockerfile. Written by fork-gatekeeper/daily_release.py, exactly as the *_REF
+# pins above are. It exists as a bake VARIABLE rather than living only in that
+# program because two places compose a tool tag — `tool_tags` and `eda-local`'s
+# `contexts` map — and when only the program knew about the recipe those two
+# stopped agreeing, which silently disabled the local-build redirect (#21).
+variable "OPENROAD_RECIPE" { default = "7444a2" }
+variable "YOSYS_RECIPE" { default = "74a892" }
+variable "SAT_SOLVERS_RECIPE" { default = "755999" }
+variable "NGSPICE_RECIPE" { default = "be7db2" }
+variable "LVS_RECIPE" { default = "e2e322" }
+variable "IVERILOG_RECIPE" { default = "940079" }
+variable "KLAYOUT_RECIPE" { default = "636653" }
+variable "VERILATOR_RECIPE" { default = "8c0ab6" }
+
+
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
 # These are the ONLY place a tool version is stated. Keep them equal to the
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
@@ -63,8 +79,8 @@ function "short" {
 # resolve to the same image — which is what makes "did this tool change between
 # these two releases" answerable by comparing one string.
 function "tool_tags" {
-  params = [name, ref]
-  result = ["${REGISTRY}/eda-tool-${name}:${short(ref)}"]
+  params = [name, ref, recipe]
+  result = ["${REGISTRY}/eda-tool-${name}:${short(ref)}-${recipe}"]
 }
 
 target "_tool" {
@@ -77,14 +93,14 @@ target "openroad" {
   inherits = ["_tool"]
   context  = "tools/openroad"
   args     = { OPENROAD_REF = OPENROAD_REF }
-  tags     = tool_tags("openroad", OPENROAD_REF)
+  tags     = tool_tags("openroad", OPENROAD_REF, OPENROAD_RECIPE)
 }
 
 target "yosys" {
   inherits = ["_tool"]
   context  = "tools/yosys"
   args     = { YOSYS_REF = YOSYS_REF }
-  tags     = tool_tags("yosys", YOSYS_REF)
+  tags     = tool_tags("yosys", YOSYS_REF, YOSYS_RECIPE)
 }
 
 # Two solvers, one image: both small, both from the same author, both consumed
@@ -98,14 +114,14 @@ target "sat-solvers" {
   inherits = ["_tool"]
   context  = "tools/sat-solvers"
   args     = { KISSAT_REF = KISSAT_REF, CADICAL_REF = CADICAL_REF }
-  tags     = ["${REGISTRY}/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}"]
+  tags     = ["${REGISTRY}/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}-${SAT_SOLVERS_RECIPE}"]
 }
 
 target "ngspice" {
   inherits = ["_tool"]
   context  = "tools/ngspice"
   args     = { NGSPICE_REF = NGSPICE_REF }
-  tags     = tool_tags("ngspice", NGSPICE_REF)
+  tags     = tool_tags("ngspice", NGSPICE_REF, NGSPICE_RECIPE)
 }
 
 # magic + netgen ship together: netgen's LVS only ever runs on magic's
@@ -115,28 +131,28 @@ target "lvs" {
   inherits = ["_tool"]
   context  = "tools/lvs"
   args     = { MAGIC_REF = MAGIC_REF, NETGEN_REF = NETGEN_REF }
-  tags     = ["${REGISTRY}/eda-tool-lvs:${short(MAGIC_REF)}-${short(NETGEN_REF)}"]
+  tags     = ["${REGISTRY}/eda-tool-lvs:${short(MAGIC_REF)}-${short(NETGEN_REF)}-${LVS_RECIPE}"]
 }
 
 target "iverilog" {
   inherits = ["_tool"]
   context  = "tools/iverilog"
   args     = { IVERILOG_REF = IVERILOG_REF }
-  tags     = tool_tags("iverilog", IVERILOG_REF)
+  tags     = tool_tags("iverilog", IVERILOG_REF, IVERILOG_RECIPE)
 }
 
 target "klayout" {
   inherits = ["_tool"]
   context  = "tools/klayout"
   args     = { KLAYOUT_REF = KLAYOUT_REF }
-  tags     = tool_tags("klayout", KLAYOUT_REF)
+  tags     = tool_tags("klayout", KLAYOUT_REF, KLAYOUT_RECIPE)
 }
 
 target "verilator" {
   inherits = ["_tool"]
   context  = "tools/verilator"
   args     = { VERILATOR_REF = VERILATOR_REF }
-  tags     = tool_tags("verilator", VERILATOR_REF)
+  tags     = tool_tags("verilator", VERILATOR_REF, VERILATOR_RECIPE)
 }
 
 group "tools" {
@@ -167,14 +183,14 @@ target "eda-local" {
   inherits = ["eda"]
   tags     = ["${REGISTRY}/vibeic-eda:local"]
   contexts = {
-    "ghcr.io/vibeic/eda-tool-openroad:${short(OPENROAD_REF)}"      = "target:openroad"
-    "ghcr.io/vibeic/eda-tool-yosys:${short(YOSYS_REF)}"            = "target:yosys"
-    "ghcr.io/vibeic/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}" = "target:sat-solvers"
-    "ghcr.io/vibeic/eda-tool-ngspice:${short(NGSPICE_REF)}"        = "target:ngspice"
-    "ghcr.io/vibeic/eda-tool-lvs:${short(MAGIC_REF)}-${short(NETGEN_REF)}" = "target:lvs"
-    "ghcr.io/vibeic/eda-tool-iverilog:${short(IVERILOG_REF)}"      = "target:iverilog"
-    "ghcr.io/vibeic/eda-tool-klayout:${short(KLAYOUT_REF)}"        = "target:klayout"
-    "ghcr.io/vibeic/eda-tool-verilator:${short(VERILATOR_REF)}"    = "target:verilator"
+    "ghcr.io/vibeic/eda-tool-openroad:${short(OPENROAD_REF)}-${OPENROAD_RECIPE}"      = "target:openroad"
+    "ghcr.io/vibeic/eda-tool-yosys:${short(YOSYS_REF)}-${YOSYS_RECIPE}"            = "target:yosys"
+    "ghcr.io/vibeic/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}-${SAT_SOLVERS_RECIPE}" = "target:sat-solvers"
+    "ghcr.io/vibeic/eda-tool-ngspice:${short(NGSPICE_REF)}-${NGSPICE_RECIPE}"        = "target:ngspice"
+    "ghcr.io/vibeic/eda-tool-lvs:${short(MAGIC_REF)}-${short(NETGEN_REF)}-${LVS_RECIPE}" = "target:lvs"
+    "ghcr.io/vibeic/eda-tool-iverilog:${short(IVERILOG_REF)}-${IVERILOG_RECIPE}"      = "target:iverilog"
+    "ghcr.io/vibeic/eda-tool-klayout:${short(KLAYOUT_REF)}-${KLAYOUT_RECIPE}"        = "target:klayout"
+    "ghcr.io/vibeic/eda-tool-verilator:${short(VERILATOR_REF)}-${VERILATOR_RECIPE}"    = "target:verilator"
   }
 }
 

@@ -23,14 +23,14 @@
 # `tools/check_fork_only.py` in the `fork-only` workflow, not by review — the
 # rule previously held only as long as whoever edited 605 lines remembered it.
 
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6
-ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b-7444a2
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6-74a892
+ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-be7db2
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab-940079
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-636653
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670-8c0ab6
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is

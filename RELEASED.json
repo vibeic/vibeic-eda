@@ -1,7 +1,7 @@
 {
-  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look.",
-  "version": "0.2.33",
-  "pins_fingerprint": "e63819db2a81",
+  "_comment": "What the last PUBLISHED image was built from \u2014 pins AND build recipes. Over pins alone this fingerprint could not tell 0.2.33 from 0.2.34, which share every pin and differ in verilator's install prefix.",
+  "version": "0.2.34",
+  "pins_fingerprint": "1ef7835f3b15",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -19,5 +19,15 @@
     "sby": "742213689ee1bff65bc34e27011438edf8ce09f2",
     "verilator": "d9f46707510f7d0ad67579aee755c2aabbf1230e",
     "yosys": "b35f2c6d5867a6be5ae625cec835ee050b4d4580"
+  },
+  "recipes": {
+    "iverilog": "940079",
+    "klayout": "636653",
+    "lvs": "e2e322",
+    "ngspice": "be7db2",
+    "openroad": "7444a2",
+    "sat-solvers": "755999",
+    "verilator": "8c0ab6",
+    "yosys": "74a892"
   }
 }

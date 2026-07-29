@@ -234,6 +234,38 @@ def recipe_hash(eda_root: Path, target: str) -> str:
     return hashlib.sha256(f.read_bytes()).hexdigest()[:6]
 
 
+def bake_recipe_vars(eda_root: Path) -> Dict[str, str]:
+    """What `docker-bake.hcl` currently believes each tool's recipe digest is."""
+    hcl = (eda_root / "docker-bake.hcl").read_text(errors="replace")
+    return {m.group(1): m.group(2) for m in re.finditer(
+        r'variable\s+"([A-Z0-9_]+)_RECIPE"\s*\{\s*default\s*=\s*"([^"]*)"', hcl)}
+
+
+def write_recipe_vars(eda_root: Path, targets: Dict[str, List[str]]) -> List[str]:
+    """Publish each tool's recipe digest into bake. Returns the ones that moved.
+
+    The digest has to live somewhere bake can read because TWO expressions
+    compose a tool tag — `tool_tags()` and `eda-local`'s `contexts` map — and a
+    digest known only to this program made those two disagree, silently
+    disabling the local-build redirect (#21). One value, written here, read by
+    both.
+    """
+    hcl = eda_root / "docker-bake.hcl"
+    text = hcl.read_text(errors="replace")
+    moved: List[str] = []
+    for target in targets:
+        var = target.upper().replace("-", "_") + "_RECIPE"
+        want = recipe_hash(eda_root, target)
+        pat = re.compile(rf'(variable\s+"{var}"\s*\{{\s*default\s*=\s*")[^"]*(")')
+        new = pat.sub(rf"\g<1>{want}\g<2>", text)
+        if new != text:
+            moved.append(f"{var}={want}")
+            text = new
+    if moved:
+        hcl.write_text(text, encoding="utf-8")
+    return moved
+
+
 def artefact_tag(eda_root: Path, target: str, ref_vars: List[str],
                  refs: Dict[str, str]) -> Optional[str]:
     """The full artefact reference: every source commit, then the recipe."""
@@ -418,7 +450,21 @@ def main(argv=None) -> int:
     # exist" cannot be asked of the registry. RELEASED.json records what the last
     # published image was built FROM; a pin set that does not match it has never
     # been released.
-    fp = pins_fingerprint(pins)
+    # Publish the recipe digests BEFORE anything reads a tag, so bake and this
+    # program cannot disagree about what an artefact is called.
+    stale = write_recipe_vars(root, targets)
+    for s in stale:
+        print(f"  recipe changed: {s}")
+
+    # The fingerprint covers pins AND recipes, because an image is built from
+    # both. Over pins alone, 0.2.33 and 0.2.34 — identical pins, different
+    # verilator recipe, different bytes — would share a fingerprint, and
+    # RELEASED.json would be unable to say which one it recorded. It would also
+    # report a recipe-only change as "already released", which is exactly the
+    # #18 shape one layer up.
+    fp = pins_fingerprint({**pins,
+                           **{f"recipe:{k}": recipe_hash(root, k)
+                              for k in targets}})
     rec = released_record(root)
     unreleased = rec.get("pins_fingerprint") != fp
     if unreleased:
