@@ -143,12 +143,19 @@ FOOTER = """<footer>
 # numbers silently went stale: the fork count reached 15, and ~63 reconciled with no
 # band of the ledger at all (open=143, open-with-priority=116, P0-P2=51, P0-P3=83).
 # A hardcoded count beside the data that defines it will always drift, so it is derived.
+#
+# 2026-07-29: the same drift came back in a different form. The COUNT stayed
+# correct and the WORD went wrong — "all __NFORKS__ forks" rendered as "all 15
+# forks" directly above a 21-row ledger, because the survey covers 15 and the
+# fork list grew to 21. A derived number inside a false quantifier is still a
+# false sentence. Both counts are now substituted and "all" is gone; the prose
+# says which forks are not yet surveyed instead of implying there are none.
 GAP = """<section>
     <div class="fork-wrap">
         <div class="section-header" style="text-align:left">
             <p class="eyebrow" data-en="Honest self-assessment" data-zh="誠實自評">Honest self-assessment</p>
             <h2 data-en="What our forks can't do yet — vs commercial EDA" data-zh="我們的 fork 還做不到什麼 — 對照商用 EDA">What our forks can't do yet — vs commercial EDA</h2>
-            <p data-en="We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all __NFORKS__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust." data-zh="我們擁有核心引擎，缺的是上面那層簽核 + 方法學。我們對三大廠（Synopsys／Cadence／Siemens EDA，加上 Ansys／Keysight／Empyrean）做了系統化調查，對照全部 __NFORKS__ 個 fork，整理出一份強化 backlog，目前有 __NOPEN__ 項未交付（直接數下方帳本裡尚未完成的每一列）。最高槓桿的單一項目是 field-solver 級、耦合感知的寄生萃取（PEX）：它是串擾／SI timing、動態 IR-drop、電遷移、點對點可靠性的前置條件 — 一個拱心石解鎖橫跨兩個工具的約五個下游簽核功能。我們公開這份差距；對能力天花板誠實，正是我們贏得信任的方式。">We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against all __NFORKS__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust.</p>
+            <p data-en="We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against __NFORKS__ of the __NTOTAL__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The remaining __NUNSURVEYED__ forks carry no capability rows yet, so a tool with an empty backlog below has not been assessed — it is not a tool with no gaps. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust." data-zh="我們擁有核心引擎，缺的是上面那層簽核 + 方法學。我們對三大廠（Synopsys／Cadence／Siemens EDA，加上 Ansys／Keysight／Empyrean）做了系統化調查，對照 __NTOTAL__ 個 fork 中的 __NFORKS__ 個，整理出一份強化 backlog，目前有 __NOPEN__ 項未交付（直接數下方帳本裡尚未完成的每一列）。其餘 __NUNSURVEYED__ 個 fork 尚無能力列，所以下方 backlog 是空的工具代表「還沒評估」，不是「沒有缺口」。最高槓桿的單一項目是 field-solver 級、耦合感知的寄生萃取（PEX）：它是串擾／SI timing、動態 IR-drop、電遷移、點對點可靠性的前置條件 — 一個拱心石解鎖橫跨兩個工具的約五個下游簽核功能。我們公開這份差距；對能力天花板誠實，正是我們贏得信任的方式。">We own the core engines; what we lack is the signoff + methodology layer on top. A systematic survey of the leading commercial suites (Synopsys / Cadence / Siemens EDA + Ansys / Keysight / Empyrean) against __NFORKS__ of the __NTOTAL__ forks produced an enhancement backlog of __NOPEN__ open items (every row not yet delivered, counted straight from the ledger below). The remaining __NUNSURVEYED__ forks carry no capability rows yet, so a tool with an empty backlog below has not been assessed — it is not a tool with no gaps. The single highest-leverage item is field-solver-accurate, coupling-aware parasitic extraction (PEX): it is a prerequisite for crosstalk/SI timing, dynamic IR-drop, electromigration, and point-to-point reliability — one keystone unblocks roughly five downstream signoff features across two tools. We publish this gap openly; honesty about the ceiling is how we earn trust.</p>
         </div>
 
         <div class="fork-scroll">
@@ -535,6 +542,8 @@ def build(out: Path):
     html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", nav).replace("__FOOTER__", footer)
             .replace("__GAP__", GAP
                      .replace("__NFORKS__", str(len(enh)))
+                     .replace("__NTOTAL__", str(len(ledgers)))
+                     .replace("__NUNSURVEYED__", str(max(0, len(ledgers) - len(enh))))
                      .replace("__NOPEN__", str(sum(
                          1 for v in enh.values() for r in v.get("rows", [])
                          if r.get("status") in ("todo", "deferred")))))
