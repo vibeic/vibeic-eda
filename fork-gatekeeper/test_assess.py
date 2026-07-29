@@ -6,6 +6,7 @@ the clearly-safe gate, the stub/degraded classify normalization, and the markdow
 render. Run:  python3 test_assess.py
 """
 import json
+import textwrap
 import os
 import sys
 import tempfile
@@ -1430,9 +1431,25 @@ def test_confirm_is_bounded_and_never_calls_the_api_itself():
         J.confirm(commits, {"sha001": (True, "low")},
                   lambda cs: seen.append(1) or {"sha001": (True, "low")}, extra=asked)
         assert len(seen) == want, (asked, len(seen))
+    # CODE, not prose. `inspect.getsource` returns the docstring and every
+    # comment, so a line in `confirm`'s own documentation saying it must never
+    # call `urlopen` would turn this red — the test would punish the sentence
+    # that states the property it enforces, and the fix would be to delete the
+    # explanation. Same trap in the other direction as the vibe-ic#551 ordering
+    # check, which read six step names out of comments and reported all six as
+    # violations.
+    import ast
     import inspect
-    src = inspect.getsource(J.confirm)
-    assert "urlopen" not in src and "_judge_chunk" not in src
+    tree = ast.parse(textwrap.dedent(inspect.getsource(J.confirm)))
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    called |= {n.func.attr for n in ast.walk(tree)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    for banned in ("urlopen", "_judge_chunk"):
+        assert banned not in called, (
+            f"`confirm` calls {banned}() — it must stay a pure combinator over "
+            f"an INJECTED sampler, or `judge()` is no longer the only "
+            f"token-spending call in the module")
 
 
 def test_the_sample_count_has_a_floor_and_survives_a_garbage_env():
