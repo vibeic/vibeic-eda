@@ -265,8 +265,15 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/foss/tools/klayout-vibeic:${LD_
 # are already in the base). Otherwise the editable build dies with
 # "fatal error: Python.h: No such file or directory".
 COPY --from=tb-src /tb /opt/vibeic-forks
+# libxcb-cursor0: the 2026-07-29 daily merge moved OpenROAD's default build to
+# Bazel, and the resulting binary links a newer Qt needing libxcb-cursor.so.0,
+# which the base does not ship. MEASURED on the first composed image after the
+# merge: `openroad -version` died with `error while loading shared libraries:
+# libxcb-cursor.so.0`, and ldd showed it as the ONLY unresolved library. The
+# pre-merge binary linked xcb but never this one.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
+      libxcb-cursor0 \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
