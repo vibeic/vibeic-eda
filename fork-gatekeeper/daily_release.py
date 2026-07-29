@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -64,7 +65,57 @@ RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 SHORT = 7
 
 
-def _sh(cmd, cwd=None, timeout=7200, stream=False):
+#: Environment every buildx invocation gets.
+#:
+#: buildkit truncates a single step's log at 2 MiB by default and says so only
+#: in a line that is itself easy to miss. The ALIGN step blows past that — CBC
+#: builds serially and is verbose — so exactly the step that has wedged four
+#: times is the one whose log stops. `-1` removes the limit.
+#:
+#: BUT ONLY WHERE BUILDKIT READS IT, WHICH IS NOT HERE BY DEFAULT. The variable
+#: is read by the buildkit DAEMON, not by the buildx client. With the `docker`
+#: driver — the default, and what this host uses — buildkit lives inside
+#: dockerd, so exporting it into the client process does exactly nothing.
+#: Measured: the klayout build with this env in place still printed
+#: `[output clipped, log limit 2MiB reached]`.
+#:
+#: It is kept because it IS the correct setting for the `docker-container`
+#: driver, where buildx passes the env through to the builder container. What
+#: is not kept is the silence: `log_limit_effective()` below reports when this
+#: cannot work, so the setting cannot look like it is doing something.
+BUILD_ENV = {"BUILDKIT_STEP_LOG_MAX_SIZE": "-1",
+             "BUILDKIT_PROGRESS": "plain"}
+
+
+def log_limit_effective() -> Optional[bool]:
+    """Can BUILDKIT_STEP_LOG_MAX_SIZE actually take effect here?
+
+    None when the driver cannot be read — not-known, which must not read as a
+    pass. This is the second time in two days that a fix of mine changed the
+    layer I control while the behaviour lived one layer further out (the first
+    removed our COPY of a directory the BASE image ships). The cheap defence is
+    the same both times: have the program say which layer it reached.
+    """
+    rc, out, _ = _sh(["docker", "buildx", "inspect"], timeout=60)
+    if rc != 0 or not out.strip():
+        return None
+    for line in out.splitlines():
+        if line.lower().startswith("driver:"):
+            return line.split(":", 1)[1].strip() != "docker"
+    return None
+
+#: Deadlines, set from measurement rather than from caution.
+#:
+#: Observed composes run 13–20 minutes when every artefact is already pulled,
+#: and the longest legitimate one is a cold ALIGN build, whose CBC dependency
+#: compiles serially upstream. 90 minutes clears that with room and still turns
+#: an overnight wedge into a morning failure instead of a morning mystery.
+#: Tool builds get longer: klayout with Qt is the slowest of them.
+COMPOSE_TIMEOUT = 5400
+TOOL_BUILD_TIMEOUT = 10800
+
+
+def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
     """Run a command. `stream=True` lets its output through to OUR stdout.
 
     Capturing is right for the short API calls, and wrong for the two builds:
@@ -77,15 +128,30 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False):
 
     Streaming gives up the captured text for the failure message. The output is
     in the log instead, which is more than the tail we were printing.
+
+    A TIMEOUT IS REPORTED AS A TIMEOUT. The wedge has cost four manual
+    interventions, each of which began with me deciding by hand whether a silent
+    build was working; `subprocess` already knows when it has waited too long,
+    and the only reason that never turned into a failure is that the deadline was
+    two hours and nobody waited for it.
     """
+    full = None
+    if env:
+        full = dict(os.environ)
+        full.update(env)
     try:
         if stream:
             sys.stdout.flush()
-            p = subprocess.run(cmd, cwd=cwd, timeout=timeout)
+            p = subprocess.run(cmd, cwd=cwd, timeout=timeout, env=full)
             return p.returncode, "", "(output streamed to the log above)"
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, env=full)
         return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 1, "", (f"TIMED OUT after {timeout}s with no exit. This is the "
+                       f"signature recorded in vibeic-eda#26: buildx alive, no "
+                       f"compiler running, no disk write, no network. Treated as "
+                       f"a failure so the release stops instead of hanging.")
     except Exception as exc:                                   # noqa: BLE001
         return 1, "", str(exc)
 
@@ -582,6 +648,17 @@ def main(argv=None) -> int:
             print(f"  retag {t}")
 
         if not a.no_build:
+            eff = log_limit_effective()
+            if eff is False:
+                print("  NOTE: the buildx driver is `docker`, so buildkit runs "
+                      "inside dockerd and BUILDKIT_STEP_LOG_MAX_SIZE cannot "
+                      "reach it from here — a long step's log WILL be clipped "
+                      "at 2 MiB. To lift it, put the variable in dockerd's own "
+                      "environment, or build on a `docker-container` builder "
+                      "created with --driver-opt env.BUILDKIT_STEP_LOG_MAX_SIZE=-1.")
+            elif eff is None:
+                print("  NOTE: could not read the buildx driver, so whether the "
+                      "step-log limit is lifted is UNKNOWN — not assumed lifted.")
             build = sorted(missing_artefacts(root, refs_now, targets))
             if build:
                 print(f"  artefacts to build (absent, not merely moved): "
@@ -611,7 +688,8 @@ def main(argv=None) -> int:
                                   str(root / "docker-bake.hcl"), "--push",
                                   "--progress", "plain",
                                   "--set", f"{t}.tags={want}", t], cwd=root,
-                                 stream=True)
+                                 stream=True, env=BUILD_ENV,
+                                 timeout=TOOL_BUILD_TIMEOUT)
                 if rc != 0:
                     print(f"[FAIL] {t} did not build; the release stops here so "
                           f"a broken tool is not tagged as a version:\n"
@@ -661,12 +739,19 @@ def main(argv=None) -> int:
             bake = ["docker", "buildx", "bake", "-f",
                     str(root / "docker-bake.hcl"), "--load", "--progress",
                     "plain", "--set", f"eda.tags={tag}", "eda"]
-            rc, _, err = _sh(bake, cwd=root, stream=True)
+            rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
+                             timeout=COMPOSE_TIMEOUT)
             if rc != 0:
                 print("  registry compose failed once; retrying before "
                       "downgrading (a transient must not cost reproducibility)",
                       flush=True)
-                rc, _, err = _sh(bake, cwd=root, stream=True)
+                # The RETRY needs the deadline more than the first attempt does,
+                # not less: it runs after something already went wrong, and an
+                # unbounded retry turns a failure into a hang. Found by the
+                # wiring test, which is the whole reason that test asserts about
+                # every call site instead of the one I was editing.
+                rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
+                                 timeout=COMPOSE_TIMEOUT)
             if rc != 0:
                 # NO LOCAL FALLBACK. There used to be one — compose `eda-local`,
                 # which redirects each tool to a freshly built target — and it

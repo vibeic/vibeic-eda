@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look.",
-  "version": "0.2.38",
-  "pins_fingerprint": "29adecf6d15d",
+  "version": "0.2.44",
+  "pins_fingerprint": "7580c9bbf5f3",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",

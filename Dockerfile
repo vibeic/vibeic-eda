@@ -35,7 +35,7 @@ ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-be7db2
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab-940079
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-636653
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-be57bf
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670-8c0ab6
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c8b26a1-382491
@@ -176,6 +176,74 @@ RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public
  && git clone https://github.com/vibeic/ALIGN-pdk-sky130.git /align/ALIGN-pdk-sky130 && git -C /align/ALIGN-pdk-sky130 checkout ${ALIGN_PDK_SKY130_REF} \
  && test -f /align/ALIGN-public/setup.py \
  && test -f /align/ALIGN-pdk-sky130/SKY130_PDK/mos.py
+
+# ---------------------------------------------------------------------------
+# Stage 11b — ALIGN, BUILT IN ITS OWN STAGE (vibeic-eda#26).
+#
+# This used to be a RUN near the end of the runtime image, and that placement —
+# not the build itself — is what made every release expensive. ALIGN compiles
+# the COIN-OR stack, which upstream builds with `make -j1`, so it dominates the
+# compose: roughly 93% of the wall time. A layer that late is invalidated by
+# ANY change above it, so a one-line edit to a tool COPY rebuilt ALIGN from
+# scratch. The image was incremental per TOOL and not incremental at all for
+# the thing that actually costs.
+#
+# As its own stage the build is keyed on what it genuinely depends on: the base
+# image, the two pinned ALIGN refs, and this recipe. Change a klayout pin and
+# ALIGN is reused; change an ALIGN pin and it rebuilds, which is the point.
+#
+# FROM ${BASE_IMAGE} deliberately, not a slimmer python image: a venv hard-codes
+# the interpreter it was created with, in its `pyvenv.cfg` and in every
+# `bin/` shebang, and the extension modules are compiled against that ABI. Built
+# against a different python3 it would copy into the runtime and fail on import
+# — the kind of break that survives a green build.
+#
+# The self-test stays HERE rather than moving to the runtime, so a broken ALIGN
+# fails the stage that produced it.
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS align-build
+USER root
+# python3-dev is NOT in the base, and the old inline placement got it for free:
+# an unrelated RUN 130 lines earlier installs it for the cocotb editable
+# installs, and ALIGN happened to be built after that. Splitting the stage
+# turned that implicit ordering into a missing header — `gdspy/clipper.cpp:43:
+# fatal error: Python.h: No such file or directory` — which is the honest
+# version of the dependency. A stage that states what it needs is the point of
+# having one.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      --no-install-recommends python3-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=align-src /align /opt/align-src
+RUN unset PYTHONPATH \
+ && python3 -m venv /foss/tools/align \
+ && /foss/tools/align/bin/pip install --no-cache-dir -q -U pip setuptools wheel \
+ && /foss/tools/align/bin/pip install --no-cache-dir /opt/align-src/ALIGN-public \
+ && /foss/tools/align/bin/pip install --no-cache-dir -q pytest \
+ && rm -rf /opt/align-src/ALIGN-public/_skbuild \
+ && printf '#!/bin/sh\n# vibeic wrapper: run ALIGN from its isolated venv (/foss/tools/align).\n# `env -u PYTHONPATH` is load bearing: this image exports a global PYTHONPATH that\n# would otherwise shadow the venv with the system pydantic 2 and break ALIGN.\n# No LD_LIBRARY_PATH needed: the COIN-OR solvers are linked statically into PnR*.so.\nexec env -u PYTHONPATH /foss/tools/align/bin/python /foss/tools/align/bin/schematic2layout.py "$@"\n' > /foss/tools/bin/align-schematic2layout \
+ && printf '#!/bin/sh\n# vibeic wrapper: the ALIGN venv interpreter, insulated from the global PYTHONPATH.\nexec env -u PYTHONPATH /foss/tools/align/bin/python "$@"\n' > /foss/tools/bin/align-python \
+ && chmod +x /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python \
+ && mkdir -p /foss/tools/align/Viewer/INPUT \
+ && chmod -R a+rX /foss/tools/align /opt/align-src \
+# SELF-TEST — a successful pip install proves nothing about a P&R tool. Generate a real
+# layout at a NON-nominal channel length and require (a) the GDS to actually contain
+# geometry and (b) the drawn poly gates to equal the netlist L. (b) is the discriminating
+# check: upstream's sky130 PDK draws every gate at the fixed 150nm Poly.Width, so if this
+# image ever picks up upstream instead of vibeic/ALIGN-pdk-sky130 the build FAILS here.
+ && cp -r /opt/align-src/ALIGN-pdk-sky130/examples/five_transistor_ota /tmp/align-selftest \
+ && sed -i s/L=150e-9/L=500e-9/g /tmp/align-selftest/five_transistor_ota.sp \
+ && cd /tmp/align-selftest \
+ && { /foss/tools/bin/align-schematic2layout . -f /tmp/align-selftest/five_transistor_ota.sp \
+        -p /opt/align-src/ALIGN-pdk-sky130/SKY130_PDK > /tmp/align-selftest/run.log 2>&1 \
+      || { echo '=== ALIGN self-test FAILED — run.log follows (the build layer is about to be discarded, so it is printed here) ==='; \
+           tail -120 /tmp/align-selftest/run.log; exit 1; }; } \
+ && /foss/tools/align/bin/python -c 'import gdspy; lib=gdspy.GdsLibrary(infile="/tmp/align-selftest/FIVE_TRANSISTOR_OTA_0.gds"); cell=lib.top_level()[0]; ps=cell.get_polygons(by_spec=True); n=sum(len(v) for v in ps.values()); gates=sorted({round((p[:,0].max()-p[:,0].min())*1e9) for p in ps[(66,20)] if (p[:,1].max()-p[:,1].min()) >= (p[:,0].max()-p[:,0].min())}); print("ALIGN self-test: top cell %s, geometry polygons=%d, vertical poly 66/20 gate lengths(nm)=%s" % (cell.name, n, gates)); assert n > 0, "FAIL: ALIGN emitted a GDS with no geometry"; assert gates == [500], "FAIL: gates not drawn at the netlist L=500nm -> the sky130 PDK in this image is NOT our patched fork"' \
+# and the PDK fork's own regression guard, which ships a NEGATIVE CONTROL proving the
+# guard is capable of failing (revert the fix -> 3 of its 6 tests fail).
+ && cd /opt/align-src/ALIGN-pdk-sky130 \
+ && env -u PYTHONPATH PATH=/foss/tools/align/bin:$PATH /foss/tools/align/bin/python -m pytest -q tests/test_channel_length.py \
+ && rm -rf /tmp/align-selftest /opt/align-src/ALIGN-pdk-sky130/.pytest_cache \
+ && echo "ALIGN OK: built from vibeic source; sky130 PDK honours netlist L; 6/6 channel-length guards pass"
 
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
@@ -585,42 +653,67 @@ RUN A7T=/foss/pdks/asap7/libs.tech \
 # fetched and compiled by ALIGN's CMake during pip install. CBC's own build is serial
 # (`make -j1`, fixed upstream) and dominates the wall time of this layer. That cost is
 # accepted deliberately. `_skbuild` (~1.4 GB of intermediates) is deleted in the SAME layer.
-COPY --from=align-src /align /opt/align-src
+# Built and self-tested in the `align-build` stage above; taken here as bytes.
+# The venv, the source trees and the two wrappers are all that survive — the
+# ~1.4 GB `_skbuild` intermediates and the compilers never enter this image.
+COPY --from=align-build /foss/tools/align /foss/tools/align
+COPY --from=align-build /opt/align-src /opt/align-src
+COPY --from=align-build /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python /foss/tools/bin/
 ENV ALIGN_HOME=/foss/tools/align \
     ALIGN_PDK_SKY130=/opt/align-src/ALIGN-pdk-sky130/SKY130_PDK
-RUN unset PYTHONPATH \
- && python3 -m venv /foss/tools/align \
- && /foss/tools/align/bin/pip install --no-cache-dir -q -U pip setuptools wheel \
- && /foss/tools/align/bin/pip install --no-cache-dir /opt/align-src/ALIGN-public \
- && /foss/tools/align/bin/pip install --no-cache-dir -q pytest \
- && rm -rf /opt/align-src/ALIGN-public/_skbuild \
- && printf '#!/bin/sh\n# vibeic wrapper: run ALIGN from its isolated venv (/foss/tools/align).\n# `env -u PYTHONPATH` is load bearing: this image exports a global PYTHONPATH that\n# would otherwise shadow the venv with the system pydantic 2 and break ALIGN.\n# No LD_LIBRARY_PATH needed: the COIN-OR solvers are linked statically into PnR*.so.\nexec env -u PYTHONPATH /foss/tools/align/bin/python /foss/tools/align/bin/schematic2layout.py "$@"\n' > /foss/tools/bin/align-schematic2layout \
- && printf '#!/bin/sh\n# vibeic wrapper: the ALIGN venv interpreter, insulated from the global PYTHONPATH.\nexec env -u PYTHONPATH /foss/tools/align/bin/python "$@"\n' > /foss/tools/bin/align-python \
- && chmod +x /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python \
- && mkdir -p /foss/tools/align/Viewer/INPUT \
- && chmod -R a+rX /foss/tools/align /opt/align-src \
-# SELF-TEST — a successful pip install proves nothing about a P&R tool. Generate a real
-# layout at a NON-nominal channel length and require (a) the GDS to actually contain
-# geometry and (b) the drawn poly gates to equal the netlist L. (b) is the discriminating
-# check: upstream's sky130 PDK draws every gate at the fixed 150nm Poly.Width, so if this
-# image ever picks up upstream instead of vibeic/ALIGN-pdk-sky130 the build FAILS here.
- && cp -r /opt/align-src/ALIGN-pdk-sky130/examples/five_transistor_ota /tmp/align-selftest \
- && sed -i s/L=150e-9/L=500e-9/g /tmp/align-selftest/five_transistor_ota.sp \
- && cd /tmp/align-selftest \
- && { /foss/tools/bin/align-schematic2layout . -f /tmp/align-selftest/five_transistor_ota.sp \
-        -p ${ALIGN_PDK_SKY130} > /tmp/align-selftest/run.log 2>&1 \
-      || { echo '=== ALIGN self-test FAILED — run.log follows (the build layer is about to be discarded, so it is printed here) ==='; \
-           tail -120 /tmp/align-selftest/run.log; exit 1; }; } \
- && /foss/tools/bin/align-python -c 'import gdspy; lib=gdspy.GdsLibrary(infile="/tmp/align-selftest/FIVE_TRANSISTOR_OTA_0.gds"); cell=lib.top_level()[0]; ps=cell.get_polygons(by_spec=True); n=sum(len(v) for v in ps.values()); gates=sorted({round((p[:,0].max()-p[:,0].min())*1e9) for p in ps[(66,20)] if (p[:,1].max()-p[:,1].min()) >= (p[:,0].max()-p[:,0].min())}); print("ALIGN self-test: top cell %s, geometry polygons=%d, vertical poly 66/20 gate lengths(nm)=%s" % (cell.name, n, gates)); assert n > 0, "FAIL: ALIGN emitted a GDS with no geometry"; assert gates == [500], "FAIL: gates not drawn at the netlist L=500nm -> the sky130 PDK in this image is NOT our patched fork"' \
-# and the PDK fork's own regression guard, which ships a NEGATIVE CONTROL proving the
-# guard is capable of failing (revert the fix -> 3 of its 6 tests fail).
- && cd /opt/align-src/ALIGN-pdk-sky130 \
- && env -u PYTHONPATH PATH=/foss/tools/align/bin:$PATH /foss/tools/align/bin/python -m pytest -q tests/test_channel_length.py \
- && rm -rf /tmp/align-selftest /opt/align-src/ALIGN-pdk-sky130/.pytest_cache \
- && echo "ALIGN OK: built from vibeic source; sky130 PDK honours netlist L; 6/6 channel-length guards pass"
+# ALIGN configures logging AT IMPORT and writes /foss/designs/LOG/align.log, so
+# the directory has to exist and belong to the runtime user. Created here rather
+# than left to whoever imports first: in 0.2.42 the verification below ran as
+# root before `USER 1000`, created this directory owned by root, and every later
+# `import align` as uid 1000 died with EACCES. The image shipped with ALIGN
+# broken and the check that broke it reported a pass — see the note on the
+# verification itself.
+RUN mkdir -p /foss/designs/LOG && chown -R 1000:1000 /foss/designs \
+# ALIGN WRITES INTO ITS OWN INSTALL PREFIX, and until now no user could.
+# `align-schematic2layout` writes each block's JSON to
+# /foss/tools/align/Viewer/INPUT before placement, and that tree was created by
+# root and left `a+rX` — readable, executable, NOT writable. So every shipped
+# image has had an ALIGN that dies on a real run as uid 1000:
+#
+#   PermissionError: [Errno 13] Permission denied:
+#     '/foss/tools/align/Viewer/INPUT/FIVE_TRANSISTOR_OTA_0.json'
+#
+# Reproduced identically on 0.2.41 and 0.2.43, so it is long-standing rather
+# than new. It survived because the build's self-test runs as root, where the
+# permission does not apply — the tool was verified in an identity no user has.
+ && chown -R 1000:1000 /foss/tools/align/Viewer
 
 # restore the base's non-root runtime user
 USER 1000
+
+# ALIGN, VERIFIED AS THE USER WHO WILL RUN IT. The copy is not the claim: a venv
+# whose interpreter did not survive it, or a wrapper whose PYTHONPATH insulation
+# this image's global ENV defeats, would both pass the build stage's own
+# self-test and fail the user.
+#
+# AFTER `USER 1000`, and that placement is the whole lesson. The first version
+# of this check sat above, ran as root, passed, and in doing so created
+# /foss/designs/LOG owned by root — which is precisely what made `import align`
+# fail for uid 1000 in 0.2.42. A probe placed in the wrong identity does not
+# merely fail to see the defect: this one CAUSED it, then reported clean. Run
+# as root it is a check of something nobody does; run here it is a check of what
+# the flow actually does.
+#
+# AND IT IS A REAL RUN, not an import and a `--help`. Both of those passed on
+# 0.2.43 while an actual placement died on a read-only Viewer directory. A check
+# that stops before the tool writes anything cannot see a permission defect, and
+# permissions are the entire failure mode of copying a root-built tree into an
+# image whose user is 1000.
+RUN /foss/tools/bin/align-python -c 'import align, gdspy, pydantic; assert pydantic.VERSION.startswith("1."), "the venv resolved the global pydantic 2 — the wrapper insulation is broken: %s" % pydantic.VERSION; print("ALIGN reachable as the runtime user: align %s, pydantic %s" % (align.__version__, pydantic.VERSION))' \
+ && cp -r /opt/align-src/ALIGN-pdk-sky130/examples/five_transistor_ota /tmp/align-usercheck \
+ && cd /tmp/align-usercheck \
+ && { /foss/tools/bin/align-schematic2layout . -f /tmp/align-usercheck/five_transistor_ota.sp \
+        -p ${ALIGN_PDK_SKY130} > /tmp/align-usercheck/run.log 2>&1 \
+      || { echo '=== ALIGN FAILS AS THE RUNTIME USER — run.log follows ==='; \
+           tail -40 /tmp/align-usercheck/run.log; exit 1; }; } \
+ && test -s /tmp/align-usercheck/FIVE_TRANSISTOR_OTA_0.gds \
+ && rm -rf /tmp/align-usercheck \
+ && echo "ALIGN OK as uid 1000: a real placement ran and wrote a GDS"
 
 # --- bare `docker exec` PATH (vibeic enhancement over stock iic-osic-tools) ---
 # The stock base only puts /foss/tools/* on PATH via /etc/profile.d/iic-osic-tools-setup.sh,

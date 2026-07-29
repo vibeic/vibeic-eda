@@ -22,12 +22,49 @@ ARG KLAYOUT_REPO=https://github.com/vibeic/klayout.git
 ARG KLAYOUT_REF=39b6a09249a97b9739f46d9404018bbd69675751  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
-      qtbase5-dev qttools5-dev-tools ca-certificates \
+      qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+      qt6-multimedia-dev qt6-svg-dev qt6-5compat-dev libqt6opengl6-dev \
+      ruby-dev \
+      ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-# build.sh needs qmake in PATH to drive the build system even with -without-qt.
+# BUILT WITH Qt, deliberately (vibeic-eda#17). `-without-qt` produces libraries and
+# buddy tools but NO `klayout` binary, so the CLI on PATH stayed the base image's
+# June build and our fork reached only `svrfdrc`. That mattered: the canonical
+# sign-off GDS is produced by `ly.read(def_path, …)` through KLayout's LEF/DEF
+# importer — the exact code our fork patches to honour tech-LEF
+# MANUFACTURINGGRID — so the grid snap was compiled, pinned, shipped and loaded
+# by nothing on the sign-off path.
+#
+# Qt6, not Qt5: the base image's klayout links libQt6Core, libQt6Widgets and
+# twelve more, so a Qt5 build would not be a drop-in replacement for it. Package
+# names verified resolvable on ubuntu:24.04 before spending the build, which is
+# the check the gtkwave GTK3/GTK4 failure earned.
+#
+# `-qmake` is required, and is the second thing that check caught: `build.sh`
+# resolves `qmake` from PATH, and the Qt6 packages install `qmake6` there while
+# the unsuffixed binary lives at /usr/lib/qt6/bin/qmake. With qtbase5-dev gone
+# there is no `qmake` on PATH at all, so the build would have failed after the
+# apt layer for a reason that has nothing to do with the code.
+#
+# RUBY IS NOT OPTIONAL HERE, and this is the third thing the first Qt build
+# taught. That build succeeded and produced `klayout` — and shipped WITHOUT
+# libklayout_drc.so and libklayout_lvs.so, because src/klayout.pro reads
+#
+#     equals(HAVE_RUBY, "1") { SUBDIRS += drc lvs }
+#
+# and we passed `-noruby`. The DRC and LVS engines are compiled as Ruby-backed
+# subdirectories even when they are driven from Python or from a .lydrc script,
+# so `-noruby` silently drops the two things this image exists to run. Installing
+# that build over the base's klayout would have removed sign-off DRC and LVS
+# while every check we own reported a pass: `check_no_capability_lost` asks
+# whether a NAME still resolves, and `libklayout_drc.so` is not a name on PATH.
 RUN git clone "${KLAYOUT_REPO}" /klayout \
  && cd /klayout && git checkout ${KLAYOUT_REF} \
- && ./build.sh -without-qt -noruby -nolibgit2 -j"$(nproc)" -bin /foss/tools/klayout-vibeic -build /klayout/bld
+ && ./build.sh -qmake /usr/lib/qt6/bin/qmake -nolibgit2 -j"$(nproc)" -bin /foss/tools/klayout-vibeic -build /klayout/bld \
+ && for e in klayout libklayout_drc.so libklayout_lvs.so libklayout_db.so; do \
+      test -e "/klayout/bld/$e" || { echo "FAIL: the build produced no $e"; exit 1; }; \
+    done \
+ && echo "klayout OK: main binary + DRC/LVS engines present"
 # ---------------------------------------------------------------------------
 # Stage 6b — vibeic/verilator. Previously NOT layered: the note here read "no honest
 #   fix warranted on v5.051 — nothing to layer", which was true at the time. It is no

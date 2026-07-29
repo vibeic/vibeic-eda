@@ -25,6 +25,10 @@ gate stays green through a runtime failure on the line it claims to check.
 from __future__ import annotations
 
 import json
+import ast
+import pathlib
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -284,3 +288,125 @@ def test_branch_is_ours_is_none_when_it_cannot_tell(monkeypatch):
     monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "up/stream", "")
                         if "repos/vibeic/x" == a[0][2] else (1, "", "boom"))
     assert R.branch_is_ours("x", "master") is None
+
+
+# --- vibeic-eda#26: a wedged build must become a failure, and its log must survive
+
+
+def test_a_build_that_never_exits_is_reported_as_a_timeout(monkeypatch):
+    """The wedge has cost four manual interventions. `subprocess` already knew.
+
+    Four times a compose sat with buildx alive, no compiler running, no disk
+    write and no network, and four times the decision to stop it was mine to
+    make by hand. The deadline existed the whole time — it was two hours, and
+    nobody was watching for two hours.
+    """
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="docker buildx bake", timeout=5400)
+    monkeypatch.setattr(R.subprocess, "run", boom)
+    rc, out, err = R._sh(["docker", "buildx", "bake"], timeout=5400)
+    assert rc == 1
+    assert "TIMED OUT" in err and "5400" in err
+    # and it must be attributable, not just a failure
+    assert "#26" in err
+
+
+def test_build_env_reaches_the_subprocess_and_keeps_the_inherited_environment(monkeypatch):
+    """`env=` REPLACES the environment; the build needs PATH and DOCKER_HOST too."""
+    seen = {}
+
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def rec(cmd, **k):
+        seen.update(k.get("env") or {})
+        return P()
+    monkeypatch.setenv("A_HOST_VAR_THE_BUILD_NEEDS", "present")
+    monkeypatch.setattr(R.subprocess, "run", rec)
+    R._sh(["docker", "buildx", "bake"], env=R.BUILD_ENV)
+    assert seen.get("BUILDKIT_STEP_LOG_MAX_SIZE") == "-1"
+    assert seen.get("A_HOST_VAR_THE_BUILD_NEEDS") == "present", \
+        "the inherited environment was dropped — PATH would go with it"
+
+
+def test_no_env_leaves_the_environment_alone(monkeypatch):
+    """Passing env=None must not materialise a copy: the API calls don't need one."""
+    seen = {"env": "unset"}
+
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(R.subprocess, "run",
+                        lambda cmd, **k: (seen.update(env=k.get("env")), P())[1])
+    R._sh(["gh", "api", "x"])
+    assert seen["env"] is None
+
+
+def test_every_buildx_invocation_is_bounded_and_carries_the_build_env():
+    """WIRING, which is where this class of fix leaks.
+
+    Adding the deadline to `_sh` does nothing for a call site that does not pass
+    it, and the two bake calls are the only ones that matter. Stated limit: this
+    reads the call sites rather than executing them — a real bake is not a unit
+    test — so it can only catch an UNWIRED call, not a mis-wired one. The
+    behaviour of what it wires is covered by the two tests above.
+    """
+    tree = ast.parse(pathlib.Path(R.__file__).read_text())
+    # Resolve the two names bound to a bake command list, so the call site that
+    # passes a variable is judged the same as the one that passes a literal.
+    # `bake`, not `buildx`: the property is about BUILDS. `buildx inspect` is a
+    # buildx call that needs neither a build environment nor an hours-long
+    # deadline, and an over-broad predicate that flags it would be trained away
+    # the first time it fired — which is how a gate stops meaning anything.
+    bake_vars = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                 for t in n.targets if isinstance(t, ast.Name)
+                 and "'bake'" in ast.dump(n.value)}
+    calls = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_sh" and n.args):
+            continue
+        a0 = n.args[0]
+        literal = "'bake'" in ast.dump(a0)
+        by_name = isinstance(a0, ast.Name) and a0.id in bake_vars
+        if literal or by_name:
+            calls.append(n)
+    assert len(calls) >= 2, f"expected both bake call sites, found {len(calls)}"
+    for c in calls:
+        kw = {k.arg: ast.dump(k.value) for k in c.keywords}
+        assert "BUILD_ENV" in kw.get("env", ""), \
+            f"a buildx call at line {c.lineno} passes no BUILD_ENV"
+        assert "TIMEOUT" in kw.get("timeout", ""), \
+            f"a buildx call at line {c.lineno} has no bounded deadline"
+
+
+def test_the_deadlines_clear_the_measured_build_times():
+    """Set from measurement: composes run 13-20 min, tool builds longer."""
+    assert R.COMPOSE_TIMEOUT >= 20 * 60 * 2
+    assert R.TOOL_BUILD_TIMEOUT > R.COMPOSE_TIMEOUT
+
+
+def test_the_log_limit_reports_that_the_docker_driver_cannot_honour_it(monkeypatch):
+    """Measured: with the `docker` driver the setting is a no-op, and silently.
+
+    buildkit reads BUILDKIT_STEP_LOG_MAX_SIZE in the DAEMON. With the default
+    driver the daemon is dockerd, which does not inherit the client's
+    environment — so a release can pass the variable, print nothing, and still
+    clip the log of the one step that keeps wedging.
+    """
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "Name: default\nDriver: docker\n", ""))
+    assert R.log_limit_effective() is False
+    monkeypatch.setattr(R, "_sh",
+                        lambda *a, **k: (0, "Name: b\nDriver: docker-container\n", ""))
+    assert R.log_limit_effective() is True
+
+
+def test_an_unreadable_driver_is_unknown_not_effective(monkeypatch):
+    """Fail-safe direction: unknown must not read as 'the limit is lifted'."""
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (1, "", "no such builder"))
+    assert R.log_limit_effective() is None
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "Name: default\n", ""))
+    assert R.log_limit_effective() is None
