@@ -54,9 +54,47 @@ export GH_TOKEN="${TOKEN}"
 # nothing on a clean day. Set GK_MERGE_PR=0 to disable.
 export GK_MERGE_PR="${GK_MERGE_PR:-1}"
 
+# The fork-only rule, enforced HERE because GitHub Actions does not run on this
+# repo. Measured 2026-07-29: `actions/runs` -> total_count 0, for every workflow
+# including the pre-existing image-version-sync, while `actions/permissions`
+# reports enabled. So `.github/workflows/fork-only.yml` is registered and never
+# fires, and a rule enforced only there would be enforced nowhere.
+#
+# This tick already runs from the checked-out repo on a schedule, so it is the
+# one place the checks reliably execute. It does NOT gate the tick: upstream
+# tracking is useful whether or not a pin disagrees with itself, and coupling
+# them would mean one bad pin silently stops the fork monitoring too. It records
+# the verdict where the daily report can show it.
+GUARD_OUT="${LOG_DIR}/source-guards.txt"
+: > "${GUARD_OUT}"
+guard_rc=0
+for g in check_fork_only.py check_pins_agree.py; do
+    if [ -f "${DIR}/../tools/${g}" ]; then
+        log "[guard] ${g}"
+        if ! python3 "${DIR}/../tools/${g}" >>"${GUARD_OUT}" 2>&1; then
+            guard_rc=1
+        fi
+    else
+        # A missing guard is not a passing guard. If tools/ moves or is renamed,
+        # this must say so rather than quietly checking nothing.
+        echo "MISSING: tools/${g} — nothing was checked" >> "${GUARD_OUT}"
+        guard_rc=1
+    fi
+done
+if [ "${guard_rc}" != "0" ]; then
+    log "[guard] FAILED — the image would build from a source we do not control,"
+    log "[guard] or a pin disagrees with itself. Details:"
+    sed 's/^/[guard]   /' "${GUARD_OUT}" | tee -a "${LOG}"
+else
+    log "[guard] source guards clean"
+    grep -E "pending|DATED" "${GUARD_OUT}" | sed 's/^/[guard]   /' | tee -a "${LOG}" || true
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
 rc=$?
+# A guard failure must not be erased by a successful tick.
+[ "${guard_rc}" != "0" ] && [ "${rc}" = "0" ] && rc=3
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}

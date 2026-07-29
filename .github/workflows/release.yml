@@ -4,10 +4,21 @@ name: release
 #
 # Trigger: push a semver tag (e.g. `v0.2.5`) or run manually.
 #
-# NOTE on the runner: a full from-source build produces a ~26 GB image and takes 1-2 h.
-# GitHub-hosted runners (14 GB disk, 6 h) CANNOT build this. Use a SELF-HOSTED runner with
-# the label `vibeic-builder` (>= 60 GB free disk, >= 8 cores, docker + buildx). Register one
-# under the vibeic org: Settings -> Actions -> Runners.
+# Two jobs, in this order, and the order is the whole point:
+#
+#   tools    build each tool as ghcr.io/vibeic/eda-tool-<name>:<commit-sha> and push
+#   release  compose the image by COPYing those artefacts in
+#
+# `tools` is a no-op for every tool whose pin did not move: the tag already
+# exists in the registry, so the step skips it. Before this split the release
+# recompiled all eight tools every time, because this workflow passed neither
+# `cache-from` nor `cache-to` (measured: 0 occurrences) — a one-character pin
+# change cost the same 1-2 h as changing everything.
+#
+# NOTE on the runner: a from-source build of every tool produces a ~26 GB image
+# and takes 1-2 h. GitHub-hosted runners (14 GB disk, 6 h) CANNOT do that. Use a
+# SELF-HOSTED runner labelled `vibeic-builder` (>= 60 GB free disk, >= 8 cores,
+# docker + buildx), registered under the vibeic org: Settings -> Actions -> Runners.
 
 on:
   push:
@@ -27,7 +38,74 @@ env:
   PLATFORMS: linux/amd64          # add ,linux/arm64 once the base publishes an arm64 tag
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Per-tool artefacts. Each is keyed on the commit that built it, so a tool
+  # whose pin did not move is already in the registry and is not rebuilt.
+  # -------------------------------------------------------------------------
+  tools:
+    runs-on: [self-hosted, vibeic-builder]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The image may consume only our own forks
+        run: |
+          python3 tools/check_fork_only.py
+          python3 tools/check_pins_agree.py
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Skipping an existing tag is what makes a one-pin release cheap. It is
+      # safe ONLY because the tag is the commit: the same tag can never mean two
+      # different commits, so "already there" and "already correct" are the same
+      # statement. A mutable tag (`:latest`, a branch name) would make this step
+      # silently ship a stale binary — which is why `check_pins_agree.py` above
+      # requires every pin to be a full SHA.
+      - name: Build and push each tool whose pin moved
+        run: |
+          set -euo pipefail
+          BUILT=0; SKIPPED=0
+          docker buildx bake -f docker-bake.hcl --print tools > /tmp/bake.json
+          for T in $(python3 -c "import json;print(' '.join(json.load(open('/tmp/bake.json'))['target']))"); do
+            TAG=$(python3 -c "import json;print(json.load(open('/tmp/bake.json'))['target']['$T']['tags'][0])")
+            if docker manifest inspect "$TAG" >/dev/null 2>&1; then
+              echo "  $T: $TAG already published — pin did not move"
+              SKIPPED=$((SKIPPED+1))
+            else
+              echo "  $T: building $TAG"
+              docker buildx bake -f docker-bake.hcl --push "$T"
+              BUILT=$((BUILT+1))
+            fi
+          done
+          echo "tools: $BUILT built, $SKIPPED already published"
+          # A run that neither built nor skipped anything examined no tools at
+          # all, which is a broken bake file rather than a clean release.
+          [ $((BUILT+SKIPPED)) -gt 0 ] || { echo "::error::bake produced no tool targets"; exit 1; }
+
+      # Every artefact the composing Dockerfile names must now be resolvable.
+      # Without this the failure surfaces mid-compose as an opaque "not found",
+      # after the release job has already started.
+      - name: Every pinned artefact resolves
+        run: |
+          set -euo pipefail
+          MISSING=0
+          for TAG in $(grep -oE 'ghcr\.io/vibeic/eda-tool-[a-z0-9-]+:[a-z0-9-]+' Dockerfile | sort -u); do
+            if docker manifest inspect "$TAG" >/dev/null 2>&1; then echo "  ok      $TAG"
+            else echo "  MISSING $TAG"; MISSING=$((MISSING+1)); fi
+          done
+          [ "$MISSING" -eq 0 ] || { echo "::error::$MISSING pinned artefact(s) do not exist"; exit 1; }
+
   build-and-push:
+    needs: tools
     runs-on: [self-hosted, vibeic-builder]
     timeout-minutes: 240
     permissions:
@@ -73,7 +151,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      # Composes from the artefacts `tools` published; compiles nothing. The
+      # cache args are what the pre-split workflow was missing entirely.
+      - name: Compose and push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -81,6 +161,8 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           push: true
           provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
             vibeic/${{ env.IMAGE }}:latest
@@ -102,4 +184,16 @@ jobs:
           docker exec "$C" openroad -version
           docker exec "$C" iverilog -V | head -1
           docker exec "$C" netgen -batch quit
+          # Each tool carries the repo+commit that produced it. This asserts the
+          # composed image contains the artefact the pin NAMES — a tag says what
+          # was asked for, this says what arrived.
           docker rm -f "$C"
+
+      # The smoke test above proves the tools RUN. It cannot tell whose build
+      # they came from: drop a COPY and the base image's own copy answers every
+      # one of those commands. This reads the provenance each artefact carries
+      # and asserts the image contains the commits the pins name.
+      - name: The image contains what the pins say it does
+        run: |
+          python3 tools/check_image_provenance.py \
+            vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}

@@ -5,7 +5,7 @@ SCRATCH=/tmp/gk-eda-build
 TAG=vibeic-eda-gkcandidate:yosys-v0.67
 LOG=/home/reyerchu/eda-fork-gatekeeper/reports/image_build.log
 : > "$LOG"
-echo "[$(date -Is)] docker build ${TAG} (YOSYS_REF=$(grep -m1 '^ARG YOSYS_REF' $SCRATCH/Dockerfile | cut -d= -f2))" | tee -a "$LOG"
+echo "[$(date -Is)] docker build ${TAG} (YOSYS_REF=$(grep -hm1 "^ARG YOSYS_REF" "$SCRATCH"/Dockerfile "$SCRATCH"/tools/*/Dockerfile 2>/dev/null | cut -d= -f2 | cut -c1-12 || echo UNKNOWN))" | tee -a "$LOG"
 docker build -t "${TAG}" "${SCRATCH}" >>"$LOG" 2>&1
 rc=$?
 echo "[$(date -Is)] docker build exit ${rc}" | tee -a "$LOG"

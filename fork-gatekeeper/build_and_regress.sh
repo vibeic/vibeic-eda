@@ -23,6 +23,69 @@
 #         the gatekeeper reads to set each tool's verdict.
 set -uo pipefail
 
+# Where an ARG pin lives. Before the per-tool split it was always the root
+# Dockerfile; each tool now owns `tools/<tool>/Dockerfile`, and the composing
+# Dockerfile carries an `IMG_<TOOL>` tag derived from that pin.
+#
+# This searches rather than assumes, and the callers below REFUSE to build when
+# it finds nothing. `sed` reports success when it matches nothing, so an
+# unchanged pin would otherwise build the OLD sha and be reported "built_green
+# at <new sha>" -- a green result for a build that never contained the commit it
+# names. That is the one failure mode this whole function exists to prevent.
+_pin_file() {   # _pin_file <tree> <ARG name>  ->  path, or empty
+    local tree="$1" arg="$2" f
+    for f in "${tree}/Dockerfile" "${tree}"/tools/*/Dockerfile; do
+        [ -f "$f" ] && grep -qE "^ARG ${arg}=" "$f" && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+# Move a pin everywhere it is written, or fail. Keeping the three sites in step
+# is what `tools/check_pins_agree.py` asserts; doing it here by hand and getting
+# it half-right would produce exactly the drift that check exists to catch.
+_bump_pin() {   # _bump_pin <tree> <ARG name> <sha>  -> 0 moved, 1 could not
+    local tree="$1" arg="$2" sha="$3" f short
+    f="$(_pin_file "$tree" "$arg")" || return 1
+    sed -i -E "s/^(ARG ${arg}=)[^[:space:]]+/\1${sha}/" "$f"
+    grep -qE "^ARG ${arg}=${sha}" "$f" || return 1
+    short="${sha:0:7}"
+    # docker-bake.hcl: the variable that decides the artefact tag.
+    [ -f "${tree}/docker-bake.hcl" ] && \
+        sed -i -E "s/^(variable \"${arg}\"[^\"]*\")[0-9a-f]+(\")/\1${sha}\2/" \
+            "${tree}/docker-bake.hcl"
+    # Dockerfile: the IMG_<TOOL> tag that gets pulled. Multi-source artefacts are
+    # tagged <short1>-<short2>, so replace only the half this ARG owns.
+    if [ -f "${tree}/tools/check_pins_agree.py" ]; then
+        python3 - "$tree" "$arg" "$sha" <<'PYBUMP'
+import re, sys, pathlib
+tree, arg, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+TOOLS = {"OPENROAD_REF": ("openroad", 0), "YOSYS_REF": ("yosys", 0),
+         "KISSAT_REF": ("sat-solvers", 0), "CADICAL_REF": ("sat-solvers", 1),
+         "NGSPICE_REF": ("ngspice", 0), "MAGIC_REF": ("lvs", 0),
+         "NETGEN_REF": ("lvs", 1), "IVERILOG_REF": ("iverilog", 0),
+         "KLAYOUT_REF": ("klayout", 0), "VERILATOR_REF": ("verilator", 0)}
+if arg not in TOOLS:
+    sys.exit(0)
+tool, idx = TOOLS[arg]
+p = pathlib.Path(tree) / "Dockerfile"
+var = "IMG_" + tool.upper().replace("-", "_")
+m = re.search(r"^ARG %s=(\S+)$" % var, p.read_text(), re.M)
+if not m:
+    sys.exit(1)
+repo, _, tag = m.group(1).rpartition(":")
+parts = tag.split("-")
+if idx >= len(parts):
+    sys.exit(1)
+parts[idx] = sha[:7]
+s = p.read_text().replace(m.group(0), "ARG %s=%s:%s" % (var, repo, "-".join(parts)))
+p.write_text(s)
+PYBUMP
+        [ "$?" != "0" ] && return 1
+    fi
+    return 0
+}
+
+
 FORKS_DIR="${GK_FORKS_DIR:-/home/reyerchu/vibe-ic-forks}"
 EDA_CLONE="${GK_EDA_CLONE:-/home/reyerchu/vibeic-eda}"
 GK_MODE="${GK_MODE:-verify}"                    # verify | promote
@@ -127,8 +190,20 @@ promote_all() {
     # 2. bump pins + VERSION (compute NEWVER from origin; tolerate unrelated drift) -------
     for tool in "${!CLEAN_SHA[@]}"; do
         arg="${CLEAN_ARG[$tool]}"; sha="${CLEAN_SHA[$tool]}"
-        [ -n "$arg" ] && sed -i -E "s/^(ARG ${arg}=)[^[:space:]]+/\1${sha}/" "${EDA_CLONE}/Dockerfile"
+        # Same refusal as the build path, and it matters more here: this bump is
+        # COMMITTED and the image is pushed under a new version. A silent no-op
+        # would publish a release whose Dockerfile shows no pin change while its
+        # notes claim the commit — the version bump would be the only evidence,
+        # and it would be wrong.
+        if [ -z "$arg" ] || ! _bump_pin "${EDA_CLONE}" "$arg" "$sha"; then
+            _pf_abort "${tool}: could not move ARG ${arg} in the vibeic-eda clone — nothing shipped"
+            return 1
+        fi
     done
+    if [ -f "${EDA_CLONE}/tools/check_pins_agree.py" ] \
+       && ! ( cd "${EDA_CLONE}" && python3 tools/check_pins_agree.py ) >>"${plog}" 2>&1; then
+        _pf_abort "pins disagree after bump — nothing shipped (see ${plog})"; return 1
+    fi
     CURVER="$(cd "${EDA_CLONE}" && ./sync_image_version.py --print 2>/dev/null)"
     # match sync_image_version.next_version()'s canonical scheme (patch 0..99, rollover to minor)
     NEWVER="$(python3 -c "x,y,z='${CURVER}'.split('.'); z=int(z); print(f'{x}.{int(y)+1}.0' if z>=99 else f'{x}.{y}.{z+1}')" 2>/dev/null)"
@@ -228,12 +303,47 @@ done <<< "${CANDS}"
 # ---- build the image with the clean candidates bumped in -------------------
 if [ "${CLEAN_COUNT}" -gt 0 ]; then
     rm -rf "${SCRATCH}"; cp -a "${EDA_CLONE}" "${SCRATCH}"
+    BUMP_FAILED=""
     for tool in "${!CLEAN_SHA[@]}"; do
         arg="${CLEAN_ARG[$tool]}"; sha="${CLEAN_SHA[$tool]}"
-        [ -n "$arg" ] && sed -i -E "s/^(ARG ${arg}=).*/\1${sha}/" "${SCRATCH}/Dockerfile"
+        if [ -z "$arg" ] || ! _bump_pin "${SCRATCH}" "$arg" "$sha"; then
+            BUMP_FAILED="${BUMP_FAILED} ${tool}"
+        fi
     done
+    if [ -n "${BUMP_FAILED}" ]; then
+        # Building anyway would produce an image WITHOUT these commits and report
+        # it green at their shas. Refuse, and name what could not be moved.
+        for tool in ${BUMP_FAILED}; do
+            RESULTS="$(emit "$tool" "pin_not_found" "could not move ARG ${CLEAN_ARG[$tool]} in the build tree (layout changed?) — refusing to build, because an image built with the OLD pin would be reported green at the NEW sha" "")"
+        done
+        echo "[build] REFUSED: could not bump${BUMP_FAILED}"
+        CLEAN_COUNT=0
+    fi
+fi
+if [ "${CLEAN_COUNT}" -gt 0 ]; then
+    # Every pin site must agree before we build; that is exactly the drift the
+    # bumps above could introduce.
+    if [ -f "${SCRATCH}/tools/check_pins_agree.py" ] \
+       && ! python3 "${SCRATCH}/tools/check_pins_agree.py" >/tmp/gkpins 2>&1; then
+        echo "[build] REFUSED: pins disagree after bump"; cat /tmp/gkpins
+        for tool in "${!CLEAN_SHA[@]}"; do
+            RESULTS="$(emit "$tool" "pin_drift" "pins disagree after bump: $(tail -1 /tmp/gkpins)" "")"
+        done
+        CLEAN_COUNT=0
+    fi
+fi
+if [ "${CLEAN_COUNT}" -gt 0 ]; then
     echo "[build] docker build ${IMG} with: ${!CLEAN_SHA[*]}"
-    if docker build -t "${IMG}" "${SCRATCH}" >"/tmp/gk-docker-${STAMP}.log" 2>&1; then
+    # After the per-tool split the composing Dockerfile COPYs published
+    # artefacts, so a bumped pin needs its artefact built first. bake does both
+    # in one DAG; without it the build fails on `not found` for the new tag.
+    if [ -f "${SCRATCH}/docker-bake.hcl" ]; then
+        BUILD_CMD=(docker buildx bake -f "${SCRATCH}/docker-bake.hcl" --load eda-local)
+    else
+        BUILD_CMD=(docker build -t "${IMG}" "${SCRATCH}")
+    fi
+    if (cd "${SCRATCH}" && "${BUILD_CMD[@]}") >"/tmp/gk-docker-${STAMP}.log" 2>&1; then
+        [ -f "${SCRATCH}/docker-bake.hcl" ] && docker tag ghcr.io/vibeic/vibeic-eda:local "${IMG}"
         # smoke regression: yosys/openroad baseline + a per-candidate-tool check so the
         # tool being shipped is actually exercised in the fresh image, not just assumed.
         SMOKE="yosys -V && openroad -version"

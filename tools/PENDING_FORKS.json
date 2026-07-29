@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Sources still pointing upstream because GitHub is throttling fork creation",
+    "(HTTP 403 'You cannot fork this repository at this time' — not a rate limit,",
+    "API budget was 4872/5000 when it fired, and not a permissions problem, five",
+    "other forks were created in the same session).",
+    "",
+    "check_fork_only.py reads this file and downgrades these to a NAMED, DATED",
+    "exception instead of a hard failure. It is deliberately not a silent",
+    "allowlist: each entry carries an expiry, and the check FAILS on an expired",
+    "one. An exception with no expiry is how a temporary state becomes permanent.",
+    "",
+    "To clear an entry: fork it into vibeic/, add it to fork-gatekeeper's",
+    "FORKS.json, point the Dockerfile at the fork, and delete the entry here."
+  ],
+  "pending": [
+    {"source": "arminbiere/kissat",  "used_by": "tools/sat-solvers", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "arminbiere/cadical", "used_by": "tools/sat-solvers", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "povik/yosys-slang",  "used_by": "base image (not built here yet)", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "The-OpenROAD-Project/OpenROAD-flow-scripts", "used_by": "Dockerfile (ORFS platforms)", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "The-OpenROAD-Project/asap7sc7p5t_28", "used_by": "Dockerfile (ASAP7 PDK data)", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "The-OpenROAD-Project/asap7_pdk_r1p7", "used_by": "Dockerfile (ASAP7 PDK data)", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"},
+    {"source": "laurentc2/ASAP7_for_KLayout", "used_by": "Dockerfile (ASAP7 KLayout layer map)", "reason": "GitHub fork throttle (HTTP 403)", "expires": "2026-08-05"}
+  ]
+}

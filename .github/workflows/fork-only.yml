@@ -1,0 +1,95 @@
+# The fork-only rule, enforced on every change rather than at review time.
+#
+# Owner rule (2026-07-29): every OSS tool we use is forked into `vibeic/` and
+# tracked by the daily fork-gatekeeper; the image consumes our forks and nothing
+# else. Before this workflow the rule was checkable only by reading a 605-line
+# Dockerfile — it held for exactly as long as everyone editing that file
+# remembered it.
+#
+# This runs in seconds and needs no build, so there is no reason for it to be
+# anything but required.#
+# WHERE THIS ACTUALLY RUNS TODAY. Measured 2026-07-29: `actions/runs` on this
+# repo reports total_count 0 — no workflow has ever executed here, including the
+# pre-existing image-version-sync, while `actions/permissions` reports enabled.
+# So this file is registered and does not fire, and a rule enforced only here
+# would be enforced nowhere. The 05:30 fork-gatekeeper tick runs the same two
+# checks against the checked-out repo, which is what enforces the rule until
+# Actions runs. This workflow is correct and stays; it starts protecting PRs the
+# day Actions is turned on, and needs no change then.
+name: fork-only
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every source and artefact must be ours
+        run: python3 tools/check_fork_only.py
+
+      - name: A tool's commit must say the same thing in all three places
+        run: python3 tools/check_pins_agree.py
+
+      # A checker that examined nothing exits 2 and says so. Asserting the
+      # negative case here means a future refactor that renames Dockerfiles out
+      # from under the patterns fails loudly instead of passing silently.
+      - name: The checker itself must be able to fail
+        run: |
+          set +e
+          printf 'FROM scratch\nCOPY --from=docker.io/x/y:1 /a /a\n' > /tmp/violation.Dockerfile
+          python3 tools/check_fork_only.py /tmp/violation.Dockerfile
+          rc=$?
+          set -e
+          if [ "$rc" != "1" ]; then
+            echo "check_fork_only returned $rc on a deliberate violation; it should be 1." >&2
+            echo "A guard that cannot fail is not a guard." >&2
+            exit 1
+          fi
+          echo "guard rejects a known violation as expected"
+
+      # Same reasoning for the other three guards. Each asserts the SPECIFIC
+      # failure it exists to catch, not merely "some non-zero exit" — a check
+      # that fails for the wrong reason still reports green on the right one.
+      - name: Each guard must reject the case it exists for
+        run: |
+          set -e
+          fail() { echo "$1" >&2; exit 1; }
+          probe() {   # probe <expected-rc> <needle> <file-content>
+            printf "$3" > /tmp/p.Dockerfile
+            set +e; out=$(python3 tools/check_fork_only.py /tmp/p.Dockerfile 2>&1); rc=$?; set -e
+            [ "$rc" = "$1" ] || fail "expected rc=$1, got $rc for: $3"
+            echo "$out" | grep -q "$2" || fail "expected message matching '$2'; got: $out"
+            echo "  ok: $2"
+          }
+          # A stage built on someone else's image, copied out of.
+          probe 1 "not one of our artefacts" \
+            'FROM someoneelse/base AS b\nFROM alpine\nCOPY --from=b /a /a\n'
+          # A named build context: resolves outside the file, so unreviewable.
+          probe 1 "cannot be checked" \
+            'FROM alpine\nCOPY --from=some-context /a /a\n'
+          # An ARG default pointing upstream is what a no-build-arg build uses.
+          probe 1 "the default is the real source" \
+            'ARG R=https://github.com/upstream/thing.git\nFROM alpine\n'
+
+          # An EXPIRED exception must fail. PENDING_FORKS.json's whole value is
+          # the deadline; if an expired entry still passed, the file would be a
+          # permanent allowlist wearing a date.
+          cp tools/PENDING_FORKS.json /tmp/pf.bak
+          python3 - <<'EOF'
+          import json, pathlib
+          f = pathlib.Path("tools/PENDING_FORKS.json")
+          d = json.loads(f.read_text())
+          for e in d.get("pending", []):
+              e["expires"] = "2000-01-01"
+          f.write_text(json.dumps(d, indent=2))
+          EOF
+          set +e; out=$(python3 tools/check_fork_only.py tools/sat-solvers/Dockerfile 2>&1); rc=$?; set -e
+          cp /tmp/pf.bak tools/PENDING_FORKS.json
+          [ "$rc" = "1" ] || fail "an expired exception returned rc=$rc; it must fail"
+          echo "$out" | grep -q "EXPIRED" || fail "expiry failure did not name the expiry: $out"
+          echo "  ok: expired exception fails"
