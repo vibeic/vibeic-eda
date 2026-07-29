@@ -64,7 +64,21 @@ RUN git clone "${KLAYOUT_REPO}" /klayout \
  && for e in klayout libklayout_drc.so libklayout_lvs.so libklayout_db.so; do \
       test -e "/klayout/bld/$e" || { echo "FAIL: the build produced no $e"; exit 1; }; \
     done \
- && echo "klayout OK: main binary + DRC/LVS engines present"
+ && echo "klayout OK: main binary + DRC/LVS engines present" \
+# SHIP THE TOOL, NOT THE BUILD. `-build /klayout/bld` is an object directory,
+# and this artefact was copying it whole: 1119 MB in the release image, of which
+# 743 MB is `.o` files, 21 MB is unit-test binaries, and 177 are Makefiles.
+# Measured on the shipped artefact — pruning leaves 340 MB and klayout, the
+# MANUFACTURINGGRID patch, svrfdrc and every strm2* buddy all still work.
+ && find /klayout/bld -name '*.o' -delete \
+ && find /klayout/bld \( -name 'Makefile' -o -name 'Makefile.*' \
+                         -o -name '*.ut' -o -name 'ut_runner' \) -delete \
+ && find /klayout/bld -name 'libklayout_*_tests.so*' -delete \
+ && test -x /klayout/bld/klayout \
+ && test -e /klayout/bld/libklayout_drc.so \
+ && test -e /klayout/bld/libklayout_lvs.so \
+ && test -d /klayout/bld/pymod \
+ && echo "klayout pruned to $(du -sm /klayout/bld | cut -f1) MB; binary, engines and pymod intact"
 # ---------------------------------------------------------------------------
 # Stage 6b — vibeic/verilator. Previously NOT layered: the note here read "no honest
 #   fix warranted on v5.051 — nothing to layer", which was true at the time. It is no

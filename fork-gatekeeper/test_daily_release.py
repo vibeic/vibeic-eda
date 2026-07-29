@@ -410,3 +410,52 @@ def test_an_unreadable_driver_is_unknown_not_effective(monkeypatch):
     assert R.log_limit_effective() is None
     monkeypatch.setattr(R, "_sh", lambda *a, **k: (0, "Name: default\n", ""))
     assert R.log_limit_effective() is None
+
+
+# --- vibeic-eda#17: the capability check was blind to the tool being replaced
+
+def test_a_prefix_moved_aside_counts_as_replaced(tmp_path):
+    """`mv` is a replacement. Leaving it out was a real hole.
+
+    #17 replaces the base's klayout by moving its tree to `klayout-base` and
+    symlinking the canonical path at ours — no `rm -rf`, no `COPY` to that
+    path. The prefix scanner considered `/foss/tools/klayout` untouched, so the
+    check compared nothing for the one tool whose replacement was the change.
+    """
+    import check_no_capability_lost as C
+    df = tmp_path / "Dockerfile"
+    df.write_text(
+        "ARG BASE_IMAGE=example/base:1\n"
+        "RUN rm -rf /foss/tools/yosys\n"
+        "COPY --from=img-lvs /x /foss/tools/magic\n"
+        "RUN mv /foss/tools/klayout /foss/tools/klayout-base \\\n"
+        " && ln -s /foss/tools/klayout-vibeic /foss/tools/klayout\n")
+    p = C.replaced_prefixes(df)
+    assert "klayout" in p, "a prefix moved aside is a prefix replaced"
+    assert "yosys" in p and "magic" in p, "the existing detections still work"
+
+
+def test_commands_are_listed_at_the_prefix_root_not_only_in_bin(tmp_path,
+                                                                monkeypatch):
+    """`<prefix>/bin` is a layout assumption, not a rule.
+
+    yosys and magic put binaries in `bin/`; klayout puts `klayout` and twelve
+    `strm2*` buddies at the top of its prefix. Measured before this fix: 55
+    commands compared, `klayout` in none of them.
+    """
+    import check_no_capability_lost as C
+    seen = {}
+
+    def fake(cmd, timeout=600):
+        seen["script"] = cmd[-1]
+        return 0, "klayout\nstrm2gds\nyosys\n", ""
+    monkeypatch.setattr(C, "_sh", fake)
+    names = C.command_names("img", ["klayout", "yosys"])
+    assert "klayout" in names and "strm2gds" in names
+    s = seen["script"]
+    assert "/foss/tools/klayout/bin" in s, "the bin/ layout must still be listed"
+    assert "-maxdepth 1 -type f -executable" in s, \
+        "executables at the prefix root are not listed at all"
+    assert '! -name "*.so*"' in s, \
+        "without this, version-suffixed sonames compare as commands and every " \
+        "version bump reports a loss"

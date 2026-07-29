@@ -75,7 +75,14 @@ def base_image(dockerfile: Path) -> str:
 
 
 def replaced_prefixes(dockerfile: Path) -> List[str]:
-    """Tool directories we delete or copy over in the composing image."""
+    """Tool directories we delete, copy over, or move aside in the composing image.
+
+    `mv` counts, and leaving it out was a real hole. vibeic-eda#17 replaces the
+    base's klayout by moving its tree to `klayout-base` and symlinking the
+    canonical path at ours — no `rm -rf`, no `COPY` to that path, so this
+    function did not consider `/foss/tools/klayout` replaced at all and the
+    check silently compared nothing for the tool it most needed to watch.
+    """
     text = dockerfile.read_text(errors="replace")
     found = set(re.findall(r"rm -rf[^\n]*?/foss/tools/([A-Za-z0-9_.-]+)", text))
     for m in re.finditer(r"^COPY --from=img-\S+\s+\S+\s+/foss/tools/([A-Za-z0-9_.-]+)",
@@ -85,12 +92,33 @@ def replaced_prefixes(dockerfile: Path) -> List[str]:
     for line in text.splitlines():
         if "rm -rf" in line and "/foss/tools/" in line:
             found.update(re.findall(r"/foss/tools/([A-Za-z0-9_.-]+)", line))
+        # `mv /foss/tools/x /foss/tools/x-base` — the SOURCE is what was replaced
+        for m in re.finditer(r"\bmv\s+/foss/tools/([A-Za-z0-9_.-]+)\s+/foss/tools/",
+                             line):
+            found.add(m.group(1))
     return sorted(found) or list(_FALLBACK_PREFIXES)
 
 
 def command_names(image: str, prefixes: List[str]) -> List[str]:
-    script = "; ".join(f'[ -d /foss/tools/{p}/bin ] && ls /foss/tools/{p}/bin'
-                       for p in prefixes)
+    """Executables the base ships under each replaced prefix.
+
+    BOTH `<prefix>/bin` AND `<prefix>` itself. Only the first was listed, and
+    that is a layout assumption dressed up as a rule: yosys, magic and netgen
+    put their binaries in `bin/`, klayout puts `klayout` and twelve `strm2*`
+    buddies at the top of its prefix. Measured before this fix — 55 commands
+    compared, and `klayout`, `strm2gds` and `strmxor` were in none of them. The
+    check that exists to catch "did we take something away" was blind to the
+    one tool whose replacement was actually being contemplated.
+
+    `! -name '*.so*'` because a shared object under the prefix is not a command;
+    listing them would compare version-suffixed sonames as if they were tools
+    and report a loss on every version bump.
+    """
+    script = "; ".join(
+        f'[ -d /foss/tools/{p}/bin ] && ls /foss/tools/{p}/bin; '
+        f'[ -d /foss/tools/{p} ] && find /foss/tools/{p} -maxdepth 1 -type f '
+        f'-executable ! -name "*.so*" -printf "%f\\n"'
+        for p in prefixes)
     rc, out, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
                       "-lc", script])
     if rc != 0 and not out.strip():

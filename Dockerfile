@@ -35,7 +35,7 @@ ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-be7db2
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab-940079
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-be57bf
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-7cb6ee
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670-8c0ab6
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c8b26a1-382491
@@ -454,6 +454,43 @@ RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/foss/tools/klayout-vibeic:${LD_
  && chmod +x /foss/tools/bin/svrfdrc \
  && LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/bin/svrfdrc --help >/dev/null 2>&1 \
       && echo "svrfdrc buddy OK" || echo "WARN: svrfdrc buddy self-test failed"
+
+# --- /foss/tools/klayout IS our build now (vibeic-eda#17) ---
+# klayout was the only tool here installed in PARALLEL rather than in place:
+# yosys, ngspice, magic, netgen, iverilog and verilator all replace the base's
+# prefix, so an absolute /foss/tools/<tool> path is correct for them and wrong
+# only for this one. That asymmetry is what #17 turned out to be — the phase-3
+# runner named /foss/tools/klayout/pymod by absolute path and got the base's
+# unpatched LEF/DEF importer, so the MANUFACTURINGGRID snap was compiled,
+# pinned, shipped and loaded by nothing.
+#
+# Fixing the runner (vibe-ic v1.8.9) fixes OUR consumer. This fixes every other
+# one: PDK decks, user scripts, anything that reasonably assumes the canonical
+# path is the tool. Measured after the swap, in a login shell, no resolver
+# involved: `klayout -v` -> 0.30.10, the grid fixture -> 0 off-grid vertices
+# (8 before), all 13 of the base's executables still resolve.
+#
+# The parallel install was the conservative choice when our build was Qt-less
+# and produced no `klayout` binary at all. It now produces the binary, the DRC
+# and LVS engines, the pymod and every strm2* buddy — a superset of the base's
+# tree, compared file by file: 67 differences, all of them the base's 0.30.9
+# sonames superseded by our 0.30.10, plus __pycache__ and a SOURCES listing.
+#
+# The base is KEPT at /foss/tools/klayout-base, with a stated criterion for
+# removing it rather than a vague "just in case": once a full sign-off run
+# (DRC + LVS on a real PDK) passes on a swapped image, it is insurance nobody
+# needs and the 207 MB should go. Until then it is one `ln -sfn` from a hotfix.
+RUN mv /foss/tools/klayout /foss/tools/klayout-base \
+ && ln -s /foss/tools/klayout-vibeic /foss/tools/klayout \
+ && test "$(readlink -f /foss/tools/klayout)" = /foss/tools/klayout-vibeic \
+ && for b in klayout strm2gds strm2cif strm2dxf strm2txt strmcmp strm2mag \
+             strm2gdstxt strmxor strmrun strmclip strm2lstr strm2oas; do \
+      test -x "/foss/tools/klayout/$b" \
+        || { echo "FAIL: the swap lost $b, which the base image provided"; exit 1; }; \
+    done \
+ && LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/klayout/klayout -v | grep -q 0.30.10 \
+ && echo "klayout swap OK: /foss/tools/klayout is the vibeic build; base kept at klayout-base"
+
 # --- vibeic verification toolchain (cocotb / cocotb-coverage / pyuvm / sby) ---
 # Editable-installed from the vibeic forks so an in-image Python patch is live; this
 # overrides the base's stock cocotb with our fork. sby installs its driver + libs into
