@@ -2198,9 +2198,15 @@ def test_the_ledger_records_how_an_indirectly_pinned_fork_reaches_the_image():
 
 
 def test_not_layered_still_holds_a_fork_the_image_never_fetches():
-    """The category is kept, and its note is accurate for the shape it was written for:
-    forked, no pin of any kind, image uses upstream directly. #8 was a membership defect,
-    and fixing membership by deleting the category would lose the honest row too."""
+    """The category is kept — #8 was a membership defect, and deleting the category to
+    fix membership would lose the honest row too.
+
+    What changed (vibeic-eda#32): the note no longer asserts the image does not
+    contain the tool. `integrated = bool(ref)` means the pin resolver found no
+    `ARG <TOOL>_REF`, and five of the six tools in this state turned out to BE in
+    the image — four from the base image, one we stage ourselves, none of those
+    routes modelled. So the row states what is known (no pin, therefore no range
+    assessed) and explicitly denies the stronger claim it used to make."""
     with tempfile.TemporaryDirectory() as t:
         state = Path(t)
         _, summary = _tick_fixture(state, None, ledgers={"unshipped": {
@@ -2209,8 +2215,14 @@ def test_not_layered_still_holds_a_fork_the_image_never_fetches():
             "behind_commits": 12}})
         row = next(r for r in summary["results"] if r["tool"] == "unshipped")
         assert row["verdict"] == "NOT_LAYERED"
-        assert row["note"] == ("forked but not pinned into the image (uses upstream "
-                               "directly) — nothing to sync")
+        assert row["note"] == ("no `ARG <TOOL>_REF` pin found, so its delivery "
+                               "route is unmodelled and no upstream range is "
+                               "assessed — this does NOT establish that the tool "
+                               "is absent from the image")
+        # The load-bearing half: the row must not claim absence. A note that says
+        # "uses upstream directly" reads as a verified fact about the image, and
+        # nothing verified it.
+        assert "absent from the image" in row["note"] and "NOT establish" in row["note"]
         assert summary["counts"]["NOT_LAYERED"] == 1
 
 

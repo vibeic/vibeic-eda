@@ -436,7 +436,24 @@ def tick() -> dict:
 
         if not led.get("integrated"):
             entry["verdict"] = "NOT_LAYERED"
-            entry["note"] = "forked but not pinned into the image (uses upstream directly) — nothing to sync"
+            # `integrated = bool(ref)` means "the pin resolver found an
+            # `ARG <TOOL>_REF`". It does NOT mean the tool is absent from
+            # the image, and this note used to assert exactly that
+            # (vibeic-eda#32). Five of the six tools in this state WERE in
+            # the image: ciel (whose managed store both sign-off PDKs
+            # symlink into), open_pdks, IHP-Open-PDK, ASAP7_for_KLayout,
+            # and OpenSTA, a submodule of the OpenROAD pin. Four arrive
+            # from the base image and one we stage ourselves; the resolver
+            # models neither route.
+            #
+            # It now states what is KNOWN and names the consequence, not a
+            # fact about the image that nothing checked.
+            # `tools/check_fork_presence_claims.py` tests the stronger
+            # claim against the image on every tick.
+            entry["note"] = ("no `ARG <TOOL>_REF` pin found, so its "
+                             "delivery route is unmodelled and no upstream "
+                             "range is assessed — this does NOT establish "
+                             "that the tool is absent from the image")
         elif nr == 0:
             entry["verdict"] = "CLEAN"
             entry["note"] = (f"on the latest upstream release "
