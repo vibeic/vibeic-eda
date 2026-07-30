@@ -393,3 +393,73 @@ def test_a_clone_without_submodule_init_stays_false():
     exists rather than being assumed."""
     pins = df.parse_dockerfile_pins(_NO_SUBMODULE_INIT)
     assert (pins.get("plain") or {}).get("submodules") is False
+
+
+# --------------------------------------------------------------------------
+# repos that are not GitHub forks (vibeic-eda#33)
+# --------------------------------------------------------------------------
+
+def _gh_for_orphan(monkeypatch, *, upstream_branch="master",
+                   forward_404=True, reverse_ok=True):
+    """A `gh` that models an independent repo: no parent, cross-repo compare 404s."""
+    calls = []
+
+    def fake(path):
+        calls.append(path)
+        if path == "repos/vibeic/Tool":                    # OUR repo — no parent
+            return {"created_at": "2026-01-01T00:00:00Z", "default_branch": "main"}
+        if path == "repos/them/Tool":                      # the UPSTREAM
+            return {"default_branch": upstream_branch}
+        if path.startswith("repos/vibeic/Tool/compare/"):  # forward, needs a fork network
+            return {"_err": "404 Not Found"} if forward_404 else {
+                "ahead_by": 1, "behind_by": 2, "merge_base_commit": {}, "commits": []}
+        if path.startswith("repos/them/Tool/compare/"):    # reversed, from upstream
+            return ({"ahead_by": 0, "behind_by": 6157,
+                     "merge_base_commit": {}, "commits": []}
+                    if reverse_ok else {"_err": "500"})
+        return {"_err": "unexpected"} if "compare" in path else []
+
+    monkeypatch.setattr(df, "gh", fake)
+    return calls
+
+
+_FORK = {"tool": "Tool", "upstream": "them/Tool", "role": "r"}
+
+
+def test_the_upstream_branch_is_asked_of_the_upstream(monkeypatch):
+    """Our repo has no parent, so `parent.default_branch` is absent and the old
+    code fell back to a hardcoded "main". ORFS upstream uses `master`, so every
+    compare named a branch that does not exist there (vibeic-eda#33)."""
+    _gh_for_orphan(monkeypatch, upstream_branch="master")
+    led = df.discover_one(_FORK, {"tool": {"ref": "v3.0"}}, "0.2.46")
+    assert led["upstream_default_branch"] == "master"
+    assert led.get("upstream_branch_resolved") is True
+
+
+def test_a_404_forward_compare_retries_from_the_upstream(monkeypatch):
+    """THE defect. A cross-repo compare needs a shared fork network; for an
+    independent repository it 404s, `behind_commits` stayed None, and the row
+    read CLEAN while ORFS's pinned v3.0 sat 6157 commits behind."""
+    _gh_for_orphan(monkeypatch)
+    led = df.discover_one(_FORK, {"tool": {"ref": "v3.0"}}, "0.2.46")
+    assert led.get("behind_commits") == 6157, \
+        f"the reversed compare did not run: behind_commits={led.get('behind_commits')}"
+    assert led.get("compare_direction") == "from-upstream"
+
+
+def test_a_working_forward_compare_is_not_reversed(monkeypatch):
+    """…or the test above is met by always reversing. A real fork must keep the
+    forward direction, where ahead/behind already mean what the ledger records."""
+    _gh_for_orphan(monkeypatch, forward_404=False)
+    led = df.discover_one(_FORK, {"tool": {"ref": "abc"}}, "0.2.46")
+    assert led.get("ahead") == 1 and led.get("behind_commits") == 2
+    assert led.get("compare_direction") is None
+
+
+def test_both_compares_failing_leaves_no_count(monkeypatch):
+    """Neither direction answered. `behind_commits` must stay absent rather than
+    default to 0 — a compare that could not run is not a fork that is current,
+    and 0 is exactly what made this invisible for as long as it was."""
+    _gh_for_orphan(monkeypatch, reverse_ok=False)
+    led = df.discover_one(_FORK, {"tool": {"ref": "v3.0"}}, "0.2.46")
+    assert led.get("behind_commits") is None
