@@ -286,19 +286,109 @@ def _commit_brief(c: dict) -> dict:
             "url": c.get("html_url", "")}
 
 
-def _releases(up_full: str) -> list[dict]:
-    """Upstream releases newest-first: [{tag, date}]. Falls back to tags (no dates)."""
-    rel = gh(f"repos/{up_full}/releases?per_page=30")
+#: A sort key that is not a date must not outrank one that is — see _iso_date.
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _iso_date(raw) -> str:
+    """`YYYY-MM-DD` from an ISO timestamp, or "" if it is not one.
+
+    These dates are SORT KEYS, compared as strings. A value that is not a date
+    but is not empty either sorts by its first character: `"T00:00:00"` is
+    greater than `"2026-06-30"` because `T` > `2`, so a malformed entry would
+    take the latest slot and become the ref the ancestry compare runs against.
+    Anything that does not start with a real date becomes "", which sorts last.
+    """
+    if not isinstance(raw, str):
+        return ""
+    head = raw[:10]
+    return head if _ISO_DATE_RE.fullmatch(head) else ""
+
+
+def _tags_by_date(up_full: str, limit: int = 30) -> list[dict]:
+    """Tags newest-first WITH dates, in one call. [] if it could not be asked.
+
+    The REST tags endpoint gives neither a date nor a meaningful order — it
+    returned `v2.0` first for OpenROAD, whose newest tag is `26Q3`. GraphQL can
+    order by TAG_COMMIT_DATE and carry the date, so one query answers both.
+    """
+    owner, _, name = up_full.partition("/")
+    q = ("query($o:String!,$n:String!,$k:Int!){repository(owner:$o,name:$n){"
+         "refs(refPrefix:\"refs/tags/\",first:$k,"
+         "orderBy:{field:TAG_COMMIT_DATE,direction:DESC}){nodes{name target{"
+         "...on Commit{committedDate} ...on Tag{target{...on Commit{committedDate}}}}}}}}")
+    try:
+        r = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={q}",
+             "-F", f"o={owner}", "-F", f"n={name}", "-F", f"k={limit}"],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    try:
+        nodes = (json.loads(r.stdout).get("data") or {}).get(
+            "repository", {}).get("refs", {}).get("nodes") or []
+    except (json.JSONDecodeError, AttributeError):
+        return []
     out = []
-    if isinstance(rel, list) and rel:
-        for r in rel:
-            out.append({"tag": r.get("tag_name"), "date": (r.get("published_at") or "")[:10]})
-        return out
-    tags = gh(f"repos/{up_full}/tags?per_page=30")
-    if isinstance(tags, list):
-        for t in tags:
-            out.append({"tag": t.get("name"), "date": None})
+    for nd in nodes:
+        tgt = nd.get("target") or {}
+        # Lightweight tag → Commit directly; annotated tag → Tag wrapping a Commit.
+        date = tgt.get("committedDate") or (
+            (tgt.get("target") or {}).get("committedDate"))
+        iso = _iso_date(date)
+        if nd.get("name") and iso:
+            out.append({"tag": nd["name"], "date": iso})
     return out
+
+
+def _releases(up_full: str) -> list[dict]:
+    """Upstream versions newest-first: [{tag, date}] — releases AND tags, merged.
+
+    vibeic-eda#31. This used to return as soon as the RELEASE list was non-empty,
+    so the tag fallback only ever fired for a project that had never published a
+    release at all. A project that published releases once and then moved to tags
+    stayed pinned to the stale list forever.
+
+    OpenROAD is exactly that: one release, `v0.9.0-beta` from 2020-07-06, while
+    it actually ships quarterly tags (26Q1/26Q2/26Q3 — our own binary is
+    `26Q3-951-g92b079b47a`). The ledger reported `upstream_latest_release =
+    v0.9.0-beta`, our pin was six years ahead of it, `behind_releases` was 0, and
+    `assess_release` skipped the tool permanently. Nothing failed; the tool was
+    simply absent from every report, which is indistinguishable from a tool with
+    nothing to adopt. Same for OpenSTA (2020-09-14) and gtkwave (2020-07-21) —
+    three of the twenty-one forked upstreams, including the place-and-route and
+    timing engines.
+
+    So both sources are read and merged on DATE. A release and a tag naming the
+    same version collapse to one entry, with the release's date preferred because
+    it is the publication date rather than the commit date.
+    """
+    merged: dict[str, str] = {}
+    rel = gh(f"repos/{up_full}/releases?per_page=30")
+    if isinstance(rel, list):
+        for r in rel:
+            tag = r.get("tag_name")
+            if tag:
+                merged[tag] = _iso_date(r.get("published_at"))
+
+    for t in _tags_by_date(up_full):
+        merged.setdefault(t["tag"], t["date"])
+
+    if not merged:
+        # Neither source answered. NOT "this project has no versions" — a caller
+        # that reads an empty list here concludes we are current, which is the
+        # failure this function is being fixed for. Left empty deliberately and
+        # visibly: the ledger records upstream_latest_release=None, which is a
+        # missing value rather than a reassuring one.
+        return []
+
+    # Undated entries sort last rather than first: an unknown date must never
+    # win the "latest" slot that drives the ancestry compare.
+    return [{"tag": k, "date": (v or None)}
+            for k, v in sorted(merged.items(),
+                               key=lambda kv: (kv[1] or "", kv[0]), reverse=True)]
 
 
 def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
