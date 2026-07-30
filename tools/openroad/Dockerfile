@@ -51,6 +51,28 @@ RUN git clone "${OPENROAD_REPO}" /src \
  && ./etc/Build.sh -threads=$(nproc) \
       -prefix=/vibeic-openroad
 
+# The STANDALONE `sta`, which `-prefix` does NOT install (vibeic-eda#8).
+# `packaging/BUILD.bazel` declares `srcs = ["//:openroad"]` — one binary — while
+# OpenROAD links OpenSTA only as `//src/sta:opensta_lib`. The executable target
+# `//src/sta:opensta` exists, is `visibility = public`, and nothing built it.
+#
+# The consequence was silent and measurable: the base image's own `sta` survived
+# at /foss/tools/openroad/bin/sta (8934800 bytes, Jun 22, byte-identical to
+# hpretl/iic-osic-tools) and carried NONE of the vibeic timing-ECO superset —
+# 0 of 10 commands, against 10 of 10 inside `openroad`. Nothing errored; an
+# absent Tcl command in a script that does not call it looks like a working
+# install. `sta_engine_parity_check` (vibe-ic v1.8.45+) now measures both.
+#
+# Copied out of `bazel-bin` rather than the install prefix because the install
+# target is what omits it. The `readlink -f` resolves bazel's output symlink to
+# a real path first: `bazel-bin` is a symlink into the output base, and a COPY
+# --from of a symlink outside the build context copies the LINK, not the file.
+RUN cd /src \
+ && bazel build --stamp //src/sta:opensta \
+ && install -D "$(readlink -f bazel-bin)/src/sta/opensta" \
+      /vibeic-openroad/bin/sta \
+ && /vibeic-openroad/bin/sta -version
+
 # ---------------------------------------------------------------------------
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
@@ -81,4 +103,7 @@ COPY --from=build /opt/or-tools /opt/or-tools
 # copy to non-directory`: /vibeic/ is the shared PROVENANCE namespace every
 # artefact writes a file into, so a payload directory cannot also live there.
 COPY --from=build /vibeic-openroad/bin/openroad /foss/tools/openroad/bin/openroad
+# Same path the base image uses, so the composing image's COPY overwrites the
+# stale upstream binary rather than landing beside it (vibeic-eda#8).
+COPY --from=build /vibeic-openroad/bin/sta /foss/tools/openroad/bin/sta
 COPY --from=build /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json

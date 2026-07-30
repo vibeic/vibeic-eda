@@ -1,0 +1,16 @@
+# Paths whose `vibeic-eda:X.Y.Z` references are HISTORY, not live pointers.
+# One glob per line. See sync_image_version.py — a live pointer must move with
+# VERSION; a historical one must not, because rewriting it states that a
+# measurement was taken against a version it was not taken against.
+
+# Every reference in this file is of the form
+#     Measured: `ls /foss/tools` in `ghcr.io/vibeic/vibeic-eda:0.2.31`
+# — it records WHICH IMAGE WAS INSPECTED to produce the tables below it. Bumping
+# those to the current version would claim the inventory was re-measured when it
+# was not. There is no install command anywhere in the file (checked: zero
+# `docker pull` / `docker run` lines), so nothing here is a pointer a reader
+# would copy.
+#
+# Registered 2026-07-30 while cutting 0.2.46; the two references had been at
+# 0.2.31 since before that and were failing --check as "unregistered".
+docs/TOOL_INVENTORY.md

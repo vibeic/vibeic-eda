@@ -267,6 +267,11 @@ USER root
 # --- vibeic/OpenROAD (native 24.04 build → RUNPATH /opt/or-tools, no lib bundling) ---
 COPY --from=img-openroad /opt/or-tools /opt/or-tools
 COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/openroad
+# The standalone `sta`, which the artefact now carries (vibeic-eda#8). Without
+# this line the base image's own copy survives at the same path — it answers
+# every smoke-test command, so the omission was invisible, and it had 0 of the
+# 10 vibeic superset commands that `openroad`'s built-in engine has all of.
+COPY --from=img-openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/sta
 # Clean-replace the base tool dirs FIRST so no stale base files survive the COPY merge —
 # e.g. the base's ghdl.so yosys plugin is built against the old ABI and would crash yosys 0.66.
 #
