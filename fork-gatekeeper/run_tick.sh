@@ -234,13 +234,34 @@ fi
 INBOUND_OUT="${LOG_DIR}/inbound-survey.txt"
 if [ -f "${DIR}/inbound_survey.py" ]; then
     log "[inbound] surveying upstream fixes our pins lack"
-    if python3 "${DIR}/inbound_survey.py" \
-            --json "${LOG_DIR}/inbound-survey.json" > "${INBOUND_OUT}" 2>&1; then
+    python3 "${DIR}/inbound_survey.py" \
+        --json "${LOG_DIR}/inbound-survey.json" > "${INBOUND_OUT}" 2>&1
+    inbound_rc=$?
+    # `inbound_survey.py` already distinguishes RC_PARTIAL (1 — some forks could
+    # not be surveyed, the REST were) from RC_NOTHING (2). This branch treated
+    # both as failure and printed only "survey FAILED", discarding the report it
+    # had just written to disk.
+    #
+    # MEASURED on the 2026-07-30 05:51 tick: two forks lack an upstream parent
+    # (cadical, kissat), so rc was 1 — and a complete 44-line survey of the other
+    # 14 tools went unread. It named 4 pins behind upstream including 20 slang
+    # fixes, among them a parser crash on invalid checker port connections, and a
+    # memory-safety fix in xschem. Nothing was hidden; the one line a reader sees
+    # said the whole thing failed, so nobody looked at the file (vibeic-eda#34).
+    #
+    # A partial result is a result. What must not be lost is WHICH part failed,
+    # so the errors are printed too rather than the report replacing them.
+    if [ "${inbound_rc}" != "2" ]; then
         head -1 "${INBOUND_OUT}" | sed 's/^/[inbound]   /' | tee -a "${LOG}"
-        grep -E "SAMPLED|NOTE:" "${INBOUND_OUT}" | sed 's/^/[inbound]   /' \
+        grep -E "SAMPLED|NOTE:|behind +[1-9]" "${INBOUND_OUT}" \
+            | sed 's/^/[inbound]   /' | tee -a "${LOG}" || true
+    fi
+    if [ "${inbound_rc}" = "1" ]; then
+        log "[inbound] survey PARTIAL — the forks below could not be surveyed; every other tool IS reported above"
+        grep -E "ERROR" "${INBOUND_OUT}" | head -5 | sed 's/^/[inbound]   /' \
             | tee -a "${LOG}" || true
-    else
-        log "[inbound] survey FAILED — details in ${INBOUND_OUT}"
+    elif [ "${inbound_rc}" != "0" ]; then
+        log "[inbound] survey produced NOTHING (rc=${inbound_rc}) — details in ${INBOUND_OUT}"
     fi
 else
     # Same rule as the guards above: a missing survey is not an empty gap.
