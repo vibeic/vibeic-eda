@@ -44,7 +44,7 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
-variable "OPENROAD_RECIPE" { default = "7ac820" }
+variable "OPENROAD_RECIPE" { default = "5c503f" }
 variable "YOSYS_RECIPE" { default = "74a892" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "be7db2" }

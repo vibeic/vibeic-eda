@@ -67,8 +67,15 @@ RUN git clone "${OPENROAD_REPO}" /src \
 # target is what omits it. The `readlink -f` resolves bazel's output symlink to
 # a real path first: `bazel-bin` is a symlink into the output base, and a COPY
 # --from of a symlink outside the build context copies the LINK, not the file.
+#
+# `bazelisk` with `bazel` as fallback, resolved the same way `etc/Build.sh` does
+# (its lines 391-393) rather than hardcoded: the first attempt wrote `bazel` and
+# the build died with `bazel: not found` in 0.127s, because this image has only
+# bazelisk. Mirroring the build script's own resolution means a change to which
+# launcher ships cannot break this step while leaving Build.sh working.
 RUN cd /src \
- && bazel build --stamp //src/sta:opensta \
+ && BZL="$(command -v bazelisk || command -v bazel)" \
+ && "$BZL" build --stamp //src/sta:opensta \
  && install -D "$(readlink -f bazel-bin)/src/sta/opensta" \
       /vibeic-openroad/bin/sta \
  && /vibeic-openroad/bin/sta -version
