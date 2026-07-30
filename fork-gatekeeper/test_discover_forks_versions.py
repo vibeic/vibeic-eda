@@ -338,3 +338,58 @@ def test_checkout_wins_over_an_earlier_unrelated_ref():
     pins = df.parse_dockerfile_pins(_CHECKOUT_WITH_DECOY)
     assert pins.get("tool", {}).get("arg") == "TOOL_REF", \
         "the generic forward scan grabbed the decoy"
+
+
+_REPO_VAR_WITH_SUBMODULES = '''
+ARG HOST_REPO=https://github.com/vibeic/Host.git
+ARG HOST_REF=1111111111111111111111111111111111111111
+RUN git clone "${HOST_REPO}" /src \\
+ && cd /src && git checkout ${HOST_REF} \\
+ && git submodule update --init --recursive --depth 1 \\
+ && ./build.sh
+RUN mkdir -p /vibeic/provenance \\
+ && printf '{"tool":"host","repo":"%s","ref":"%s"}' \\
+      "${HOST_REPO}" "${HOST_REF}" > /vibeic/provenance/host.json
+'''
+
+
+def test_clone_flags_survive_a_later_provenance_line_naming_the_same_url():
+    """After `${X_REPO}` substitution the URL appears several times — the ARG
+    that defines it, the RUN that clones, and the provenance printf that records
+    it — and the parse loop assigns on every match, so the LAST wins.
+
+    For `tools/openroad/Dockerfile` the last is the printf, which has neither
+    `git clone` nor `submodule` in it:
+
+        1252  ARG OPENROAD_REPO=…
+        2885  RUN git clone … && git submodule update --init --recursive
+        5279  RUN printf '{"tool":"openroad","repo":"%s"…'     <- won
+
+    So `submodules` read False for a build that fetches them, and
+    `expand_vendored_pins` never fired for the fork it was written for: OpenSTA,
+    vendored at src/sta, in the image while the ledger called it absent
+    (vibeic-eda#8, #32). This fixture carries the printf, which the earlier one
+    did not — without it the test passed against the bug.
+    """
+    pins = df.parse_dockerfile_pins(_REPO_VAR_WITH_SUBMODULES)
+    host = pins.get("host") or {}
+    assert host.get("submodules") is True, \
+        "a provenance line mentioning the URL overwrote the clone step's flags"
+    assert host.get("recursive") is True
+
+
+_NO_SUBMODULE_INIT = '''
+ARG PLAIN_REPO=https://github.com/vibeic/Plain.git
+ARG PLAIN_REF=2222222222222222222222222222222222222222
+RUN git clone "${PLAIN_REPO}" /src \\
+ && cd /src && git checkout ${PLAIN_REF} \\
+ && make
+'''
+
+
+def test_a_clone_without_submodule_init_stays_false():
+    """…or the test above is met by hardcoding True. A declared-but-never-fetched
+    submodule is correctly NOT integrated, which is the whole reason the flag
+    exists rather than being assumed."""
+    pins = df.parse_dockerfile_pins(_NO_SUBMODULE_INIT)
+    assert (pins.get("plain") or {}).get("submodules") is False

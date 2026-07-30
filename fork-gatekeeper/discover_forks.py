@@ -110,6 +110,7 @@ def parse_dockerfile_pins(text: str) -> dict:
     whether a fork vendored inside it reaches the image. `expand_vendored_pins` consumes
     them; a declared-but-never-fetched submodule is correctly not integrated.
     """
+    orig_text = text          # before ${*_REPO} substitution, for the clone-step lookup
     args = dict(re.findall(r"ARG\s+(\w+_REF)\s*=\s*(\S+)", text))
     # Since the per-tool split (vibeic-eda#14) a clone reads `git clone "${YOSYS_REPO}"`
     # and the URL lives in the ARG default. Substituting the *_REPO args in before
@@ -158,7 +159,30 @@ def parse_dockerfile_pins(text: str) -> dict:
             am = re.search(r"\$\{(\w+_REF)\}", _tail)
         if am and am.group(1) in args:
             arg = am.group(1)
+            # The instruction that CLONES this repo, not merely one the URL
+            # text appears in. After `${X_REPO}` substitution the URL occurs
+            # SEVERAL times — in the ARG that defines it, in the RUN that
+            # clones, and in the provenance `printf` that records it — and this
+            # loop assigns on every match, so the LAST one wins. For
+            # `tools/openroad/Dockerfile` that last match is the printf:
+            #
+            #   1252  ARG OPENROAD_REPO=…            clone=no   submodule=no
+            #   2885  RUN git clone … && git submodule update --init --recursive
+            #   5279  RUN printf '{"tool":"openroad","repo":"%s"…'   <- wins
+            #
+            # so `submodules`/`recursive` came out False for a build that fetches
+            # them, and `expand_vendored_pins` never fired for the one fork it
+            # was written for: OpenSTA, vendored at src/sta, shipping in the
+            # image while the ledger called it absent (vibeic-eda#8, #32).
             step = next((t for s, e, t in instrs if s <= m.start() < e), "")
+            if "git clone" not in step:
+                _needles = [m.group(0)]
+                for _rv, _url in re.findall(r"ARG\s+(\w+_REPO)\s*=\s*(\S+)", orig_text):
+                    if m.group(0) in _url:
+                        _needles.append("${%s}" % _rv)
+                step = next((t for _s, _e, t in instrs
+                             if "git clone" in t and any(n in t for n in _needles)),
+                            step)
             pins[tool.lower()] = {"ref": args[arg], "arg": arg, "branch": branches.get(arg),
                                   "repo": tool,
                                   "submodules": bool(_SUBMODULE_INIT.search(step)),
