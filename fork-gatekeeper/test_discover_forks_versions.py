@@ -235,3 +235,106 @@ def test_without_a_pinned_ref_no_range_is_invented():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------------------------
+# pin parsing — the ref sits on either side of the URL (vibeic-eda#32)
+# --------------------------------------------------------------------------
+
+_BRANCH_FORM = '''
+ARG ORFS_REF=v3.0
+RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \\
+      https://github.com/vibeic/OpenROAD-flow-scripts.git /orfs \\
+ && git -C /orfs sparse-checkout set flow/platforms/nangate45
+'''
+
+_CHECKOUT_FORM = '''
+ARG MAGIC_REPO=https://github.com/vibeic/magic.git
+ARG MAGIC_REF=9d3ed4b16b5e5d6570846b448b89ed7d953cd14b
+RUN git clone "${MAGIC_REPO}" /magic \\
+ && cd /magic && git checkout ${MAGIC_REF} \\
+ && make
+'''
+
+_THREE_IN_ONE_RUN = '''
+ARG ASAP7SC_REF=main
+ARG ASAP7PDK_REF=main
+ARG ASAP7KL_REF=main
+RUN git clone --depth 1 --branch ${ASAP7SC_REF} --sparse \\
+      https://github.com/vibeic/asap7sc7p5t_28.git /a7sc \\
+ && git clone --depth 1 --branch ${ASAP7PDK_REF} --sparse \\
+      https://github.com/vibeic/asap7_pdk_r1p7.git /a7pdk \\
+ && git clone --depth 1 --branch ${ASAP7KL_REF} \\
+      https://github.com/vibeic/ASAP7_for_KLayout.git /a7kl
+'''
+
+_PROVENANCE_TAIL = '''
+ARG MAGIC_REPO=https://github.com/vibeic/magic.git
+ARG MAGIC_REF=aaaaaaaaaaaa
+ARG NETGEN_REPO=https://github.com/vibeic/netgen.git
+ARG NETGEN_REF=bbbbbbbbbbbb
+RUN git clone "${MAGIC_REPO}" /magic && cd /magic && git checkout ${MAGIC_REF}
+RUN git clone "${NETGEN_REPO}" /netgen && cd /netgen && git checkout ${NETGEN_REF}
+RUN printf '{"repo":"%s","ref":"%s","netgen_repo":"%s","netgen_ref":"%s"}' \\
+      "${MAGIC_REPO}" "${MAGIC_REF}" "${NETGEN_REPO}" "${NETGEN_REF}" > /p.json
+'''
+
+
+def test_the_branch_form_is_parsed():
+    """`--branch ${REF}` puts the ref BEFORE the URL. Searching only forward
+    missed it entirely, and OpenROAD-flow-scripts — which supplies
+    /foss/pdks/nangate45 and /foss/pdks/asap7 to the shipped image — read as a
+    fork with no pin at all (vibeic-eda#32)."""
+    pins = df.parse_dockerfile_pins(_BRANCH_FORM)
+    assert pins.get("openroad-flow-scripts", {}).get("arg") == "ORFS_REF"
+
+
+def test_the_checkout_form_still_parses():
+    """The eight pins that already worked. Three attempts at "nearest ref"
+    fixed the branch form and broke this one."""
+    pins = df.parse_dockerfile_pins(_CHECKOUT_FORM)
+    assert pins.get("magic", {}).get("arg") == "MAGIC_REF"
+
+
+def test_three_clones_in_one_run_each_get_their_own_ref():
+    """The mispairing that a distance heuristic cannot avoid: looking forward
+    gave asap7sc7p5t_28 the pin of asap7_pdk_r1p7, looking backward gave it the
+    pin of the clone before. A WRONG pin is worse than a missing one — the row
+    reads as tracked."""
+    pins = df.parse_dockerfile_pins(_THREE_IN_ONE_RUN)
+    assert pins.get("asap7sc7p5t_28", {}).get("arg") == "ASAP7SC_REF"
+    assert pins.get("asap7_pdk_r1p7", {}).get("arg") == "ASAP7PDK_REF"
+    assert pins.get("asap7_for_klayout", {}).get("arg") == "ASAP7KL_REF"
+
+
+def test_a_provenance_line_naming_both_refs_does_not_steal_the_pin():
+    """`tools/lvs/Dockerfile` writes both tools' repo+ref into one printf. An
+    instruction-wide search let magic's clause run into it and pick up
+    NETGEN_REF."""
+    pins = df.parse_dockerfile_pins(_PROVENANCE_TAIL)
+    assert pins.get("magic", {}).get("arg") == "MAGIC_REF"
+    assert pins.get("netgen", {}).get("arg") == "NETGEN_REF"
+
+
+_CHECKOUT_WITH_DECOY = '''
+ARG TOOL_REPO=https://github.com/vibeic/tool.git
+ARG DECOY_REF=deadbeef
+ARG TOOL_REF=cafebabe
+RUN git clone "${TOOL_REPO}" /tool \\
+ && echo "unrelated ${DECOY_REF} mentioned first" \\
+ && cd /tool && git checkout ${TOOL_REF}
+'''
+
+
+def test_checkout_wins_over_an_earlier_unrelated_ref():
+    """The `checkout` branch must be doing the work, not the generic
+    forward-scan fallback behind it.
+
+    Removing the checkout pattern left the whole suite green, because the
+    fallback picks the first `${*_REF}` after the URL and that happened to be
+    the right one in every fixture. Here it is not: a decoy ref appears first,
+    so only a parser that looks for `checkout` specifically gets this right.
+    """
+    pins = df.parse_dockerfile_pins(_CHECKOUT_WITH_DECOY)
+    assert pins.get("tool", {}).get("arg") == "TOOL_REF", \
+        "the generic forward scan grabbed the decoy"

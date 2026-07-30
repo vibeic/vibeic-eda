@@ -125,8 +125,37 @@ def parse_dockerfile_pins(text: str) -> dict:
     pins = {}
     for m in re.finditer(r"github\.com/vibeic/([A-Za-z0-9_.-]+?)\.git", text):
         tool = m.group(1)
-        tail = text[m.end(): m.end() + 400]
-        am = re.search(r"\$\{(\w+_REF)\}", tail)
+        # Dispatched on the clone's SYNTAX, not on distance. Four attempts at
+        # "nearest ref" each fixed one pairing and broke another, because the two
+        # forms put the ref on opposite sides of the URL:
+        #
+        #   [A] git clone --depth 1 --branch ${ORFS_REF} … <url>     ref BEFORE
+        #   [B] git clone "${MAGIC_REPO}" /magic && … checkout ${MAGIC_REF}   AFTER
+        #
+        # Looking only forward (the original) missed every [A]: OpenROAD-flow-scripts
+        # and ASAP7_for_KLayout parsed as having NO pin while both supply PDK trees
+        # to the shipped image (vibeic-eda#32). Looking backward, or at the whole
+        # instruction, mispaired the multi-clone RUNs — three asap7 clones in one
+        # RUN, and lvs/sat-solvers whose provenance printf names both tools' refs.
+        # A wrong pin is worse than a missing one: the row reads as tracked.
+        #
+        # `--branch X` and `checkout X` are unambiguous, so each form is matched
+        # where it actually writes the ref.
+        _tail = text[m.end(): m.end() + 400]
+        _head = text[max(0, m.start() - 200): m.start()]
+        # On the [A] side, LAST match wins: three clones sharing a RUN put several
+        # `--branch` refs in the look-behind, and the one belonging to this URL is
+        # the closest, not the first. `re.search` returns the first, which paired
+        # asap7_pdk_r1p7 with asap7sc7p5t_28's ref.
+        _b = re.findall(r"--branch\s+\$\{(\w+_REF)\}", _head)
+        am = re.search(r"checkout\s+\$\{(\w+_REF)\}", _tail)
+        if not am and _b:
+            class _M:
+                def __init__(self, g): self._g = g
+                def group(self, _n): return self._g
+            am = _M(_b[-1])
+        if not am:
+            am = re.search(r"\$\{(\w+_REF)\}", _tail)
         if am and am.group(1) in args:
             arg = am.group(1)
             step = next((t for s, e, t in instrs if s <= m.start() < e), "")
