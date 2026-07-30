@@ -457,7 +457,26 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         led["error"] = f"repo meta: {meta['_err']}"
         return led
     parent = meta.get("parent") or {}
-    up_branch = parent.get("default_branch") or "main"
+    # ASK THE UPSTREAM when our repo has no parent. `vibeic/OpenROAD-flow-scripts`
+    # and `vibeic/ASAP7_for_KLayout` are independent repositories rather than
+    # GitHub forks (isFork=false, parent=null), so `parent.default_branch` is
+    # absent and the hardcoded "main" was wrong for ORFS, whose upstream uses
+    # `master`. Every compare against that branch then failed, `behind_commits`
+    # never computed, and the row read CLEAN while our pin (v3.0) sat 5944
+    # commits behind the upstream tag the ledger itself recorded as latest
+    # (vibeic-eda#33). `up_full` was never the problem — it comes from
+    # FORKS.json — only the branch did.
+    up_branch = parent.get("default_branch")
+    if not up_branch:
+        _um = gh(f"repos/{up_full}")
+        up_branch = (_um.get("default_branch")
+                     if isinstance(_um, dict) and not _um.get("_err") else None)
+    # Still nothing means the upstream could not be asked. "main" is a guess, and
+    # a guessed branch produces a failed compare that reads as "nothing behind" —
+    # so it is recorded as unknown instead, and the caller sees no comparison
+    # rather than a comparison against a branch that may not exist.
+    led["upstream_branch_resolved"] = bool(up_branch)
+    up_branch = up_branch or "main"
     up_owner = up_full.split("/")[0]
     led.update({"forked_at": (meta.get("created_at") or "")[:10],
                 "upstream_default_branch": up_branch})
@@ -487,6 +506,25 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     # our carried patches + fork point: compare upstream default ... our pinned ref
     head = ref or meta.get("default_branch") or up_branch
     cmp = gh(f"repos/{ORG}/{tool}/compare/{up_owner}:{up_branch}...{head}")
+    # Ask the UPSTREAM instead when our repo cannot answer. A cross-repo compare
+    # needs the two to share a fork network, and `vibeic/OpenROAD-flow-scripts`
+    # and `vibeic/ASAP7_for_KLayout` are independent repositories (isFork=false),
+    # so this 404s for them. `behind_commits` then stayed None and the row read
+    # CLEAN while ORFS's pinned v3.0 sat 6157 commits behind upstream master —
+    # and ORFS supplies /foss/pdks/{nangate45,asap7} to the shipped image
+    # (vibeic-eda#33).
+    #
+    # The reversed query answers the same question: upstream's `master...<our
+    # ref>` reports how far our ref trails. `ahead_by`/`behind_by` swap meaning
+    # with the direction, so they are read back the other way round.
+    if cmp.get("_err") and ref:
+        _rev = gh(f"repos/{up_full}/compare/{up_branch}...{ref}")
+        if not _rev.get("_err"):
+            cmp = {"merge_base_commit": _rev.get("merge_base_commit"),
+                   "ahead_by": _rev.get("ahead_by", 0),
+                   "behind_by": _rev.get("behind_by", 0),
+                   "commits": _rev.get("commits") or []}
+            led["compare_direction"] = "from-upstream"
     pin_date = None
     if not cmp.get("_err"):
         mb = cmp.get("merge_base_commit") or {}
