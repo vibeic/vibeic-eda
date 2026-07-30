@@ -75,7 +75,7 @@ guard_rc=0
 # a `gh` token and already runs daily, so it is the only place that can notice.
 # The PR workflow runs the same checker offline, where those rows report as
 # unverified rather than passing.
-for g in check_fork_only.py check_pins_agree.py check_doc_counts.py; do
+for g in check_fork_only.py check_pins_agree.py check_doc_counts.py check_fork_presence_claims.py; do
     case "${g}" in
         check_doc_counts.py) extra=(--online) ;;
         *)                   extra=() ;;
