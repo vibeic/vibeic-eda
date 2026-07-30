@@ -152,5 +152,86 @@ def test_tags_by_date_reads_an_annotated_tag(monkeypatch):
     assert got == {"light": "2026-01-02", "annot": "2026-03-04"}
 
 
+# --------------------------------------------------------------------------
+# vibeic-eda#31, second half — the range needs two ENDS, not just a latest.
+#
+# Driven through the real `assess()` with the fixture style test_assess.py
+# already uses (GK_STATE_DIR + a ledger on disk + stubbed layers), because the
+# thing under test is WHICH RANGE assess picks, and a hand-called helper would
+# not exercise that choice.
+# --------------------------------------------------------------------------
+
+import importlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+import assess_release as A  # noqa: E402
+
+
+def _fixture(tmp: Path, **led_over):
+    """assess() wired to stub layers; returns the list the range lands in."""
+    os.environ["GK_STATE_DIR"] = str(tmp)
+    importlib.reload(A)
+    led = {"tool": "OpenROAD", "integrated": True,
+           "upstream": "The-OpenROAD-Project/OpenROAD",
+           "upstream_default_branch": "master",
+           "pinned_ref_full": "9" * 40,
+           "base_release": "v0.9.0-beta",
+           "upstream_latest_release": "v0.9.0-beta",
+           "behind_releases": 0, "behind_commits": 7, "role": "PnR"}
+    led.update(led_over)
+    (tmp / "ledger").mkdir(parents=True, exist_ok=True)
+    (tmp / "ledger" / f"{led['tool']}.json").write_text(json.dumps(led))
+
+    seen = []
+    A.upstream_commits = lambda up, base, new: (seen.append((base, new)) or ([], []))
+    A.our_patch_files = lambda *a: set()
+    A._commit_files = lambda *a: set()
+    A.clean_cherrypick = lambda *a: True
+    A.classify_commits = lambda tool, role, commits: {}
+    A._confirm_candidates = lambda *a, **k: {}
+    return led, seen
+
+
+def test_an_empty_release_range_falls_back_to_commits():
+    """THE second defect. `base_release == upstream_latest_release` collapses the
+    range onto one tag, so the assessment covers an empty diff and the fork reads
+    as clean while upstream master has moved. OpenROAD sat in exactly that state:
+    both ends `v0.9.0-beta` (2020-07-06), master moving daily."""
+    with tempfile.TemporaryDirectory() as d:
+        led, seen = _fixture(Path(d))
+        A.assess("OpenROAD")
+    assert seen, "assess() never asked for a commit range"
+    base, new = seen[0]
+    assert (base, new) != ("v0.9.0-beta", "v0.9.0-beta"), \
+        "the range is still a single point; the assessment would cover nothing"
+    assert base == "9" * 40, f"expected our pinned ref as base, got {base}"
+    assert new == "master", f"expected upstream default branch as head, got {new}"
+
+
+def test_a_real_release_range_is_left_alone():
+    """The twelve upstreams with current releases must keep the RELEASE range —
+    magic ships daily and its tag range is the right question for it."""
+    with tempfile.TemporaryDirectory() as d:
+        led, seen = _fixture(Path(d), tool="magic", upstream="RTimothyEdwards/magic",
+                             base_release="8.3.674", upstream_latest_release="8.3.678",
+                             behind_releases=4, behind_commits=108)
+        A.assess("magic")
+    assert seen and seen[0] == ("8.3.674", "8.3.678"), \
+        f"a genuine release range was overwritten with a commit range: {seen}"
+
+
+def test_without_a_pinned_ref_no_range_is_invented():
+    """No pinned ref means no base. Falling through to the existing
+    missing-base error is correct; substituting something plausible is not."""
+    with tempfile.TemporaryDirectory() as d:
+        led, seen = _fixture(Path(d), pinned_ref_full=None,
+                             base_release=None, upstream_latest_release=None)
+        r = A.assess("OpenROAD")
+    assert not seen, f"a range was built without a pinned ref: {seen}"
+    assert "error" in r, f"expected the missing-base error, got {r}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

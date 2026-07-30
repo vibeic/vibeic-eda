@@ -730,6 +730,28 @@ def assess(tool: str) -> dict:
     our_ref = led.get("pinned_ref_full")
     base_ref = led.get("base_release") or (led.get("fork_point") or {}).get("sha")
     new_ref = led.get("upstream_latest_release")
+
+    # vibeic-eda#31, second half. A project that ships from rolling master has no
+    # NEW RELEASE to frame the range with, so `base_release ... latest_release`
+    # collapses onto a single tag and the assessment covers an empty diff — it
+    # reports nothing and looks like a clean fork.
+    #
+    # OpenROAD is the case: `base_release` and `upstream_latest_release` were
+    # BOTH `v0.9.0-beta` (2020-07-06) while master moved daily, so the range was
+    # `v0.9.0-beta...v0.9.0-beta`. Reading tags fixed which tag is "latest"; it
+    # did not give the range two ENDS. OpenSTA is worse — one tag, ever, from
+    # 2020 — so no amount of tag-reading produces a range for it at all.
+    #
+    # When the release range is empty but master HAS moved, assess the commit
+    # range instead: our pinned ref to upstream's default branch. That is exactly
+    # the set `behind_commits` counted, which is the set a human would be asked
+    # about. Cross-fork compare is used deliberately and was verified against the
+    # live API — the upstream repo resolves a sha from its own fork network.
+    if ((led.get("behind_releases") or 0) == 0
+            and (led.get("behind_commits") or 0) > 0
+            and our_ref):
+        base_ref, new_ref = our_ref, up_branch
+
     if not (base_ref and new_ref):
         return {"tool": tool, "error": "missing base_release/latest for the commit range"}
 
