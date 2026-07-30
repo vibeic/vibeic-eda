@@ -127,18 +127,76 @@ def pinned_refs(eda_root: Path) -> Dict[str, str]:
     return pins
 
 
-def survey_one(repo: str, ref: str) -> dict:
+def declared_upstreams(eda_root: Path) -> Dict[str, str]:
+    """tool -> upstream slug, as recorded in FORKS.json.
+
+    GitHub only reports a `parent` for a repository created THROUGH the fork
+    button; one populated by pushing a mirror has `fork=false` and no parent, and
+    is indistinguishable here from a repo whose upstream nobody knows.  Both
+    SAT solvers are in that state, so both had been reported unsurveyable since
+    the survey was written — while FORKS.json recorded their upstreams the whole
+    time, one file away.
+
+    An empty mapping is returned only when the file is missing or unreadable; it
+    is never used to mean "no upstream exists".
+    """
+    path = eda_root / "fork-gatekeeper" / "FORKS.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, str] = {}
+    for entry in doc.get("forks", []):
+        tool, upstream = entry.get("tool"), entry.get("upstream")
+        if tool and upstream:
+            out[tool] = upstream
+    return out
+
+
+def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -> dict:
     """Upstream commits reachable from their default branch but not from `ref`."""
     meta = _gh_json(f"repos/vibeic/{repo}")
-    if not meta or not meta.get("parent"):
-        return {"repo": repo, "error": "no upstream parent recorded"}
-    parent = meta["parent"]["full_name"]
-    branch = meta["parent"].get("default_branch", "master")
+    # Measured: for a non-fork this endpoint OMITS `parent` entirely, so a plain
+    # `.get("parent", {})` would do. `or {}` is kept because it also survives an
+    # explicit `"parent": null`, and the two are indistinguishable to a reader
+    # who only sees the field missing from the output.
+    gh_parent = (meta or {}).get("parent") or {}
+    parent = gh_parent.get("full_name")
+    branch = gh_parent.get("default_branch")
+    source = "github-parent"
+    if not parent:
+        parent = (declared or {}).get(repo)
+        source = "forks-json"
+    if not parent:
+        return {"repo": repo, "error": "no upstream recorded by GitHub or FORKS.json"}
+    if not branch:
+        # Resolved from the upstream itself rather than assumed: guessing
+        # "master" on a repo that renamed to "main" turns a real survey into a
+        # compare against a branch that does not exist, which reports as an
+        # error rather than as the zero it would look like.
+        branch = (_gh_json(f"repos/{parent}") or {}).get("default_branch", "master")
     owner = parent.split("/")[0]
 
     cmp_doc = _gh_json(f"repos/vibeic/{repo}/compare/{ref}...{owner}:{branch}")
+    scope = "cross-repo"
     if cmp_doc is None:
-        return {"repo": repo, "upstream": parent, "error": "compare failed"}
+        # A cross-repo compare 404s unless GitHub links the two as fork+parent,
+        # which it only does for a repo created through the fork button. Our
+        # mirrors were populated by pushing, so the endpoint refuses even though
+        # the histories are shared — upstream resolves our cadical pin
+        # c60730422 (2026-07-19) perfectly well.
+        #
+        # When upstream contains our pin, the same question can be asked inside
+        # the upstream repository alone, which needs no relationship at all.
+        # The narrower scope is recorded rather than hidden: this comparison
+        # cannot see commits of OURS, so on a mirror it is exact and on a fork
+        # carrying local work it would understate. `local_commits_invisible`
+        # says so in the output instead of leaving the caller to assume.
+        cmp_doc = _gh_json(f"repos/{parent}/compare/{ref}...{branch}")
+        scope = "upstream-internal"
+    if cmp_doc is None:
+        return {"repo": repo, "upstream": parent, "upstream_source": source,
+                "error": "compare failed in both cross-repo and upstream-internal scope"}
 
     behind = cmp_doc.get("total_commits", 0)
     commits = cmp_doc.get("commits", []) or []
@@ -155,6 +213,14 @@ def survey_one(repo: str, ref: str) -> dict:
                                .get("date", ""))[:10]})
     return {
         "repo": repo, "upstream": parent, "branch": branch, "pin": ref[:9],
+        # Where the upstream came from. A slug GitHub vouches for and one we
+        # asserted in FORKS.json carry different weight, and a reader that
+        # cannot tell them apart is trusting our own claim as verification.
+        "upstream_source": source,
+        "compare_scope": scope,
+        # True when the answer came from inside the upstream repo, which by
+        # construction cannot observe commits that exist only in ours.
+        "local_commits_invisible": scope == "upstream-internal",
         "behind": behind,
         "sampled": len(commits),
         # Named, not implied: a caller that reads `fix_candidates` without this
@@ -185,7 +251,8 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return RC_NOTHING
 
-    results = [survey_one(repo, ref) for repo, ref in sorted(pins.items())]
+    declared = declared_upstreams(Path(a.eda_root))
+    results = [survey_one(repo, ref, declared) for repo, ref in sorted(pins.items())]
     errored = [r for r in results if r.get("error")]
 
     total_behind = sum(r.get("behind", 0) for r in results)
