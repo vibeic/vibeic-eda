@@ -22,7 +22,15 @@
 
 FROM swift:5.9 AS build
 ARG FAULT_REPO=https://github.com/vibeic/Fault.git
-ARG FAULT_REF=fix/skip-synth-honours-output  # branch: carries the --skip-synth output fix
+ARG FAULT_REF=0c90e3b14b7f1a940f4120da8ac03037847309f4  # pinned; main tip carrying the
+#   --skip-synth output fix (chain.swift). Was `fix/skip-synth-honours-output`, a BRANCH
+#   NAME — and that branch no longer exists: `git ls-remote vibeic/Fault` lists only
+#   `main`. The work was merged into main as 0c90e3b (2026-07-31) and the branch was
+#   deleted, so `git checkout ${FAULT_REF}` would fail and this stage no longer builds.
+#
+#   A branch name is not a pin in any case: it moves, so the same Dockerfile produces
+#   different content at different times and `check_pins_agree` has nothing stable to
+#   compare. Every other tool here pins a 40-char SHA; this one now does too.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
