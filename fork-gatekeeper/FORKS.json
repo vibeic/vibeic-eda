@@ -145,6 +145,11 @@
       "upstream": "zachjs/sv2v"
     },
     {
+      "tool": "Trilinos",
+      "role": "Xyce's build dependency — Xyce cannot be configured or linked without it. Statically linked into eda-tool-xyce, not shipped as its own artefact, which is why it has no IMG_ pin of its own. Mirrored 2026-07-31 (clone+push) after the recorded reason for leaving it upstream — that a whole-history push fails at this size — did not survive testing: the 1.8 GB push went through.",
+      "upstream": "trilinos/Trilinos"
+    },
+    {
       "tool": "verilator",
       "role": "RTL simulation (lint / fast sim)",
       "upstream": "verilator/verilator"
