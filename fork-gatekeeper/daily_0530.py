@@ -119,9 +119,37 @@ def step1_upstream(g, main, rep):
     r = sh(*g, "merge", "--no-edit", "-m",
            f"Merge upstream into {main} (daily 05:30)", ub)
     if r.returncode:
+        # Collect the evidence BEFORE aborting, and route it to the SAME AI step
+        # that already handles our-branch conflicts. It did not reach that step
+        # before: `step2b_ai_decisions` only read `rep["conflicted"]`, which
+        # `step2_ours` fills, so an UPSTREAM conflict printed "needs a human" and
+        # nothing came back for it.
+        #
+        # That is backwards for the invariant the owner states first: "upstream's
+        # contributions are all in". A conflict taking upstream commits is
+        # precisely the case where that invariant is at risk, and it was the one
+        # case with no decision-maker. Measured 2026-08-01: OpenSTA (11 upstream
+        # commits) and OpenROAD (4) both sat here.
+        files = [l for l in out(*g, "diff", "--name-only",
+                                "--diff-filter=U").splitlines() if l.strip()]
+        commits = [{"sha": s[:12],
+                    "subject": out(*g, "log", "-1", "--format=%s", s),
+                    "author": out(*g, "log", "-1", "--format=%an", s)}
+                   for s in out(*g, "rev-list", f"{main}..{ub}").split()[:20]]
         sh(*g, "merge", "--abort")
-        rep["upstream"] = f"CONFLICT taking {behind} upstream commit(s) — needs a human"
-        rep["needs_human"] = True
+        rep["upstream"] = f"CONFLICT taking {behind} upstream commit(s)"
+        rep.setdefault("conflicted", []).append({
+            "branch": ub,
+            "direction": "upstream -> our mainline",
+            "commits": int(behind or 0),
+            "conflicting_files": files,
+            # NOT `our_commits`: in this direction they are UPSTREAM's, and
+            # the brief prints this list under a heading taken from the field.
+            # A name that contradicts its contents is how a decision gets made
+            # on a false description.
+            "commits_detail": commits,
+            "merge_stderr": (r.stderr or r.stdout or "").strip()[-800:],
+        })
     else:
         rep["upstream"] = f"merged {behind} upstream commit(s)"
 
@@ -239,15 +267,22 @@ def step2_ours(g, main, rep):
             sh(*g, "merge", "--abort")
             conflicted.append({
                 "branch": b,
+                # STATED, not defaulted. The brief renders this per case and the
+                # two directions put OPPOSITE sides at risk, so a case that does
+                # not say which it is gets decided on a guess.
+                "direction": "our branch -> our mainline",
                 "commits": len(mine),
                 "conflicting_files": files,
-                "our_commits": commits,
+                "commits_detail": commits,
                 "merge_stderr": (r.stderr or r.stdout or "").strip()[-800:],
             })
         else:
             merged.append({"branch": b, "commits": len(mine)})
     rep["merged"] = merged
-    rep["conflicted"] = conflicted
+    # APPEND, never assign: step1 may already have put an upstream conflict here,
+    # and step1 runs first. Assigning would drop the very conflicts that put the
+    # "upstream is all in" invariant at risk -- and it would do it silently.
+    rep.setdefault("conflicted", []).extend(conflicted)
     rep["carried_nothing_new"] = len(empty)
 
 
@@ -377,12 +412,14 @@ def _handoff_brief(cases) -> str:
         "You are this host's fork gatekeeper. The 05:30 fork-consolidation run "
         "reached the ONE part it is not allowed to decide alone.",
         "",
-        "Every branch below carries commits of OURS that are not on our "
-        "master, and `git merge` CONFLICTED. The owner's standing rule is that "
-        "choosing between merge and cherry-pick, and resolving the conflict, "
-        "needs AI judgement — a script deciding by itself is not enough. So it "
-        "stopped here and handed you the evidence rather than aborting the "
-        "round or guessing.",
+        "Each case below is a `git merge` that CONFLICTED, and EACH ONE "
+        "STATES ITS OWN DIRECTION — read it before deciding. `our branch -> "
+        "our mainline` risks abandoning OUR fix; `upstream -> our mainline` "
+        "risks dropping an UPSTREAM contribution, which is the invariant the "
+        "owner states first. The standing rule is that choosing between merge "
+        "and cherry-pick, and resolving the conflict, needs AI judgement — a "
+        "script deciding by itself is not enough. So it stopped here and "
+        "handed you the evidence rather than aborting the round or guessing.",
         "",
         "FOR EACH CASE: read the actual code, decide MERGE (take the branch "
         "whole) or CHERRY-PICK (take only the commits that are still wanted), "
@@ -396,8 +433,11 @@ def _handoff_brief(cases) -> str:
         "  * Never delete a branch that is the head of an OPEN upstream PR. "
         "    The prune step already guards this; do not work around it. We "
         "    have already killed our own iverilog PR this way once.",
-        "  * A conflict resolved by dropping our fix is a decision to abandon "
-        "    that fix — only do it deliberately, and record it.",
+        "  * A conflict resolved by dropping a side is a decision to abandon "
+        "    that side's work — only do it deliberately, and record it. WHICH "
+        "    side is at risk depends on the case's direction: `our branch ->` "
+        "    puts our fix at risk, `upstream ->` puts an upstream contribution "
+        "    at risk.",
         "  * Repo artifacts are ENGLISH ONLY: commit messages, branch names, "
         "    PR titles and bodies.",
         "",
@@ -405,12 +445,15 @@ def _handoff_brief(cases) -> str:
         "",
     ]
     for c in cases:
+        _dir = c.get("direction") or "our branch -> our mainline"
+        _whose = "upstream's" if _dir.startswith("upstream") else "our"
         lines.append(f"── {c['fork']} : branch `{c['branch']}` "
-                     f"({c['commits']} of our commits) ──")
+                     f"({c['commits']} of {_whose} commits) ──")
+        lines.append(f"  direction: {_dir}")
         if c.get("conflicting_files"):
             lines.append("  conflicting files: "
                          + ", ".join(c["conflicting_files"][:12]))
-        for k in c.get("our_commits", []):
+        for k in c.get("commits_detail", c.get("our_commits", [])):
             lines.append(f"  {k['sha']}  {k['subject'][:90]}")
             if k.get("files"):
                 lines.append("      touches: " + ", ".join(k["files"][:8]))
