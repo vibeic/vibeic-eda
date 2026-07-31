@@ -49,6 +49,7 @@ variable "YOSYS_RECIPE" { default = "586160" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "5d88d6" }
 variable "LVS_RECIPE" { default = "e2e322" }
+variable "FASTERCAP_RECIPE" { default = "a1c7f0" }
 variable "IVERILOG_RECIPE" { default = "d06e70" }
 variable "KLAYOUT_RECIPE" { default = "7cb6ee" }
 variable "VERILATOR_RECIPE" { default = "8b2650" }
@@ -73,6 +74,13 @@ variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
 variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
+# FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
+# add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
+# FasterCap checkout cannot configure. All three refs appear in the tag below, so
+# none of them can move without the release pulling a new image.
+variable "FASTERCAP_REF"   { default = "595ea4348196b4f9a2b51c3d4768f4edb1746fb5" }
+variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
+variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
 variable "IVERILOG_REF"    { default = "cf9ff9dcb7c74f90db67ee40fc8905b7992daaef" }
 variable "KLAYOUT_REF"     { default = "a5a7a2d6be41d4f66338eacdc65ceb573985c3ee" }
 variable "VERILATOR_REF"   { default = "9a3cc0c7dd00d45c0cff7d6314b6c232aa2e6390" }
@@ -129,6 +137,15 @@ target "sat-solvers" {
   context  = "tools/sat-solvers"
   args     = { KISSAT_REF = KISSAT_REF, CADICAL_REF = CADICAL_REF }
   tags     = ["${REGISTRY}/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}-${SAT_SOLVERS_RECIPE}"]
+}
+
+# Same shape as sat-solvers and lvs: the tag carries every ref the image is built
+# from, so a bump to any one of the three cannot ship invisibly.
+target "fastercap" {
+  inherits = ["_tool"]
+  context  = "tools/fastercap"
+  args     = { FASTERCAP_REF = FASTERCAP_REF, LINALGEBRA_REF = LINALGEBRA_REF, GEOMETRY_REF = GEOMETRY_REF }
+  tags     = ["${REGISTRY}/eda-tool-fastercap:${short(FASTERCAP_REF)}-${short(LINALGEBRA_REF)}-${short(GEOMETRY_REF)}-${FASTERCAP_RECIPE}"]
 }
 
 target "ngspice" {
@@ -227,7 +244,7 @@ group "tools" {
   targets = ["openroad", "yosys", "sat-solvers", "ngspice",
              "lvs", "iverilog", "klayout", "verilator",
              "gtkwave", "xschem", "slang", "xyce",
-             "yices2", "sv-elab", "fault"]
+             "yices2", "sv-elab", "fault", "fastercap"]
 }
 
 # The release image. No `contexts` block and no dependency on the tool targets:

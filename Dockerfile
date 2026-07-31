@@ -44,6 +44,7 @@ ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-75d582
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:0c90e3b-a7d4fd
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:595ea43-627132d-de03ffe-a1c7f0
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -69,6 +70,7 @@ FROM ${IMG_XYCE} AS img-xyce
 FROM ${IMG_YICES2} AS img-yices2
 FROM ${IMG_SV_ELAB} AS img-sv-elab
 FROM ${IMG_FAULT} AS img-fault
+FROM ${IMG_FASTERCAP} AS img-fastercap
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +482,14 @@ COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.
 COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
 COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
+# FasterCap: the base image ships /foss/tools/bin/FasterCap as a SYMLINK to
+# /foss/tools/rftoolkit/bin/FasterCap. Overwriting the RESOLVED path is what
+# actually replaces the binary users run -- an overlay beside it would leave the
+# symlink pointing at the base's Jun-2 build with every version string matching.
+COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap
+COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
+COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
