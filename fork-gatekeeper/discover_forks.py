@@ -32,6 +32,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -541,6 +542,34 @@ API_PROBE_CAP = int(os.environ.get("GK_RELEASE_PROBE_CAP") or "25")
 #: changes which sentence the ledger and the page are making (vibeic-eda#36).
 CONTAINED, NEW, SUPERSEDED, UNDETERMINED = "contained", "new", "superseded", "undetermined"
 FOLDED = "folded"
+#: …and EQUIVALENT is the same split, at the site that introduced FOLDED.
+#:
+#: CONTAINED is a claim about our TREE: our pinned ref already holds this work, so
+#: adopting the release moves no byte. Round 2's own invariant test states it as
+#: "an ancestor of our pin, or a merge into our pin that changes nothing", and run
+#: against the real corpus rather than a fixture it failed on TWO live rows —
+#: yices2 `yices-2.7.0`, which conflicts on `doc/sphinx/source/conf.py`, and
+#: cocotb `v1.5.0rc1`, which conflicts on `documentation/source/release_notes.rst`.
+#: Both arrived through the patch-equivalence branch, which is gated on neither
+#: half of that invariant.
+#:
+#: Their claim is a different one, and it is TRUE: every commit they have that our
+#: pin lacks is patch-identical to a commit our pin carries — and our pin has since
+#: changed the same files again, which is why merging them is not a no-op. That is
+#: not "we already build this tree"; it is "we carry this work and have moved past
+#: it". So it gets a name of its own.
+#:
+#: It counts as containment everywhere the COUNT and `base_release` are concerned
+#: — `yices-2.7.0` is the release yices2 builds and must stay `base_release`. Only
+#: the heading changes, which is the whole of what was wrong.
+EQUIVALENT = "patch-equivalent"
+#: Buckets whose rows are re-proved from the repository before they are filed,
+#: and the claim each one makes. See `_verify_buckets`.
+VERIFIED_BUCKETS = (CONTAINED, EQUIVALENT)
+#: How many of OUR commits one patch-equivalence re-proof may hash before it gives
+#: up. Past it the row is recorded UNVERIFIABLE with the number, never assumed
+#: sound. Measured: the two real rows needed 341 and 2276, at 0.32s and 0.63s.
+PATCHID_CAP = int(os.environ.get("GK_PATCHID_CAP") or "20000")
 
 #: `behind_releases` is an int ONLY under this status. The other two carry None.
 MEASURED, UNKNOWN, NOT_PROBED = "measured", "unknown", "not-probed"
@@ -586,6 +615,21 @@ def _peel(repo, revs: list[str]) -> dict[str, str]:
     return got
 
 
+def _range_counts(repo, base_sha: str, head_sha: str):
+    """(commits in `base..head`, of which non-merge) — or None if git would not say.
+
+    The SIZE of the range `git cherry` is about to be asked to summarise, measured
+    separately from `git cherry`, because `git cherry` cannot report what it did
+    not look at.
+    """
+    rc, allc, _ = _git(repo, "rev-list", "--count", f"{base_sha}..{head_sha}", timeout=180)
+    rc2, nmc, _ = _git(repo, "rev-list", "--no-merges", "--count",
+                       f"{base_sha}..{head_sha}", timeout=180)
+    if rc != 0 or rc2 != 0 or not allc.isdigit() or not nmc.isdigit():
+        return None
+    return int(allc), int(nmc)
+
+
 def _patch_equivalent(repo, head_sha: str, base_sha: str):
     """Does every commit `head_sha` has and `base_sha` lacks already exist in
     `base_sha` under a DIFFERENT sha? True / False / None (could not tell).
@@ -593,7 +637,7 @@ def _patch_equivalent(repo, head_sha: str, base_sha: str):
     `git cherry <base> <head>` walks `base..head` and prints each commit prefixed
     `-` when a commit reachable from `base` (back to their merge-base) produces
     the IDENTICAL patch, `+` when nothing does. So "no `+` line" is exactly the
-    property: the work is already ours, applied by a different route.
+    property — OVER THE COMMITS IT WALKED, which is not the same set as the range.
 
     WHY ANCESTRY IS NOT ENOUGH. A release tag frequently sits on a version-stamp
     commit that upstream also merged to its trunk under a new sha — a squash
@@ -605,21 +649,72 @@ def _patch_equivalent(repo, head_sha: str, base_sha: str):
     commit path, is what sees through it; `git cherry` is that comparison run
     over a whole range in one process.
 
+    WHAT `git cherry` DOES NOT WALK, AND WHY THAT USED TO READ AS PROOF. `git
+    cherry` walks with `max_parents = 1`, so a MERGE COMMIT in the range is never
+    listed and never has its patch-id compared. The tail of this function used to
+    be `all(ln.startswith('-') for ln in lines) or not lines`, and `all([])` is
+    True: an EMPTY WALK WAS ACCEPTED AS PROOF OF CONTAINMENT — and
+    `_local_containment` returns on it BEFORE `_merge_changes_nothing`, the one
+    test that can see a merge, ever runs.
+
+    Measured on a constructed repository driven through these very functions: a
+    release tag on a merge commit whose own tree adds `cve.txt`, both of its
+    parents ancestors of our pin, our pin without `cve.txt`. `rev-list
+    <pin>..<rel>` = 1, `git cherry` = 0 lines, this function returned True, and
+    the release was filed as work we already have.
+
+    LATENT RATHER THAN LIVE, and counted rather than assumed: every tag in every
+    pinned tool's clone — 2248 of them across the 29 tools that have both a pin
+    and a clone — was tested for that exact shape (`rev-list --count pin..tag > 0`
+    AND `rev-list --no-merges --count pin..tag == 0`). 0 matched, so no number
+    published today is wrong. It is one release-time fixup away from being wrong:
+    netgen tags 57 merge commits in its first 60 tags, sby 39, magic 38, yices2 9,
+    klayout 5, cadical 4, and netgen's own `1.5.323` IS a merge commit — saved
+    today only because the merge-base tree-equality test happens to fire in front
+    of this one.
+
+    SO THE RANGE IS MEASURED, NOT ASSUMED. `rev-list --count` and `rev-list
+    --no-merges --count` say how many commits the range holds and how many of
+    them `git cherry` was able to consider. When those disagree — or when the
+    walk returned a different number of lines than the range holds — this
+    function SAW LESS THAN THE WHOLE and answers None.
+
+    TREATING ONLY THE EMPTY OUTPUT AS INCONCLUSIVE WOULD NOT HAVE BEEN ENOUGH,
+    and that too is measured rather than argued: a range holding one ordinary
+    patch-equivalent commit AND one such merge prints exactly one line, a `-`,
+    the output is not empty, an empty-output guard never fires, and the evil
+    merge is contained-by-assertion just as before.
+
     THE FAILURE DIRECTION THIS MUST NOT HAVE. A release we genuinely lack has at
     least one commit whose patch nothing of ours reproduces, so `git cherry`
     prints a `+` and the release stays counted. Anything that is not a clean run
     of git — a missing object, a timeout, a non-zero exit — returns None, and
-    None never means "contained" at the call site. There is no input for which a
-    failure of this function removes a release from the count.
+    None never means "contained" at the call site. Nor does an incomplete walk:
+    a range this function could not see all of is None too. There is no input
+    for which a failure OR A BLIND SPOT of this function removes a release from
+    the count.
     """
+    counts = _range_counts(repo, base_sha, head_sha)
+    if counts is None:
+        return None
+    n_all, n_nomerge = counts
+    if n_all != n_nomerge:
+        # Merge commits in the range. `git cherry` will not walk them, so whatever
+        # it prints is a statement about a strict subset of the work in question.
+        return None
     rc, out, _ = _git(repo, "cherry", base_sha, head_sha, timeout=180)
     if rc != 0:
         return None
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if any(ln.startswith("+") for ln in lines):
         return False
-    # No `+`. Either every listed commit was `-` (equivalent), or the range was
-    # empty — which `merge-base --is-ancestor` has already reported as contained.
+    if len(lines) != n_nomerge:
+        # The walk and the range disagree about how many commits there are. That
+        # is not a "no": it is this function failing to account for the range.
+        return None
+    # Every commit in the range was walked, and every one of them was `-`. An
+    # empty range lands here too and is True for the right reason: there is
+    # nothing in it that we lack.
     return all(ln.startswith("-") for ln in lines) or not lines
 
 
@@ -676,7 +771,9 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
       sha; this can. Measured on a release whose one missing commit was the
       version stamp for that very release, squash-merged to trunk beforehand:
       identical patch-id, different sha, and our own header already declaring the
-      released version.
+      released version. Its verdict is EQUIVALENT rather than CONTAINED: the work
+      is ours, the tree is not necessarily, and only one of those two sentences is
+      what `contained` says.
 
       merge — the three-way merge of the release into our pin produces the tree
       we already build. That is the adoption question asked literally, and it is
@@ -718,14 +815,181 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
         return (CONTAINED,
                 "changes no file relative to the merge-base with our pinned ref", False)
     if _patch_equivalent(repo, tag_sha, pin_sha) is True:
-        return (CONTAINED,
+        # EQUIVALENT, not CONTAINED — see the constant. Our pin carries the work;
+        # our pin is not the same tree, and may not even merge it cleanly.
+        return (EQUIVALENT,
                 "every commit it has that our pinned ref lacks is patch-identical "
-                "(git patch-id --stable) to a commit our pinned ref already carries", False)
+                "(git patch-id --stable) to a commit our pinned ref already carries, "
+                "and our pinned ref has since moved on from it", False)
     if _merge_changes_nothing(repo, tag_sha, pin_sha, mb) is True:
         return (CONTAINED,
                 "merging it into our pinned ref produces the tree we already build — "
                 "it changes no file", False)
     return NEW, "carries commits and file changes our pinned ref does not have", False
+
+
+def _verify_contained(repo, tag_sha: str, pin_sha: str):
+    """Re-prove CONTAINED from the repository. (True / False / None, why).
+
+    THE INVARIANT `contained_releases` ASSERTS, stated once and checked where the
+    rows are actually produced. Four proofs, any one of which makes "our pinned
+    ref already holds this" a true sentence:
+
+      * the release is an ancestor of our pin;
+      * its tree IS our pin's tree;
+      * its tree is the tree of the merge-base with our pin, so it adds nothing
+        to the line we share;
+      * the three-way merge of it into our pin produces the tree we already build.
+
+    WHY THIS EXISTS AT ALL, given `_local_containment` just decided the same
+    thing. Round 2 wrote this invariant as a test — and the only input the test
+    ever saw was a fixture built to satisfy it. Run against the real ledger it
+    failed on two live rows the day it was written. A check that runs only in a
+    fixture is not a check on production; this one runs on every sweep, over the
+    rows the sweep is about to file.
+
+    It is deliberately NOT the same set of questions `_local_containment` asks.
+    It never calls `_patch_equivalent`, so a bug in the patch path cannot make
+    its own verification pass — which is exactly the bug this round is closing.
+
+    None means the proof could not be RUN (a missing object, a git without
+    `merge-tree --write-tree`). None is not a violation and never becomes one:
+    it is recorded as unverifiable, with the reason, and the row stands.
+    """
+    if not _peel(repo, [tag_sha, pin_sha]).get(tag_sha):
+        return None, "the release commit is not in this clone"
+    rc, _, err = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
+    if rc == 0:
+        return True, "ancestor of our pinned ref"
+    if rc != 1:
+        return None, f"merge-base --is-ancestor failed: {err[:100]}"
+    trees = _tree_pair(repo, tag_sha, pin_sha)
+    if trees is None:
+        return None, "could not read the trees of the release and our pinned ref"
+    if trees[0] == trees[1]:
+        return True, "identical tree to our pinned ref"
+    rc, mb, err = _git(repo, "merge-base", tag_sha, pin_sha)
+    if rc == 1 or (rc == 0 and not mb):
+        return False, "shares no ancestor with our pinned ref, and its tree is not ours"
+    if rc != 0:
+        return None, f"merge-base failed: {err[:100]}"
+    mtrees = _tree_pair(repo, tag_sha, mb)
+    if mtrees is not None and mtrees[0] == mtrees[1]:
+        return True, "changes no file relative to the merge-base with our pinned ref"
+    rc, out, _ = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
+                      pin_sha, tag_sha, timeout=300)
+    if rc == 1:
+        conflicted = [ln for ln in out.splitlines() if ln.startswith("CONFLICT")]
+        return False, ("merging it into our pinned ref CONFLICTS: "
+                       + (conflicted[0][:160] if conflicted else "unresolved"))
+    first = (out.splitlines() or [""])[0].strip()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
+        return None, "git merge-tree --write-tree is unavailable (git < 2.38)"
+    if first == trees[1]:
+        return True, "merging it into our pinned ref changes no file"
+    return False, "merging it into our pinned ref changes files our pinned ref does not have"
+
+
+def _patch_id_set(repo, rng: str, cap: int):
+    """{patch-id} for the non-merge commits in `rng` — or None.
+
+    `git log -p | git patch-id --stable` is the same normalisation `git cherry`
+    performs internally, run here WITHOUT `git cherry`, so this can disagree with
+    it. One process pair for the whole range: measured 0.63s over cocotb's 2276
+    commits.
+    """
+    rc, cnt, _ = _git(repo, "rev-list", "--count", "--no-merges", rng, timeout=300)
+    if rc != 0 or not cnt.isdigit():
+        return None
+    if int(cnt) > cap:
+        return None
+    # The one shell pipeline in this module, because `git patch-id` reads the diff
+    # stream `git log -p` writes and there is no plumbing form that does both. Every
+    # interpolated value is quoted: a clone path with a space would otherwise make
+    # this return None, and a None here reads as "could not verify" rather than as
+    # the failure it would be.
+    try:
+        r = subprocess.run(
+            f"git -C {shlex.quote(str(repo))} log -p --no-merges "
+            f"--format='commit %H' {shlex.quote(rng)} | git patch-id --stable",
+            shell=True, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return {ln.split()[0] for ln in (r.stdout or "").splitlines() if ln.strip()}
+
+
+def _verify_patch_equivalent(repo, tag_sha: str, pin_sha: str):
+    """Re-prove EQUIVALENT from the repository. (True / False / None, why).
+
+    Splitting a bucket out and then not checking it moves an unverified claim
+    rather than removing one, so the new bucket gets the same treatment as the
+    old — and by an implementation that does not go through `git cherry`, whose
+    blind spot is the whole subject of this round.
+
+    It is therefore a SECOND, independent detector of that blind spot: a range
+    holding a merge commit cannot have had every commit compared, and this says
+    so directly rather than inferring it from what a walk printed.
+    """
+    if not _peel(repo, [tag_sha, pin_sha]).get(tag_sha):
+        return None, "the release commit is not in this clone"
+    counts = _range_counts(repo, pin_sha, tag_sha)
+    if counts is None:
+        return None, "could not size the range"
+    n_all, n_nomerge = counts
+    if n_all != n_nomerge:
+        return False, (f"the range holds {n_all - n_nomerge} merge commit(s) whose own "
+                       f"trees nothing compared — patch equivalence was claimed over a "
+                       f"range that was never fully examined")
+    theirs = _patch_id_set(repo, f"{pin_sha}..{tag_sha}", PATCHID_CAP)
+    if theirs is None:
+        return None, "git patch-id would not run over the release's own commits"
+    ours = _patch_id_set(repo, f"{tag_sha}..{pin_sha}", PATCHID_CAP)
+    if ours is None:
+        return None, (f"our side of the range is larger than GK_PATCHID_CAP={PATCHID_CAP} "
+                      f"or git patch-id would not run")
+    missing = theirs - ours
+    if missing:
+        return False, f"{len(missing)} of its {len(theirs)} commit(s) match nothing we carry"
+    return True, f"all {len(theirs)} of its commits are patch-identical to ones we carry"
+
+
+def _verify_buckets(repo, groups: dict, pin_sha: str) -> dict:
+    """Re-prove every CONTAINED and EQUIVALENT verdict, and REFUSE the ones that
+    do not survive. Returns what was checked, so a clean result over zero rows is
+    visible as such rather than reading like a pass.
+
+    A refuted row does not become NEW. Turning a self-contradiction into a
+    measurement is the shape this whole module exists to remove: the classifier
+    said one thing, an independent check of the repository says another, and the
+    honest disposition for that release is that WE DO NOT KNOW. It goes to
+    UNDETERMINED, which nulls the count for that tool and states the reason on
+    the row.
+    """
+    checked, unverifiable, violations = 0, [], []
+    for g in groups.values():
+        if g.get("verdict") not in VERIFIED_BUCKETS:
+            continue
+        claim = g["verdict"]
+        if repo is None:
+            ok, why = None, "no local clone holds both ends; decided over the API"
+        elif claim == CONTAINED:
+            ok, why = _verify_contained(repo, g["sha"], pin_sha)
+        else:
+            ok, why = _verify_patch_equivalent(repo, g["sha"], pin_sha)
+        row = {"tag": g["tags"][0], "claim": claim, "reason": why}
+        if ok is True:
+            checked += 1
+        elif ok is None:
+            unverifiable.append(row)
+        else:
+            violations.append({**row, "filed_as": g.get("why")})
+            g["verdict"] = None
+            g["why"] = (f"classified {claim} — {g.get('why')} — but an independent check "
+                        f"of the repository refutes it: {why}. A verdict that contradicts "
+                        f"itself is not a measurement")
+    return {"checked": checked, "unverifiable": unverifiable, "violations": violations}
 
 
 def _tree_pair(repo, a: str, b: str):
@@ -825,9 +1089,10 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     that is not contained is UNDETERMINED rather than counted — not knowing where
     we branched from is not the same as knowing everything is ahead.
     """
-    out = {"new": [], "contained": [], "superseded": [], "folded": [],
+    out = {"new": [], "contained": [], "equivalent": [], "superseded": [], "folded": [],
            "undetermined": [], "behind": None, "status": NOT_PROBED, "base": None,
-           "api_calls": 0, "clone": None}
+           "api_calls": 0, "clone": None,
+           "bucket_check": {"checked": 0, "unverifiable": [], "violations": []}}
     if not ref or not rels:
         return out
 
@@ -906,7 +1171,20 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         # our PIN contains is a release we build. A prerelease folded into its
         # final one (step 4) is contained for COUNTING purposes and is not a
         # candidate to name as the version we ship.
-        g["in_pin"] = verdict == CONTAINED
+        #
+        # EQUIVALENT counts here. `yices-2.7.0` is patch-equivalent rather than an
+        # ancestor, and it IS the release yices2 builds; excluding it would move
+        # that row's `base_release` back to `Yices-2.6.4` and its count from 0 to
+        # 2 — measured, and the reason the merge test does not simply gate this
+        # branch.
+        g["in_pin"] = verdict in VERIFIED_BUCKETS
+
+    # 3b. RE-PROVE THE BUCKETS BEFORE ANYTHING IS FILED IN ONE. Round 2 wrote this
+    #     invariant as a test and the only input it ever saw was a fixture built to
+    #     satisfy it; run against the real ledger it failed on two live rows. It
+    #     runs here, on every sweep, over the rows this sweep is about to file, and
+    #     a row it refutes is held UNDETERMINED rather than published.
+    out["bucket_check"] = _verify_buckets(graph, groups, pin_sha)
 
     # 4. COLLAPSE a prerelease into a final release that already carries its work.
     #    The `prerelease` flag is the API's own; the containment is ancestry OR
@@ -1033,6 +1311,8 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
             row["also_tagged"] = g["tags"][1:]
         if g["verdict"] == CONTAINED:
             out["contained"].append(row)
+        elif g["verdict"] == EQUIVALENT:
+            out["equivalent"].append(row)
         elif g["verdict"] == NEW:
             out["new"].append(row)
         elif g["verdict"] == SUPERSEDED:
@@ -1394,6 +1674,12 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                            fork_point=(led.get("fork_point") or {}).get("sha"))
     led["new_releases"] = cl["new"]
     led["contained_releases"] = cl["contained"][:15]
+    # NAMED FOR THE CLAIM IT MAKES. Our pinned ref carries every commit these
+    # releases have, under different shas — and has since moved past them, so
+    # merging one is not a no-op and `contained` would overstate it. They are not
+    # counted, and they remain eligible to be `base_release`: yices2's
+    # `yices-2.7.0` is exactly this shape and is the release yices2 builds.
+    led["patch_equivalent_releases"] = cl["equivalent"][:15]
     led["superseded_releases"] = cl["superseded"][:15]
     # NAMED FOR WHAT IS IN IT. These carry commits our pinned ref does NOT have —
     # they are counted, once, under the release that carries their work. Filing
@@ -1405,7 +1691,11 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     led["behind_releases"] = cl["behind"]
     led["behind_releases_status"] = cl["status"]
     led["release_containment"] = {"clone": cl["clone"], "api_calls": cl["api_calls"],
-                                  "candidates": len(rels), "fork_point_date": pin_date}
+                                  "candidates": len(rels), "fork_point_date": pin_date,
+                                  # WHAT WAS RE-PROVED, and how much of it. `checked`
+                                  # is here so a clean result over zero rows reads as
+                                  # zero rows rather than as a pass.
+                                  "bucket_check": cl["bucket_check"]}
     led["base_release"] = cl["base"]
 
     led.setdefault("last_sync", None)
@@ -1452,6 +1742,11 @@ def main():
               f"(pinned via {p.get('arg')}) — in the image, no ARG of its own")
 
     index = []
+    # Tools whose own classification was refuted by the re-proof in step 3b. Not a
+    # warning: the sweep exits non-zero on it, because a bucket that asserts
+    # something false is the defect this module was rewritten to remove and it must
+    # not be able to reappear quietly.
+    refuted: dict[str, list] = {}
     for fork in FORKS:
         prev = LEDGER / f"{fork['tool']}.json"
         sync_log, last_sync = [], None
@@ -1473,6 +1768,9 @@ def main():
             "tool", "role", "upstream", "forked_at", "pinned_ref", "vibeic_branch",
             "ahead", "base_release", "upstream_latest_release", "behind_releases",
             "behind_releases_status", "image_version", "last_sync")})
+        _bc = (led.get("release_containment") or {}).get("bucket_check") or {}
+        if _bc.get("violations"):
+            refuted[fork["tool"]] = _bc["violations"]
         _st = release_gap_status(led)
         _n = ("unknown" if _st == UNKNOWN
               else ("not-probed" if _st == NOT_PROBED else release_gap(led)))
@@ -1485,8 +1783,21 @@ def main():
          "image_version": image_version,
          gk_state.PROVENANCE_KEY: gk_state.provenance(), "forks": index},
         indent=2, ensure_ascii=False) + "\n")
+    _checked = sum(((json.loads((LEDGER / f"{f['tool']}.json").read_text())
+                     .get("release_containment") or {}).get("bucket_check") or {})
+                   .get("checked", 0)
+                   for f in FORKS if (LEDGER / f"{f['tool']}.json").is_file())
     print(f"wrote {len(index)} ledgers · image {image_version} → {LEDGER}")
+    print(f"  bucket re-proof: {_checked} contained/patch-equivalent row(s) re-proved "
+          f"from the clones, {len(refuted)} tool(s) refuted")
+    if refuted:
+        print("  BUCKET INVARIANT VIOLATED — these rows claimed containment their own "
+              "repository refutes. They were held UNDETERMINED, not published:")
+        for tool, vs in refuted.items():
+            for v in vs:
+                print(f"    {tool:16} {v['tag']:24} [{v['claim']}] {v['reason']}")
+    return len(refuted)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(1 if main() else 0)

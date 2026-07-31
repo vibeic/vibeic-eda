@@ -844,7 +844,15 @@ def test_a_release_whose_only_missing_commit_is_one_we_already_carry(monkeypatch
     assert led["behind_releases_status"] == "measured"
     assert led["base_release"] == "v2.0", \
         f"base_release names an older release than the one we build: {led['base_release']}"
-    assert "v2.0" in _tags_of(led, "contained_releases")
+    # ROUND 3 MOVED THIS ROW, AND ONLY THIS ROW. It was `contained_releases`, which
+    # is the claim that our tree already holds the release — and for this shape our
+    # trunk has moved on past it, so merging it is not a no-op and the claim was
+    # only ever true in the weaker patch sense. Run against the real corpus rather
+    # than a fixture, that overstatement was live on yices2 `yices-2.7.0` and
+    # cocotb `v1.5.0rc1`. The count and `base_release` are asserted above and are
+    # unchanged; what moved is the heading.
+    assert "v2.0" not in _tags_of(led, "contained_releases")
+    assert "v2.0" in _tags_of(led, "patch_equivalent_releases")
 
 
 def test_patch_equivalence_does_not_zero_a_release_that_also_carries_real_work(monkeypatch):
@@ -1244,3 +1252,539 @@ def test_the_daily_report_does_not_print_a_digit_for_a_row_nobody_probed():
     assert "not probed" in row, f"the report row states no such thing: {row}"
     assert "| 0 |" not in row and "| None |" not in row, \
         f"a row nobody probed rendered as a value: {row}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROUND 3 — THE HOLE ROUND 2's OWN VERIFIER FOUND IN ROUND 2's FIX
+#
+# Round 2 replaced ancestry-only containment with four content tests. The third
+# of them, `_patch_equivalent`, ended
+#
+#     return all(ln.startswith('-') for ln in lines) or not lines
+#
+# and `all([])` is True. `git cherry` walks with `max_parents = 1`, so a MERGE
+# COMMIT in the range is never listed — and an EMPTY WALK was therefore accepted
+# as PROOF of containment. `_local_containment` returns on that before
+# `_merge_changes_nothing`, the one test that can see a merge, ever runs.
+#
+# The two shapes below are the input, built as real repositories and driven
+# through the real `discover_one`:
+#
+#   * a release tag on a merge commit whose OWN TREE adds a file, both parents
+#     ancestors of our pin. `rev-list <pin>..<rel>` = 1, `git cherry` = 0 lines.
+#   * the same evil merge with ONE ordinary patch-equivalent commit beside it.
+#     `git cherry` prints exactly one line and it is a `-`. The output is NOT
+#     empty, so the narrower repair — "treat an EMPTY `git cherry` output as
+#     inconclusive" — never fires and the release is contained-by-assertion just
+#     as before. That is why the fix measures the RANGE instead of the OUTPUT.
+#
+# LATENT, NOT LIVE, and counted rather than assumed: every tag in every pinned
+# tool's clone — 2248 across the 29 tools with both a pin and a clone — was tested
+# for `rev-list --count pin..tag > 0` AND `rev-list --no-merges --count
+# pin..tag == 0`, and 0 matched. But netgen tags 57 merge commits in its first 60
+# tags, sby 39, magic 38, yices2 9, klayout 5, cadical 4, and netgen's own
+# `1.5.323` IS a merge commit — saved today only because the merge-base
+# tree-equality test happens to fire in front of the patch test.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _evil_merge(repo: Path, other: str, when: str, fname: str, body: str) -> str:
+    """A merge commit whose OWN TREE carries a change neither parent has.
+
+    Ordinary git, not an exotic construction: `git merge --no-commit`, edit,
+    commit is how a conflict resolution, a release-time version stamp or a
+    last-minute security patch lands ON the merge. Every one of those is a change
+    that exists only in the merge commit, and `git cherry` cannot see any of them.
+    """
+    subprocess.run(["git", "-C", str(repo), "merge", "--no-commit", "--no-ff", other],
+                   capture_output=True, text=True)
+    (repo / fname).write_text(body)
+    _git(repo, "add", "-A")
+    env = {**os.environ, "GIT_AUTHOR_DATE": f"{when}T00:00:00Z",
+           "GIT_COMMITTER_DATE": f"{when}T00:00:00Z"}
+    r = subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        f"Merge (+{fname})"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_a_release_on_a_merge_commit_is_not_contained_by_an_empty_cherry_walk(monkeypatch):
+    """MEASURED on this exact repository, through the production functions:
+
+        rev-list --count <pin>..<v2.0>             = 1
+        rev-list --no-merges --count <pin>..<v2.0> = 0
+        git cherry <pin> <v2.0>                    -> rc 0, no output
+        _patch_equivalent(...)                     -> True
+        _merge_changes_nothing(...)                -> False
+        _local_containment(...)                    -> ('contained', 'every commit …
+                                                        is patch-identical …')
+
+    The merge test WOULD have caught it. The patch test returns first, on an
+    empty walk, and `cve.txt` — a file our pinned ref does not have — is filed
+    as work we already carry.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)                     # the release we do contain
+        _git(repo, "checkout", "-q", "-b", "side", a)
+        c = _commit(repo, "c", "c", "2026-01-05")
+        _git(repo, "checkout", "-q", "master")
+        b = _commit(repo, "b", "b", "2026-01-10")
+        _merge_no_ff(repo, c, "2026-01-11")              # the trunk absorbs the side
+        pin = _commit(repo, "d", "d", "2026-01-12")      # …and moves on: our pin
+        # The release: a merge of two commits our pin ALREADY HAS, carrying a
+        # change of its own that our pin does not have.
+        _git(repo, "checkout", "-q", "-b", "rel", b)
+        rel = _evil_merge(repo, c, "2026-02-01", "cve.txt", "the fix nobody has\n")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+
+        assert subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{pin}:cve.txt"],
+                              capture_output=True).returncode != 0, \
+            "the fixture is wrong: our pin already has cve.txt"
+        assert df._git(repo, "rev-list", "--count", f"{pin}..{rel}")[1] == "1"
+        assert df._git(repo, "rev-list", "--no-merges", "--count", f"{pin}..{rel}")[1] == "0"
+
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-12"))
+    assert led["behind_releases"] == 1, \
+        (f"a release carrying a file our pinned ref does not have was counted as "
+         f"contained: new={_tags_of(led)} contained={_tags_of(led, 'contained_releases')}")
+    assert _tags_of(led) == ["v2.0"]
+    assert "v2.0" not in _tags_of(led, "contained_releases"), \
+        "an empty `git cherry` walk was accepted as proof our pinned ref contains it"
+    assert led["base_release"] == "v1.0", \
+        f"base_release names a release we do not build: {led['base_release']}"
+
+
+def test_one_patch_equivalent_commit_beside_an_evil_merge_is_still_not_contained(monkeypatch):
+    """THE NEGATIVE CONTROL ON THE NARROWER REPAIR.
+
+    "Treat an EMPTY `git cherry` output as inconclusive whenever `rev-list
+    --count base..head` is non-zero" closes the shape above and nothing else.
+    Here the range is one ordinary commit — patch-identical to one our pin
+    carries, so `-` — plus one evil merge. MEASURED:
+
+        rev-list --count <pin>..<v2.0>             = 2
+        rev-list --no-merges --count <pin>..<v2.0> = 1
+        git cherry <pin> <v2.0>  -> '- c3cca768…'   (ONE line, NOT empty)
+        _patch_equivalent(...)   -> True
+        _local_containment(...)  -> contained
+
+    The empty-output guard never fires. What is wrong is not that the output was
+    empty; it is that the output describes a strict SUBSET of the range. So the
+    fix compares the walk against the range, and this is the input that tells the
+    two repairs apart.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        c = _commit(repo, "c", "c", "2026-01-05")
+        ours = _commit(repo, "fix.txt", "FIX\n", "2026-01-08")    # our sha
+        pin = _commit(repo, "d", "d", "2026-01-12")
+        _git(repo, "checkout", "-q", "-b", "rel", c)
+        theirs = _commit(repo, "fix.txt", "FIX\n", "2026-01-09")  # their sha, same patch
+        _git(repo, "checkout", "-q", "-b", "rel2", c)
+        rel = _evil_merge(repo, theirs, "2026-02-01", "cve.txt", "the fix nobody has\n")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+
+        def _pid(sha):
+            return subprocess.run(f"git -C {repo} show {sha} | git patch-id --stable",
+                                  shell=True, capture_output=True,
+                                  text=True).stdout.split()[0]
+
+        assert _pid(ours) == _pid(theirs), "the fixture is wrong: the two commits differ"
+        assert df._git(repo, "rev-list", "--count", f"{pin}..{rel}")[1] == "2"
+        assert df._git(repo, "rev-list", "--no-merges", "--count", f"{pin}..{rel}")[1] == "1"
+        assert df._git(repo, "cherry", pin, rel)[1].strip() != "", \
+            "the fixture is wrong: this shape must produce NON-empty cherry output"
+
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-12"))
+    assert led["behind_releases"] == 1, \
+        (f"`git cherry` summarised 1 of the 2 commits in the range and its silence "
+         f"about the other was read as containment: new={_tags_of(led)} "
+         f"contained={_tags_of(led, 'contained_releases')}")
+    assert _tags_of(led) == ["v2.0"]
+    assert "v2.0" not in _tags_of(led, "contained_releases")
+    assert led["base_release"] == "v1.0"
+
+
+# ── THE BUCKET NAMES WHAT IS IN IT — AT THE SITE ROUND 2 CREATED ────────────
+#
+# `contained_releases` filed two LIVE rows whose claim fails round 2's own
+# invariant test. MEASURED against the real ledger and the real clones, with the
+# TRUE merge-base rather than the fixture's `--merge-base=<pin>`:
+#
+#   yices2 `yices-2.7.0` — ancestor NO; merge-tree CONFLICTS on
+#                          doc/sphinx/source/conf.py
+#   cocotb `v1.5.0rc1`   — ancestor NO; merge-tree CONFLICTS on
+#                          documentation/source/release_notes.rst
+#
+# Both arrived through the patch-equivalence branch, which is gated on neither
+# half. The COUNT is right — our pin is AHEAD on the conflicting file, so there
+# is nothing to advance to — and `base_release yices-2.7.0` is the right answer
+# and must stay. What is wrong is the HEADING. "Contained" is the claim that
+# adopting the release moves no byte; for these two, adopting it does not even
+# apply cleanly. Their claim is a different, true one: our pinned ref carries
+# every commit they have, under different shas, and has since moved past them.
+# So they get a bucket that says that — the same remedy round 2 applied to
+# FOLDED, at the site round 2 created.
+
+def test_a_patch_equivalent_release_is_not_filed_as_contained_but_still_names_the_base(monkeypatch):
+    """The yices2 shape in miniature, and the CONSTRAINT that pins the fix.
+
+    A release whose one missing commit is patch-identical to one our pin carries,
+    where our pin has since changed the same file again — so merging it is not a
+    no-op and ancestry says no. It must:
+
+      * NOT be counted (it is not work we lack) — unchanged;
+      * STILL be `base_release` (it is the release we build) — the constraint;
+      * NOT sit under a heading that says our tree contains it.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        c = _commit(repo, "c", "c", "2026-01-05")
+        ours = _commit(repo, "fix.txt", "FIX\n", "2026-01-08")
+        pin = _commit(repo, "d", "d", "2026-01-12")
+        _git(repo, "checkout", "-q", "-b", "rel", c)
+        theirs = _commit(repo, "fix.txt", "FIX\n", "2026-01-09")
+        _git(repo, "tag", "v2.0", theirs)
+        _git(repo, "checkout", "-q", "master")
+
+        def _pid(sha):
+            return subprocess.run(f"git -C {repo} show {sha} | git patch-id --stable",
+                                  shell=True, capture_output=True,
+                                  text=True).stdout.split()[0]
+
+        assert _pid(ours) == _pid(theirs)
+        assert subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                               theirs, pin], capture_output=True).returncode == 1, \
+            "the fixture is wrong: this release must NOT be an ancestor of our pin"
+
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-01-10", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-12"))
+    # unchanged by the fix — the control that keeps patch-equivalence working
+    assert led["behind_releases"] == 0, \
+        f"a patch-equivalent release started being counted: {_tags_of(led)}"
+    assert led["base_release"] == "v2.0", \
+        (f"a patch-equivalent release stopped being eligible for base_release: "
+         f"{led['base_release']} — this is the yices2 `yices-2.7.0` constraint")
+    # …and the bucket, which is what round 3 changes
+    assert "v2.0" not in _tags_of(led, "contained_releases"), \
+        ("a release our pinned ref neither contains nor merges as a no-op is filed "
+         "under a heading that claims our tree already has it")
+    assert _tags_of(led, "patch_equivalent_releases") == ["v2.0"], \
+        "the row is in no bucket at all — it vanished from the ledger"
+    assert "v1.0" in _tags_of(led, "contained_releases"), \
+        "an ordinary ancestor release stopped being contained"
+
+
+def test_the_contained_bucket_is_verified_before_it_is_written_not_only_in_a_test(monkeypatch):
+    """A fixture test only ever sees fixtures. This one plants the contradiction
+    INSIDE the production path and requires the sweep itself to refuse it.
+
+    `_local_containment` is replaced by one that calls a release contained when
+    it plainly is not — the same lie the empty-`git cherry` walk told, arrived at
+    by a shorter route. Nothing downstream of the classification can tell the two
+    apart, which is the point: the ledger must not be able to publish a
+    `contained_releases` row whose claim does not survive an independent check of
+    the repository.
+
+    And "inconclusive stays inconclusive": the row does not silently become NEW —
+    that would invent a measurement out of a self-contradiction. It becomes
+    UNDETERMINED, the count becomes null, and the row says what happened.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        rel = _commit(repo, "brand-new.txt", "work we plainly do not have\n", "2026-02-01")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+
+        real = df._local_containment
+
+        def lying(repo_, tag_sha, pin_sha, _real=real, _rel=rel):
+            if tag_sha == _rel:
+                return df.CONTAINED, "a claim nothing checked", False
+            return _real(repo_, tag_sha, pin_sha)
+
+        monkeypatch.setattr(df, "_local_containment", lying)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert "v2.0" not in _tags_of(led, "contained_releases"), \
+        ("the ledger published a `contained` row that an independent check of the "
+         "repository refutes — nothing verified the bucket before it was written")
+    assert "v2.0" in _tags_of(led, "undetermined_releases"), \
+        "the refuted row was dropped or silently reclassified instead of held undecided"
+    assert led["behind_releases"] is None and led["behind_releases_status"] == "unknown", \
+        f"a self-contradicting classification still produced a number: {led['behind_releases']}"
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert chk.get("violations"), \
+        f"the run recorded no violation for a row it refused: {chk}"
+    assert chk.get("checked", 0) >= 1, \
+        f"the check reported clean because it checked nothing: {chk}"
+
+
+def test_the_bucket_check_is_not_vacuous_on_an_honest_run(monkeypatch):
+    """The other half of the same guard: a checker that returns clean because it
+    examined zero rows is the failure mode, not the success mode. On an ordinary
+    honest run the recorded check must say how many rows it actually verified,
+    and that number must not be zero.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert chk.get("checked") == 1, \
+        f"the bucket check did not verify the one contained row it filed: {chk}"
+    assert chk.get("violations") == [], f"an honest run reported a violation: {chk}"
+    assert led["behind_releases"] == 0
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# THE SAME INVARIANT, AGAINST THE REAL CORPUS
+#
+# This is how (2) survived round 2: the invariant existed, and the only thing it
+# ever saw was a fixture built to satisfy it. Run against the real ledger and the
+# real clones it failed twice on the day it was written.
+#
+# The predicate below is written out IN THIS FILE rather than imported from
+# `discover_forks`. A corpus check that calls the same helper production calls
+# can only ever confirm that production is self-consistent; this one has to be
+# able to disagree with it.
+#
+# It reads whatever ledger `GK_STATE_DIR` points at — the production one by
+# default — SKIPS only when there is no corpus at all, and FAILS when there is a
+# corpus and nothing in it was checkable, because a checker that reports clean
+# over zero rows is the defect, not the absence of one.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _corpus_ledgers():
+    led_dir = df.LEDGER
+    if not led_dir.is_dir():
+        return led_dir, []
+    out = []
+    for f in sorted(led_dir.glob("*.json")):
+        if f.name == "index.json":
+            continue
+        try:
+            out.append(json.loads(f.read_text()))
+        except json.JSONDecodeError:
+            continue
+    return led_dir, out
+
+
+def _g(repo, *args, timeout=600):
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                       text=True, timeout=timeout)
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def _our_tree_already_has_it(repo, tag_rev: str, pin: str):
+    """(True / False / None, why) — recomputed from git, believing nothing.
+
+    The four proofs that make `contained` a true sentence, and no others:
+    ancestry; the release's tree IS our tree; the release's tree is the tree of
+    the merge-base, so it adds nothing to the line we share; the three-way merge
+    of it into our pin produces the tree we already build.
+    """
+    rc, _, err = _g(repo, "merge-base", "--is-ancestor", tag_rev, pin)
+    if rc == 0:
+        return True, "ancestor of our pinned ref"
+    if rc != 1:
+        return None, f"merge-base --is-ancestor failed: {err[:100]}"
+    rc, tt, _ = _g(repo, "rev-parse", f"{tag_rev}^{{tree}}")
+    rc2, pt, _ = _g(repo, "rev-parse", f"{pin}^{{tree}}")
+    if rc != 0 or rc2 != 0:
+        return None, "could not read the trees"
+    if tt == pt:
+        return True, "identical tree to our pinned ref"
+    rc, mb, err = _g(repo, "merge-base", tag_rev, pin)
+    if rc == 1 or not mb:
+        return False, "shares no ancestor with our pinned ref and its tree is not ours"
+    if rc != 0:
+        return None, f"merge-base failed: {err[:100]}"
+    rc, mt, _ = _g(repo, "rev-parse", f"{mb}^{{tree}}")
+    if rc == 0 and mt == tt:
+        return True, "changes no file relative to the merge-base with our pinned ref"
+    r = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree",
+                        f"--merge-base={mb}", pin, tag_rev],
+                       capture_output=True, text=True, timeout=600)
+    first = ((r.stdout or "").splitlines() or [""])[0].strip()
+    if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", first):
+        if first == pt:
+            return True, "merging it into our pinned ref changes no file"
+        return False, "merging it into our pinned ref changes files we do not have"
+    if r.returncode == 1:
+        conflicted = [ln for ln in (r.stdout or "").splitlines() if ln.startswith("CONFLICT")]
+        return False, ("merging it into our pinned ref CONFLICTS: "
+                       + (conflicted[0][:140] if conflicted else "unresolved"))
+    return None, "git merge-tree --write-tree is unavailable (git < 2.38)"
+
+
+def _patch_ids(repo, rng: str):
+    """{patch-id} for the non-merge commits in `rng`, via `git patch-id --stable`
+    — the same normalisation `git cherry` uses internally, computed here without
+    going through `git cherry` at all."""
+    r = subprocess.run(
+        f"git -C {repo} log -p --no-merges --format='commit %H' {rng} "
+        f"| git patch-id --stable", shell=True, capture_output=True, text=True,
+        timeout=900)
+    if r.returncode != 0:
+        return None
+    return {ln.split()[0] for ln in (r.stdout or "").splitlines() if ln.strip()}
+
+
+def _we_carry_every_commit_of_it(repo, tag_rev: str, pin: str):
+    """(True / False / None, why) for the patch-equivalence claim, recomputed."""
+    rc, n_all, _ = _g(repo, "rev-list", "--count", f"{pin}..{tag_rev}")
+    rc2, n_nm, _ = _g(repo, "rev-list", "--no-merges", "--count", f"{pin}..{tag_rev}")
+    if rc != 0 or rc2 != 0 or not n_all.isdigit() or not n_nm.isdigit():
+        return None, "could not size the range"
+    if int(n_all) != int(n_nm):
+        return False, (f"the range holds {int(n_all) - int(n_nm)} merge commit(s) whose "
+                       f"own trees nothing compared — patch equivalence was claimed over "
+                       f"a range that was never fully examined")
+    theirs = _patch_ids(repo, f"{pin}..{tag_rev}")
+    ours = _patch_ids(repo, f"{tag_rev}..{pin}")
+    if theirs is None or ours is None:
+        return None, "git patch-id would not run"
+    missing = theirs - ours
+    if missing:
+        return False, f"{len(missing)} of its {len(theirs)} commit(s) match nothing we carry"
+    return True, f"all {len(theirs)} of its commits are patch-identical to ours"
+
+
+def test_every_contained_release_in_the_REAL_ledger_survives_an_independent_check():
+    """NOT A FIXTURE. Every row the real corpus files under `contained_releases`,
+    re-proved from the real clone.
+
+    Measured against `fix/release-containment-measured` at 3661f8d: TWO rows fail
+    — yices2 `yices-2.7.0` (conflicts on doc/sphinx/source/conf.py) and cocotb
+    `v1.5.0rc1` (conflicts on documentation/source/release_notes.rst).
+    """
+    led_dir, ledgers = _corpus_ledgers()
+    if not ledgers:
+        pytest.skip(f"no fork ledger at {led_dir} — the corpus half of this "
+                    f"invariant checked NOTHING on this host")
+    checked, unverifiable, violations, with_bucket = 0, [], [], 0
+    for led in ledgers:
+        rows = led.get("contained_releases")
+        if rows is None:
+            continue                      # a ledger written before the bucket existed
+        with_bucket += 1
+        pin = led.get("pinned_ref_full") or led.get("pinned_ref")
+        repo = df.FORK_CLONES / led["tool"]
+        if not pin or not (repo / ".git").exists():
+            unverifiable.append(f"{led['tool']}: no pin or no clone")
+            continue
+        for row in rows:
+            ok, why = _our_tree_already_has_it(repo, row["tag"] + "^{commit}", pin)
+            if ok is True:
+                checked += 1
+            elif ok is None:
+                unverifiable.append(f"{led['tool']} {row['tag']}: {why}")
+            else:
+                violations.append(f"{led['tool']} {row['tag']}: {why} "
+                                  f"| filed as: {row.get('why')}")
+    assert not violations, (
+        f"{len(violations)} row(s) in {led_dir} are filed under `contained_releases` "
+        f"while an independent check of the repository says our pinned ref neither "
+        f"contains them nor merges them as a no-op:\n  " + "\n  ".join(violations))
+    assert with_bucket, (
+        f"no ledger in {led_dir} carries a `contained_releases` key — this corpus "
+        f"predates the bucket, so nothing was checked")
+    assert checked, (
+        f"{with_bucket} ledger(s) in {led_dir} but ZERO rows could be verified "
+        f"({len(unverifiable)} unverifiable: {unverifiable[:5]}). A clean result over "
+        f"zero rows is the defect this test exists to catch")
+
+
+def test_every_patch_equivalent_release_in_the_REAL_ledger_survives_an_independent_check():
+    """The bucket round 3 splits out, checked the same way and by an
+    implementation that does not go through `git cherry` at all. Splitting a
+    bucket out and then not checking it moves the unverified claim rather than
+    removing it.
+
+    It is also a second, independent detector of the merge hole: a release whose
+    range holds a merge commit cannot have had every commit compared, so the
+    claim fails here even when `git cherry` says nothing.
+    """
+    led_dir, ledgers = _corpus_ledgers()
+    if not ledgers:
+        pytest.skip(f"no fork ledger at {led_dir}")
+    checked, unverifiable, violations, present = 0, [], [], False
+    for led in ledgers:
+        rows = led.get("patch_equivalent_releases")
+        if rows is None:
+            continue
+        present = True
+        pin = led.get("pinned_ref_full") or led.get("pinned_ref")
+        repo = df.FORK_CLONES / led["tool"]
+        if not pin or not (repo / ".git").exists():
+            continue
+        for row in rows:
+            ok, why = _we_carry_every_commit_of_it(repo, row["tag"] + "^{commit}", pin)
+            if ok is True:
+                checked += 1
+            elif ok is None:
+                unverifiable.append(f"{led['tool']} {row['tag']}: {why}")
+            else:
+                violations.append(f"{led['tool']} {row['tag']}: {why}")
+    assert not violations, (
+        f"row(s) filed under `patch_equivalent_releases` in {led_dir} that an "
+        f"independent patch-id comparison refutes:\n  " + "\n  ".join(violations))
+    assert present, (
+        f"no ledger in {led_dir} carries a `patch_equivalent_releases` key — the "
+        f"corpus was not produced by the code under test, so nothing was checked")
+
+
+def test_the_sweep_itself_records_the_bucket_check_for_every_tool_it_measured():
+    """The production run must leave the evidence behind, because the corpus test
+    above cannot run where there is no corpus. A ledger that measured releases
+    and carries no `bucket_check` was written by something that did not verify
+    what it wrote — which is the state the corpus was in when the two live rows
+    were found.
+    """
+    led_dir, ledgers = _corpus_ledgers()
+    if not ledgers:
+        pytest.skip(f"no fork ledger at {led_dir}")
+    measured = [l for l in ledgers if l.get("behind_releases_status") == df.MEASURED]
+    if not measured:
+        pytest.skip(f"no MEASURED row in {led_dir}")
+    missing = [l["tool"] for l in measured
+               if not isinstance((l.get("release_containment") or {}).get("bucket_check"),
+                                 dict)]
+    assert not missing, (
+        f"{len(missing)} of {len(measured)} MEASURED ledger(s) in {led_dir} carry no "
+        f"bucket_check — nothing verified the buckets they published: {missing[:8]}")
+    dirty = {l["tool"]: l["release_containment"]["bucket_check"]["violations"]
+             for l in measured
+             if l["release_containment"]["bucket_check"].get("violations")}
+    assert not dirty, f"the sweep recorded bucket violations and published anyway: {dirty}"

@@ -620,6 +620,22 @@ function enhBlock(tool){
       ? `<h5 style="margin-top:1rem" data-en="Prereleases counted under a later release (${foldRows.length})" data-zh="併入後續 release 一起計算的 prerelease（${foldRows.length}）">Prereleases counted under a later release (${foldRows.length})</h5>`
         + foldRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc((r&&r.why)||('counted under '+((r&&r.counted_under)||'?')))}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
       : "";
+    // Releases our pinned ref CARRIES — every commit they have exists in our ref
+    // under a different sha — while our ref has since moved past them, so merging
+    // one is not a no-op. They are not work we lack and are not counted; they are
+    // also not "contained", which claims our tree is already theirs. MEASURED:
+    // yices2 `yices-2.7.0`, cocotb `v1.5.0rc1` and klayout `v0.28.17-1` sat under
+    // the contained heading while a three-way merge of each into our pin
+    // CONFLICTS — on doc/sphinx/source/conf.py, documentation/source/release_notes.rst
+    // and azure-pipelines.yml respectively, in every case because our pin is ahead
+    // on that file. A row like this must not vanish from the page when it leaves
+    // the contained bucket.
+    const eqvRows = (d.patch_equivalent_releases||[]);
+    const eqvBlock = eqvRows.length
+      ? `<h5 style="margin-top:1rem" data-en="Releases our ref carries under different shas (${eqvRows.length})" data-zh="我們的 ref 以不同 sha 已帶著的 release（${eqvRows.length}）">Releases our ref carries under different shas (${eqvRows.length})</h5>`
+        + `<p class="fork-caption" data-en="Every commit these releases have exists in the ref we build, patch-for-patch, under a different sha — and the ref has moved on since, so adopting one is not a no-op. Nothing here is work we are missing." data-zh="這些 release 的每一個 commit 都以不同的 sha 存在於我們建置的 ref 裡（patch 逐一比對相同），而我們的 ref 之後又往前走了，所以重新採用並不是零變更。這裡沒有我們缺少的工作。">Every commit these releases have exists in the ref we build under a different sha; nothing here is work we are missing.</p>`
+        + eqvRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc(r&&r.why||'')}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
+      : "";
     const relHead = relGap(d) == null ? (relUnknown(d) ? "?" : "n/a") : newRel;
     const rel = ((d.new_releases&&d.new_releases.length)
       ? `<h5 style="margin-top:1rem" data-en="New upstream releases to integrate (${relHead})" data-zh="待整合的上游新 release（${relHead}）">New upstream releases to integrate (${relHead})</h5>` + d.new_releases.map(r=>`<div class="fork-commit"><span class="sha">${esc(r.tag||'')}</span><span>${esc(r.why||'')}</span><span style="margin-left:auto">${esc(r.date||'')}</span></div>`).join("")
@@ -628,10 +644,19 @@ function enhBlock(tool){
           // a measurement, and a NOT-PROBED row made none: it has no pin, or the
           // upstream has published no release and no tag to compare against. The
           // reassurance is only printed where it is true.
+          // "CONTAINED in the ref we build" is a claim about our TREE, and it is
+          // not the claim a patch-equivalent row makes: our ref carries that work
+          // under other shas and has since moved past it, so a merge of it is not
+          // a no-op. Printing the stronger sentence over those rows would restate
+          // on the page exactly the overstatement the bucket split removes from
+          // the ledger, so where such a row exists the sentence says what was
+          // actually measured.
           ? (relStatus(d) === "measured"
-             ? `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be contained in the ref we build." data-zh="每一個上游 release 都經量測確認已包含在我們建置的 ref 裡。">Every upstream release was measured to be contained in the ref we build.</p>`
+             ? (eqvRows.length
+                ? `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be already in the ref we build — ${eqvRows.length} of them as work the ref carries under different shas rather than as an ancestor of it." data-zh="每一個上游 release 都經量測確認已在我們建置的 ref 裡 —— 其中 ${eqvRows.length} 個是以不同 sha 被我們的 ref 帶著，而不是它的祖先。">Every upstream release was measured to be already in the ref we build.</p>`
+                : `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be contained in the ref we build." data-zh="每一個上游 release 都經量測確認已包含在我們建置的 ref 裡。">Every upstream release was measured to be contained in the ref we build.</p>`)
              : `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="No upstream release was probed: this upstream publishes no release or tag, or nothing pins it into the image. That is not a gap of zero — nothing was compared." data-zh="沒有任何上游 release 被檢查過：這個上游沒有發布 release 或 tag，或是沒有東西把它鎖進 image。這不等於缺口為零 —— 根本沒有比較過。">No upstream release was probed — nothing was compared, which is not a gap of zero.</p>`)
-          :"")) + foldBlock + undBlock;
+          :"")) + eqvBlock + foldBlock + undBlock;
     const log = (d.sync_log&&d.sync_log.length)
       ? `<h5 style="margin-top:1rem" data-en="Daily sync log" data-zh="每日同步 log">Daily sync log</h5>` + d.sync_log.slice(-10).reverse().map(s=>`<div class="fork-commit"><span class="sha">${esc((s.date||'').slice(0,10))}</span><span class="fork-verd ${esc(s.verdict||'')}">${esc(s.verdict||'')}</span><span>${esc(s.note||'')}</span></div>`).join("")
       : "";
