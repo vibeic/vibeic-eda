@@ -131,15 +131,75 @@ def step2_ours(g, main, rep):
     rep["carried_nothing_new"] = len(empty)
 
 
+def _branches_serving_an_open_upstream_pr(g):
+    """Branch names that an OPEN pull request upstream uses as its head.
+
+    `git cherry` answers "is this work already in main". That is the right
+    question for OUR line and the wrong question for a branch that is also the
+    head of a PR we filed UPSTREAM: once we merge our own fix into our fork's
+    master, cherry reports nothing unique, the branch is pruned, and deleting
+    the head branch CLOSES THE PULL REQUEST. The work survives on our line and
+    the contribution silently dies.
+
+    Measured, 2026-07-31: steveicarus/iverilog#1455 (the non-blocking event
+    trigger fix) was closed at 04:33 UTC by exactly this path -- closed and
+    head_ref_deleted in the same second, by us, with no maintainer involved. It
+    was the only upstream PR we had.
+
+    So ask GitHub, not git. Failure to reach the API returns None, and the
+    caller then prunes NOTHING: a branch kept by mistake costs a line of
+    clutter, a branch deleted by mistake costs an upstream contribution.
+    """
+    origin = out(*g, "remote", "get-url", "origin")
+    upstream = out(*g, "remote", "get-url", "upstream")
+    if not origin or not upstream:
+        return set()          # no upstream to have filed a PR against
+
+    def _slug(url):
+        u = url.strip().removesuffix(".git")
+        if u.startswith("git@"):
+            u = u.split(":", 1)[-1]
+        parts = [p for p in u.split("/") if p]
+        return "/".join(parts[-2:]) if len(parts) >= 2 else ""
+
+    up, org = _slug(upstream), _slug(origin).split("/")[0]
+    if not up or not org:
+        return set()
+
+    r = sh("gh", "api", f"repos/{up}/pulls?state=open&per_page=100")
+    if r.returncode:
+        return None           # cannot tell -> caller must not delete anything
+    try:
+        prs = json.loads(r.stdout)
+    except ValueError:
+        return None
+    return {p["head"]["ref"] for p in prs
+            if ((p.get("head") or {}).get("repo") or {}).get("owner", {})
+            .get("login", "").lower() == org.lower()}
+
+
 def step4_prune(g, main, rep, apply):
-    """Delete only what git itself says holds nothing unique."""
+    """Delete only what git itself says holds nothing unique -- AND what is not
+    serving an open upstream PR."""
     brs = [b for b in out(*g, "for-each-ref", "--format=%(refname:short)",
                           "refs/heads").splitlines() if b.strip() and b != main]
+    protected = _branches_serving_an_open_upstream_pr(g)
+    if protected is None:
+        rep["pruned"] = []
+        rep["prune_skipped"] = ("could not reach the GitHub API to check for "
+                                "open upstream PRs; pruned nothing rather than "
+                                "risk closing one")
+        rep["needs_human"] = True
+        return
+    if protected:
+        rep["prune_protected"] = sorted(protected)
     gone = []
     for b in brs:
         cherry = out(*g, "cherry", main, b)
         if [l for l in cherry.splitlines() if l.startswith("+")]:
             continue                      # still holds unique work — keep
+        if b in protected:
+            continue                      # head of an open upstream PR — keep
         if apply and sh(*g, "branch", "-D", b).returncode == 0:
             sh(*g, "push", "-q", "origin", "--delete", b)
             gone.append(b)
