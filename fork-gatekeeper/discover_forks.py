@@ -534,7 +534,13 @@ FORK_CLONES = Path(os.environ.get("GK_FORK_CLONES")
 API_PROBE_CAP = int(os.environ.get("GK_RELEASE_PROBE_CAP") or "25")
 
 #: The dispositions. "We could not ask" is one of them, and it is not "no".
+#: FOLDED is its own disposition rather than a flavour of CONTAINED: a prerelease
+#: whose work is counted under the final release that supersedes it carries commits
+#: our pin does NOT have, so filing it beside the releases we already build states
+#: something false about our tree. It does not change the count either way; it
+#: changes which sentence the ledger and the page are making (vibeic-eda#36).
 CONTAINED, NEW, SUPERSEDED, UNDETERMINED = "contained", "new", "superseded", "undetermined"
+FOLDED = "folded"
 
 #: `behind_releases` is an int ONLY under this status. The other two carry None.
 MEASURED, UNKNOWN, NOT_PROBED = "measured", "unknown", "not-probed"
@@ -580,10 +586,79 @@ def _peel(repo, revs: list[str]) -> dict[str, str]:
     return got
 
 
+def _patch_equivalent(repo, head_sha: str, base_sha: str):
+    """Does every commit `head_sha` has and `base_sha` lacks already exist in
+    `base_sha` under a DIFFERENT sha? True / False / None (could not tell).
+
+    `git cherry <base> <head>` walks `base..head` and prints each commit prefixed
+    `-` when a commit reachable from `base` (back to their merge-base) produces
+    the IDENTICAL patch, `+` when nothing does. So "no `+` line" is exactly the
+    property: the work is already ours, applied by a different route.
+
+    WHY ANCESTRY IS NOT ENOUGH. A release tag frequently sits on a version-stamp
+    commit that upstream also merged to its trunk under a new sha — a squash
+    merge, a backport, a rewritten release branch. The tagged commit is then not
+    an ancestor of anything we build, its tree differs from the merge-base's, and
+    every ancestry-shaped test says "work you do not have" about a change that is
+    byte-for-byte already in our tree. `git patch-id --stable`, which
+    `assess_release.already_carried` already uses for the same reason on the
+    commit path, is what sees through it; `git cherry` is that comparison run
+    over a whole range in one process.
+
+    THE FAILURE DIRECTION THIS MUST NOT HAVE. A release we genuinely lack has at
+    least one commit whose patch nothing of ours reproduces, so `git cherry`
+    prints a `+` and the release stays counted. Anything that is not a clean run
+    of git — a missing object, a timeout, a non-zero exit — returns None, and
+    None never means "contained" at the call site. There is no input for which a
+    failure of this function removes a release from the count.
+    """
+    rc, out, _ = _git(repo, "cherry", base_sha, head_sha, timeout=180)
+    if rc != 0:
+        return None
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if any(ln.startswith("+") for ln in lines):
+        return False
+    # No `+`. Either every listed commit was `-` (equivalent), or the range was
+    # empty — which `merge-base --is-ancestor` has already reported as contained.
+    return all(ln.startswith("-") for ln in lines) or not lines
+
+
+def _merge_changes_nothing(repo, head_sha: str, base_sha: str, mb: str):
+    """Would merging `head_sha` into `base_sha` change base's tree at all?
+    Returns True (it would change nothing) / False / None (could not tell).
+
+    This is the adoption question asked literally: `git merge-tree --write-tree`
+    performs the real three-way merge the gatekeeper would perform and writes the
+    resulting tree. When that tree IS the tree we already build, adopting the
+    release moves no byte, and a release that moves no byte is not work we lack.
+
+    It answers a shape `git cherry` cannot: upstream cutting a release branch,
+    then REWRITING it, so the tagged commits are neither ancestors of ours nor
+    patch-identical to ours, while the file states they produce are ones our
+    trunk already reached by its own commits.
+
+    Sound in the direction that matters: a release carrying anything we do not
+    have contributes it to the merge, so the merged tree differs from ours and
+    the release stays counted. A conflict is a non-zero exit and is NOT a
+    no-op — it is reported as False here and the release stays counted. Git
+    older than 2.38 has no `--write-tree`; that exits non-zero too, and the
+    caller falls through to the next test rather than inventing an answer.
+    """
+    rc, out, _ = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
+                      base_sha, head_sha, timeout=180)
+    if rc == 1:
+        return False                     # conflicts: adopting it is not a no-op
+    first = (out.splitlines() or [""])[0].strip()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
+        return None                      # no --write-tree (git < 2.38), or no tree printed
+    trees = _tree_pair(repo, base_sha, base_sha)
+    return None if trees is None else first == trees[0]
+
+
 def _local_containment(repo, tag_sha: str, pin_sha: str):
     """(verdict, why, disjoint) for one release commit against our pin, locally.
 
-    Two questions, in cost order, and BOTH are about content:
+    FOUR questions, in cost order, and every one of them is about CONTENT:
 
       ancestry — `merge-base --is-ancestor` — is a sufficient shortcut, never the
       verdict. A tag placed on a merge commit that re-joins history we already
@@ -595,8 +670,24 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
       the tag's content is content we already build. This is the same question
       the API answers as "zero changed files".
 
+      patch-equivalence — every commit the tag has and we lack is byte-identical,
+      as a patch, to a commit we carry (`git cherry` over `git patch-id
+      --stable`). Ancestry cannot see a change that reached our trunk under a new
+      sha; this can. Measured on a release whose one missing commit was the
+      version stamp for that very release, squash-merged to trunk beforehand:
+      identical patch-id, different sha, and our own header already declaring the
+      released version.
+
+      merge — the three-way merge of the release into our pin produces the tree
+      we already build. That is the adoption question asked literally, and it is
+      the one that survives an upstream REWRITING its release branch, where
+      neither ancestry nor patch-id can match but the file states are ours
+      already.
+
+    None of the four reads a date, and none of them names a project.
+
     `disjoint` says the release and our pin share NO ancestor at all. That is a
-    definite answer from git, not a failure, and it means something the other two
+    definite answer from git, not a failure, and it means something the other
     values cannot express: the release is not on the line we track, so it is not
     a release we could advance to by any rebase. Measured on an upstream that
     re-imported its history — its newest release is a 115-commit tree with a
@@ -626,6 +717,14 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
     if trees[0] == trees[1]:
         return (CONTAINED,
                 "changes no file relative to the merge-base with our pinned ref", False)
+    if _patch_equivalent(repo, tag_sha, pin_sha) is True:
+        return (CONTAINED,
+                "every commit it has that our pinned ref lacks is patch-identical "
+                "(git patch-id --stable) to a commit our pinned ref already carries", False)
+    if _merge_changes_nothing(repo, tag_sha, pin_sha, mb) is True:
+        return (CONTAINED,
+                "merging it into our pinned ref produces the tree we already build — "
+                "it changes no file", False)
     return NEW, "carries commits and file changes our pinned ref does not have", False
 
 
@@ -726,9 +825,9 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     that is not contained is UNDETERMINED rather than counted — not knowing where
     we branched from is not the same as knowing everything is ahead.
     """
-    out = {"new": [], "contained": [], "superseded": [], "undetermined": [],
-           "behind": None, "status": NOT_PROBED, "base": None, "api_calls": 0,
-           "clone": None}
+    out = {"new": [], "contained": [], "superseded": [], "folded": [],
+           "undetermined": [], "behind": None, "status": NOT_PROBED, "base": None,
+           "api_calls": 0, "clone": None}
     if not ref or not rels:
         return out
 
@@ -809,19 +908,33 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         # candidate to name as the version we ship.
         g["in_pin"] = verdict == CONTAINED
 
-    # 4. COLLAPSE a prerelease into a final release that already contains it. The
-    #    `prerelease` flag is the API's own; the containment is ancestry. Neither
-    #    half looks at the tag TEXT, so this is not an "rc" matcher.
+    # 4. COLLAPSE a prerelease into a final release that already carries its work.
+    #    The `prerelease` flag is the API's own; the containment is ancestry OR
+    #    patch-equivalence. Neither half looks at the tag TEXT, so this is not an
+    #    "rc" matcher.
+    #
+    #    ANCESTRY ALONE WAS NOT ENOUGH, measured: an upstream that rewrites its
+    #    release branch between the candidate and the final leaves the candidate
+    #    an ancestor of nothing, while three of its four commits exist in the
+    #    final under new shas with identical patch-ids. Counting it beside the
+    #    final states two releases' worth of missing work for one release's worth
+    #    of commits — the same double-count as two tags on one commit, arrived at
+    #    by a different route.
+    #
+    #    And the disposition is FOLDED, not CONTAINED. Its work IS counted, under
+    #    the final; but our pinned ref does not contain it, and a bucket named
+    #    `contained` would say that it does.
     finals = [g for g in groups.values()
               if g["verdict"] == NEW and g["prerelease"] is not True]
     for g in groups.values():
         if g["verdict"] != NEW or g["prerelease"] is not True:
             continue
         for f in finals:
-            if _ancestor(graph, tool, up_full, g["sha"], f["sha"], out) is True:
-                g["verdict"] = CONTAINED
-                g["why"] = (f"prerelease superseded by {f['tags'][0]}, which contains it "
-                            f"and is counted instead")
+            if _carried_by(graph, tool, up_full, g["sha"], f["sha"], out) is True:
+                g["verdict"] = FOLDED
+                g["folded_into"] = f["tags"][0]
+                g["why"] = (f"prerelease whose work {f['tags'][0]} already carries; counted "
+                            f"once, under {f['tags'][0]}, not contained in our pinned ref")
                 break
 
     # 5. BEHIND US, NOT AHEAD — the trunk-divergence ordering described above.
@@ -861,6 +974,19 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
 
     for g in groups.values():
         if g["verdict"] != NEW:
+            continue
+        # ALREADY CARRIED BY THE RELEASE WE BUILD. If the release we were measured
+        # to contain carries this candidate's work — ancestry or patch-equivalence,
+        # the same two tests used everywhere else — then there is nothing here to
+        # advance to: the thing that supersedes it is the thing we already build.
+        # Measured on a prerelease of the very release our pin contains, which was
+        # otherwise reported as "one release behind" on a row whose base release
+        # and upstream latest release were the SAME tag.
+        if (base_g is not None and g is not base_g
+                and _carried_by(graph, tool, up_full, g["sha"], base_g["sha"], out) is True):
+            g["verdict"] = SUPERSEDED
+            g["why"] = (f"its work is carried by {base_g['tags'][0]}, which our pinned ref "
+                        f"already contains — there is nothing here to advance to")
             continue
         # A release that shares NO ancestor with our pin is not on the line we
         # track, so no rebase reaches it and it is not a gap — PROVIDED we are
@@ -911,6 +1037,8 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
             out["new"].append(row)
         elif g["verdict"] == SUPERSEDED:
             out["superseded"].append(row)
+        elif g["verdict"] == FOLDED:
+            out["folded"].append({**row, "counted_under": g.get("folded_into")})
         else:
             out["undetermined"].append({**row, "error": g.get("why") or "undetermined"})
     out["base"] = base_g["tags"][0] if base_g is not None else None
@@ -942,6 +1070,26 @@ def _ancestor(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     return c["ahead_by"] == 0
 
 
+def _carried_by(clone, tool: str, up_full: str, a: str, b: str, out: dict):
+    """Does `b` already carry every commit `a` has? None when it cannot be decided.
+
+    The SAME question `_local_containment` asks of our pinned ref, asked of one
+    release about another, and answered by the same two tests in the same order:
+    ancestry first because it is free, then patch-equivalence, which is the half
+    the prerelease fold was missing.
+
+    None is a third value on purpose, and every caller must pick the answer that
+    invents no fact: a prerelease that cannot be SHOWN to be carried stays
+    counted. Not being able to tell never removes a release from the count.
+    """
+    anc = _ancestor(clone, tool, up_full, a, b, out)
+    if anc is True:
+        return True
+    if clone is not None and _patch_equivalent(clone, a, b) is True:
+        return True
+    return None if anc is None else False
+
+
 def _merge_base(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     """The merge-base commit of `a` and `b`, or None if it could not be found."""
     if a == b:
@@ -964,6 +1112,35 @@ def _merge_base(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     return None
 
 
+def release_gap_status(led: dict) -> str:
+    """MEASURED / UNKNOWN / NOT_PROBED for one ledger row — THREE claims, not two.
+
+    They are three different sentences and the difference is the point of this
+    module:
+
+      MEASURED   — we asked about every upstream release and this is the answer.
+      UNKNOWN    — we asked and at least one release could not be decided. The
+                   count does not exist; `undetermined_releases` says what stopped
+                   each one.
+      NOT_PROBED — the question has no subject: nothing pins this tool into the
+                   image, or the upstream publishes no release or tag at all.
+                   Measured on the corpus the day this was written: four upstreams
+                   with zero tags and seven tools with no pin, ELEVEN rows whose
+                   ledger value is null. Rendering them "0" claims we compared
+                   against something. There was nothing to compare against.
+
+    A ledger written before `behind_releases_status` existed is read at face
+    value: a count is a count, and a null with undetermined rows beside it is
+    UNKNOWN. A null with nothing beside it never had a subject either.
+    """
+    st = led.get("behind_releases_status")
+    if st in (MEASURED, UNKNOWN, NOT_PROBED):
+        return st
+    if led.get("behind_releases") is None:
+        return UNKNOWN if led.get("undetermined_releases") else NOT_PROBED
+    return MEASURED
+
+
 def release_gap(led: dict):
     """The ledger's release gap as an int, or None when it is not a measurement.
 
@@ -971,11 +1148,16 @@ def release_gap(led: dict):
     0` is the shape being removed: it maps "we could not find out" onto the same
     value as "we checked and there is nothing", and no reader downstream can tell
     those apart — which is the whole defect.
+
+    `or 0` was ALSO still here, one level down: `return n if isinstance(n, int)
+    else 0` handed a confident zero to every NOT_PROBED row, because only UNKNOWN
+    was being screened out. A null is a null under both statuses; only MEASURED
+    produces a number.
     """
-    if release_gap_unknown(led):
+    if release_gap_status(led) != MEASURED:
         return None
     n = led.get("behind_releases")
-    return n if isinstance(n, int) else 0
+    return n if isinstance(n, int) else None
 
 
 def release_gap_unknown(led: dict) -> bool:
@@ -983,14 +1165,85 @@ def release_gap_unknown(led: dict) -> bool:
 
     True is not a small number; it is the absence of one. A consumer that renders
     it as 0, or as a guess, is publishing a measurement nobody made.
+
+    NOT the negation of "measured": a NOT_PROBED row is not unknown-in-this-sense
+    — nobody failed to measure anything, there was nothing to measure — and the
+    callers that escalate an unknown gap to a human must not escalate those.
+    `release_gap() is None` is the test for "there is no number here".
     """
-    if led.get("behind_releases_status") == UNKNOWN:
-        return True
-    # A ledger written before this field existed states a count and nothing about
-    # how it was reached. It is read at face value rather than retro-flagged —
-    # `behind_releases_status` absent is the signal that it predates the question.
-    return (led.get("behind_releases") is None
-            and bool(led.get("undetermined_releases")))
+    return release_gap_status(led) == UNKNOWN
+
+
+def _ls_remote_head(url: str, branch: str) -> str | None:
+    """The commit `refs/heads/<branch>` points at, from ONE `git ls-remote`.
+
+    Costs no API budget and needs no fork network. It is what makes answering
+    from a local clone SAFE rather than merely cheap: a clone that has not been
+    fetched would report a stale merge-base and, worse, a small `behind_commits`,
+    which is the reassuring direction. Asking the remote what the branch really
+    is turns "the clone might be current" into a checked fact.
+    """
+    try:
+        r = subprocess.run(["git", "ls-remote", url, f"refs/heads/{branch}"],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+            return parts[0]
+    return None
+
+
+def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
+    """`compare`-shaped answer for `<upstream branch>...<our head>` from the clone.
+
+    Same keys the API compare returns — `merge_base_commit`, `ahead_by`,
+    `behind_by`, `commits` — so the caller reads one shape whichever route
+    answered. None means THIS CLONE CANNOT ANSWER, which is not an answer of zero.
+
+    Refuses to answer unless it holds the CURRENT upstream branch head, resolved
+    by `git ls-remote` rather than trusted from a remote-tracking ref. A stale
+    clone reports fewer commits behind than there are, and every consumer reads
+    small numbers as health.
+    """
+    clone = _clone_for(tool)
+    if clone is None or not head or not up_branch:
+        return None
+    up_sha = _ls_remote_head(f"https://github.com/{up_full}.git", up_branch)
+    if not up_sha:
+        return None
+    have = _peel(clone, [up_sha, head])
+    if up_sha not in have or head not in have:
+        return None
+    up_sha, head_sha = have[up_sha], have[head]
+    rc, mb, _ = _git(clone, "merge-base", up_sha, head_sha)
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", mb or ""):
+        return None
+    rc, counts, _ = _git(clone, "rev-list", "--left-right", "--count",
+                         f"{up_sha}...{head_sha}")
+    parts = counts.split()
+    if rc != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    behind, ahead = int(parts[0]), int(parts[1])
+    rc, log, _ = _git(clone, "log", f"--max-count={CAP}",
+                      "--format=%H%x1f%ad%x1f%s", "--date=short", f"{mb}..{head_sha}")
+    commits = []
+    if rc == 0 and log:
+        for line in reversed(log.splitlines()):
+            f = line.split("\x1f")
+            if len(f) == 3:
+                commits.append({"sha": f[0], "html_url": f"https://github.com/{ORG}/{tool}/commit/{f[0]}",
+                                "commit": {"message": f[2], "author": {"date": f[1]}}})
+    rc, mbline, _ = _git(clone, "show", "-s", "--format=%H%x1f%ad%x1f%s", "--date=short", mb)
+    mf = mbline.split("\x1f") if rc == 0 else []
+    mb_commit = {"sha": mb, "html_url": f"https://github.com/{up_full}/commit/{mb}",
+                 "commit": {"message": mf[2] if len(mf) == 3 else "",
+                            "author": {"date": mf[1] if len(mf) == 3 else ""}}}
+    return {"merge_base_commit": mb_commit, "ahead_by": ahead, "behind_by": behind,
+            "commits": commits}
 
 
 def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
@@ -1052,28 +1305,68 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         led["pinned_via"] = (f"{pin.get('arg') or '?'} → {ORG}/{pin['vendored_in']} "
                              f"{pin['vendored_path']}")
 
-    # our carried patches + fork point: compare upstream default ... our pinned ref
-    head = ref or meta.get("default_branch") or up_branch
-    cmp = gh(f"repos/{ORG}/{tool}/compare/{up_owner}:{up_branch}...{head}")
-    # Ask the UPSTREAM instead when our repo cannot answer. A cross-repo compare
-    # needs the two to share a fork network, and `vibeic/OpenROAD-flow-scripts`
-    # and `vibeic/ASAP7_for_KLayout` are independent repositories (isFork=false),
-    # so this 404s for them. `behind_commits` then stayed None and the row read
-    # CLEAN while ORFS's pinned v3.0 sat 6157 commits behind upstream master —
-    # and ORFS supplies /foss/pdks/{nangate45,asap7} to the shipped image
-    # (vibeic-eda#33).
+    # our carried patches + fork point: where our pinned ref left the upstream trunk.
     #
-    # The reversed query answers the same question: upstream's `master...<our
-    # ref>` reports how far our ref trails. `ahead_by`/`behind_by` swap meaning
-    # with the direction, so they are read back the other way round.
+    # ROUTED ON WHAT THE REPOSITORY IS, NOT ON AN ERROR IT RETURNS. The query this
+    # used to lead with — `repos/vibeic/<tool>/compare/<up_owner>:<branch>...<head>`
+    # — is a CROSS-REPO compare, which GitHub resolves only through a shared fork
+    # network. Several of our repositories are mirrors rather than GitHub forks
+    # (`fork: false`, `parent: null`), and for those it does not fail
+    # intermittently: it 404s 100% of the time, permanently, and the reversed
+    # query 404s for the same reason (measured on `repos/AUCOHL/Fault/compare/
+    # main...<our pin>` → HTTP 404). `fork`/`parent` is a fact the meta call
+    # already fetched, so the form that CAN answer is chosen up front rather than
+    # discovered by spending a request on one that cannot.
+    #
+    # THE LOCAL CLONE ANSWERS FIRST, for the same reason it does on the release
+    # path: it holds both sides in one object store, so the merge-base is a local
+    # graph question with no API budget and no fork network in it at all. A mirror
+    # with a clone was the row that made this necessary — `fork_point` stayed None,
+    # so every release became UNDETERMINED and the tool was permanently
+    # `behind_releases: null` over three junk test tags, while
+    # `git merge-base upstream/<branch> <pin>` in the clone answered in
+    # milliseconds. Fixing the release path and leaving this one on the broken
+    # form is half a fix.
+    #
+    # UNDETERMINED ONLY WHEN NEITHER CAN. `fork_point_status` records which route
+    # answered, and `compare_error` carries the literal text when none did — the
+    # row must never read as "no divergence" because the question failed.
+    head = ref or meta.get("default_branch") or up_branch
+    # A repo that STATES it is not a fork cannot answer the cross-repo form. An
+    # older ledger's meta that states nothing is not evidence either way, so the
+    # query is still attempted — routing on a fact we have, never on a guess.
+    can_cross_repo = bool(meta.get("parent")) or meta.get("fork") is not False
+    cmp: dict = {"_err": "not attempted"}
+    source = None
+
+    # The clone answers about our PIN. An unpinned tool has no ref to ask about,
+    # and resolving its fork's branch name inside a clone would answer about a
+    # different commit than the one the API would name.
+    _loc = _local_compare(tool, up_full, up_branch, ref) if ref else None
+    if _loc is not None:
+        cmp, source = _loc, "local-clone"
+    if cmp.get("_err") and can_cross_repo:
+        cmp = gh(f"repos/{ORG}/{tool}/compare/{up_owner}:{up_branch}...{head}")
+        if not cmp.get("_err"):
+            source = "fork-network-compare"
     if cmp.get("_err") and ref:
+        # The reversed query answers the same question from the other side:
+        # upstream's `<branch>...<our ref>` reports how far our ref trails.
+        # `ahead_by`/`behind_by` swap meaning with the direction, so they are read
+        # back the other way round. It is NOT gated on the fork network: it
+        # resolves whenever the upstream repo can name our ref itself, which is
+        # the case for every tool pinned to an upstream TAG.
         _rev = gh(f"repos/{up_full}/compare/{up_branch}...{ref}")
         if not _rev.get("_err"):
             cmp = {"merge_base_commit": _rev.get("merge_base_commit"),
                    "ahead_by": _rev.get("ahead_by", 0),
                    "behind_by": _rev.get("behind_by", 0),
                    "commits": _rev.get("commits") or []}
-            led["compare_direction"] = "from-upstream"
+            led["compare_direction"], source = "from-upstream", "upstream-compare"
+    if cmp.get("_err") and not can_cross_repo:
+        cmp = {"_err": (f"{cmp['_err']}; {ORG}/{tool} is a mirror rather than a GitHub "
+                        f"fork (fork=false, parent=null), so no cross-repo compare "
+                        f"against {up_full} can resolve, and no local clone could answer")}
     pin_date = None
     if not cmp.get("_err"):
         mb = cmp.get("merge_base_commit") or {}
@@ -1081,6 +1374,7 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         led["ahead"] = cmp.get("ahead_by", 0)                 # our patches on the pinned branch
         led["behind_commits"] = cmp.get("behind_by", 0)       # informational (commit granularity)
         led["carried_patches"] = [_commit_brief(c) for c in (cmp.get("commits") or [])][:CAP]
+        led["fork_point_status"] = source
         # Classify releases by the FORK POINT (merge-base) date — the point where our
         # branch diverges from upstream = the release our patches are based on. Using a
         # patch's own author date is wrong: rebasing onto a new release preserves the
@@ -1088,6 +1382,7 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         pin_date = (led.get("fork_point") or {}).get("date")
     else:
         led["compare_error"] = cmp["_err"]
+        led["fork_point_status"] = "undetermined"
 
     # RELEASE tracking, by CONTAINMENT — see the block above `classify_releases`.
     # `pin_date` (the fork-point date) stays in the ledger as display metadata; no
@@ -1100,6 +1395,12 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     led["new_releases"] = cl["new"]
     led["contained_releases"] = cl["contained"][:15]
     led["superseded_releases"] = cl["superseded"][:15]
+    # NAMED FOR WHAT IS IN IT. These carry commits our pinned ref does NOT have —
+    # they are counted, once, under the release that carries their work. Filing
+    # them beside the releases we already build made the ledger assert something
+    # measurably false: two of them compared 225 and 15 commits ahead of our pin,
+    # with 300+ changed files, under the heading "contained".
+    led["folded_releases"] = cl["folded"][:15]
     led["undetermined_releases"] = cl["undetermined"]
     led["behind_releases"] = cl["behind"]
     led["behind_releases_status"] = cl["status"]
@@ -1172,9 +1473,9 @@ def main():
             "tool", "role", "upstream", "forked_at", "pinned_ref", "vibeic_branch",
             "ahead", "base_release", "upstream_latest_release", "behind_releases",
             "behind_releases_status", "image_version", "last_sync")})
-        _n = ("unknown" if release_gap_unknown(led)
-              else ("—" if led.get("behind_releases") is None
-                    else led.get("behind_releases")))
+        _st = release_gap_status(led)
+        _n = ("unknown" if _st == UNKNOWN
+              else ("not-probed" if _st == NOT_PROBED else release_gap(led)))
         tag = led.get("error") or (f"pin={led.get('pinned_ref')} patches={led.get('ahead','?')} "
                                    f"base={led.get('base_release')} latest={led.get('upstream_latest_release')} "
                                    f"new_releases={_n}")

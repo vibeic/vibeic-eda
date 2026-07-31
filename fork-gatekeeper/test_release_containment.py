@@ -158,6 +158,10 @@ def _discover(monkeypatch, clones: Path, ref: str, releases, tags=(),
     # No network, ever: an ls-remote that silently answered would make a test that
     # is supposed to prove the clone was consulted pass for the wrong reason.
     monkeypatch.setattr(df, "_ls_remote_tags", lambda url: {}, raising=False)
+    # …and the same for the fork-point path's remote probe: the shapes below are
+    # about the RELEASE classification, so the clone must not also become the
+    # source of the fork point and change what is being measured.
+    monkeypatch.setattr(df, "_ls_remote_head", lambda url, branch: None, raising=False)
     led = df.discover_one({"tool": TOOL, "upstream": UP, "role": "r"},
                           {TOOL.lower(): {"ref": ref, "arg": "TOOL_REF"}}, "0.9.9")
     led["_gh_calls"] = calls
@@ -252,7 +256,11 @@ def test_a_prerelease_contained_in_its_final_release_is_not_counted_twice(monkey
     assert led["behind_releases"] == 1, \
         f"a prerelease was counted beside the release that contains it: {_tags_of(led)}"
     assert _tags_of(led) == ["v3.0.0"]
-    assert "v3.0.0-rc1" in _tags_of(led, "contained_releases")
+    # …in the bucket that says what it is. `contained_releases` is a claim about
+    # OUR TREE, and our pinned ref does not contain this prerelease — it is work
+    # we lack, counted once, under the release that carries it.
+    assert _tags_of(led, "folded_releases") == ["v3.0.0-rc1"]
+    assert "v3.0.0-rc1" not in _tags_of(led, "contained_releases")
 
 
 def test_a_prerelease_nobody_superseded_is_still_counted(monkeypatch):
@@ -393,6 +401,7 @@ def test_without_a_fork_point_an_uncontained_release_is_undetermined(monkeypatch
         monkeypatch.setattr(df, "_tags_by_date", lambda up, limit=30: [])
         monkeypatch.setattr(df, "FORK_CLONES", clones, raising=False)
         monkeypatch.setattr(df, "_ls_remote_tags", lambda url: {}, raising=False)
+        monkeypatch.setattr(df, "_ls_remote_head", lambda url, branch: None, raising=False)
         led = df.discover_one({"tool": TOOL, "upstream": UP, "role": "r"},
                               {TOOL.lower(): {"ref": pin, "arg": "TOOL_REF"}}, "0.9.9")
     assert led.get("fork_point") is None, "the fixture failed to remove the fork point"
@@ -696,7 +705,10 @@ def test_a_measured_zero_is_still_not_actionable():
 
 # ── the published page ──────────────────────────────────────────────────────
 
-_JS = re.compile(r"const pill = .*?const relPill = d => .*?;\n", re.S)
+# From the pill helper through the end of `relPill`, whose closing brace is the
+# first one at column zero after it. Sliced rather than re-implemented so the
+# node run below executes THE PAGE'S OWN readers, not a copy of them.
+_JS = re.compile(r"const pill = .*?\n\n", re.S)
 
 
 def test_the_page_never_coerces_an_unmeasured_gap_to_zero():
@@ -748,3 +760,487 @@ def test_the_page_carries_no_display_layer_override_of_a_measured_field():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+# ════════════════════════════════════════════════════════════════════════════
+# ANCESTRY CANNOT SEE PATCH-EQUIVALENCE — and the count paid for it twice
+#
+# The measurement above replaced a date comparison with a containment test built
+# from ancestry plus one tree comparison. Swept over the whole corpus it produced
+# two rows that were WRONG IN THE OTHER DIRECTION: releases counted as work we
+# lack whose content our pinned ref already carries, byte for byte, reached by a
+# route ancestry cannot follow.
+#
+#   * a release tag on a version-stamp commit that upstream ALSO squash-merged to
+#     its trunk beforehand. Identical patch-id, different sha, our own public
+#     header already declaring the released version — and `git merge-base
+#     --is-ancestor` says no, because the sha we have is not the sha it tagged.
+#     Reported 2 behind. Truth 0, and the row named a release three minor
+#     versions older than the one we build as the one we build.
+#   * a release whose branch upstream REWROTE after cutting it. Every commit on
+#     it has a new sha; the two version-stamp commits are not patch-identical to
+#     anything (their diffs step through an intermediate our trunk never had);
+#     and the tree they produce is the tree we already build. Reported 2, of
+#     which one was the release itself and one was its own prerelease, counted
+#     separately because a rewritten branch leaves the prerelease an ancestor of
+#     nothing.
+#
+# Each shape below is a real git repository with that topology, driven through
+# the real `discover_one`. Two of them are CONTROLS that must keep counting a
+# release we genuinely lack — the failure direction that matters, because a
+# false CLEAN is the half nobody looks at.
+
+
+def _cherry_pick(repo: Path, sha: str, when: str) -> str:
+    """Apply `sha` here as a NEW commit — same patch, different sha.
+
+    `-x` appends a provenance line to the message, so the commit object differs
+    while `git patch-id --stable` is identical. That is the whole shape: a change
+    that is ours without being the object upstream tagged.
+    """
+    env = {**os.environ, "GIT_AUTHOR_DATE": f"{when}T00:00:00Z",
+           "GIT_COMMITTER_DATE": f"{when}T00:00:00Z"}
+    r = subprocess.run(["git", "-C", str(repo), "cherry-pick", "-x", sha],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    return _git(repo, "rev-parse", "HEAD")
+
+
+# ── SHAPE 9 — the release's missing commit is one we carry under another sha ─
+
+def test_a_release_whose_only_missing_commit_is_one_we_already_carry(monkeypatch):
+    """MEASURED: reported 2, truth 0, and `base_release` regressed by three minor
+    versions.
+
+    `git cherry <our pin> <the release>` prints exactly one line and it is a `-`:
+    the single commit the release has that we do not is patch-identical
+    (`git patch-id --stable`) to a commit that IS an ancestor of our pin. The
+    ancestry test cannot see it — the sha it looks for was never on our line —
+    and the tree test cannot either, because our trunk moved on afterwards and
+    the release's tree no longer matches the merge-base's.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        c0 = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", c0)                 # a release we plainly contain
+        # upstream cuts the release on its own branch: one version-stamp commit
+        _git(repo, "checkout", "-q", "-b", "rel-2", c0)
+        stamp = _commit(repo, "VERSION", "2.0\n", "2026-02-01")
+        _git(repo, "tag", "v2.0", stamp)
+        # …and the same change reaches the trunk we track under a different sha
+        _git(repo, "checkout", "-q", "master")
+        _cherry_pick(repo, stamp, "2026-02-02")
+        pin = _commit(repo, "b", "b", "2026-03-01")
+        assert not subprocess.run(["git", "-C", str(repo), "merge-base",
+                                   "--is-ancestor", stamp, pin],
+                                  capture_output=True).returncode == 0, \
+            "the fixture failed: the release commit is an ancestor after all"
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-01", False),
+                                  ("v1.0", "2026-01-01", False)],
+                        fork_point=(pin, "2026-03-01"))
+    assert led["behind_releases"] == 0, \
+        f"a release we carry under a different sha counted as new: {_tags_of(led)}"
+    assert led["behind_releases_status"] == "measured"
+    assert led["base_release"] == "v2.0", \
+        f"base_release names an older release than the one we build: {led['base_release']}"
+    assert "v2.0" in _tags_of(led, "contained_releases")
+
+
+def test_patch_equivalence_does_not_zero_a_release_that_also_carries_real_work(monkeypatch):
+    """THE CONTROL for the shape above, and the one that keeps it honest.
+
+    Same release, same already-carried version stamp — plus ONE commit that is
+    nobody's cherry-pick. `git cherry` prints a `+` for it, so the release still
+    carries work we lack and is still counted. A fix that answered "contained"
+    whenever ANY commit matched would pass the test above and lose this one.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        c0 = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", c0)
+        _git(repo, "checkout", "-q", "-b", "rel-2", c0)
+        stamp = _commit(repo, "VERSION", "2.0\n", "2026-02-01")
+        _commit(repo, "fix", "a real fix", "2026-02-02")      # nobody has this
+        _git(repo, "tag", "v2.0", _git(repo, "rev-parse", "HEAD"))
+        _git(repo, "checkout", "-q", "master")
+        _cherry_pick(repo, stamp, "2026-02-03")
+        pin = _commit(repo, "b", "b", "2026-03-01")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-01", False)],
+                        fork_point=(pin, "2026-03-01"))
+    assert _tags_of(led) == ["v2.0"], \
+        f"a release carrying a commit nobody has was zeroed: {_tags_of(led)}"
+    assert led["behind_releases"] == 1
+    assert led["base_release"] == "v1.0"
+
+
+# ── SHAPE 10 — upstream rewrote the release branch after cutting it ──────────
+
+def test_a_release_whose_rewritten_commits_produce_the_tree_we_already_build(monkeypatch):
+    """MEASURED: reported 2, truth 0.
+
+    Upstream cuts `release/N`, stamps it `N-rc2` and then `N`, and rewrites the
+    branch in between. Our trunk reached the released version in ONE step, so:
+
+      * ancestry says no — different shas;
+      * the tree test says no — our trunk carries 131 further commits;
+      * patch-id says no — `rc1 → rc2` and `rc2 → N` are two diffs, and our
+        trunk's single `rc1 → N` matches neither.
+
+    What is true is the thing the gatekeeper would actually do: MERGE it. The
+    three-way merge of the release into our pinned ref produces the tree we
+    already build, so adopting the release moves no byte. `git merge-tree
+    --write-tree` answers exactly that, and it is the only one of the four tests
+    that survives a rewritten branch.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        (repo / "VERSION").write_text("1.0.0rc1\n")
+        c0 = _commit(repo, "f", "x", "2026-01-01")
+        _git(repo, "tag", "v0.9", c0)
+        # the release branch: two stamps, stepping through an intermediate
+        _git(repo, "checkout", "-q", "-b", "rel-1", c0)
+        _commit(repo, "VERSION", "1.0.0rc2\n", "2026-02-01")
+        final = _commit(repo, "VERSION", "1.0.0\n", "2026-02-02")
+        _git(repo, "tag", "v1.0", final)
+        # our trunk: the same released version in one step, plus its own work
+        _git(repo, "checkout", "-q", "master")
+        _commit(repo, "VERSION", "1.0.0\n", "2026-02-03")
+        pin = _commit(repo, "f", "y", "2026-03-01")
+        cherry = subprocess.run(["git", "-C", str(repo), "cherry", pin, final],
+                                capture_output=True, text=True)
+        assert cherry.stdout.count("+") == 2, \
+            f"the fixture failed: the stamps are patch-equivalent after all: {cherry.stdout}"
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-02", False),
+                                  ("v0.9", "2026-01-01", False)],
+                        fork_point=(pin, "2026-03-01"))
+    assert led["behind_releases"] == 0, \
+        f"a release that merges into our pin as a no-op counted as new: {_tags_of(led)}"
+    assert led["behind_releases_status"] == "measured"
+    assert led["base_release"] == "v1.0", \
+        f"base_release names an older release than the one we build: {led['base_release']}"
+
+
+def test_a_merge_that_would_change_our_tree_is_still_a_gap(monkeypatch):
+    """THE CONTROL for the merge test. One extra file on the release branch and
+    the merge stops being a no-op, so the release is still counted. A fix that
+    treated "the merge ran" as "contained" would pass the test above and lose
+    this one."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        (repo / "VERSION").write_text("1.0.0rc1\n")
+        c0 = _commit(repo, "f", "x", "2026-01-01")
+        _git(repo, "tag", "v0.9", c0)
+        _git(repo, "checkout", "-q", "-b", "rel-1", c0)
+        _commit(repo, "VERSION", "1.0.0rc2\n", "2026-02-01")
+        _commit(repo, "VERSION", "1.0.0\n", "2026-02-02")
+        _git(repo, "tag", "v1.0", _commit(repo, "feature", "real work", "2026-02-03"))
+        _git(repo, "checkout", "-q", "master")
+        _commit(repo, "VERSION", "1.0.0\n", "2026-02-04")
+        pin = _commit(repo, "f", "y", "2026-03-01")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-03", False),
+                                  ("v0.9", "2026-01-01", False)],
+                        fork_point=(pin, "2026-03-01"))
+    assert _tags_of(led) == ["v1.0"], \
+        f"a release whose merge adds a file was zeroed: {_tags_of(led)}"
+    assert led["behind_releases"] == 1
+
+
+# ── SHAPE 11 — the prerelease fold, on a branch that was rewritten ───────────
+
+def test_a_prerelease_folds_into_its_final_when_the_branch_was_rewritten(monkeypatch):
+    """MEASURED: reported 2 for ONE release we lack.
+
+    The fold collapses a prerelease into the final release that carries its work.
+    It tested ANCESTRY only — and an upstream that rewrites its release branch
+    between cutting the prerelease and tagging the final leaves the prerelease an
+    ancestor of nothing, while its commits exist in the final under new shas with
+    identical patch-ids. Two names, one piece of missing work, counted twice.
+
+    The fold now asks the same question the containment test asks: ancestry OR
+    patch-equivalence. It still reads the API's own `prerelease` flag and never
+    the tag text.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        pin = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v0.9", pin)
+        # the prerelease, cut on the first cut of the branch
+        _git(repo, "checkout", "-q", "-b", "rel-a", pin)
+        feature = _commit(repo, "x", "a feature", "2026-02-01")
+        _git(repo, "tag", "v1.0rc1", feature)
+        # …and the branch rewritten: same patch, new sha, then the final stamp
+        _git(repo, "checkout", "-q", "-b", "rel-b", pin)
+        _cherry_pick(repo, feature, "2026-02-05")
+        final = _commit(repo, "VERSION", "1.0\n", "2026-02-06")
+        _git(repo, "tag", "v1.0", final)
+        _git(repo, "checkout", "-q", "master")
+        assert not subprocess.run(["git", "-C", str(repo), "merge-base",
+                                   "--is-ancestor", feature, final],
+                                  capture_output=True).returncode == 0, \
+            "the fixture failed: the prerelease is an ancestor of the final after all"
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-06", False),
+                                  ("v1.0rc1", "2026-02-01", True),
+                                  ("v0.9", "2026-01-01", False)],
+                        fork_point=(pin, "2026-01-01"))
+    assert led["behind_releases"] == 1, \
+        f"a prerelease was counted beside the release that carries it: {_tags_of(led)}"
+    assert _tags_of(led) == ["v1.0"]
+
+
+# ── THE BUCKET NAMES WHAT IS IN IT ──────────────────────────────────────────
+
+def test_a_folded_prerelease_is_not_filed_as_contained_in_our_pinned_ref(monkeypatch):
+    """MEASURED on the live ledger: two release candidates filed under
+    `contained_releases` while an independent compare put them 225 and 15 commits
+    and 300+ changed files AHEAD of our pin.
+
+    The COUNT was right — they fold into a final release that is counted — but
+    `contained` is a claim about our tree, and our tree does not contain them.
+    They belong to a bucket that says what they are: work counted once, under the
+    release that carries it.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        pin = _commit(repo, "a", "a", "2026-01-01")
+        rc = _commit(repo, "b", "b", "2026-02-01")
+        _git(repo, "tag", "v3.0.0-rc1", rc)
+        final = _commit(repo, "c", "c", "2026-03-01")
+        _git(repo, "tag", "v3.0.0", final)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v3.0.0", "2026-03-02", False),
+                                  ("v3.0.0-rc1", "2026-02-02", True)],
+                        fork_point=(pin, "2026-01-01"))
+        # …and the bucket's claim, checked against the repository itself.
+        for row in led.get("contained_releases") or []:
+            anc = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                                  row["tag"] + "^{commit}", pin], capture_output=True)
+            mt = subprocess.run(["git", "-C", str(repo), "merge-tree", "--write-tree",
+                                 f"--merge-base={pin}", pin, row['tag'] + "^{commit}"],
+                                capture_output=True, text=True)
+            pin_tree = _git(repo, "rev-parse", pin + "^{tree}")
+            noop = mt.returncode == 0 and mt.stdout.split("\n")[0].strip() == pin_tree
+            assert anc.returncode == 0 or noop, \
+                (f"{row['tag']} is filed under contained_releases, but our pinned ref "
+                 f"neither contains it nor merges it as a no-op")
+    assert led["behind_releases"] == 1, "the count changed when the bucket did"
+    assert "v3.0.0-rc1" not in _tags_of(led, "contained_releases"), \
+        "a release our pinned ref does not contain is filed as contained"
+    assert _tags_of(led, "folded_releases") == ["v3.0.0-rc1"], \
+        "the folded prerelease is in no bucket at all — it vanished from the ledger"
+    assert (led["folded_releases"][0].get("counted_under")) == "v3.0.0", \
+        "the row does not say which release its work is counted under"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# THE FORK POINT — the same defect, at the other site that computes one
+#
+# `discover_one` derives our fork point from
+# `repos/vibeic/<tool>/compare/<upstream owner>:<branch>...<head>`, a CROSS-REPO
+# compare. GitHub resolves that only through a shared fork network, and several
+# of our repositories are MIRRORS rather than GitHub forks (`fork: false`,
+# `parent: null`). For those it does not fail sometimes: it 404s every time,
+# permanently — and so does the reversed query, whenever our pin is a sha that
+# exists only in our mirror.
+#
+# `fork_point` then stayed None, which the release path reads as "we do not know
+# where we branched from", so EVERY release became undetermined and the row was
+# permanently `behind_releases: null` over three junk test tags. Meanwhile the
+# local clone answers the same question in milliseconds, because it holds both
+# sides in one object store and needs no fork network at all.
+#
+# Routing on the ERROR is what made this invisible: a 404 is what a broken query
+# and an unreachable API look like alike. `fork`/`parent` is a fact the metadata
+# call already returns, so the form that CAN answer is chosen before a request is
+# spent on one that cannot.
+
+def _discover_mirror(monkeypatch, clones: Path, ref: str, releases,
+                     up_head: str | None, repo_meta=None, compare_ok=False):
+    """`discover_one` against a repo that states `fork: false, parent: null`.
+
+    Every compare 404s, exactly as the live API does for such a repository. The
+    only thing that can answer is the clone.
+    """
+    def fake_gh(path):
+        if path == f"repos/{ORG}/{TOOL}":
+            return {"created_at": "2020-01-01T00:00:00Z", "default_branch": "master",
+                    "fork": False, "parent": None, **(repo_meta or {})}
+        if path == f"repos/{UP}":
+            return {"default_branch": "master"}
+        if "/compare/" in path:
+            return {"_err": "gh: Not Found (HTTP 404)"}
+        if "/releases?" in path:
+            return [{"tag_name": t, "published_at": f"{dt}T00:00:00Z", "prerelease": pre}
+                    for t, dt, pre in releases]
+        return {"_err": f"unexpected path {path}"}
+
+    monkeypatch.setattr(df, "gh", fake_gh)
+    monkeypatch.setattr(df, "_tags_by_date", lambda up, limit=30: [])
+    monkeypatch.setattr(df, "FORK_CLONES", clones, raising=False)
+    monkeypatch.setattr(df, "_ls_remote_tags", lambda url: {}, raising=False)
+    monkeypatch.setattr(df, "_ls_remote_head", lambda url, branch: up_head, raising=False)
+    return df.discover_one({"tool": TOOL, "upstream": UP, "role": "r"},
+                           {TOOL.lower(): {"ref": ref, "arg": "TOOL_REF"}}, "0.9.9")
+
+
+def test_a_mirror_repo_gets_its_fork_point_from_the_local_clone(monkeypatch):
+    """MEASURED: `fork_point: null`, `behind_releases: null`, permanently.
+
+    Nothing about this repository can be compared through GitHub, and everything
+    about it can be answered by `git merge-base` in the clone we already keep on
+    disk. The fork point, our carried patches and how far we trail all come back,
+    and the release gap stops being undetermined for want of them.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        _commit(repo, "u0", "u0", "2026-01-01")
+        u1 = _commit(repo, "u1", "u1", "2026-02-01")
+        _git(repo, "tag", "v1.0", u1)
+        u2 = _commit(repo, "u2", "u2", "2026-03-01")     # upstream moved on
+        _git(repo, "tag", "v2.0", u2)
+        _git(repo, "checkout", "-q", "-b", "vibeic", u1)  # our line, from u1
+        pin = _commit(repo, "ours", "ours", "2026-02-15")
+        led = _discover_mirror(monkeypatch, clones, pin,
+                               releases=[("v2.0", "2026-03-01", False),
+                                         ("v1.0", "2026-02-01", False)],
+                               up_head=u2)
+    assert (led.get("fork_point") or {}).get("sha") == u1[:12], \
+        f"the fork point was not recovered from the clone: {led.get('fork_point')}"
+    assert led.get("fork_point_status") == "local-clone"
+    assert led.get("ahead") == 1, f"our carried patches: {led.get('ahead')}"
+    assert led.get("behind_commits") == 1, f"how far we trail: {led.get('behind_commits')}"
+    assert led["behind_releases"] == 1 and led["behind_releases_status"] == "measured", \
+        (f"the release gap is still not a measurement: {led['behind_releases']} / "
+         f"{led['behind_releases_status']}")
+    assert _tags_of(led) == ["v2.0"]
+    assert led["base_release"] == "v1.0"
+
+
+def test_a_stale_clone_does_not_get_to_answer_about_the_fork_point(monkeypatch):
+    """…and the clone only answers when it demonstrably holds the CURRENT
+    upstream head. A clone that has not been fetched reports a smaller
+    `behind_commits` than the truth, and small numbers read as health. The head
+    is resolved with `git ls-remote` and checked against the object store; a
+    clone that does not have it is not asked."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        u1 = _commit(repo, "u1", "u1", "2026-02-01")
+        _git(repo, "checkout", "-q", "-b", "vibeic", u1)
+        pin = _commit(repo, "ours", "ours", "2026-02-15")
+        led = _discover_mirror(monkeypatch, clones, pin,
+                               releases=[("v2.0", "2026-03-01", False)],
+                               up_head="c" * 40)      # a head this clone does not have
+    assert led.get("fork_point") is None, \
+        "a clone that lacks the current upstream head answered anyway"
+    assert led["behind_releases"] is None and led["behind_releases_status"] == "unknown", \
+        "an unanswerable fork point produced a release count"
+    assert "mirror" in (led.get("compare_error") or ""), \
+        f"the row does not say WHY nothing could answer: {led.get('compare_error')!r}"
+    assert led.get("fork_point_status") == "undetermined"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# NOT PROBED IS NOT MEASURED ZERO
+#
+# `behind_releases` is null under TWO statuses and they are different claims:
+# `unknown` (we asked and could not decide) and `not-probed` (there was nothing
+# to ask about — no pin, or an upstream with no release and no tag). Eleven rows
+# on the corpus carry the second. Both were rendering as a confident `0`:
+# `release_gap` screened out only `unknown` and then did `else 0`, and the page
+# did `(d.behind_releases)||0`.
+
+def test_release_gap_does_not_turn_a_not_probed_null_into_a_measured_zero():
+    """The unit that says it in one line. `release_gap` is documented as THE ONE
+    READER every consumer goes through, and it was handing back the very number
+    it exists to prevent."""
+    assert df.release_gap({"behind_releases": None,
+                           "behind_releases_status": "not-probed"}) is None, \
+        "a not-probed row resolved to a number"
+    assert df.release_gap({"behind_releases": None,
+                           "behind_releases_status": "unknown"}) is None
+    assert df.release_gap({"behind_releases": 0,
+                           "behind_releases_status": "measured"}) == 0, \
+        "a measured zero stopped being a zero"
+    assert df.release_gap({"behind_releases": 4,
+                           "behind_releases_status": "measured"}) == 4
+
+
+def test_an_upstream_with_no_release_and_no_tag_is_not_a_measured_zero(monkeypatch):
+    """End to end, on the shape four upstreams in the corpus actually have: the
+    project has published nothing to compare against. The question has no
+    subject, and `0` answers it as though somebody had asked."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        pin = _commit(repo, "a", "a", "2026-01-01")
+        led = _discover(monkeypatch, clones, pin, releases=[], tags=[],
+                        fork_point=(pin, "2026-01-01"))
+    assert led["behind_releases"] is None
+    assert led["behind_releases_status"] == "not-probed"
+    assert df.release_gap(led) is None, \
+        f"a row with nothing to compare against reported {df.release_gap(led)}"
+    assert df.release_gap_unknown(led) is False, \
+        "'nothing to probe' was escalated as 'we failed to measure'"
+
+
+def test_the_page_tells_the_three_statuses_apart():
+    """Executed in node, not grepped. Four rows through the page's own readers:
+    a measured gap, a measured ZERO, an undetermined one, and a not-probed one.
+    The last two must not render as the second."""
+    m = _JS.search(bp.PAGE)
+    assert m, "the page's release-gap readers are gone or were renamed"
+    prog = m.group(0) + """
+const rows = [
+  {behind_releases: 3, behind_releases_status: "measured", integrated: true},
+  {behind_releases: 0, behind_releases_status: "measured", integrated: true},
+  {behind_releases: null, behind_releases_status: "unknown", integrated: true,
+   undetermined_releases: [{tag: "v2.0", error: "gh: Not Found (HTTP 404)"}]},
+  {behind_releases: null, behind_releases_status: "not-probed", integrated: true}
+];
+console.log(JSON.stringify(rows.map(d => [relGap(d), relPill(d)])));
+"""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "p.js"
+        p.write_text(prog)
+        r = subprocess.run(["node", str(p)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got[0][0] == 3 and ">3<" in got[0][1]
+    assert got[1][0] == 0 and ">0<" in got[1][1], \
+        "a MEASURED zero stopped rendering as a zero"
+    assert got[2][0] is None and ">?<" in got[2][1]
+    assert got[3][0] is None, f"a not-probed row resolved to the number {got[3][0]}"
+    assert ">0<" not in got[3][1], \
+        f"a row nobody probed rendered a confident zero pill: {got[3][1]}"
+    assert got[3][1] != got[1][1] and got[3][1] != got[2][1], \
+        f"not-probed renders identically to a measured zero or to an unknown: {got[3][1]}"
+
+
+def test_the_daily_report_does_not_print_a_digit_for_a_row_nobody_probed():
+    """gatekeeper's report table, on the third status. `unknown` was already
+    spelled out; `not-probed` fell through to the raw field and printed the null
+    itself."""
+    import importlib
+    gk = importlib.import_module("gatekeeper")
+    summary = {"date": "2026-08-01", "generated_at": "x", "image_version": "0.9.9",
+               "counts": {"MERGED": 0, "DEFERRED": 0, "CLEAN": 1, "NOT_LAYERED": 0},
+               "results": [{"tool": TOOL, "verdict": "CLEAN", "new_releases": None,
+                            "new_releases_status": "not-probed",
+                            "latest_release": None, "note": "n"}]}
+    md = gk._report_md(summary)
+    row = next(ln for ln in md.splitlines() if ln.startswith(f"| {TOOL} |"))
+    assert "not probed" in row, f"the report row states no such thing: {row}"
+    assert "| 0 |" not in row and "| None |" not in row, \
+        f"a row nobody probed rendered as a value: {row}"

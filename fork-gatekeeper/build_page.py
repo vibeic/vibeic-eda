@@ -358,18 +358,41 @@ const ENH = __ENH__;
 const PINNOTES = __PINNOTES__;
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
-// UNKNOWN IS NOT ZERO. `behind_releases` is null whenever the daily check could
-// not decide whether some upstream release is already contained in the ref we
-// build, and defaulting that field to zero with `||` renders it as a confident
-// "0" — a number no reader can tell from a measurement. These three are the only
-// way this page is allowed to read the field, and a test greps the whole page
-// for the coercion so it cannot come back in a fourth.
-const relUnknown = d => (d && (d.behind_releases_status === "unknown"
-  || (d.behind_releases == null && (d.undetermined_releases||[]).length > 0))) || false;
-const relGap = d => relUnknown(d) ? null : ((d && d.behind_releases) || 0);
-const relPill = d => relUnknown(d)
-  ? `<span class="pilln behind" title="containment undetermined — not a count">?</span>`
-  : pill(relGap(d), 'behind');
+// THREE CLAIMS, THREE RENDERINGS. `behind_releases` is null under TWO different
+// statuses and they are different sentences:
+//
+//   measured    — every upstream release was checked; the number is the answer,
+//                 and 0 means "checked, nothing there".
+//   unknown     — at least one release could not be decided. There is no number.
+//   not-probed  — the question has no subject: nothing pins this tool into the
+//                 image, or the upstream has published no release and no tag.
+//                 ELEVEN rows on the corpus the day this was written.
+//
+// `(d.behind_releases)||0` collapsed the last two onto the first and printed a
+// confident "0" pill for a row nobody compared against anything — the same
+// fabrication as the count this whole page was rebuilt to stop making. A test
+// greps the page for the coercion and executes these four readers in node
+// against all three statuses.
+const relStatus = d => {
+  if(!d) return "not-probed";
+  const s = d.behind_releases_status;
+  if(s === "measured" || s === "unknown" || s === "not-probed") return s;
+  if(d.behind_releases == null)
+    return (d.undetermined_releases||[]).length > 0 ? "unknown" : "not-probed";
+  return "measured";
+};
+const relUnknown = d => relStatus(d) === "unknown";
+const relGap = d => relStatus(d) === "measured"
+  ? (typeof (d && d.behind_releases) === "number" ? d.behind_releases : null)
+  : null;
+const relPill = d => {
+  const s = relStatus(d);
+  if(s === "unknown")
+    return `<span class="pilln behind" title="containment undetermined — not a count">?</span>`;
+  if(s === "not-probed")
+    return `<span class="pilln zero" title="no release was probed — nothing pins this tool, or the upstream publishes no release or tag">n/a</span>`;
+  return pill(relGap(d), 'behind');
+};
 
 // per-tool enhancement backlog (capability matrix vs commercial EDA), grouped by area
 const ENH_ICON = {done:"✅", todo:"⬜", deferred:"🔷", external:"⚪"};
@@ -587,10 +610,28 @@ function enhBlock(tool){
       ? `<h5 style="margin-top:1rem" data-en="Releases whose containment could not be determined (${undRows.length})" data-zh="無法判定是否已包含的 release（${undRows.length}）">Releases whose containment could not be determined (${undRows.length})</h5>`
         + undRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc(r&&r.error||'undetermined')}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
       : "";
-    const relHead = relUnknown(d) ? "?" : newRel;
+    // Releases whose work is counted ONCE, under the release that carries it —
+    // prereleases of a release we are already counting. They are NOT contained in
+    // the ref we build (two of them measured 225 and 15 commits ahead of our pin),
+    // so they get a heading that says what they are instead of one that says we
+    // already have them.
+    const foldRows = (d.folded_releases||[]);
+    const foldBlock = foldRows.length
+      ? `<h5 style="margin-top:1rem" data-en="Prereleases counted under a later release (${foldRows.length})" data-zh="併入後續 release 一起計算的 prerelease（${foldRows.length}）">Prereleases counted under a later release (${foldRows.length})</h5>`
+        + foldRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc((r&&r.why)||('counted under '+((r&&r.counted_under)||'?')))}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
+      : "";
+    const relHead = relGap(d) == null ? (relUnknown(d) ? "?" : "n/a") : newRel;
     const rel = ((d.new_releases&&d.new_releases.length)
       ? `<h5 style="margin-top:1rem" data-en="New upstream releases to integrate (${relHead})" data-zh="待整合的上游新 release（${relHead}）">New upstream releases to integrate (${relHead})</h5>` + d.new_releases.map(r=>`<div class="fork-commit"><span class="sha">${esc(r.tag||'')}</span><span>${esc(r.why||'')}</span><span style="margin-left:auto">${esc(r.date||'')}</span></div>`).join("")
-      : (d.integrated && !undRows.length ?`<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be contained in the ref we build." data-zh="每一個上游 release 都經量測確認已包含在我們建置的 ref 裡。">Every upstream release was measured to be contained in the ref we build.</p>`:"")) + undBlock;
+      : (d.integrated && !undRows.length
+          // "Every upstream release was measured to be contained" is a claim about
+          // a measurement, and a NOT-PROBED row made none: it has no pin, or the
+          // upstream has published no release and no tag to compare against. The
+          // reassurance is only printed where it is true.
+          ? (relStatus(d) === "measured"
+             ? `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be contained in the ref we build." data-zh="每一個上游 release 都經量測確認已包含在我們建置的 ref 裡。">Every upstream release was measured to be contained in the ref we build.</p>`
+             : `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="No upstream release was probed: this upstream publishes no release or tag, or nothing pins it into the image. That is not a gap of zero — nothing was compared." data-zh="沒有任何上游 release 被檢查過：這個上游沒有發布 release 或 tag，或是沒有東西把它鎖進 image。這不等於缺口為零 —— 根本沒有比較過。">No upstream release was probed — nothing was compared, which is not a gap of zero.</p>`)
+          :"")) + foldBlock + undBlock;
     const log = (d.sync_log&&d.sync_log.length)
       ? `<h5 style="margin-top:1rem" data-en="Daily sync log" data-zh="每日同步 log">Daily sync log</h5>` + d.sync_log.slice(-10).reverse().map(s=>`<div class="fork-commit"><span class="sha">${esc((s.date||'').slice(0,10))}</span><span class="fork-verd ${esc(s.verdict||'')}">${esc(s.verdict||'')}</span><span>${esc(s.note||'')}</span></div>`).join("")
       : "";

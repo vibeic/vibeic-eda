@@ -63,7 +63,7 @@ import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic
 # now int-or-null and null means "containment could not be decided", which is NOT
 # zero. Every private `led.get("behind_releases") or 0` is a place that turns an
 # unanswered question into a reassuring number.
-from discover_forks import release_gap_unknown  # noqa: E402
+from discover_forks import release_gap, release_gap_unknown  # noqa: E402
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"
@@ -733,8 +733,12 @@ def assess(tool: str) -> dict:
     # that would become a published "CLEAN". Unknown falls through to a real
     # assessment instead, and says so in the result.
     rel_unknown = release_gap_unknown(led)
+    # `release_gap` is the only reader: `or 0` was still turning a NOT-PROBED null
+    # — no pin, or an upstream with no release and no tag — into a measured zero,
+    # and this return is where that becomes a published CLEAN.
+    rel_gap = release_gap(led)
     if (not rel_unknown
-            and (led.get("behind_releases") or 0) == 0
+            and rel_gap == 0
             and (led.get("behind_commits") or 0) == 0):
         return {"tool": tool, "status": "clean", "commits": [],
                 "base_release": led.get("base_release"), "latest": led.get("upstream_latest_release")}
@@ -767,7 +771,7 @@ def assess(tool: str) -> dict:
     # those undecided releases contain, so it is the one range that cannot miss
     # them. What it must never do is fall through as if the gap had been measured
     # at zero — that is `or 0` on a null, which is the defect being fixed.
-    if ((rel_unknown or (led.get("behind_releases") or 0) == 0)
+    if ((rel_unknown or not rel_gap)
             and (led.get("behind_commits") or 0) > 0
             and our_ref):
         base_ref, new_ref = our_ref, up_branch

@@ -112,7 +112,8 @@ def _actionable(summary):
     for r in summary.get("results", []):
         if r.get("verdict") == "MERGED":
             merged.append(r)
-        elif r.get("verdict") == "DEFERRED" and ((r.get("new_releases") or 0) > 0
+        elif r.get("verdict") == "DEFERRED" and ((isinstance(r.get("new_releases"), int)
+                                                  and r["new_releases"] > 0)
                                                  or r.get("new_releases_status") == "unknown"):
             failed.append(r)
     return merged, failed

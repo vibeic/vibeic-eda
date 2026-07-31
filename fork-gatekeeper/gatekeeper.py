@@ -68,7 +68,7 @@ import discover_forks as disc  # noqa: E402
 # `disc.main()` off the network — a stub that neutralises the SEEDER must not
 # also silently remove the one function that keeps an unmeasured gap from
 # reading as zero.
-from discover_forks import release_gap_unknown  # noqa: E402
+from discover_forks import release_gap, release_gap_status, release_gap_unknown  # noqa: E402
 import build_page  # noqa: E402
 import fleet_config  # noqa: E402  — is the configuration we ran on the committed one?
 try:
@@ -355,7 +355,11 @@ def tick() -> dict:
         # when containment could not be decided for some upstream release, and
         # `or 0` reads that as "level with upstream" — the same silence that kept
         # OpenROAD out, arrived at by a different route.
-        behind = ((led.get("behind_releases") or 0) > 0
+        #
+        # `release_gap` rather than the raw field: `or 0` on a null is the
+        # coercion this module exists to remove, and it was still here.
+        _gap = release_gap(led)
+        behind = ((_gap is not None and _gap > 0)
                   or (led.get("behind_commits") or 0) > 0
                   or release_gap_unknown(led))
         if led.get("integrated") and behind:
@@ -468,11 +472,16 @@ def tick() -> dict:
         # place that shows it to a human branches on `rel_unknown` first, and the
         # row carries `new_releases_status` so a reader of the JSON can too.
         rel_unknown = release_gap_unknown(led)
-        nr = led.get("behind_releases") or 0
-        nr_txt = "an undetermined number of" if rel_unknown else str(nr)
+        rel_status = release_gap_status(led)
+        # `nr` IS None when there is no number — a null travels as a null, and the
+        # status beside it says which of the three claims the row is making.
+        nr = release_gap(led)
+        nr_txt = ("an undetermined number of" if rel_unknown
+                  else "no upstream release to compare against, so no" if nr is None
+                  else str(nr))
         latest = led.get("upstream_latest_release")
         entry = {"date": date, "verdict": None, "note": "", "new_releases": nr,
-                 "new_releases_status": ("unknown" if rel_unknown else "measured"),
+                 "new_releases_status": rel_status,
                  "latest_release": latest, "merged_release": None}
         cross_checked = None
 
@@ -735,7 +744,8 @@ def _maybe_notify(summary: dict, assessments: dict | None = None,
     # in need of a human, and `(x or 0) > 0` on a null is exactly how it would
     # instead be filtered out as "nothing new".
     uncovered = any(r["verdict"] == "DEFERRED"
-                    and ((r.get("new_releases") or 0) > 0
+                    and ((isinstance(r.get("new_releases"), int)
+                          and r["new_releases"] > 0)
                          or r.get("new_releases_status") == "unknown")
                     and r["tool"] not in assess_tools for r in summary["results"])
     outcomes = []
@@ -783,6 +793,8 @@ def _report_md(s: dict) -> str:
         # decided is the one thing a reader cannot recover from, because nothing
         # in the table would distinguish it from a row that was checked.
         nrc = ("unknown" if r.get("new_releases_status") == "unknown"
+               else "not probed" if (r.get("new_releases_status") == "not-probed"
+                                     or r.get("new_releases") is None)
                else r["new_releases"])
         lines.append(f"| {r['tool']} | {r['verdict']} | {nrc} | "
                      f"{r.get('latest_release') or '—'} | {r['note']} |")
