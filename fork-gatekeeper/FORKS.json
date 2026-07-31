@@ -60,6 +60,11 @@
       "upstream": "AUCOHL/Fault"
     },
     {
+      "tool": "Geometry",
+      "upstream": "ediloren/Geometry",
+      "role": "FasterCap build-time sibling — `add_subdirectory(\"../Geometry\")`. Same story as LinAlgebra."
+    },
+    {
       "tool": "gtkwave",
       "role": "waveform viewer — the format reader behind every VCD/FST our cocotb and iverilog runs emit; a dump this cannot open is a failed measurement, not a passing one",
       "upstream": "gtkwave/gtkwave"
@@ -83,6 +88,11 @@
       "tool": "klayout",
       "role": "DRC / layout-edit / GDS streamout / extraction",
       "upstream": "KLayout/klayout"
+    },
+    {
+      "tool": "LinAlgebra",
+      "upstream": "ediloren/LinAlgebra",
+      "role": "FasterCap build-time sibling — FasterCap's own CMakeLists does `add_subdirectory(\"../LinAlgebra\")`, so FasterCap cannot be built from our fork without it. Mirrored 2026-08-01 (clone+push; the fork API returned 403). Missing it is why the image kept consuming the base image's FasterCap: building from our fork was impossible and nobody had tried."
     },
     {
       "tool": "magic",

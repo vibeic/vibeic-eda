@@ -50,6 +50,10 @@ TOOLS = {
     "yices2":      ["YICES2_REF"],
     "sv-elab":     ["SV_ELAB_REF"],
     "fault":       ["FAULT_REF"],
+    # Three sibling repos, because upstream splits FasterCap across three and
+    # its CMakeLists does `add_subdirectory("../LinAlgebra")`. All three refs
+    # are in the tag, so none can move without the release pulling a new image.
+    "fastercap":   ["FASTERCAP_REF", "LINALGEBRA_REF", "GEOMETRY_REF"],
 }
 
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
