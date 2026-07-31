@@ -17,14 +17,16 @@
     "properly \u2014 see that repo's README.",
     "",
     "check_fork_only reads this file. An entry here is a NAMED, DATED exception,",
-    "never a silent allowlist, and an expired one FAILS the build."
+    "never a silent allowlist, and an expired one FAILS the build.",
+    "",
+    "2026-07-31: the last entry (trilinos/Trilinos) is CLOSED, and its stated",
+    "reason turned out to be wrong. It said the mirror route was not a drop-in",
+    "because at 853 MB this is the size range where the content API fails on",
+    "large files. clone+push does not use the content API. The push succeeded",
+    "from a 1.8 GB working tree; GitHub emitted a large-file WARNING for one",
+    "55 MB .mat file and took the push. tools/xyce/Dockerfile now clones",
+    "vibeic/Trilinos. Nothing is pending: check_fork_only reports 49 of 49",
+    "references ours, 0 pending, for the first time."
   ],
-  "pending": [
-    {
-      "source": "trilinos/Trilinos",
-      "used_by": "tools/xyce \u2014 Xyce cannot be configured or linked without it",
-      "reason": "Fork blocked: `gh repo fork trilinos/Trilinos` returns HTTP 403 'You cannot fork this repository at this time'. The mirror route used for the six sources in 9861b90 is not a drop-in here either: at 853 MB this is the size range where that commit reported the content API failing on large files. Xyce ITSELF builds from vibeic/Xyce; this is its build dependency, statically linked and not shipped as its own artefact.",
-      "expires": "2026-08-12"
-    }
-  ]
+  "pending": []
 }

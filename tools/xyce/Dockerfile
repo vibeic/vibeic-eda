@@ -36,7 +36,7 @@
 # end. With the split, a missing Xyce dependency costs the Xyce layer only.
 FROM ubuntu:24.04 AS trilinos
 
-ARG TRILINOS_REPO=https://github.com/trilinos/Trilinos.git
+ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
 ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -61,8 +61,8 @@ RUN mkdir -p /tmp/xyce \
 FROM ubuntu:24.04 AS build
 
 ARG XYCE_REPO=https://github.com/vibeic/Xyce.git
-ARG XYCE_REF=a592a42ae7472151d1c8e3bca0ca62d27476f2f3
-ARG TRILINOS_REPO=https://github.com/trilinos/Trilinos.git
+ARG XYCE_REF=d72b5846a0397ddf852a49305cb6f395457685ca
+ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
 ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0
 
 # Dependencies READ rather than guessed, after gtkwave cost two rounds of

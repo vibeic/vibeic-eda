@@ -1,14 +1,14 @@
 {
-  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit the release made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.45",
-  "pins_fingerprint": "e4e0a5f63d1b",
+  "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
+  "version": "0.2.47",
+  "pins_fingerprint": "e81dc11f9e6d",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
-    "OpenROAD": "92b079b47a1c1c470eb9fb0d32613a0b27379ad6",
-    "Xyce": "a592a42ae7472151d1c8e3bca0ca62d27476f2f3",
+    "OpenROAD": "5acadbee49cdff07b7d8cac8e2f2c55fbbb14266",
+    "Xyce": "d72b5846a0397ddf852a49305cb6f395457685ca",
     "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
-    "cocotb": "4b3383fec9df0d1ea8c617e38dc438de0ed68540",
+    "cocotb": "15f2d1017ed3d20089c32adaf81f0062b3944bae",
     "cocotb-coverage": "be916da99520662f77cfccb8dd17861c8f986ce0",
     "gtkwave": "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b",
     "iverilog": "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b",
@@ -17,13 +17,13 @@
     "magic": "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b",
     "netgen": "0334b7dfb1d6adce0a8079f5552f68982815d3d9",
     "ngspice": "2d15ecb34c1b606cf653bafbdd21315b6bc21962",
-    "pyuvm": "04add2a48c0701dee8e1c84cdd70737f5a3815c1",
+    "pyuvm": "d2f1736d7c5fb6338bcef1d0dafa3c17e2892866",
     "sby": "742213689ee1bff65bc34e27011438edf8ce09f2",
-    "slang": "24809c8e0b94d0915fe05b44d98c2df7a8e80c3e",
-    "sv-elab": "b2b718c5a66ad525858298466f7ecaa60497393e",
-    "verilator": "d9f46707510f7d0ad67579aee755c2aabbf1230e",
-    "xschem": "c8b26a17d8d53ce7fbd9e7d45ab6bb03e75996e0",
+    "slang": "ed5621f26ea75a603d088aedfc25ba6ed323072c",
+    "sv-elab": "3dddccd478618d68f8a5e160fb4b5783c4da35d4",
+    "verilator": "6e2761a4bfe6dc08b728baa2f04cd64c04d07861",
+    "xschem": "c4233c1f95b11552933a9b95d5f9d4924200b871",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "b35f2c6d5867a6be5ae625cec835ee050b4d4580"
+    "yosys": "7b270aed677e5082132ce7148c36f80e1168988e"
   }
 }

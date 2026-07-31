@@ -120,9 +120,21 @@ def pending() -> dict:
 #: was reported as "not one of our artefacts" while being the same image the
 #: composing stage uses. A guard that fires when the repo gets STRICTER is the
 #: kind that gets switched off, and this one fired on exactly that.
+#: `swift` added 2026-07-31 for tools/fault. It is the official Docker Library
+#: Swift image and it is here for the same reason `ubuntu` is: it supplies a
+#: COMPILER, and the rule above governs the tools we build, not the toolchain
+#: that builds them. Fault itself is cloned from `vibeic/Fault` and nothing else.
+#:
+#: Stated plainly because it is the one case that is not purely a build-time
+#: base: the artefact stage also copies the Swift RUNTIME libraries out of it
+#: (libswiftCore, libFoundation, libdispatch, libBlocksRuntime, libicu*swift).
+#: They are the language runtime a Swift binary cannot start without — the same
+#: role libstdc++ and libc play for every C++ tool here, which ship from the
+#: `ubuntu` bases already on this list. What must never come from here is a
+#: TOOL, and none does.
 ALLOWED_BASE = re.compile(
     r"^(scratch|ubuntu|debian|alpine|alpine/git|hpretl/iic-osic-tools"
-    r"|openroad/[a-z0-9._-]+)([:@].*)?$", re.I)
+    r"|swift|openroad/[a-z0-9._-]+)([:@].*)?$", re.I)
 
 
 def stages(text: str) -> dict:

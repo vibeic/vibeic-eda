@@ -50,6 +50,16 @@
       "upstream": "mciepluc/cocotb-coverage"
     },
     {
+      "tool": "FasterCap",
+      "role": "3D/2D capacitance extraction field solver — fastercap_extract dispatches to it for parasitic extraction cross-checks. Mirrored 2026-07-31 (clone+push).",
+      "upstream": "ediloren/FasterCap"
+    },
+    {
+      "tool": "Fault",
+      "role": "DFT/ATPG engine — `fault atpg` / `fault cut` / `fault chain` drive Phase-3 scan insertion and stuck-at coverage. Mirrored 2026-07-31 (clone+push; the fork API returns 403). Carries our fix for `chain --skip-synth` never creating the file `-o` asked for while still exiting EX_OK.",
+      "upstream": "AUCOHL/Fault"
+    },
+    {
       "tool": "gtkwave",
       "role": "waveform viewer — the format reader behind every VCD/FST our cocotb and iverilog runs emit; a dump this cannot open is a failed measurement, not a passing one",
       "upstream": "gtkwave/gtkwave"
@@ -128,6 +138,11 @@
       "tool": "sv-elab",
       "role": "yosys SystemVerilog plugin (upstream renamed povik/yosys-slang -> povik/sv-elab); the SV frontend the 0.4x->0.66 roadmap makes default",
       "upstream": "povik/sv-elab"
+    },
+    {
+      "tool": "sv2v",
+      "role": "SystemVerilog-to-Verilog conversion — invoked by reused_ip_rtl_consume when an ingested IP is SystemVerilog and the downstream tool is Verilog-only. Mirrored 2026-07-31 (clone+push).",
+      "upstream": "zachjs/sv2v"
     },
     {
       "tool": "verilator",

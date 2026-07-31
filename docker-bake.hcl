@@ -44,20 +44,21 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
-variable "OPENROAD_RECIPE" { default = "5c503f" }
-variable "YOSYS_RECIPE" { default = "74a892" }
+variable "OPENROAD_RECIPE" { default = "78200d" }
+variable "YOSYS_RECIPE" { default = "ccf3a3" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "be7db2" }
 variable "LVS_RECIPE" { default = "e2e322" }
-variable "IVERILOG_RECIPE" { default = "940079" }
+variable "IVERILOG_RECIPE" { default = "d06e70" }
 variable "KLAYOUT_RECIPE" { default = "7cb6ee" }
-variable "VERILATOR_RECIPE" { default = "8c0ab6" }
+variable "VERILATOR_RECIPE" { default = "e5bd58" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
-variable "XSCHEM_RECIPE" { default = "382491" }
-variable "SLANG_RECIPE" { default = "b569b8" }
-variable "XYCE_RECIPE" { default = "9d3df7" }
+variable "XSCHEM_RECIPE" { default = "f0bdeb" }
+variable "SLANG_RECIPE" { default = "d87240" }
+variable "XYCE_RECIPE" { default = "b15c9e" }
 variable "YICES2_RECIPE" { default = "04c594" }
-variable "SV_ELAB_RECIPE" { default = "0656db" }
+variable "FAULT_RECIPE" { default = "f625c2" }
+variable "SV_ELAB_RECIPE" { default = "799906" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -65,22 +66,23 @@ variable "SV_ELAB_RECIPE" { default = "0656db" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "92b079b47a1c1c470eb9fb0d32613a0b27379ad6" }
-variable "YOSYS_REF"       { default = "b35f2c6d5867a6be5ae625cec835ee050b4d4580" }
+variable "OPENROAD_REF"    { default = "09d67f08f8b4b2f094c4435fe5e6ad49cec725dc" }
+variable "YOSYS_REF"       { default = "8ffdf38383382c77bd53a248bc35676e0348a979" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
 variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
-variable "IVERILOG_REF"    { default = "fe9dfabc4beb78f04bf9d7b9f52992b8d629ad8b" }
+variable "IVERILOG_REF"    { default = "cf9ff9dcb7c74f90db67ee40fc8905b7992daaef" }
 variable "KLAYOUT_REF"     { default = "39b6a09249a97b9739f46d9404018bbd69675751" }
-variable "VERILATOR_REF"   { default = "d9f46707510f7d0ad67579aee755c2aabbf1230e" }
+variable "VERILATOR_REF"   { default = "556091019a7eebf8a8fd3043c8c8da6defed6fc5" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
-variable "XSCHEM_REF" { default = "c8b26a17d8d53ce7fbd9e7d45ab6bb03e75996e0" }
-variable "SLANG_REF" { default = "24809c8e0b94d0915fe05b44d98c2df7a8e80c3e" }
-variable "XYCE_REF" { default = "a592a42ae7472151d1c8e3bca0ca62d27476f2f3" }
+variable "XSCHEM_REF" { default = "ff2f4824c1a24e158d218f44db11cc682b4881c8" }
+variable "FAULT_REF" { default = "0c90e3b14b7f1a940f4120da8ac03037847309f4" }
+variable "SLANG_REF" { default = "99197ea10f8d7a476af46718eaacf1b5e93b5e74" }
+variable "XYCE_REF" { default = "d72b5846a0397ddf852a49305cb6f395457685ca" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
-variable "SV_ELAB_REF" { default = "b2b718c5a66ad525858298466f7ecaa60497393e" }
+variable "SV_ELAB_REF" { default = "3dddccd478618d68f8a5e160fb4b5783c4da35d4" }
 
 function "short" {
   params = [ref]
@@ -181,6 +183,13 @@ target "xschem" {
   tags     = tool_tags("xschem", XSCHEM_REF, XSCHEM_RECIPE)
 }
 
+target "fault" {
+  inherits = ["_tool"]
+  context  = "tools/fault"
+  args     = { FAULT_REF = FAULT_REF }
+  tags     = tool_tags("fault", FAULT_REF, FAULT_RECIPE)
+}
+
 target "slang" {
   inherits = ["_tool"]
   context  = "tools/slang"
@@ -218,7 +227,7 @@ group "tools" {
   targets = ["openroad", "yosys", "sat-solvers", "ngspice",
              "lvs", "iverilog", "klayout", "verilator",
              "gtkwave", "xschem", "slang", "xyce",
-             "yices2", "sv-elab"]
+             "yices2", "sv-elab", "fault"]
 }
 
 # The release image. No `contexts` block and no dependency on the tool targets:

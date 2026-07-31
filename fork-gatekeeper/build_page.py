@@ -205,6 +205,10 @@ STYLE = """<style>
 .pilln.zero{color:var(--text-muted,#6b7684);background:transparent;border:1px solid var(--border,#232a33)}
 .pilln.behind{color:#fff;background:#c07d1e}
 .pilln.ahead{color:#fff;background:#2f8f6b}
+.fork-gap{margin:1.2rem 0 2rem;padding:1rem 1.2rem;border-left:3px solid #c07d1e;background:rgba(192,125,30,.07);border-radius:0 6px 6px 0}
+.fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
+.fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
+.fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
 .fork-detail{background:rgba(120,150,180,.05)}
 .fork-detail td{padding:0}
 .fork-detail .inner{padding:1rem 1.2rem;display:none}
@@ -281,6 +285,7 @@ __NAV__
         </div>
 
         <div class="fork-metrics" id="forkMetrics"></div>
+<div class="fork-gap" id="forkGap"></div>
         <p class="fork-caption" id="forkUpdated"></p>
         <p class="fork-caption" id="enhSummary"></p>
 
@@ -382,6 +387,13 @@ function enhBlock(tool){
 (function(){
   const imageVer = (LEDGERS[0]||{}).image_version || "—";
   const totalPatches = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
+  // THE TRACKING GAP. Forked, but neither worked on (ahead==0) nor kept current
+  // (behind_commits>0) — the only rows that are nobody's deliberate state.
+  // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
+  // a fork whose default branch drifts while its pinned work branch is current is
+  // fine by design, because the default branch takes part in no build.
+  const gapTools = LEDGERS.filter(d=>(d.ahead||0)===0 && (d.behind_commits||0)>0)
+                          .sort((a,b)=>(b.behind_commits||0)-(a.behind_commits||0));
   const withNewRel = LEDGERS.filter(d=>(d.behind_releases||0)>0).length;
   const lastCheck = REPORT ? (REPORT.date||"") : "—";
   const enhVals = Object.values(ENH||{});
@@ -392,12 +404,22 @@ function enhBlock(tool){
     [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     [totalPatches, {en:"Patches carried",zh:"揹著的補丁"}],
+    [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
     [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
     [withNewRel, {en:"Tools with a new release",zh:"有新 release 的工具"}],
     [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
     `<div class="fork-kpi"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+  const gapEl = document.getElementById("forkGap");
+  if (gapEl) {
+    if (!gapTools.length) {
+      gapEl.innerHTML = '<p data-en="Every fork is either carrying patches of ours or level with upstream." data-zh="每一個 fork 都不是揹著我們的補丁、就是跟上游齊平。">Every fork is either carrying patches of ours or level with upstream.</p>';
+    } else {
+      const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span></li>`).join("");
+      gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>`;
+    }
+  }
 
   const rows = LEDGERS.map((d,i)=>{
     const ahead = d.ahead||0;

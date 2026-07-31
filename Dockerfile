@@ -29,20 +29,21 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:92b079b-5c503f
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6-74a892
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:09d67f0-78200d
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:8ffdf38-ccf3a3
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-be7db2
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:fe9dfab-940079
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf9ff9d-d06e70
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:39b6a09-7cb6ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d9f4670-8c0ab6
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:5560910-e5bd58
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c8b26a1-382491
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:24809c8-b569b8
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:a592a42-9d3df7
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-b15c9e
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:b2b718c-0656db
+ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:0c90e3b-f625c2
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -67,6 +68,7 @@ FROM ${IMG_SLANG} AS img-slang
 FROM ${IMG_XYCE} AS img-xyce
 FROM ${IMG_YICES2} AS img-yices2
 FROM ${IMG_SV_ELAB} AS img-sv-elab
+FROM ${IMG_FAULT} AS img-fault
 
 
 # ---------------------------------------------------------------------------
@@ -90,9 +92,9 @@ FROM ${IMG_SV_ELAB} AS img-sv-elab
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=4b3383fec9df0d1ea8c617e38dc438de0ed68540  # branch vibeic/parallel-regression-dispatch (PLL1)
+ARG COCOTB_REF=15f2d1017ed3d20089c32adaf81f0062b3944bae  # branch vibeic/parallel-regression-dispatch (PLL1)
 ARG COCOTB_COVERAGE_REF=be916da99520662f77cfccb8dd17861c8f986ce0  # branch vibeic/integration is V15 crv scalability + V36 rank + V10/V11/V35 bins-closure; union verified per-definition (20/20, 0 dropped)
-ARG PYUVM_REF=04add2a48c0701dee8e1c84cdd70737f5a3815c1  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
+ARG PYUVM_REF=d2f1736d7c5fb6338bcef1d0dafa3c17e2892866  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
 ARG SBY_REF=742213689ee1bff65bc34e27011438edf8ce09f2  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
 RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
@@ -435,30 +437,26 @@ RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin
  && ln -sf /foss/tools/netgen/bin/netgen /foss/tools/bin/netgen 2>/dev/null || true \
  && for t in iverilog vvp iverilog-vpi vvp; do ln -sf /foss/tools/iverilog/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
  && for t in yices yices-sat yices-smt yices-smt2; do ln -sf /foss/tools/yices/bin/$t /foss/tools/bin/$t; done
-# fault (AUCOHL DFT toolchain) ships from the iic-osic-tools base at
-# /usr/local/bin/fault (already on PATH). Surface it under /foss/tools/bin too so
-# its path is consistent with every other EDA tool — eda_dft invokes bare `fault`
-# (PATH) and eda_doctor probes bare `fault`, so both work with or without this
-# symlink; it's a path-consistency convenience, not a functional requirement.
-RUN command -v fault >/dev/null 2>&1 && ln -sf "$(command -v fault)" /foss/tools/bin/fault 2>/dev/null || true
-# --- vibeic/klayout svrfdrc (NATIVE C++ SVRF/Calibre DRC buddy) ---
-# The `svrfdrc <deck> <layout> <report> [--cell=TOP]` binary was compiled in Stage 6
-# (svrf-native-drc branch) and shipped inside /klayout/bld -> already copied to
-# /foss/tools/klayout-vibeic above. The `svrfdrc()` entry + the whole native SVRF
-# engine (dbSVRFDeck/dbSVRFEngine) are baked into the FORK's libklayout_bd.so there.
-# NO Python interpreter, NO `-r` script, NO GUI macro — byte-parity with the retired
-# run_svrf_drc.py proven on a real commercial foundry deck.
+# fault (AUCOHL DFT toolchain) — OURS, not the base image's.
 #
-# WRAPPER (not a bare symlink): the buddy's ELF carries DT_RUNPATH=/foss/tools/klayout-vibeic,
-# but the runtime env sets LD_LIBRARY_PATH=/foss/tools/klayout:... and DT_RUNPATH is
-# searched AFTER LD_LIBRARY_PATH. A bare symlink therefore loads the STOCK
-# /foss/tools/klayout/libklayout_bd.so (which lacks the svrfdrc symbol + engine) →
-# `undefined symbol: svrfdrc(int, char**)`. The wrapper prepends the fork lib dir to
-# LD_LIBRARY_PATH so ALL klayout libs resolve consistently from the fork build.
-RUN printf '#!/bin/sh\nexec env LD_LIBRARY_PATH=/foss/tools/klayout-vibeic:${LD_LIBRARY_PATH} /foss/tools/klayout-vibeic/svrfdrc "$@"\n' > /foss/tools/bin/svrfdrc \
- && chmod +x /foss/tools/bin/svrfdrc \
- && LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/bin/svrfdrc --help >/dev/null 2>&1 \
-      && echo "svrfdrc buddy OK" || echo "WARN: svrfdrc buddy self-test failed"
+# This used to symlink whatever /usr/local/bin/fault the iic-osic-tools base
+# happened to carry. Measured 2026-07-31: that binary is 0.9.4, built from
+# `efabless/Fault` — itself a fork abandoned in 2021-12 — while live upstream is
+# AUCOHL/Fault. Because nothing here ever CLONED it, `check_fork_only.py` had no
+# source to check, FORKS.json never listed it, and the daily upstream merge could
+# not see it. It was the one tool in this flow invisible to every mechanism that
+# keeps a tool current, and it silently aged four years.
+#
+# It also carries our own fix: `fault chain -o out.v --skip-synth` used to exit
+# EX_OK and never create out.v.
+#
+# The Swift runtime libraries come with it — the base image has no libswiftCore /
+# libFoundation / libdispatch, so the binary alone would not start.
+COPY --from=img-fault /foss/tools/fault/bin/fault /foss/tools/fault/bin/fault
+COPY --from=img-fault /foss/tools/fault/lib/ /foss/tools/fault/lib/
+RUN ln -sf /foss/tools/fault/bin/fault /foss/tools/bin/fault \
+ && printf '/foss/tools/fault/lib\n' > /etc/ld.so.conf.d/vibeic-fault.conf \
+ && ldconfig
 
 # --- /foss/tools/klayout IS our build now (vibeic-eda#17) ---
 # klayout was the only tool here installed in PARALLEL rather than in place:
