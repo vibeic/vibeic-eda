@@ -53,13 +53,38 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 from typing import Dict, List, Tuple
 
 RC_OK, RC_CONTRADICTED, RC_CANNOT_CHECK = 0, 1, 2
 
-DEFAULT_IMAGE = "ghcr.io/vibeic/vibeic-eda:0.2.46"
+def _default_image() -> str:
+    """The image this repo currently ships, read from VERSION.
+
+    Was hard-coded `0.2.46`. VERSION said 0.2.47, so every default run verified
+    the absence claims against a PUBLISHED-BUT-SUPERSEDED image — the check
+    passed and said nothing about what we ship today. A tool that entered the
+    image in 0.2.47 while its ledger entry still claimed absence would not have
+    been caught by the gate whose entire job is that contradiction.
+
+    Falls back to the last known-good tag rather than raising: a missing VERSION
+    is a reason to say so, not to skip the check entirely.
+    """
+    v = pathlib.Path(__file__).resolve().parents[1] / "VERSION"
+    try:
+        tag = v.read_text(encoding="utf-8").strip()
+    except OSError:
+        tag = ""
+    if not tag:
+        print(f"WARNING: {v} unreadable; falling back to 0.2.46, which may not "
+              f"be what this repo ships", file=sys.stderr)
+        tag = "0.2.46"
+    return f"ghcr.io/vibeic/vibeic-eda:{tag}"
+
+
+DEFAULT_IMAGE = _default_image()
 
 #: Where each tool WOULD live if it shipped. A tool absent from this map is
 #: reported as unknown rather than assumed absent — see the refusals above.
