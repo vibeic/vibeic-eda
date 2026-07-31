@@ -100,12 +100,20 @@ def _run(args, cwd=None):
 
 def _actionable(summary):
     """(merged, failed) — merged tools, and DEFERRED tools that have a NEW release (a real
-    integration failure, not merely un-layered/clean)."""
+    integration failure, not merely un-layered/clean).
+
+    A tool whose release gap is UNKNOWN is actionable too. `new_releases` is null
+    whenever containment could not be decided for some upstream release, and
+    `(r.get("new_releases") or 0) > 0` reads null as zero — which would drop the
+    one row where nobody knows what we are missing, on the grounds that we are
+    missing nothing.
+    """
     merged, failed = [], []
     for r in summary.get("results", []):
         if r.get("verdict") == "MERGED":
             merged.append(r)
-        elif r.get("verdict") == "DEFERRED" and (r.get("new_releases") or 0) > 0:
+        elif r.get("verdict") == "DEFERRED" and ((r.get("new_releases") or 0) > 0
+                                                 or r.get("new_releases_status") == "unknown"):
             failed.append(r)
     return merged, failed
 

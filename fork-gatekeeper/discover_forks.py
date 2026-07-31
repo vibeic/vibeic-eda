@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -419,12 +420,18 @@ def _releases(up_full: str) -> list[dict]:
     it is the publication date rather than the commit date.
     """
     merged: dict[str, str] = {}
+    # The API's OWN prerelease flag, kept per tag. It is a fact the release record
+    # states, not something inferred from a tag name — no "rc"/"beta" matching, which
+    # would be a second proxy of exactly the kind this module is being cured of.
+    # None (a tag with no release record) means UNKNOWN, not False.
+    pre: dict[str, bool] = {}
     rel = gh(f"repos/{up_full}/releases?per_page=30")
     if isinstance(rel, list):
         for r in rel:
             tag = r.get("tag_name")
             if tag:
                 merged[tag] = _iso_date(r.get("published_at"))
+                pre[tag] = bool(r.get("prerelease"))
 
     for t in _tags_by_date(up_full):
         merged.setdefault(t["tag"], t["date"])
@@ -439,9 +446,551 @@ def _releases(up_full: str) -> list[dict]:
 
     # Undated entries sort last rather than first: an unknown date must never
     # win the "latest" slot that drives the ancestry compare.
-    return [{"tag": k, "date": (v or None)}
+    return [{"tag": k, "date": (v or None), "prerelease": pre.get(k)}
             for k, v in sorted(merged.items(),
                                key=lambda kv: (kv[1] or "", kv[0]), reverse=True)]
+
+
+# ── CONTAINMENT ─────────────────────────────────────────────────────────────
+# "Behind by N releases" is a claim about CONTENT: N pieces of work upstream has
+# that our pinned ref does not. Until 2026-08-01 it was computed by comparing a
+# release's PUBLICATION DATE against our fork-point date, with a single
+# all-or-nothing ancestry probe on the newest release in front of it. A date is a
+# proxy for containment, and the four rows the published page carried on
+# 2026-08-01 are the four ways the proxy diverges from the property:
+#
+#   * a tag pointing at EXACTLY our pinned commit — tagged the day after the
+#     commit was authored, so `published_at > fork_point_date` and it counted;
+#   * two tags on the SAME commit — one release, counted twice;
+#   * a prerelease and its final release — one piece of work, counted twice;
+#   * a tag on a RELEASE BRANCH that only ever merges the branch we track — the
+#     merge commit is by construction dated after the content it wraps and is by
+#     construction not an ancestor of anything on the merged-from side, so both
+#     the date test and the ancestry test say "new" about a zero-byte delta.
+#
+# Worse than any of those: when the API errored the code took the SAME branch as
+# a measured "not contained" and emitted a NUMBER. Nothing downstream could tell
+# a fabricated measurement from a real one, which is the defect this block exists
+# to remove — hence `undetermined_releases` and `behind_releases = None`.
+#
+# The rule, and no tool appears in it:
+#
+#   1. resolve every candidate to its TARGET COMMIT (peeling annotated tags);
+#   2. collapse candidates that resolve to the same commit — identity of a
+#      version is its commit, not its name;
+#   3. per distinct commit, ask CONTAINMENT: is it an ancestor of our pin, or
+#      does it change no file relative to the merge-base with our pin? Either
+#      one means our tree already has that work;
+#   4. collapse a candidate the API itself flags `prerelease` into any counted
+#      final release that already contains it;
+#   5. drop a candidate that is BEHIND US rather than ahead — see below;
+#   6. anything unanswerable is UNDETERMINED and the count is null.
+#
+# No arithmetic below reads a date.
+#
+# STEP 5, AND WHY IT IS NOT THE DATE FILTER COMING BACK. "Behind by N releases"
+# has always meant releases we could ADVANCE to. The old code bounded that set
+# with `release_date > fork_point_date`; delete the date and the bound goes with
+# it, and a project that cuts every release on its own maintenance branch starts
+# counting its whole history — a 2017 release-candidate does carry commits our
+# pin lacks (branch-only ones), so "not contained" alone says yes to it.
+#
+# The bound the graph itself supplies is the TRUNK DIVERGENCE POINT. For a
+# release R let
+#
+#     t(R) = merge-base(R, our fork point)
+#
+# — the place on the shared trunk where R's line left it. Every t is a trunk
+# commit, so ancestry among the t's is a real ordering of releases with no clock
+# in it. A release is behind us when its line left the trunk STRICTLY EARLIER
+# than the line of the newest release we actually contain:
+#
+#     R counts  ⟺  t(base) is an ancestor of t(R)
+#
+# where `base` is the newest release our pin contains, chosen by that same
+# ordering. Measured on the two shapes that pin it down, and no other candidate
+# rule survives both:
+#
+#   * maintenance releases of a superseded series — t is a PROPER ANCESTOR of
+#     t(base), so they drop. (Testing "is our fork point an ancestor of R" also
+#     drops them, but see the next case, which it gets wrong.)
+#   * a patch release cut from the very release we build, while the trunk moved
+#     on separately — t equals t(base), so it counts. Our fork point is NOT an
+#     ancestor of it, and our pin does not contain it: it is the newest release
+#     upstream has and we do not have it.
+#
+# It is a fact about ancestry, computed from ancestry. A release whose line left
+# the trunk before ours is not "probably old", it is provably not something we
+# can move up to.
+
+#: WHERE the fork clones live. Containment is decided against these whenever they
+#: can answer, which spends no GitHub API budget at all — one compare call per
+#: release across 36 tools is a bill this program cannot afford daily.
+FORK_CLONES = Path(os.environ.get("GK_FORK_CLONES")
+                   or os.path.expanduser("~/vibe-ic-forks"))
+#: How many API compares ONE tool may spend when no clone can answer. Candidates
+#: past it are UNDETERMINED, never assumed: a stated budget that shows up in the
+#: ledger, rather than a silent truncation that reads like a measurement.
+API_PROBE_CAP = int(os.environ.get("GK_RELEASE_PROBE_CAP") or "25")
+
+#: The dispositions. "We could not ask" is one of them, and it is not "no".
+CONTAINED, NEW, SUPERSEDED, UNDETERMINED = "contained", "new", "superseded", "undetermined"
+
+#: `behind_releases` is an int ONLY under this status. The other two carry None.
+MEASURED, UNKNOWN, NOT_PROBED = "measured", "unknown", "not-probed"
+
+
+def _git(repo, *args, stdin: str | None = None, timeout: int = 60):
+    """(rc, stdout, stderr) for a git command in `repo`. Never raises."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), *args], input=stdin,
+                           capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, "", f"{e.__class__.__name__}: {e}"
+    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+
+
+def _clone_for(tool: str) -> Path | None:
+    """The local clone that can answer for `tool`, or None."""
+    p = FORK_CLONES / tool
+    return p if (p / ".git").exists() or (p / "HEAD").is_file() else None
+
+
+def _peel(repo, revs: list[str]) -> dict[str, str]:
+    """{rev: commit sha} for the revs THIS clone holds — one subprocess for all.
+
+    `cat-file --batch-check` prints one line per input IN ORDER and prints
+    `<input> missing` for an object the clone does not have, so the same call
+    answers both "what commit is this name" and "is that commit here". A rev the
+    clone cannot resolve is simply absent from the result: the caller must then
+    ask somebody who can, never assume.
+    """
+    if not revs:
+        return {}
+    rc, out, _ = _git(repo, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                      "--buffer", stdin="".join(f"{r}^{{commit}}\n" for r in revs))
+    if rc != 0 and not out:
+        return {}
+    lines = out.splitlines()
+    got = {}
+    for rev, line in zip(revs, lines):
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "commit" and re.fullmatch(r"[0-9a-f]{40}", parts[0]):
+            got[rev] = parts[0]
+    return got
+
+
+def _local_containment(repo, tag_sha: str, pin_sha: str):
+    """(verdict, why, disjoint) for one release commit against our pin, locally.
+
+    Two questions, in cost order, and BOTH are about content:
+
+      ancestry — `merge-base --is-ancestor` — is a sufficient shortcut, never the
+      verdict. A tag placed on a merge commit that re-joins history we already
+      have is not an ancestor of anything on the merged-from side while
+      contributing nothing, so a NO here means "keep asking", not "behind".
+
+      trees — the tag's tree against the tree of the merge-base with our pin. The
+      merge-base is by definition reachable from our pin, so an equal tree means
+      the tag's content is content we already build. This is the same question
+      the API answers as "zero changed files".
+
+    `disjoint` says the release and our pin share NO ancestor at all. That is a
+    definite answer from git, not a failure, and it means something the other two
+    values cannot express: the release is not on the line we track, so it is not
+    a release we could advance to by any rebase. Measured on an upstream that
+    re-imported its history — its newest release is a 115-commit tree with a
+    different root commit from the 3459-commit history its older tags sit on.
+
+    Returns (None, reason, False) when this clone cannot decide — a missing
+    object, a git that would not run.
+    """
+    rc, _, err = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
+    if rc == 0:
+        return CONTAINED, "ancestor of our pinned ref", False
+    if rc not in (1,):                       # 1 = a clean "no"; anything else is a failure
+        return None, f"git merge-base --is-ancestor failed: {err[:120]}", False
+    rc, mb, err = _git(repo, "merge-base", tag_sha, pin_sha)
+    if rc != 0 or not mb:
+        # No shared history at all. The trees are the only remaining question,
+        # and answering it is still a measurement, not a guess.
+        trees = _tree_pair(repo, tag_sha, pin_sha)
+        if trees is None:
+            return None, f"git merge-base failed: {err[:120]}", False
+        if trees[0] == trees[1]:
+            return CONTAINED, "identical tree to our pinned ref", False
+        return NEW, "shares no ancestor with our pinned ref", True
+    trees = _tree_pair(repo, tag_sha, mb)
+    if trees is None:
+        return None, "could not read the trees of the release and the merge-base", False
+    if trees[0] == trees[1]:
+        return (CONTAINED,
+                "changes no file relative to the merge-base with our pinned ref", False)
+    return NEW, "carries commits and file changes our pinned ref does not have", False
+
+
+def _tree_pair(repo, a: str, b: str):
+    """(tree(a), tree(b)) or None if either could not be read."""
+    rc, out, _ = _git(repo, "cat-file", "--batch-check=%(objectname)", "--buffer",
+                      stdin=f"{a}^{{tree}}\n{b}^{{tree}}\n")
+    lines = out.splitlines()
+    if rc != 0 or len(lines) != 2:
+        return None
+    if not all(re.fullmatch(r"[0-9a-f]{40}", ln.strip()) for ln in lines):
+        return None
+    return lines[0].strip(), lines[1].strip()
+
+
+def _api_containment(tool: str, up_full: str, tag_sha: str, pin_sha: str):
+    """(verdict, why) for one release commit against our pin, over the API.
+
+    ONE compare answers both halves: `compare/<pin>...<tag>` reports `ahead_by`
+    (commits the tag has that our pin lacks) and `files` (what those commits
+    change relative to the merge-base). `ahead_by == 0` is the ancestry
+    shortcut; an empty `files` is the content test.
+
+    RAW SHAS IN A SINGLE REPOSITORY, deliberately. The query this replaces was
+    `compare/<upstream_owner>:<tag>...<ref>`, a CROSS-REPO form that resolves
+    only through a shared fork network — and several of our mirrors are
+    independent repositories (`fork: false`, `parent: null`), for which it 404s
+    100% of the time. That 404 was then read as "not contained". Both endpoints
+    are ordinary commits present in both repositories, so the same question is
+    asked of whichever one answers, and an error from BOTH is an error, not a
+    number.
+    """
+    errs = []
+    for repo in (f"{ORG}/{tool}", up_full):
+        c = gh(f"repos/{repo}/compare/{pin_sha}...{tag_sha}")
+        if c.get("_err"):
+            errs.append(f"{repo}: {c['_err']}")
+            continue
+        ahead = c.get("ahead_by")
+        if not isinstance(ahead, int):
+            errs.append(f"{repo}: compare returned no ahead_by")
+            continue
+        if ahead == 0:
+            return CONTAINED, f"ancestor of our pinned ref (compare in {repo})", False
+        files = c.get("files")
+        if isinstance(files, list) and not files:
+            return (CONTAINED,
+                    f"changes no file relative to our pinned ref (compare in {repo})", False)
+        if not isinstance(files, list):
+            errs.append(f"{repo}: compare returned no file list")
+            continue
+        return NEW, f"{ahead} commit(s) and {len(files)} changed file(s) we do not have", False
+    return None, "; ".join(errs) or "no compare could be run", False
+
+
+def _ls_remote_tags(url: str) -> dict[str, str]:
+    """{tag: commit sha} from ONE `git ls-remote` — no API budget, no clone.
+
+    The peeled `refs/tags/<t>^{}` line wins over the plain one, which for an
+    annotated tag names the tag OBJECT rather than the commit it points at.
+    """
+    try:
+        r = subprocess.run(["git", "ls-remote", "--tags", url],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    plain, peeled = {}, {}
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].startswith("refs/tags/"):
+            continue
+        name = parts[1][len("refs/tags/"):]
+        (peeled if name.endswith("^{}") else plain)[name.removesuffix("^{}")] = parts[0]
+    return {**plain, **peeled}
+
+
+def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None,
+                      fork_point: str | None = None) -> dict:
+    """WHICH upstream releases carry work our pinned ref does not have.
+
+    Returns the whole answer, including the parts that could not be measured:
+
+        {"new": [...], "contained": [...], "superseded": [...],
+         "undetermined": [...], "behind": int | None,
+         "status": MEASURED | UNKNOWN | NOT_PROBED,
+         "base": tag | None, "api_calls": int, "clone": str | None}
+
+    `behind` is an int ONLY under MEASURED. Under UNKNOWN it is None and
+    `undetermined` names every release and the literal error that stopped it;
+    under NOT_PROBED there was no pin or no upstream version to ask about, so the
+    question has no subject. A caller that reads None as 0 has reintroduced the
+    defect.
+
+    `fork_point` is our pinned ref's merge-base with the upstream trunk. It is
+    what bounds "ahead of us" without a date; when it is not known, a release
+    that is not contained is UNDETERMINED rather than counted — not knowing where
+    we branched from is not the same as knowing everything is ahead.
+    """
+    out = {"new": [], "contained": [], "superseded": [], "undetermined": [],
+           "behind": None, "status": NOT_PROBED, "base": None, "api_calls": 0,
+           "clone": None}
+    if not ref or not rels:
+        return out
+
+    clone = _clone_for(tool)
+    out["clone"] = str(clone) if clone else None
+    tags = [r["tag"] for r in rels]
+
+    # 1. RESOLVE every candidate — and our pin — to a commit. Local clone first
+    #    (free), then one `git ls-remote` per side (no API budget), then give up
+    #    on the ones still unresolved. `pinned_ref_full` is not always a sha:
+    #    ORFS pins the TAG `v3.0`, so the pin is peeled by the same machinery.
+    shas = _peel(clone, tags + [ref]) if clone else {}
+    if ref not in shas or any(t not in shas for t in tags):
+        for url in (f"https://github.com/{up_full}.git", f"https://github.com/{ORG}/{tool}.git"):
+            remote = _ls_remote_tags(url)
+            for t in tags:
+                if t not in shas and t in remote:
+                    shas[t] = remote[t]
+            if ref not in shas and ref in remote:
+                shas[ref] = remote[ref]
+            if ref in shas and all(t in shas for t in tags):
+                break
+    pin_sha = shas.get(ref) or (ref if re.fullmatch(r"[0-9a-f]{40}", ref or "") else None)
+    if not pin_sha:
+        out["status"] = UNKNOWN
+        out["undetermined"] = [{**r, "sha": shas.get(r["tag"]),
+                                "error": f"our pinned ref {ref!r} could not be resolved "
+                                         f"to a commit"} for r in rels]
+        return out
+
+    # 2. COLLAPSE by commit. Two names for one commit are one release — a bare
+    #    `16.2.0` beside `trilinos-release-16-2-0`, a prerelease tag beside its
+    #    own release record. Order is preserved so the first (newest) name leads.
+    groups: dict[str, dict] = {}
+    for r in rels:
+        sha = shas.get(r["tag"])
+        if not sha:
+            out["undetermined"].append(
+                {**r, "sha": None,
+                 "error": "the tag could not be resolved to a commit in the fork clone, "
+                          "the upstream remote or our mirror"})
+            continue
+        g = groups.setdefault(sha, {"sha": sha, "tags": [], "date": r.get("date"),
+                                    "prerelease": None})
+        g["tags"].append(r["tag"])
+        # A group is a prerelease only if a release record SAYS so and none says
+        # otherwise. A tag with no release record contributes no opinion.
+        if r.get("prerelease") is False:
+            g["prerelease"] = False
+        elif r.get("prerelease") is True and g["prerelease"] is not False:
+            g["prerelease"] = True
+
+    # 3. CONTAINMENT, per distinct commit. Local when the clone holds both ends,
+    #    API otherwise, UNDETERMINED when neither can answer.
+    local_ok = clone is not None and bool(_peel(clone, [pin_sha]))
+    graph = clone if local_ok else None
+    for g in groups.values():
+        verdict = why = None
+        disjoint = False
+        if local_ok and _peel(clone, [g["sha"]]):
+            verdict, why, disjoint = _local_containment(clone, g["sha"], pin_sha)
+        if verdict is None:
+            if out["api_calls"] >= API_PROBE_CAP:
+                why = (f"probe budget exhausted after {API_PROBE_CAP} API compares "
+                       f"(GK_RELEASE_PROBE_CAP)" + (f"; local: {why}" if why else ""))
+            else:
+                out["api_calls"] += 1
+                api_verdict, api_why, disjoint = _api_containment(
+                    tool, up_full, g["sha"], pin_sha)
+                verdict, why = api_verdict, (api_why if api_verdict else
+                                             f"{api_why}{'; local: ' + why if why else ''}")
+        g["why"] = why
+        g["verdict"] = verdict
+        g["disjoint"] = disjoint
+        # WHY it is contained matters for picking `base_release`: only a release
+        # our PIN contains is a release we build. A prerelease folded into its
+        # final one (step 4) is contained for COUNTING purposes and is not a
+        # candidate to name as the version we ship.
+        g["in_pin"] = verdict == CONTAINED
+
+    # 4. COLLAPSE a prerelease into a final release that already contains it. The
+    #    `prerelease` flag is the API's own; the containment is ancestry. Neither
+    #    half looks at the tag TEXT, so this is not an "rc" matcher.
+    finals = [g for g in groups.values()
+              if g["verdict"] == NEW and g["prerelease"] is not True]
+    for g in groups.values():
+        if g["verdict"] != NEW or g["prerelease"] is not True:
+            continue
+        for f in finals:
+            if _ancestor(graph, tool, up_full, g["sha"], f["sha"], out) is True:
+                g["verdict"] = CONTAINED
+                g["why"] = (f"prerelease superseded by {f['tags'][0]}, which contains it "
+                            f"and is counted instead")
+                break
+
+    # 5. BEHIND US, NOT AHEAD — the trunk-divergence ordering described above.
+    #    t(R) = merge-base(R, our fork point) is the point on the shared trunk
+    #    where R's line left it; a release counts only when t(base) is an ancestor
+    #    of t(R), i.e. its line left the trunk no earlier than the line of the
+    #    newest release we actually contain.
+    fp = (_peel(clone, [fork_point]).get(fork_point) if (clone and fork_point)
+          else fork_point)
+    tpoint: dict[str, str | None] = {}
+
+    def _t(sha: str):
+        if sha not in tpoint:
+            tpoint[sha] = _merge_base(graph, tool, up_full, sha, fp, out) if fp else None
+        return tpoint[sha]
+
+    # `base` — the newest release our PIN contains, chosen by the same ordering
+    # rather than by list position, which is a date order. Ties (several releases
+    # off one trunk point) are broken by ancestry between the releases themselves,
+    # so a patch release wins over the release it patches.
+    base_g = None
+    for g in groups.values():
+        if not g.get("in_pin"):
+            continue
+        if base_g is None:
+            base_g = g
+            continue
+        tb, tg = _t(base_g["sha"]), _t(g["sha"])
+        if tb is None or tg is None:
+            continue
+        if tb != tg:
+            if _ancestor(graph, tool, up_full, tb, tg, out) is True:
+                base_g = g
+        elif _ancestor(graph, tool, up_full, base_g["sha"], g["sha"], out) is True:
+            base_g = g
+    ref_t = _t(base_g["sha"]) if base_g is not None else fp
+
+    for g in groups.values():
+        if g["verdict"] != NEW:
+            continue
+        # A release that shares NO ancestor with our pin is not on the line we
+        # track, so no rebase reaches it and it is not a gap — PROVIDED we are
+        # anchored, i.e. we contain some release of this project. With no anchor
+        # the same observation could equally mean upstream re-rooted its history
+        # and left us on the abandoned side, so it stays undecided.
+        if g.get("disjoint"):
+            if base_g is not None:
+                g["verdict"] = SUPERSEDED
+                g["why"] = ("shares no ancestor with the line we track — an abandoned "
+                            "history, not a release any rebase could reach")
+            else:
+                g["verdict"] = None
+                g["why"] = ("shares no ancestor with our pinned ref, and we contain no "
+                            "release of this project to anchor the comparison")
+            continue
+        tg = _t(g["sha"])
+        if not ref_t or tg is None:
+            g["verdict"] = None
+            g["why"] = ("where this release's line left the upstream trunk could not be "
+                        "established, so whether it is ahead of us or behind us is "
+                        "undecided" + (
+                            "" if fp else
+                            " (our own merge-base with the upstream trunk is unknown)"))
+            continue
+        anc = _ancestor(graph, tool, up_full, ref_t, tg, out)
+        if anc is None:
+            g["verdict"] = None
+            g["why"] = ("the trunk order between this release and the one we build "
+                        "could not be established")
+        elif not anc:
+            g["verdict"] = SUPERSEDED
+            g["why"] = (f"its line left the upstream trunk at {tg[:12]}, before the line of "
+                        f"{base_g['tags'][0] if base_g else 'our pinned ref'} left it at "
+                        f"{ref_t[:12]} — an older series, not a release we could advance to")
+
+    # 6. REPORT. `base_release` is the newest release we were MEASURED to contain
+    #    — the release we actually build — not the newest one dated before our
+    #    fork point, which is what named the wrong tag on three rows at once.
+    for g in groups.values():
+        row = {"tag": g["tags"][0], "date": g.get("date"), "sha": g["sha"][:12],
+               "why": g.get("why")}
+        if len(g["tags"]) > 1:
+            row["also_tagged"] = g["tags"][1:]
+        if g["verdict"] == CONTAINED:
+            out["contained"].append(row)
+        elif g["verdict"] == NEW:
+            out["new"].append(row)
+        elif g["verdict"] == SUPERSEDED:
+            out["superseded"].append(row)
+        else:
+            out["undetermined"].append({**row, "error": g.get("why") or "undetermined"})
+    out["base"] = base_g["tags"][0] if base_g is not None else None
+    if out["undetermined"]:
+        out["status"], out["behind"] = UNKNOWN, None
+    else:
+        out["status"], out["behind"] = MEASURED, len(out["new"])
+    return out
+
+
+def _ancestor(clone, tool: str, up_full: str, a: str, b: str, out: dict):
+    """Is commit `a` an ancestor of commit `b`? None when it cannot be decided.
+
+    None is a THIRD value on purpose. Every caller here has to choose what to do
+    with "could not tell", and each of them must choose the answer that does not
+    invent a fact: a prerelease that cannot be shown to be superseded stays
+    counted, and a release whose position cannot be established is undetermined.
+    """
+    if clone is not None:
+        rc, _, _ = _git(clone, "merge-base", "--is-ancestor", a, b)
+        if rc in (0, 1):
+            return rc == 0
+    if out["api_calls"] >= API_PROBE_CAP:
+        return None
+    out["api_calls"] += 1
+    c = gh(f"repos/{up_full}/compare/{b}...{a}")
+    if c.get("_err") or not isinstance(c.get("ahead_by"), int):
+        return None
+    return c["ahead_by"] == 0
+
+
+def _merge_base(clone, tool: str, up_full: str, a: str, b: str, out: dict):
+    """The merge-base commit of `a` and `b`, or None if it could not be found."""
+    if a == b:
+        return a
+    if clone is not None:
+        rc, mb, _ = _git(clone, "merge-base", a, b)
+        if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", mb or ""):
+            return mb
+    if out["api_calls"] >= API_PROBE_CAP:
+        return None
+    for repo in (f"{ORG}/{tool}", up_full):
+        out["api_calls"] += 1
+        c = gh(f"repos/{repo}/compare/{a}...{b}")
+        sha = ((c.get("merge_base_commit") or {}).get("sha")
+               if isinstance(c, dict) and not c.get("_err") else None)
+        if sha:
+            return sha
+        if out["api_calls"] >= API_PROBE_CAP:
+            break
+    return None
+
+
+def release_gap(led: dict):
+    """The ledger's release gap as an int, or None when it is not a measurement.
+
+    THE ONE READER every consumer must go through. `led.get("behind_releases") or
+    0` is the shape being removed: it maps "we could not find out" onto the same
+    value as "we checked and there is nothing", and no reader downstream can tell
+    those apart — which is the whole defect.
+    """
+    if release_gap_unknown(led):
+        return None
+    n = led.get("behind_releases")
+    return n if isinstance(n, int) else 0
+
+
+def release_gap_unknown(led: dict) -> bool:
+    """Could containment NOT be decided for at least one upstream release?
+
+    True is not a small number; it is the absence of one. A consumer that renders
+    it as 0, or as a guess, is publishing a measurement nobody made.
+    """
+    if led.get("behind_releases_status") == UNKNOWN:
+        return True
+    # A ledger written before this field existed states a count and nothing about
+    # how it was reached. It is read at face value rather than retro-flagged —
+    # `behind_releases_status` absent is the signal that it predates the question.
+    return (led.get("behind_releases") is None
+            and bool(led.get("undetermined_releases")))
 
 
 def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
@@ -540,28 +1089,23 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     else:
         led["compare_error"] = cmp["_err"]
 
-    # RELEASE tracking. Accurate "are we on the latest release" via ANCESTRY (one
-    # compare: is the latest release tag contained in our pinned ref?) — date-based
-    # classification is fragile for tools that release daily (magic) or whose tags
-    # aren't on the default branch. Fall back to dates only when not current.
+    # RELEASE tracking, by CONTAINMENT — see the block above `classify_releases`.
+    # `pin_date` (the fork-point date) stays in the ledger as display metadata; no
+    # arithmetic that produces `behind_releases` reads it any more.
     rels = _releases(up_full)
     led["upstream_releases"] = rels[:15]
     led["upstream_latest_release"] = rels[0]["tag"] if rels else None
-    new, base = [], None
-    current = False
-    if rels and ref:
-        latest_tag = rels[0]["tag"]
-        c = gh(f"repos/{ORG}/{tool}/compare/{up_owner}:{latest_tag}...{ref}")
-        # behind_by == 0 → the latest release has no commit our pin lacks → we're current
-        if not c.get("_err") and c.get("behind_by", 1) == 0:
-            base, current = latest_tag, True
-    if not current:
-        new = [r for r in rels if r.get("date") and pin_date and r["date"] > pin_date]
-        b = next((r for r in rels if r.get("date") and pin_date and r["date"] <= pin_date), None)
-        base = b["tag"] if b else None
-    led["new_releases"] = new
-    led["behind_releases"] = len(new)
-    led["base_release"] = base
+    cl = classify_releases(tool, up_full, rels, ref,
+                           fork_point=(led.get("fork_point") or {}).get("sha"))
+    led["new_releases"] = cl["new"]
+    led["contained_releases"] = cl["contained"][:15]
+    led["superseded_releases"] = cl["superseded"][:15]
+    led["undetermined_releases"] = cl["undetermined"]
+    led["behind_releases"] = cl["behind"]
+    led["behind_releases_status"] = cl["status"]
+    led["release_containment"] = {"clone": cl["clone"], "api_calls": cl["api_calls"],
+                                  "candidates": len(rels), "fork_point_date": pin_date}
+    led["base_release"] = cl["base"]
 
     led.setdefault("last_sync", None)
     return led
@@ -620,13 +1164,20 @@ def main():
         led["sync_log"], led["last_sync"] = sync_log, last_sync
         led[gk_state.PROVENANCE_KEY] = gk_state.provenance()
         prev.write_text(json.dumps(led, indent=2, ensure_ascii=False) + "\n")
+        # `behind_releases_status` travels WITH the count everywhere the count
+        # travels. The index is what `build_page` and every quick reader load
+        # first, and a null in it with no status beside it is exactly the value
+        # nobody can tell from a measurement.
         index.append({k: led.get(k) for k in (
             "tool", "role", "upstream", "forked_at", "pinned_ref", "vibeic_branch",
             "ahead", "base_release", "upstream_latest_release", "behind_releases",
-            "image_version", "last_sync")})
+            "behind_releases_status", "image_version", "last_sync")})
+        _n = ("unknown" if release_gap_unknown(led)
+              else ("—" if led.get("behind_releases") is None
+                    else led.get("behind_releases")))
         tag = led.get("error") or (f"pin={led.get('pinned_ref')} patches={led.get('ahead','?')} "
                                    f"base={led.get('base_release')} latest={led.get('upstream_latest_release')} "
-                                   f"new_releases={led.get('behind_releases','?')}")
+                                   f"new_releases={_n}")
         print(f"  {fork['tool']:16} {tag}")
     (LEDGER / "index.json").write_text(json.dumps(
         {"generated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),

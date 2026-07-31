@@ -63,6 +63,12 @@ LEDGER = STATE / "ledger"
 REPORTS = STATE / "reports"
 REG_CFG = HERE / "regression.json"    # config ships WITH the source
 import discover_forks as disc  # noqa: E402
+# BOUND BY NAME, not looked up on the module. The reader of `behind_releases` has
+# to survive the test fixtures that replace `gk.disc` wholesale to keep
+# `disc.main()` off the network — a stub that neutralises the SEEDER must not
+# also silently remove the one function that keeps an unmeasured gap from
+# reading as zero.
+from discover_forks import release_gap_unknown  # noqa: E402
 import build_page  # noqa: E402
 import fleet_config  # noqa: E402  — is the configuration we ran on the committed one?
 try:
@@ -129,7 +135,11 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
         return {}
 
 
-def assessment_entry(rep: dict, nr: int, latest) -> dict:
+def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
+    # `nr` may be the STRING the caller renders for an unmeasured release gap
+    # ("an undetermined number of"). It is only ever interpolated into a
+    # human-facing note here, never counted, so both shapes are correct — and a
+    # note that says "0 new release(s)" beside a DEFERRED verdict is not.
     """The daily report's row for a fork that was ASSESSED — verdict, note, counts.
 
     A pure function of the assessment report so the sync-log summary can be exercised
@@ -227,6 +237,24 @@ def pin_provenance(led: dict) -> str:
             f"vibeic/{host}), not an ARG of its own: changing it means rebuilding {host}")
 
 
+def _undetermined_note(led: dict) -> str:
+    """The clause a row adds when some release's CONTAINMENT could not be decided.
+
+    A count nobody could measure must not be published as a count, and it must not
+    be published as silence either. This names the releases and the literal error
+    that stopped each one, so the reader's next move is a command, not a guess.
+    """
+    und = led.get("undetermined_releases") or []
+    if not und:
+        return ""
+    shown = ", ".join(f"{u.get('tag')} ({u.get('error') or 'undetermined'})"
+                      for u in und[:3] if isinstance(u, dict))
+    more = f" +{len(und) - 3} more" if len(und) > 3 else ""
+    return (f" — WARNING: containment is UNDETERMINED for {len(und)} upstream "
+            f"release(s), so the release gap is unknown rather than {len(led.get('new_releases') or [])}: "
+            f"{shown}{more}")
+
+
 def unassessed_drift(led: dict) -> str:
     """What a CLEAN row does not say: upstream commits our pinned ref does not carry.
 
@@ -322,8 +350,14 @@ def tick() -> dict:
         # could not become a candidate. `behind_commits` was already computed and
         # stored by discover_forks — the number sat in the ledger, unread by the
         # one condition that decides whether anyone looks.
+        #
+        # …and an UNDETERMINED release gap enters too. `behind_releases` is null
+        # when containment could not be decided for some upstream release, and
+        # `or 0` reads that as "level with upstream" — the same silence that kept
+        # OpenROAD out, arrived at by a different route.
         behind = ((led.get("behind_releases") or 0) > 0
-                  or (led.get("behind_commits") or 0) > 0)
+                  or (led.get("behind_commits") or 0) > 0
+                  or release_gap_unknown(led))
         if led.get("integrated") and behind:
             candidates.append(led)
 
@@ -428,9 +462,17 @@ def tick() -> dict:
     pending_ledgers: list[tuple] = []   # written only once the documents agree
     for p, led in leds.items():
         tool = led["tool"]
+        # `nr` is a NUMBER OF RELEASES, and it may not exist. `rel_unknown` says
+        # the ledger could not decide containment for at least one of them, in
+        # which case `nr` is 0 only because arithmetic needs something — every
+        # place that shows it to a human branches on `rel_unknown` first, and the
+        # row carries `new_releases_status` so a reader of the JSON can too.
+        rel_unknown = release_gap_unknown(led)
         nr = led.get("behind_releases") or 0
+        nr_txt = "an undetermined number of" if rel_unknown else str(nr)
         latest = led.get("upstream_latest_release")
         entry = {"date": date, "verdict": None, "note": "", "new_releases": nr,
+                 "new_releases_status": ("unknown" if rel_unknown else "measured"),
                  "latest_release": latest, "merged_release": None}
         cross_checked = None
 
@@ -454,7 +496,7 @@ def tick() -> dict:
                              "delivery route is unmodelled and no upstream "
                              "range is assessed — this does NOT establish "
                              "that the tool is absent from the image")
-        elif nr == 0:
+        elif nr == 0 and not rel_unknown:
             entry["verdict"] = "CLEAN"
             entry["note"] = (f"on the latest upstream release "
                              f"({led.get('base_release') or led.get('pinned_ref')})"
@@ -476,15 +518,21 @@ def tick() -> dict:
                 entry["verdict"] = "DEFERRED"
                 entry["note"] = f"{s} → target {latest}: {detail}"
         elif tool in assessments:
-            entry.update(assessment_entry(assessments[tool], nr, latest))
+            # `nr_txt`, not `nr`: the one place `assessment_entry` shows this
+            # number is a human-facing note, and "0 new release(s)" next to a
+            # DEFERRED verdict is precisely the contradiction an unmeasured gap
+            # produces. It still accepts a plain int — that is what its tests pass.
+            entry.update(assessment_entry(assessments[tool], nr_txt, latest))
             cross_checked = tool
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))
-            entry["note"] = f"{nr} new upstream release(s) [{rels}] → target {latest}. {not_configured}"
+            entry["note"] = (f"{nr_txt} new upstream release(s) [{rels}] → target {latest}."
+                             f"{_undetermined_note(led)} {not_configured}")
         else:
             entry["verdict"] = "DEFERRED"
-            entry["note"] = f"{nr} new release(s) → {latest}; harness returned no result for this tool"
+            entry["note"] = (f"{nr_txt} new release(s) → {latest}; harness returned no "
+                             f"result for this tool{_undetermined_note(led)}")
 
         # HOW this fork is pinned, appended once for every verdict — a fork vendored
         # inside another fork's ref is pinned for as long as it is in the image, not only
@@ -683,7 +731,12 @@ def _maybe_notify(summary: dict, assessments: dict | None = None,
                     if (a.get("commit_count") or 0) > 0 or a.get("error")}
     # the SYNC/BACKLOG PR covers MERGED doc-bumps + any DEFERRED-with-new-release fork the
     # assessment PR did NOT already carry (e.g. assess_release import failed entirely).
-    uncovered = any(r["verdict"] == "DEFERRED" and (r.get("new_releases") or 0) > 0
+    # …or whose release gap could not be MEASURED. An unknown gap is the row most
+    # in need of a human, and `(x or 0) > 0` on a null is exactly how it would
+    # instead be filtered out as "nothing new".
+    uncovered = any(r["verdict"] == "DEFERRED"
+                    and ((r.get("new_releases") or 0) > 0
+                         or r.get("new_releases_status") == "unknown")
                     and r["tool"] not in assess_tools for r in summary["results"])
     outcomes = []
     try:
@@ -725,12 +778,21 @@ def _report_md(s: dict) -> str:
              "| Tool | Verdict | New releases | Target | Note |", "|---|---|---|---|---|"]
     order = {"MERGED": 0, "DEFERRED": 1, "CLEAN": 2, "NOT_LAYERED": 3}
     for r in sorted(s["results"], key=lambda r: (order.get(r["verdict"], 9), r["tool"])):
-        lines.append(f"| {r['tool']} | {r['verdict']} | {r['new_releases']} | "
+        # `unknown`, spelled out, never a digit. The column is a MEASUREMENT of how
+        # much upstream work we lack; printing 0 for a row where that could not be
+        # decided is the one thing a reader cannot recover from, because nothing
+        # in the table would distinguish it from a row that was checked.
+        nrc = ("unknown" if r.get("new_releases_status") == "unknown"
+               else r["new_releases"])
+        lines.append(f"| {r['tool']} | {r['verdict']} | {nrc} | "
                      f"{r.get('latest_release') or '—'} | {r['note']} |")
     lines += ["", "> CLEAN = already on the latest upstream release. NOT_LAYERED = forked but "
               "the image build never fetches it — no ARG pin of its own and not vendored "
               "inside one. DEFERRED tools have a new upstream release staged; the image "
-              "auto-rebuilds + merges once image_build.cmd is wired and the rebuild is green."]
+              "auto-rebuilds + merges once image_build.cmd is wired and the rebuild is green. "
+              "`New releases = unknown` means CONTAINMENT COULD NOT BE DECIDED for at least "
+              "one upstream release — it is not zero and it is not a count; the row's note "
+              "names the releases and the error that stopped each one."]
     return "\n".join(lines) + "\n"
 
 
