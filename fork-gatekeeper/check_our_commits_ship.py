@@ -79,6 +79,29 @@ def stranded(repo_dir: Path, pin: str) -> List[dict]:
         "git", "-C", str(repo_dir), "for-each-ref", "--format=%(refname:short)",
         "refs/heads", "refs/remotes/origin").splitlines() if b.strip()]
     for br in branches:
+        # PATCH EQUIVALENCE, not `{pin}..{br}` SHA reachability.
+        #
+        # This program's own docstring warns that reachability counted 273
+        # stranded commits where `git cherry` counted 2 — the same fix
+        # cherry-picked onto a dozen parallel branches, counted once per copy.
+        # The enumeration here was doing exactly that, and it is not a rounding
+        # difference. Measured on OpenROAD 2026-07-31:
+        #
+        #   git log {pin}..{br}        35 "stranded" commits of ours
+        #   git cherry {pin} {br}      those same SHAs marked `-`
+        #
+        # e.g. fe6cb189b "gpl: register eco_freeze tests in Bazel BUILD" is not
+        # an ancestor of the pin — and its patch IS on the shipped line as
+        # bee1cf03c0, same day, same subject, cherry-picked. Reporting it as
+        # stranded sends someone to merge a branch whose content already ships.
+        #
+        # `git cherry` prints `+` for a patch the upstream ref lacks and `-` for
+        # one it already has, so only the `+` lines are candidates.
+        cherry = sh("git", "-C", str(repo_dir), "cherry", pin, br)
+        unique = {ln.split()[1] for ln in cherry.splitlines()
+                  if ln.startswith("+") and len(ln.split()) > 1}
+        if not unique:
+            continue
         log = sh("git", "-C", str(repo_dir), "log", "--no-merges",
                  "--format=%H%x1f%an%x1f%ad%x1f%s", "--date=short", f"{pin}..{br}")
         for line in log.splitlines():
@@ -86,6 +109,8 @@ def stranded(repo_dir: Path, pin: str) -> List[dict]:
             if len(parts) != 4:
                 continue
             sha, author, date, subject = parts
+            if sha not in unique:
+                continue
             if sha in seen:
                 continue
             if not any(o in author.lower() for o in OURS):
