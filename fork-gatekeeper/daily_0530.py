@@ -45,17 +45,43 @@ WHAT IT REFUSES
   2026-07-31 a `master` that looked stale locally was 7924 upstream commits
   BEHIND its own origin, and forcing would have destroyed them.
 * It never cuts an image version when no tool changed.
-* It stops at a conflict rather than resolving it. A merge conflict between our
-  own work and upstream is a judgement call, and pretending otherwise is how a
-  fix gets silently dropped.
+* It never RESOLVES a conflict by itself. A merge conflict between our own work
+  and upstream is a judgement call, and pretending otherwise is how a fix gets
+  silently dropped.
+
+THE AI HALF (step 2b, owner ruling 2026-07-31)
+----------------------------------------------
+    "Merge 或者是 Cherry-pick 的話，是需要用到 AI 的，用程式直接判斷是不夠的。"
+
+Refusing to resolve a conflict is right. STOPPING there was not: the earlier
+version flagged `needs_human` and moved on, so a conflicted branch simply sat,
+and the six steps completed while the work they exist to consolidate did not.
+
+So the script does the mechanical half and hands the judgement half to this
+host's gatekeeper AI, with the evidence attached: the conflicting files, our
+commits on that branch with their subjects and touched files, and git's own
+message. The gatekeeper decides MERGE vs CHERRY-PICK per case, resolves on the
+merits, and lands it. `--no-ai` writes the brief without invoking, which is what
+a dry run does. A case nobody decided is still `needs_human`; a case the
+gatekeeper decided is decided.
+
+The invocation BLOCKS. Detaching it would end this process before the
+gatekeeper's turn produced anything, which is the exact failure that has already
+cost this campaign four rounds on one cell.
 
 Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
 from __future__ import annotations
-import argparse, json, subprocess, sys
+import argparse, json, os, subprocess, sys
 from pathlib import Path
 
-FORKS = Path("/home/reyerchu/vibe-ic-forks")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gk_state
+
+# Overridable so the AI-handoff path can be exercised against a synthetic fork.
+# The step it guards only fires on a real merge conflict, and a conflict that
+# never happens on a given morning is not evidence the handoff works.
+FORKS = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 EDA = Path("/home/reyerchu/vibeic-eda")
 OURS = ("reyer", "vibeic")
 
@@ -121,9 +147,29 @@ def step2_ours(g, main, rep):
         r = sh(*g, "merge", "--no-edit", "-m",
                f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b)
         if r.returncode:
+            # Collect the evidence a merge-vs-cherry-pick decision needs BEFORE
+            # aborting, because aborting destroys it. The owner's standing rule
+            # is that this decision needs AI: "Merge 或者是 Cherry-pick 的話,
+            # 是需要用到 AI 的, 用程式直接判斷是不夠的." A script that stops
+            # here and prints needs_human has not made the decision, it has
+            # only deferred it — and in practice nobody came back for it.
+            files = [l for l in out(*g, "diff", "--name-only",
+                                    "--diff-filter=U").splitlines() if l.strip()]
+            commits = [{"sha": s[:12],
+                        "subject": out(*g, "log", "-1", "--format=%s", s),
+                        "author": out(*g, "log", "-1", "--format=%an", s),
+                        "files": [x for x in out(*g, "show", "--name-only",
+                                                 "--format=", s).splitlines()
+                                  if x.strip()][:20]}
+                       for s in mine[:20]]
             sh(*g, "merge", "--abort")
-            conflicted.append({"branch": b, "commits": len(mine)})
-            rep["needs_human"] = True
+            conflicted.append({
+                "branch": b,
+                "commits": len(mine),
+                "conflicting_files": files,
+                "our_commits": commits,
+                "merge_stderr": (r.stderr or r.stdout or "").strip()[-800:],
+            })
         else:
             merged.append({"branch": b, "commits": len(mine)})
     rep["merged"] = merged
@@ -208,6 +254,114 @@ def step4_prune(g, main, rep, apply):
     rep["pruned"] = gone
 
 
+def _claude_bin():
+    for c in (Path.home() / ".local/bin/claude",):
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    r = subprocess.run(["bash", "-lic", "command -v claude"],
+                       capture_output=True, text=True)
+    p = r.stdout.strip()
+    return p if p else None
+
+
+def _handoff_brief(cases) -> str:
+    """What the gatekeeper is asked to decide, with the evidence attached."""
+    lines = [
+        "You are this host's fork gatekeeper. The 05:30 fork-consolidation run "
+        "reached the ONE part it is not allowed to decide alone.",
+        "",
+        "Every branch below carries commits of OURS that are not on our "
+        "master, and `git merge` CONFLICTED. The owner's standing rule is that "
+        "choosing between merge and cherry-pick, and resolving the conflict, "
+        "needs AI judgement — a script deciding by itself is not enough. So it "
+        "stopped here and handed you the evidence rather than aborting the "
+        "round or guessing.",
+        "",
+        "FOR EACH CASE: read the actual code, decide MERGE (take the branch "
+        "whole) or CHERRY-PICK (take only the commits that are still wanted), "
+        "resolve the conflict on its merits, and LAND it on that fork's "
+        "mainline. Then push. If a case genuinely should not land, say so and "
+        "say why — that is a decision too, and it is allowed. What is not "
+        "allowed is leaving a case untouched with no verdict.",
+        "",
+        "RULES THAT BIND YOU HERE:",
+        "  * Never force-push. If the push is rejected, report the rejection.",
+        "  * Never delete a branch that is the head of an OPEN upstream PR. "
+        "    The prune step already guards this; do not work around it. We "
+        "    have already killed our own iverilog PR this way once.",
+        "  * A conflict resolved by dropping our fix is a decision to abandon "
+        "    that fix — only do it deliberately, and record it.",
+        "  * Repo artifacts are ENGLISH ONLY: commit messages, branch names, "
+        "    PR titles and bodies.",
+        "",
+        f"{len(cases)} CASE(S):",
+        "",
+    ]
+    for c in cases:
+        lines.append(f"── {c['fork']} : branch `{c['branch']}` "
+                     f"({c['commits']} of our commits) ──")
+        if c.get("conflicting_files"):
+            lines.append("  conflicting files: "
+                         + ", ".join(c["conflicting_files"][:12]))
+        for k in c.get("our_commits", []):
+            lines.append(f"  {k['sha']}  {k['subject'][:90]}")
+            if k.get("files"):
+                lines.append("      touches: " + ", ".join(k["files"][:8]))
+        if c.get("merge_stderr"):
+            lines.append("  git said: "
+                         + c["merge_stderr"].replace("\n", " ")[:300])
+        lines.append(f"  repo path: {c['path']}")
+        lines.append("")
+    lines.append("Report, per case: the verdict (MERGE / CHERRY-PICK / "
+                 "DECLINE), what you did, and the resulting sha or the reason "
+                 "nothing landed.")
+    return "\n".join(lines)
+
+
+def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
+    """Hand every merge-vs-cherry-pick conflict to the gatekeeper AI.
+
+    This is the step the owner singled out: "Merge 或者是 Cherry-pick 的話,
+    是需要用到 AI 的, 用程式直接判斷是不夠的." Before this existed the run
+    flagged `needs_human` and moved on, so a conflicted branch simply sat
+    there — the six steps completed while the work they exist to consolidate
+    did not.
+    """
+    cases = []
+    for fork, rep in sorted(report.items()):
+        for c in rep.get("conflicted", []) or []:
+            cases.append({**c, "fork": fork, "path": str(FORKS / fork)})
+    if not cases:
+        return {"cases": 0, "invoked": False}
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pending = state_dir / "ai_decisions_pending.json"
+    pending.write_text(json.dumps(cases, indent=2) + "\n")
+    brief = _handoff_brief(cases)
+    (state_dir / "ai_decisions_brief.txt").write_text(brief)
+
+    if not apply:
+        return {"cases": len(cases), "invoked": False,
+                "note": "dry run — brief written, gatekeeper not invoked"}
+
+    binp = _claude_bin()
+    if not binp:
+        return {"cases": len(cases), "invoked": False,
+                "error": "no claude binary on this host — cases left pending"}
+
+    log = state_dir / "ai_decisions.log"
+    # BLOCKING on purpose. Detaching would end this process before the
+    # gatekeeper's turn produced anything, which is the failure mode that has
+    # already cost this campaign four rounds on one cell.
+    r = subprocess.run([binp, "-p", brief,
+                        "--permission-mode", "bypassPermissions"],
+                       capture_output=True, text=True, timeout=timeout_s)
+    log.write_text((r.stdout or "") + "\n--- stderr ---\n" + (r.stderr or ""))
+    return {"cases": len(cases), "invoked": True, "rc": r.returncode,
+            "log": str(log),
+            "tail": (r.stdout or "").strip()[-600:]}
+
+
 def main_(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--apply", action="store_true",
@@ -215,6 +369,11 @@ def main_(argv=None) -> int:
     ap.add_argument("--json", default=None)
     ap.add_argument("--skip-build", action="store_true",
                     help="stop after step 4; step 5 is daily_release.py")
+    ap.add_argument("--no-ai", action="store_true",
+                    help="write the conflict brief but do not invoke the "
+                         "gatekeeper (the cases stay pending)")
+    ap.add_argument("--ai-timeout", type=int, default=3600,
+                    help="seconds to let the gatekeeper's turn run (default 3600)")
     args = ap.parse_args(argv)
 
     if not FORKS.is_dir():
@@ -250,10 +409,24 @@ def main_(argv=None) -> int:
         needs_human |= rep.get("needs_human", False)
         report[d.name] = rep
 
+    # Step 2b — the AI half. A conflict is NOT a reason to stop the round; it
+    # is the one decision this script is not allowed to make alone.
+    ai = step2b_ai_decisions(report, gk_state.state_dir(), args.apply and not args.no_ai,
+                             timeout_s=args.ai_timeout)
+    report["_ai_decisions"] = ai
+    # Only an UNRESOLVED case needs a human. A case the gatekeeper decided is
+    # decided; a case it could not reach still needs someone.
+    if ai.get("cases") and not ai.get("invoked"):
+        needs_human = True
+    if ai.get("invoked") and ai.get("rc"):
+        needs_human = True
+
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
 
     for name, r in sorted(report.items()):
+        if name == "_ai_decisions":
+            continue
         if r.get("error"):
             print(f"  {name:<20} ⚠️ {r['error']}")
             continue
@@ -270,6 +443,16 @@ def main_(argv=None) -> int:
             bits.append(r["push"])
         if bits:
             print(f"  {name:<20} " + "; ".join(bits))
+
+    _ai = report.get("_ai_decisions") or {}
+    if _ai.get("cases"):
+        if _ai.get("invoked"):
+            print(f"\n  step 2b  {_ai['cases']} merge/cherry-pick conflict(s) "
+                  f"handed to the gatekeeper AI (rc={_ai.get('rc')}) "
+                  f"— log: {_ai.get('log')}")
+        else:
+            print(f"\n  step 2b  {_ai['cases']} conflict(s) PENDING a gatekeeper "
+                  f"decision: {_ai.get('error') or _ai.get('note')}")
 
     print("\n  step 5 (build + verify + publish) is daily_release.py — run it next"
           if not args.skip_build else "")

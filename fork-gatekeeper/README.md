@@ -98,3 +98,54 @@ Runs on the build host via cron (daily). Runtime output (`reports/`, `ledger/`,
 only the version-controlled source + the `FORKS.json` registry. To relocate the
 deployment, point the cron entry at a checkout of this repo's `fork-gatekeeper/`
 and set the env knobs above.
+
+## The 05:30 round on 8HD-d, and the one decision the script refuses to make
+
+`run_0530.sh` is the single cron entry at 05:30 Asia/Taipei on 8HD-d
+(192.168.1.112). It runs `daily_0530.py --apply` first — upstream into each
+fork's one line, our branches into that line, then prune — and only afterwards
+the pre-existing `run_tick.sh`. Two pipelines, one entry, so the order is
+guaranteed; the wrapper holds its own lock and captures each exit code directly
+rather than through a pipe.
+
+### Step 2b — the gatekeeper AI decides merge vs cherry-pick
+
+Owner ruling, 2026-07-31: *"Merge 或者是 Cherry-pick 的話，是需要用到 AI 的，
+用程式直接判斷是不夠的。"*
+
+`daily_0530.py` deliberately does not resolve a merge conflict. It used to stop
+there and print `needs_human`, which meant a conflicted branch simply sat while
+the six steps reported themselves complete — the round finished and the work it
+exists to consolidate did not.
+
+So the script now does the mechanical half and hands the judgement half to this
+host's gatekeeper. For each conflict it collects the evidence a decision needs
+**before** aborting the merge, because aborting destroys it: the conflicting
+files, our commits on that branch with their subjects and touched files, and
+git's own message. Those land in `$GK_STATE_DIR/ai_decisions_pending.json` and
+`ai_decisions_brief.txt`, and the brief is passed straight to a `claude -p`
+turn. **That turn is the gatekeeper.** The call blocks — detaching it would end
+the process before the turn produced anything.
+
+The brief is self-contained: a gatekeeper turn needs no prior knowledge of this
+document to do the job. It states the per-case evidence, asks for MERGE /
+CHERRY-PICK / DECLINE with a reason, and carries the rules that bind the step:
+
+* never force-push — report a rejection instead;
+* never delete a branch that is the head of an **open upstream PR**. `step4_prune`
+  guards this by asking GitHub, and prunes nothing at all when the API is
+  unreachable. On 2026-07-31 the un-guarded prune closed our only upstream PR
+  (steveicarus/iverilog#1455) by deleting its head branch;
+* resolving a conflict by dropping our fix **is** a decision to abandon that fix
+  — deliberate and recorded, or not at all;
+* repo artifacts are English only.
+
+`--no-ai` writes the brief without invoking, which is what a dry run does. A case
+nobody decided still exits 1; a case the gatekeeper decided is decided.
+
+Exercised end-to-end against a synthetic conflicting fork (`GK_FORKS_DIR`
+overrides the forks root for exactly this reason — a step that only fires on a
+real conflict is not tested by a morning that had none). Measured: the merge
+landed on master naming the choice it made, our fix won the conflict, the source
+branch was untouched, no branch was deleted, and when the push failed the turn
+reported it rather than inventing a remote or forcing.
