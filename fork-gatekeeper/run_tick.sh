@@ -400,6 +400,40 @@ else
     log "[ci-ran] nothing was checked, which is not a clean result"
 fi
 
+# vibeic-eda#35 — is the image the union of the forks' masters?
+#
+# `check_our_commits_ship.py` answers exactly the question that issue asks, it
+# has been correct since it was written, and NOTHING CALLED IT. It reported
+# nothing for as long as it existed; the 36-stranded state it was built to
+# detect went unnoticed for precisely that reason. A check that exists, is
+# right, and is never invoked is indistinguishable from one that was never
+# written — the same "absence rendering as a pass" this tick keeps finding
+# elsewhere.
+#
+# It compares by PATCH EQUIVALENCE (`git cherry`), not by SHA reachability: the
+# same fix cherry-picked onto a dozen branches is one fix, and counting SHAs
+# overcounted it 136-fold when this was first measured.
+#
+# FAILS the tick (rc 6), unlike the CI block above. The distinction is who can
+# act: an account-level Actions block is a standing owner action no tick can
+# clear, so failing on it would be daily noise. A commit of ours that no build
+# branch reaches IS this tick's job — the merge step it runs is what puts it
+# there — so a non-zero here means the round did not finish its own work.
+SHIP_OUT="${LOG_DIR}/our-commits-ship.txt"
+ship_rc=0
+if [ -f "${DIR}/check_our_commits_ship.py" ]; then
+    python3 "${DIR}/check_our_commits_ship.py" \
+        --json "${LOG_DIR}/our-commits-ship.json" > "${SHIP_OUT}" 2>&1
+    ship_rc=$?
+    tail -1 "${SHIP_OUT}" | sed 's/^/[ship]   /' | tee -a "${LOG}"
+    grep -E "STRANDED|NOT reachable" "${SHIP_OUT}" | sed 's/^/[ship]   /' | tee -a "${LOG}" || true
+    [ "${ship_rc}" != "0" ] && log "[ship] rc=${ship_rc} — a commit of ours is not reachable from the branch its pin names (vibeic-eda#35)"
+else
+    echo "MISSING: ${DIR}/check_our_commits_ship.py — whether our commits ship was NOT checked" > "${SHIP_OUT}"
+    log "[ship] nothing was checked, which is not a clean result"
+    ship_rc=2
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
@@ -410,5 +444,7 @@ rc=$?
 # cut no image because a fork conflicted has not had a clean day.
 [ "${merge_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=4
 [ "${release_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=5
+# Nor by our own commits failing to reach the branches the image builds from.
+[ "${ship_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=6
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}
