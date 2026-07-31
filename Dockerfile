@@ -94,7 +94,13 @@ FROM ${IMG_FAULT} AS img-fault
 FROM alpine/git AS tb-src
 ARG COCOTB_REF=15f2d1017ed3d20089c32adaf81f0062b3944bae  # branch vibeic/parallel-regression-dispatch (PLL1)
 ARG COCOTB_COVERAGE_REF=be916da99520662f77cfccb8dd17861c8f986ce0  # branch vibeic/integration is V15 crv scalability + V36 rank + V10/V11/V35 bins-closure; union verified per-definition (20/20, 0 dropped)
-ARG PYUVM_REF=d2f1736d7c5fb6338bcef1d0dafa3c17e2892866  # branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
+ARG PYUVM_REF=ca55221c171d841a864f6ff273c797601757eddf  # master tip. Was
+#   d2f1736 (branch vibeic/integration) — branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
+#   Advanced to master in #35: `git cherry` says master carries 1 patch the pin
+#   lacked and the pin carried 0 master lacked, so this is a strict gain. The
+#   patch is 57bdc4a "RAL: restore the back-door access tests that never reached
+#   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
+#   own subject records that the file had gone missing once before.
 ARG SBY_REF=742213689ee1bff65bc34e27011438edf8ce09f2  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
 RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
