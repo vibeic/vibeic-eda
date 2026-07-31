@@ -706,6 +706,30 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # `libs.tech/{librelane,openlane}/rules.openrcx.*.nom[.magic]`). `setRC.tcl` (per-layer
 # set_layer_rc estimate) is staged alongside as `setRC.asap7.tcl` for reference. ASAP7
 # ships ONE (typical) corner only → single-corner `.nom` SPEF (min/max disclosed absent).
+# WHAT THE cbb78ec283a0 PIN CHANGED HERE, measured image-to-image against the
+# published ghcr.io/vibeic/vibeic-eda:0.2.51. The staged inventory is the same
+# 20 files at the same paths; exactly three of them differ, all from the single
+# upstream commit "add Implant layers to asap7sc7p5t_28 lef files":
+#   asap7_tech_1x_201209.lef         830a032810b0 -> 7694bf4f8ef2  (+25/-0)
+#     six new IMPLANT layers: LVTN LVTP RVTN RVTP SLVTN SLVTP.
+#   asap7sc7p5t_28_R_1x_220121a.lef  43b68456f519 -> 4eb73f825720  (+896/-0)
+#     every one of the 212 macros (grep -c '^MACRO ' is 212 before AND after)
+#     gains two OBS rects covering the FULL cell bbox, RVTN on the n half-row
+#     and RVTP on the p half-row: 212 `LAYER RVTN` + 212 `LAYER RVTP`.
+#   setRC.asap7.tcl                  9e5f9ee001cf -> ce6e29fe23b6
+#     staged for reference only; no consumer found.
+# The five RVT/TT Liberty files, the GDS, asap7.lydrc and the OpenRCX rules are
+# BYTE-IDENTICAL across the move, and so are all six nangate45 files.
+#
+# THE OBS ADDITION IS NOT INERT ON PAPER - it had to be measured. A full-bbox
+# obstruction on every cell would collapse detailed routing if any tool took an
+# OBS as a routing blockage without checking that the layer TYPE is IMPLANT.
+# Measured on a real 130-instance place-and-route run on BOTH images:
+#   OpenROAD tech layers 24 -> 30, but ROUTING_LAYER_COUNT stays 10 and every
+#   routing_level is unchanged (M1=1 .. M9=9, Pad=10) - only raw layer numbers
+#   shift by 6; 212 -> 212 masters; detailed_route 0 violations and 0 unrouted
+#   signal nets on both; and the routed DEF is BYTE-IDENTICAL,
+#   sha256 43906192d1bb9471873481cd6667ef657473f2621f68995b08f08c6d2220e2e3.
 COPY --from=nangate45-src /orfs/flow/platforms/asap7 /tmp/asap7
 RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && mkdir -p "$A7"/lib "$A7"/techlef "$A7"/lef "$A7"/gds \
