@@ -40,7 +40,7 @@ ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:9a3cc0c-8b2650
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-da5697
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-75d582
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:0c90e3b-a7d4fd
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
@@ -373,13 +373,59 @@ COPY --from=img-verilator /foss/tools/verilator /foss/tools/verilator
 # Forked on 2026-07-28 and still consumed from the BASE image until now: the
 # fork existed and nothing built from it. check_fork_only cannot see that — it
 # checks what we build and copy, and says in its own docstring that it is blind
-# to the tools the base supplies. The COPY overwrites the base directory in
-# place, so the base build is replaced rather than shadowed on PATH.
+# to the tools the base supplies. A COPY overwrites base files it SHARES A NAME
+# WITH -- it does not remove base files our build does not produce. That
+# distinction was invisible while both builds used the same recipe and became
+# visible the moment Xyce moved from autotools to cmake: the cmake build emits
+# `buildxyceplugin.sh` and a plain `libxyce.so`, so the base's autotools
+# `buildxyceplugin`, `libADMSrlc.*`, `libxyce.a` and `libxyce.so.0 ->
+# libxyce.so.0.0.0` all survived alongside ours. Measured on 0.2.49: 26 files
+# dated Jun 22 in a 381 MB directory, including a `libxyce.so.0` symlink into a
+# 60 MB library from the OLD Trilinos.
+#
+# `ldd` confirmed the shipped Xyce binds our `libxyce.so`, so this was dead
+# weight rather than a wrong-library bug -- but a stale soname beside a live one
+# is a loaded gun, and 300 MB of it ships to every user.
+#
+# So the directories we REPLACE are emptied first. `--from=img-* /dev/null` is
+# not a thing; a RUN that removes them before the COPY is.
 
+RUN rm -rf /foss/tools/gtkwave /foss/tools/xschem /foss/tools/slang \
+           /foss/tools/xyce
 COPY --from=img-gtkwave /foss/tools/gtkwave /foss/tools/gtkwave
 COPY --from=img-xschem /foss/tools/xschem /foss/tools/xschem
 COPY --from=img-slang /foss/tools/slang /foss/tools/slang
 COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
+
+# The replacement must be TOTAL, not partial. Asserting it here means a future
+# recipe change that stops producing a file cannot silently leave the base's
+# version of it behind.
+RUN set -e; \
+    n=$(find /foss/tools/xyce /foss/tools/gtkwave /foss/tools/xschem \
+             /foss/tools/slang ! -newermt "2026-07-01" 2>/dev/null | wc -l); \
+    [ "$n" = "0" ] || { echo "FAIL: $n base-image file(s) survived the overlay:"; \
+        find /foss/tools/xyce /foss/tools/gtkwave /foss/tools/xschem \
+             /foss/tools/slang ! -newermt "2026-07-01" 2>/dev/null | head -20; \
+        exit 1; }; \
+    echo "overlay is total: no base-image residue in the four replaced trees"
+
+# Emptying those trees exposed a link the base image owns. `/foss/tools/bin` is
+# the PATH dir and holds symlinks INTO each tool prefix; the base linked
+# `buildxyceplugin`, the autotools name. Our cmake build installs
+# `buildxyceplugin.sh`, so once the base's copy was removed the link dangled and
+# the repo's own no-dangling-symlink gate refused to ship -- correctly. Repoint
+# it at the name we actually produce, and keep the old name working, because a
+# user's script that calls `buildxyceplugin` should not break over a build-system
+# change inside the image.
+RUN set -e; \
+    if [ -x /foss/tools/xyce/bin/buildxyceplugin.sh ]; then \
+      ln -sf /foss/tools/xyce/bin/buildxyceplugin.sh /foss/tools/bin/buildxyceplugin; \
+      ln -sf /foss/tools/xyce/bin/buildxyceplugin.sh /foss/tools/bin/buildxyceplugin.sh; \
+      echo "buildxyceplugin -> buildxyceplugin.sh (cmake name), old name kept"; \
+    else \
+      echo "FAIL: no buildxyceplugin.sh -- the ADMS plugin builder is missing"; \
+      ls -l /foss/tools/xyce/bin; exit 1; \
+    fi
 
 # The last two of the forked-but-not-built set. yices2 was a lodger in the yosys
 # prefix (upstream builds it with --prefix=$TOOLS/yosys); it now has its own.
@@ -516,9 +562,24 @@ COPY --from=tb-src /tb /opt/vibeic-forks
 # merge: `openroad -version` died with `error while loading shared libraries:
 # libxcb-cursor.so.0`, and ldd showed it as the ONLY unresolved library. The
 # pre-merge binary linked xcb but never this one.
+# libopenmpi-dev is for a CAPABILITY, not for running Xyce. Xyce itself runs
+# fine without it -- the MPI runtime (`libmpi_cxx.so.40`) is already here. What
+# needs the -dev package is `buildxyceplugin`, which COMPILES a user's Verilog-A
+# device against Xyce and links it with `mpicxx`. Linking needs the unversioned
+# `libmpi.so` symlinks that only the -dev package installs.
+#
+# Measured on 0.2.49 and 0.2.50 alike, so this predates the residue cleanup:
+#   /usr/bin/ld: cannot find -lmpi_cxx: No such file or directory
+#   /usr/bin/ld: cannot find -lmpi ... -lopen-rte ... -lopen-pal ...
+# and `buildxyceplugin` printed "Done!" anyway, so the failure shipped as a
+# success. The plugin builder was present, executable, and unable to build a
+# plugin -- exactly the gap between "the file is there" and "the capability is
+# there" that the build-time assertion in tools/xyce/Dockerfile was added for.
+# That assertion checks the builder EXISTS; nothing checked it WORKS.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
       libxcb-cursor0 \
+      libopenmpi-dev \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
@@ -817,3 +878,26 @@ RUN n=0; for f in /foss/tools/bin/*; do \
     done; \
     [ "$n" = "0" ] || { echo "refusing to ship $n dangling symlink(s)"; exit 1; }; \
     echo "no dangling symlinks in /foss/tools/bin"
+
+# THE PLUGIN BUILDER MUST BUILD A PLUGIN, not merely exist.
+#
+# tools/xyce/Dockerfile already asserts `buildxyceplugin.sh` is present and
+# executable. That assertion passed on 0.2.49 and 0.2.50 while the builder could
+# not produce a single .so, because the final image had the MPI RUNTIME but not
+# the linker's `libmpi.so` symlinks -- and the builder printed "Done!" over the
+# link failure, so nothing downstream could tell. Presence was a proxy for
+# capability, and the two had come apart.
+#
+# So build one here, from a Verilog-A resistor written inline, and require the
+# .so to exist. Ohm's law is not being tested; the toolchain is.
+RUN set -e; \
+    d=$(mktemp -d); cd "$d"; \
+    printf '`include "disciplines.vams"\nmodule vgate(p,n);\n  inout p,n; electrical p,n;\n  parameter real r = 1000 from (0:inf);\n  analog begin I(p,n) <+ V(p,n)/r; end\nendmodule\n' > vgate.va; \
+    buildxyceplugin -o vgate vgate.va . > build.log 2>&1 || true; \
+    if [ -f libvgate.so ]; then \
+      echo "xyce plugin builder WORKS: $(ls -l libvgate.so | awk '{print $5}') byte .so"; \
+    else \
+      echo "FAIL: buildxyceplugin produced no shared object"; \
+      tail -25 build.log; exit 1; \
+    fi; \
+    cd /; rm -rf "$d"
