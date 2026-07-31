@@ -45,7 +45,7 @@ variable "TAG" { default = "dev" }
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
 variable "OPENROAD_RECIPE" { default = "78200d" }
-variable "YOSYS_RECIPE" { default = "ccf3a3" }
+variable "YOSYS_RECIPE" { default = "2791f1" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "be7db2" }
 variable "LVS_RECIPE" { default = "e2e322" }
