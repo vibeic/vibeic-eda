@@ -47,7 +47,7 @@ variable "TAG" { default = "dev" }
 variable "OPENROAD_RECIPE" { default = "78200d" }
 variable "YOSYS_RECIPE" { default = "2791f1" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
-variable "NGSPICE_RECIPE" { default = "be7db2" }
+variable "NGSPICE_RECIPE" { default = "5d88d6" }
 variable "LVS_RECIPE" { default = "e2e322" }
 variable "IVERILOG_RECIPE" { default = "d06e70" }
 variable "KLAYOUT_RECIPE" { default = "7cb6ee" }
@@ -55,9 +55,9 @@ variable "VERILATOR_RECIPE" { default = "e5bd58" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
 variable "XSCHEM_RECIPE" { default = "f0bdeb" }
 variable "SLANG_RECIPE" { default = "d87240" }
-variable "XYCE_RECIPE" { default = "b15c9e" }
+variable "XYCE_RECIPE" { default = "da5697" }
 variable "YICES2_RECIPE" { default = "04c594" }
-variable "FAULT_RECIPE" { default = "f625c2" }
+variable "FAULT_RECIPE" { default = "a7d4fd" }
 variable "SV_ELAB_RECIPE" { default = "799906" }
 
 
@@ -67,7 +67,7 @@ variable "SV_ELAB_RECIPE" { default = "799906" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "09d67f08f8b4b2f094c4435fe5e6ad49cec725dc" }
-variable "YOSYS_REF"       { default = "4ae217b389f96e1f88cddd44cbd9ec3ee9d49c4c" }
+variable "YOSYS_REF"       { default = "715cea078ff8d413b6c2dad6b91299d5aa759246" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
@@ -75,7 +75,7 @@ variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
 variable "IVERILOG_REF"    { default = "cf9ff9dcb7c74f90db67ee40fc8905b7992daaef" }
 variable "KLAYOUT_REF"     { default = "39b6a09249a97b9739f46d9404018bbd69675751" }
-variable "VERILATOR_REF"   { default = "556091019a7eebf8a8fd3043c8c8da6defed6fc5" }
+variable "VERILATOR_REF"   { default = "9a3cc0c7dd00d45c0cff7d6314b6c232aa2e6390" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
 variable "XSCHEM_REF" { default = "ff2f4824c1a24e158d218f44db11cc682b4881c8" }
 variable "FAULT_REF" { default = "0c90e3b14b7f1a940f4120da8ac03037847309f4" }

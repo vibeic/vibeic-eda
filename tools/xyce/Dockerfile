@@ -37,7 +37,7 @@
 FROM ubuntu:24.04 AS trilinos
 
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0
+ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0  # branch vibeic/xyce-trilinos-12.12 -- Trilinos 12.12.1. NOT master: the development line removed AztecOO, Amesos, Ifpack, EpetraExt and Isorropia, and trilinos.reconfigure.sh enables all five, so a master pin fails configure. Xyce here is built with autotools, whose minimum is NOT the cmake path 13.5. Branch created 2026-07-31 so the pin hangs off a branch instead of being an orphan.
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git cmake gfortran ca-certificates \
@@ -63,9 +63,7 @@ FROM ubuntu:24.04 AS build
 ARG XYCE_REPO=https://github.com/vibeic/Xyce.git
 ARG XYCE_REF=d72b5846a0397ddf852a49305cb6f395457685ca
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0
-
-# Dependencies READ rather than guessed, after gtkwave cost two rounds of
+ARG TRILINOS_REF=89b8c7f016c247568f7c9c1f32d250c8d2683de0  # branch vibeic/xyce-trilinos-12.12 -- Trilinos 12.12.1. NOT master: the development line removed AztecOO, Amesos, Ifpack, EpetraExt and Isorropia, and trilinos.reconfigure.sh enables all five, so a master pin fails configure. Xyce here is built with autotools, whose minimum is NOT the cmake path 13.5. Branch created 2026-07-31 so the pin hangs off a branch instead of being an orphan.
 # one-at-a-time discovery:
 #   libfl-dev  FlexLexer.h — the flex C++ header ships separately from the flex
 #              binary, and Xyce's ReactionNetwork includes it.
