@@ -111,7 +111,7 @@
     },
     {
       "tool": "OpenROAD-flow-scripts",
-      "role": "Nangate45 platform data — /foss/pdks/nangate45",
+      "role": "open PDK platform data, not a tool: 17 files sparse-checked out of flow/platforms/{nangate45,asap7} and re-staged into /foss/pdks/nangate45 (all 6 files) and /foss/pdks/asap7 (11 of 20). ZERO ORFS flow logic is consumed. Pinned by ARG OPENROAD_FLOW_SCRIPTS_REF in the composing Dockerfile; cbb78ec283a0acc259c5a9d468267a65f47261c3 = upstream master at 2026-08-01, mirrored as branch vibeic-orfs-pin-20260801. We carry NO commits of our own here (git rev-list --count origin/master ^upstream/master = 0), so the fork is a pure mirror.",
       "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts"
     },
     {
