@@ -67,7 +67,7 @@ variable "SV_ELAB_RECIPE" { default = "799906" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "09d67f08f8b4b2f094c4435fe5e6ad49cec725dc" }
-variable "YOSYS_REF"       { default = "8ffdf38383382c77bd53a248bc35676e0348a979" }
+variable "YOSYS_REF"       { default = "4ae217b389f96e1f88cddd44cbd9ec3ee9d49c4c" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
