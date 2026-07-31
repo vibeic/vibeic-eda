@@ -72,7 +72,7 @@ cost this campaign four rounds on one cell.
 Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
 from __future__ import annotations
-import argparse, json, os, subprocess, sys
+import argparse, json, os, re, subprocess, sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -126,10 +126,84 @@ def step1_upstream(g, main, rep):
         rep["upstream"] = f"merged {behind} upstream commit(s)"
 
 
+def _fork_branches(g, main):
+    """Every branch the FORK has, not every branch this clone happens to hold.
+
+    This used to read `refs/heads` — the LOCAL branches. A clone that has only
+    ever checked out master has exactly one local branch, so the step reported
+    "nothing to consolidate" for a fork whose work sat on branches it had never
+    fetched a local ref for.
+
+    Measured 2026-07-31: OpenSTA held 7 of our STA commits (path-based analysis,
+    crosstalk delta-delay, glitch screening, vectorless statistical activity) on
+    `vibeic/daily-merge-2026-07-29` and `vibeic/sta-timing-eco`, and yosys held
+    one on `fix/stat-always-print-cells-row`. Locally OpenSTA had ONE branch:
+    master. The step walked past all eight commits and called the fork clean.
+
+    "Which branches does this fork have" is a question about the fork, so it is
+    asked of `refs/remotes/origin` after a fetch, not of whatever refs a clone
+    was left holding.
+    """
+    sh(*g, "fetch", "origin", "--prune", "--quiet")
+    # Exclude BOTH conventional mainline names, not just the one this clone
+    # happens to have checked out. A dry run caught `asap7sc7p5t_28` offering
+    # `origin/master` for deletion because the local mainline is `main` while the
+    # fork's default branch is `master`; the comparison was against the local
+    # name and the remote default did not match it.
+    protected_names = {"main", "master", main.split("/")[-1]}
+    out_b = []
+    for b in out(*g, "for-each-ref", "--format=%(refname:short)",
+                 "refs/remotes/origin").splitlines():
+        b = b.strip()
+        # A bare `origin` is the remote ref itself, not a branch. The same dry
+        # run offered it for deletion on eight forks.
+        if not b or b == "origin" or b.endswith("/HEAD"):
+            continue
+        if not b.startswith("origin/"):
+            continue
+        if b.split("/", 1)[1] in protected_names:
+            continue
+        out_b.append(b)
+    return out_b
+
+
+def _branches_an_image_pin_depends_on(g, eda_root=EDA):
+    """Branches that contain a commit some image Dockerfile pins.
+
+    Deleting one of these is how a pin becomes an orphan: the commit survives
+    only as long as a branch reaches it, and afterwards the image builds from
+    something git may garbage-collect. That is not hypothetical — `cocotb`'s pin
+    `15f2d1017` is reachable from ZERO branches today for exactly this reason.
+
+    A dry run offered `origin/vibeic/batch-honesty-integration` for deletion,
+    which is the branch `NGSPICE_REF` points into. Pruning it would have
+    manufactured a second cocotb.
+    """
+    pins = set()
+    try:
+        files = list((eda_root / "tools").glob("*/Dockerfile"))
+        if (eda_root / "Dockerfile").is_file():
+            files.append(eda_root / "Dockerfile")
+        for f in files:
+            for m in re.finditer(r"^ARG\s+\w*REF\w*=([0-9a-f]{7,40})",
+                                 f.read_text(errors="replace"), re.M):
+                pins.add(m.group(1))
+    except Exception:                                       # noqa: BLE001
+        return None          # cannot tell -> caller must not delete anything
+    if not pins:
+        return set()
+    keep = set()
+    for b in _fork_branches(g, mainline(g) or "master"):
+        for p in pins:
+            if sh(*g, "merge-base", "--is-ancestor", p, b).returncode == 0:
+                keep.add(b)
+                break
+    return keep
+
+
 def step2_ours(g, main, rep):
     """Our branches -> master, by patch equivalence."""
-    brs = [b for b in out(*g, "for-each-ref", "--format=%(refname:short)",
-                          "refs/heads").splitlines() if b.strip() and b != main]
+    brs = _fork_branches(g, main)
     merged, conflicted, empty = [], [], []
     for b in brs:
         cherry = out(*g, "cherry", main, b)
@@ -224,11 +298,40 @@ def _branches_serving_an_open_upstream_pr(g):
             .get("login", "").lower() == org.lower()}
 
 
+def _is_ours_to_delete(g, b):
+    """A branch WE created as PR scaffolding, not one the fork inherited.
+
+    Reading the fork's real branch list (rather than the local clone's) is what
+    makes the consolidation honest, and it also hands `prune` 138 branches on
+    yosys instead of 9 — almost all of them upstream's own history, copied into
+    the fork when it was created. Deleting those is not "分支太多" cleanup; it
+    is throwing away a public project's branches from our mirror of it.
+
+    So deletion is scoped to what we made: a `vibeic/` branch, or a branch whose
+    tip we authored. Anything inherited is left alone whatever `git cherry`
+    says about it.
+    """
+    name = b.split("/", 1)[-1] if b.startswith("origin/") else b
+    if name.startswith("vibeic/") or b.startswith("origin/vibeic/"):
+        return True
+    au = out(*g, "log", "-1", "--format=%an <%ae>", b).lower()
+    return any(o in au for o in OURS)
+
+
 def step4_prune(g, main, rep, apply):
     """Delete only what git itself says holds nothing unique -- AND what is not
-    serving an open upstream PR."""
-    brs = [b for b in out(*g, "for-each-ref", "--format=%(refname:short)",
-                          "refs/heads").splitlines() if b.strip() and b != main]
+    serving an open upstream PR -- AND what we created in the first place."""
+    brs = [b for b in _fork_branches(g, main) if _is_ours_to_delete(g, b)]
+    pinned = _branches_an_image_pin_depends_on(g)
+    if pinned is None:
+        rep["pruned"] = []
+        rep["prune_skipped"] = ("could not read the image pins; pruned nothing "
+                                "rather than risk orphaning one")
+        rep["needs_human"] = True
+        return
+    if pinned:
+        rep["prune_pin_protected"] = sorted(pinned)
+    brs = [b for b in brs if b not in pinned]
     protected = _branches_serving_an_open_upstream_pr(g)
     if protected is None:
         rep["pruned"] = []
@@ -244,12 +347,16 @@ def step4_prune(g, main, rep, apply):
         cherry = out(*g, "cherry", main, b)
         if [l for l in cherry.splitlines() if l.startswith("+")]:
             continue                      # still holds unique work — keep
-        if b in protected:
+        if (b in protected
+                or b.split("/", 1)[-1] in protected):
             continue                      # head of an open upstream PR — keep
-        if apply and sh(*g, "branch", "-D", b).returncode == 0:
-            sh(*g, "push", "-q", "origin", "--delete", b)
-            gone.append(b)
-        elif not apply:
+        if apply:
+            # `b` may be a remote-tracking name (origin/x) with no local ref.
+            local = b.split("/", 1)[-1] if b.startswith("origin/") else b
+            sh(*g, "branch", "-D", local)
+            if sh(*g, "push", "-q", "origin", "--delete", local).returncode == 0:
+                gone.append(b)
+        else:
             gone.append(b)
     rep["pruned"] = gone
 
