@@ -187,6 +187,47 @@ GAP = """<section>
     </div>
 </section>"""
 
+# --- WHY a pin sits where it sits -------------------------------------------
+# `behind_releases` counts TAGS. A tag count cannot tell a pin that was NEGLECTED
+# from one that is HELD ON PURPOSE, and rendering both in the same visual language
+# tells the reader something false — the same reasoning the tracking-gap block
+# already applies when it excludes the rows that are somebody's deliberate state.
+# The ledger schema has no field for this, so until discover_forks.py records a
+# rationale of its own it lives here, keyed by the ledger's `tool`. A tool with NO
+# entry renders plain: an unexplained gap, which is the honest default.
+#
+#   kind "held"  — deliberate ceiling. Taking the newer release breaks the build.
+#   kind "on-it" — MEASURED to be sitting on the newest release already; the count
+#                  is an artefact of the detector comparing dates, not a real gap.
+#
+# `ours` overrides the ledger's base_release where that field was measured wrong.
+# Every entry below was verified against LIVE upstream on 2026-08-01, and the
+# command that settles it is recorded in `checked` so the next reader can re-run
+# it instead of trusting this table.
+PIN_NOTES = {
+    "Trilinos": {
+        "kind": "held",
+        "ours": "trilinos-release-16-2-1",
+        "en": "Frozen at 16.2.1 on purpose: Trilinos 17.x deletes AztecOO, Amesos, Ifpack, EpetraExt and Isorropia, which Xyce still needs in order to configure and link.",
+        "zh": "刻意凍結在 16.2.1：Trilinos 17.x 已刪除 AztecOO、Amesos、Ifpack、EpetraExt、Isorropia，而 Xyce 至今仍需要它們才能 configure 與連結。",
+        "checked": "gh api repos/trilinos/Trilinos/contents/packages/{aztecoo,ifpack,epetraext,isorropia,amesos}?ref=trilinos-release-16-2-1 -> all present; the same five paths at trilinos-release-17-1-1 -> HTTP 404. Xyce side: XyceSuperBuild.cmake:84,91,92 sets Trilinos_ENABLE_EpetraExt / Isorropia / AztecOO = ON. Our pin cf47480689f4 IS the tag trilinos-release-16-2-1, so the ledger's base_release 'trilinos-release-16-1-0' is wrong.",
+    },
+    "cadical": {
+        "kind": "on-it",
+        "ours": "rel-3.0.1",
+        "en": "Our pin IS rel-3.0.1, and that same commit is upstream master HEAD. The release was tagged the day after the commit was authored, so a date-based check reads it as one we missed.",
+        "zh": "我們鎖的就是 rel-3.0.1，而那個 commit 同時也是上游 master HEAD。該 release 的 tag 是在 commit 隔天才打的，所以用日期比對的檢查把它誤判成我們漏掉的。",
+        "checked": "git ls-remote https://github.com/arminbiere/cadical.git refs/heads/master refs/tags/rel-3.0.1 -> both c60730422e758ef1cebe7aeddf2dda31c996bf04, which is exactly CADICAL_REF. The ledger's base_release 'rel-3.0.0' is wrong.",
+    },
+    "netgen": {
+        "kind": "on-it",
+        "ours": "1.5.323",
+        "en": "The tree we build already IS 1.5.323. Upstream bumps the version on master and only afterwards merges it onto the netgen-1.5 branch to tag it, so the tag can never be an ancestor of what we build.",
+        "zh": "我們建置的那棵樹本來就是 1.5.323。上游是先在 master 改版號，之後才 merge 到 netgen-1.5 分支打 tag，所以那個 tag 永遠不可能是我們建置對象的祖先。",
+        "checked": "tree sha of master HEAD e1528a797cdb == tree sha of 1.5.323^{} bb8a6108b93b == 07a6aa6abca564fec2bc91394591608817e2aeb4 (identical trees). VERSION at our pin 0334b7dfb1d6 reads 1.5.323. The ledger's base_release '1.5.322' is wrong.",
+    },
+}
+
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
@@ -209,6 +250,9 @@ STYLE = """<style>
 .fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
 .fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
 .fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
+.fork-rel{border-left-color:#63a8ea;background:rgba(99,168,234,.07)}
+.fork-rel .fork-gap-list>li{margin-bottom:.55rem}
+.fork-rel .enh-pill{margin-left:.3rem}
 .fork-detail{background:rgba(120,150,180,.05)}
 .fork-detail td{padding:0}
 .fork-detail .inner{padding:1rem 1.2rem;display:none}
@@ -286,6 +330,8 @@ __NAV__
 
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
+
+<div class="fork-gap fork-rel" id="forkRel"></div>
         <p class="fork-caption" id="forkUpdated"></p>
         <p class="fork-caption" id="enhSummary"></p>
 
@@ -318,6 +364,7 @@ __FOOTER__
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
 const ENH = __ENH__;
+const PINNOTES = __PINNOTES__;
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
 
@@ -418,6 +465,56 @@ function enhBlock(tool){
     } else {
       const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span></li>`).join("");
       gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>`;
+    }
+  }
+
+  // WHICH tools have a new release. The KPI above is a bare count, and a count the
+  // reader cannot act on is not a report: it names no tool, no ref and no tag, so
+  // there is nothing to go and look at. Rendered in the same idiom as the
+  // tracking-gap block above. A row here is NOT automatically a gap — the marks
+  // come from PIN_NOTES in build_page.py, where each one cites what was measured.
+  const relTools = LEDGERS.filter(d=>(d.behind_releases||0)>0)
+                          .sort((a,b)=>(b.behind_releases||0)-(a.behind_releases||0));
+  const relEl = document.getElementById("forkRel");
+  if (relEl) {
+    if (!relTools.length) {
+      relEl.innerHTML = '<p data-en="Every tracked tool is on the newest upstream release." data-zh="每個追蹤中的工具都在上游最新的 release 上。">Every tracked tool is on the newest upstream release.</p>';
+    } else {
+      const BADGE = {
+        "held":  {cls:"deferred", en:"HELD BY DESIGN", zh:"刻意凍結"},
+        "on-it": {cls:"done",     en:"ALREADY ON IT",  zh:"其實已經在上面"}
+      };
+      const relRows = relTools.map(d=>{
+        const tool = d.tool||d.repo||"?";
+        const note = PINNOTES[tool];
+        const ours = (note&&note.ours) || d.base_release || d.pinned_ref || "?";
+        const pin  = (d.pinned_ref && d.pinned_ref !== ours)
+          ? ` <span class="fork-mono" style="color:var(--text-muted,#6b7684)">(${esc(d.pinned_ref)})</span>` : "";
+        const latest = d.upstream_latest_release || "?";
+        // A release EQUAL to the one we build is not a release we are missing, no
+        // matter what the detector counted — listing it as "in between" would be a
+        // plain falsehood on the page.
+        const tags = (d.new_releases||[]).map(r=>r&&r.tag).filter(t=>t && t!==ours);
+        const shown = tags.slice(0,6);
+        const more = tags.length > shown.length ? ` +${tags.length-shown.length}` : "";
+        const between = shown.length
+          ? `<span class="enh-note"><span data-en="Tags in between:" data-zh="中間的 tag：">Tags in between:</span> <span class="fork-mono">${esc(shown.join(", ")+more)}</span></span>`
+          : "";
+        const b = note && BADGE[note.kind];
+        const badge = b ? `<span class="enh-pill ${b.cls}" data-en="${esc(b.en)}" data-zh="${esc(b.zh)}">${esc(b.en)}</span>` : "";
+        const why = note ? `<span class="enh-note" data-en="${esc(note.en)}" data-zh="${esc(note.zh)}">${esc(note.en)}</span>` : "";
+        // Only an UNMARKED row may state the count as a fact about us. On a marked
+        // row the count is the detector's, and saying "N releases ahead of us" next
+        // to a ref we measured to be the newest is how a page lies to a reader.
+        const n = d.behind_releases||0;
+        const tail = (b && note.kind==="on-it")
+          ? `<b>${n}</b> <span data-en="counted by the daily check — measured, that gap is zero" data-zh="個是每日檢查數出來的 —— 實際量測，這個缺口是零">counted by the daily check — measured, that gap is zero</span>`
+          : (b && note.kind==="held")
+          ? `<b>${n}</b> <span data-en="counted since our pin — none of them adoptable" data-zh="個是從我們鎖定點之後數的 —— 沒有一個能升上去">counted since our pin — none of them adoptable</span>`
+          : `<b>${n}</b> <span data-en="release(s) ahead of us" data-zh="個 release 在我們前面">release(s) ahead of us</span>`;
+        return `<li><code>${esc(tool)}</code> ${badge} — <span data-en="we build" data-zh="我們建置的是">we build</span> <span class="fork-mono">${esc(ours)}</span>${pin}, <span data-en="upstream latest" data-zh="上游最新">upstream latest</span> <span class="fork-mono">${esc(latest)}</span> — ${tail}${between}${why}</li>`;
+      }).join("");
+      relEl.innerHTML = `<h4 data-en="Tools with a new release (${relTools.length})" data-zh="有新 release 的工具（${relTools.length}）">Tools with a new release (${relTools.length})</h4><ul class="fork-gap-list">${relRows}</ul><p class="fork-gap-note" data-en="Counted on the release feed of the ref each Dockerfile pins (its ARG *_REF). Not every row is a gap. HELD BY DESIGN is a deliberate ceiling — the newer release would break the build, so there is nothing here to close. ALREADY ON IT was measured to be sitting on the newest release already: that count comes from the detector comparing dates rather than ancestry, and is a bookkeeping artefact. A row with no mark is an ordinary, unexplained gap." data-zh="數的是每個 Dockerfile 實際鎖定的那個 ref（該工具的 ARG *_REF）的 release。並不是每一列都是缺口。「刻意凍結」是刻意設下的天花板 —— 升上去會直接讓建置壞掉，這裡沒有東西要補。「其實已經在上面」是經量測就坐在最新 release 上：那個數字來自偵測器比對日期而非 ancestry，是記帳上的假象。沒有標記的那一列，才是一般的、還沒有人解釋的缺口。">Counted on the ref each Dockerfile pins. HELD BY DESIGN is a deliberate ceiling, not a gap.</p>`;
     }
   }
 
@@ -822,6 +919,7 @@ def build(out: Path):
             .replace("__INVENTORY__", inv_html)
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
+            .replace("__PINNOTES__", json.dumps(PIN_NOTES, ensure_ascii=False))
             .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
     html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
     out.write_text(html)
