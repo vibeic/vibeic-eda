@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Refuse a push that the existing checks would have caught (vibeic-eda#42).
+#
+# ONE MACHINE'S WORD. This lives in .git/hooks, does not travel with a clone,
+# and `--no-verify` bypasses it without a trace. It does not replace the 05:30
+# tick, which runs everything on a machine nobody edited; it moves the cheap
+# half of that answer to the moment the mistake is made.
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+[ -x "$ROOT/tools/prepush-gates.sh" ] || {
+  echo "pre-push: tools/prepush-gates.sh missing — NOTHING was checked." >&2
+  echo "          That is a gap, not a pass. Restore it or push deliberately." >&2
+  exit 1
+}
+exec "$ROOT/tools/prepush-gates.sh"

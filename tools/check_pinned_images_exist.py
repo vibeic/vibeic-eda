@@ -33,6 +33,7 @@ look (missing client, unreachable registry, or nothing to compare).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import re
 import shutil
@@ -104,15 +105,31 @@ def main(argv=None) -> int:
               f"This is NOT a clean result.", file=sys.stderr)
         return RC_CANNOT_LOOK
 
+    # CONCURRENT because this now runs before a push. One round-trip per pin is
+    # 65s serially for 16 tools; at 8 it is 8-42s depending on the registry, and
+    # a pre-push check that costs a minute is one people learn to skip. The
+    # queries are independent reads and share no state.
     missing, unknown, ok = [], [], []
-    for arg, tag in pins:
-        res, detail = resolves(client, tag, a.timeout)
-        if res is True:
-            ok.append(tag)
-        elif res is False:
-            missing.append({"arg": arg, "tag": tag, "detail": detail})
-        else:
-            unknown.append({"arg": arg, "tag": tag, "detail": detail})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(resolves, client, tag, a.timeout): (arg, tag)
+                   for arg, tag in pins}
+        for fut in concurrent.futures.as_completed(futures):
+            arg, tag = futures[fut]
+            try:
+                res, detail = fut.result()
+            except Exception as exc:        # a crashed probe is not an answer
+                res, detail = None, f"{type(exc).__name__}: {exc}"
+            if res is True:
+                ok.append(tag)
+            elif res is False:
+                missing.append({"arg": arg, "tag": tag, "detail": detail})
+            else:
+                unknown.append({"arg": arg, "tag": tag, "detail": detail})
+    # completion order is nondeterministic; restore file order so the output is
+    # the same on every run
+    _pos = {tag: i for i, (_a, tag) in enumerate(pins)}
+    missing.sort(key=lambda d: _pos.get(d["tag"], 0))
+    unknown.sort(key=lambda d: _pos.get(d["tag"], 0))
 
     report = {"dockerfile": a.dockerfile, "client": client,
               "checked": len(pins), "resolved": len(ok),

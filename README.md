@@ -63,12 +63,12 @@ and fails on drift.
 
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
-| upstream projects the fork-gatekeeper tracks | **30** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
-| `vibeic/*` sources the build clones | **26** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
-| per-tool build artefacts (`tools/<name>/`) | **14** | `ls tools/*/Dockerfile \| wc -l` |
+| upstream projects the fork-gatekeeper tracks | **36** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| `vibeic/*` sources the build clones | **31** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
+| per-tool build artefacts (`tools/<name>/`) | **16** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
-| source refs pinned across all Dockerfiles | **28** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
-| …of those, pinned to a full commit SHA | **26** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| source refs pinned across all Dockerfiles | **32** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **29** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 
 <!-- /counts:local -->
 
@@ -227,6 +227,15 @@ are upstream refs staged as *data*, not as tools —
   (`asap7sc7p5t_28`, `asap7_pdk_r1p7`, `laurentc2/ASAP7_for_KLayout`) staged for the
   ASAP7 device-LVS source-of-truth. These three track `main`, not a SHA — see
   [Build from source](#build-from-source) on what that means for reproducibility.
+
+**Tracked but not built by us: `sv2v`.** The fork-gatekeeper mirrors
+[`zachjs/sv2v`](https://github.com/zachjs/sv2v) (clone+push, 2026-07-31) so an
+upstream fix is noticed, and the image does NOT build it — `/foss/tools/bin/sv2v`
+is the BASE image's binary. The tool is present and it is somebody else's, which
+is the same shape `eda-tool-fastercap` was in until it was built from our fork:
+`check_fork_only` cannot see it, because the tool IS there and IS the right
+version. Named here so "we track it" is not read as "we ship ours" — that
+distinction is what `check_doc_counts` refuses to let go unstated.
 
 ### Analog auto-layout track (ALIGN)
 
