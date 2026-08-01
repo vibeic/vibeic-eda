@@ -35,15 +35,16 @@ ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-5d88d6
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf9ff9d-d06e70
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7cb6ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:9a3cc0c-8b2650
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d327986-c6e5fa
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-75d582
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:0c90e3b-a7d4fd
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-416e37
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -69,6 +70,7 @@ FROM ${IMG_XYCE} AS img-xyce
 FROM ${IMG_YICES2} AS img-yices2
 FROM ${IMG_SV_ELAB} AS img-sv-elab
 FROM ${IMG_FAULT} AS img-fault
+FROM ${IMG_FASTERCAP} AS img-fastercap
 
 
 # ---------------------------------------------------------------------------
@@ -114,19 +116,58 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
 #   EDUCATIONAL DRC — but it is NOT a manufacturable foundry sign-off (FreePDK45 is a
 #   fictional process; no real foundry, no LVS deck). The iic-osic-tools base ships
 #   sky130/gf180/sg13g2 but NOT nangate45, so we fetch it from the OpenROAD-flow-scripts
-#   `nangate45` platform (the reference open 45nm flow, pinned to the v3.0 tag) and, in
+#   `nangate45` platform (the reference open 45nm flow, pinned by ARG ORFS_REF to the
+#   upstream master tip cbb78ec283a0, 2026-08-01; it was the v3.0 tag through image
+#   0.2.51) and, in
 #   the runtime stage, re-stage it into the open_pdks libs.ref/<scl>/ layout the plugin's
 #   PDK resolvers expect. Registered in the plugin as PDK `nangate45`
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG ORFS_REF=v3.0
+ARG OPENROAD_FLOW_SCRIPTS_REF=cbb78ec283a0acc259c5a9d468267a65f47261c3  # pinned; branch vibeic-orfs-pin-20260801 -- upstream master tip at 2026-08-01, mirrored on our fork
+# We carry NO commits of our own on this repo, measured on the fork:
+#   git rev-list --count origin/master ^upstream/master   ->  0
+#   git rev-list --count upstream/master ^origin/master   ->  0
+# so the move off the v3.0 tag (181e913, 2024-01-04 -- what image 0.2.51
+# and everything before it shipped) is a pure fast-forward of 6159
+# commits. We consume 17 DATA files out of flow/platforms/nangate45 and
+# flow/platforms/asap7, and ZERO ORFS flow logic: nothing in flow/scripts,
+# config.mk, the Makefile or the OpenROAD submodule reaches the image.
+# NOTE for anyone editing this line: BuildKit parses whatever follows the
+# value as further ARG names, so a bare `=` in a trailing comment fails the
+# build with `ARG names can not be blank`. Keep measurements on their own
+# comment lines.
+# A SHA, not a tag or a branch name, for two reasons measured here:
+#   1. `git clone --branch <sha>` is fatal ("Remote branch ... not found"), and
+#      `--branch master` would make the pin float -- a different tree on every
+#      rebuild, which is the reproducibility hole README already calls out.
+#   2. `daily_release.ref_arg_names` only recognises `^ARG <NAME>_REF=<40-hex>`,
+#      so while this held the tag `v3.0` the pin was invisible to the release
+#      bookkeeping: it appears in NO RELEASED.json `pins` map and was never
+#      offered for a version bump. A 40-hex ref closes that half of the gap.
+# The ARG is OPENROAD_FLOW_SCRIPTS_REF, not the older ORFS_REF (image 0.2.51
+# and earlier), for the other half: check_pins_current, daily_release and
+# inbound_survey all pair `ARG <NAME>_REF` with `github.com/vibeic/<repo>` BY
+# NAME, via repo.upper().replace("-","_") -- OPENROAD_FLOW_SCRIPTS. `ORFS`
+# matched nothing, so this fork was absent from every pin-currency count and
+# from RELEASED.json regardless of what the ref held. Nothing passes
+# --build-arg for it (measured: no override in .github/workflows,
+# docker-bake.hcl or any script), so the rename changes no caller.
+# `checkout ${OPENROAD_FLOW_SCRIPTS_REF}` (not `--branch`) is also the form
+# `discover_forks.parse_dockerfile_pins` matches as its [B] shape, so the fork
+# page keeps showing a real pin instead of dropping to default-branch tracking.
 # One clone, both open non-foundry platforms: nangate45 (FreePDK45 45nm) AND
 # asap7 (ASU/ARM 7nm predictive, BSD). Both are re-staged into the open_pdks
-# libs.ref/<scl>/ layout in the runtime stage below.
-RUN git clone --depth 1 --branch ${ORFS_REF} --filter=blob:none --sparse \
-      https://github.com/vibeic/OpenROAD-flow-scripts.git /orfs \
- && git -C /orfs sparse-checkout set flow/platforms/nangate45 flow/platforms/asap7
+# libs.ref/<scl>/ layout in the runtime stage below. sparse-checkout is armed
+# BEFORE the checkout so the blobless fetch never materialises the other
+# platforms or the designs tree.
+RUN git init /orfs -q \
+ && git -C /orfs sparse-checkout init --cone \
+ && git -C /orfs sparse-checkout set flow/platforms/nangate45 flow/platforms/asap7 \
+ && git -C /orfs remote add origin https://github.com/vibeic/OpenROAD-flow-scripts.git \
+ && git -C /orfs fetch --depth 1 --filter=blob:none origin ${OPENROAD_FLOW_SCRIPTS_REF} \
+ && git -C /orfs checkout ${OPENROAD_FLOW_SCRIPTS_REF} \
+ && test "$(git -C /orfs rev-parse HEAD)" = "${OPENROAD_FLOW_SCRIPTS_REF}"
 
 # ---------------------------------------------------------------------------
 # Stage 9b — ASAP7 device-LVS source-of-truth (B1/#174; all PUBLIC + BSD).
@@ -480,7 +521,14 @@ COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.
 COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
 COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
+# FasterCap: the base image ships /foss/tools/bin/FasterCap as a SYMLINK to
+# /foss/tools/rftoolkit/bin/FasterCap. Overwriting the RESOLVED path is what
+# actually replaces the binary users run -- an overlay beside it would leave the
+# symlink pointing at the base's Jun-2 build with every version string matching.
+COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap
+COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
+COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
@@ -648,7 +696,8 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # DRC), so synth / PnR / CTS / STA / area all run at a 7nm-representative node and
 # the asap7 KLayout deck gives an EDUCATIONAL DRC — but it is NOT a manufacturable
 # foundry sign-off (no real foundry, no LVS deck; ASAP7 uses a 4x-scaled drawn
-# geometry convention). Re-stage the ORFS asap7 platform (v3.0) into the open_pdks
+# geometry convention). Re-stage the ORFS asap7 platform (ARG ORFS_REF, master tip
+# cbb78ec283a0 as of 2026-08-01; v3.0 through image 0.2.51) into the open_pdks
 # libs.ref/<scl>/ layout the plugin's PDK resolvers expect. The std-cell library is
 # `asap7sc7p5t` (7.5-track). We stage the DEFAULT RVT (R) VT flavor at the TYPICAL
 # (TT / "TC") corner: asap7 splits Liberty into 5 functional groups (AO / INVBUF /
@@ -666,16 +715,40 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # `libs.tech/{librelane,openlane}/rules.openrcx.*.nom[.magic]`). `setRC.tcl` (per-layer
 # set_layer_rc estimate) is staged alongside as `setRC.asap7.tcl` for reference. ASAP7
 # ships ONE (typical) corner only → single-corner `.nom` SPEF (min/max disclosed absent).
+# WHAT THE cbb78ec283a0 PIN CHANGED HERE, measured image-to-image against the
+# published ghcr.io/vibeic/vibeic-eda:0.2.51. The staged inventory is the same
+# 20 files at the same paths; exactly three of them differ, all from the single
+# upstream commit "add Implant layers to asap7sc7p5t_28 lef files":
+#   asap7_tech_1x_201209.lef         830a032810b0 -> 7694bf4f8ef2  (+25/-0)
+#     six new IMPLANT layers: LVTN LVTP RVTN RVTP SLVTN SLVTP.
+#   asap7sc7p5t_28_R_1x_220121a.lef  43b68456f519 -> 4eb73f825720  (+896/-0)
+#     every one of the 212 macros (grep -c '^MACRO ' is 212 before AND after)
+#     gains two OBS rects covering the FULL cell bbox, RVTN on the n half-row
+#     and RVTP on the p half-row: 212 `LAYER RVTN` + 212 `LAYER RVTP`.
+#   setRC.asap7.tcl                  9e5f9ee001cf -> ce6e29fe23b6
+#     staged for reference only; no consumer found.
+# The five RVT/TT Liberty files, the GDS, asap7.lydrc and the OpenRCX rules are
+# BYTE-IDENTICAL across the move, and so are all six nangate45 files.
+#
+# THE OBS ADDITION IS NOT INERT ON PAPER - it had to be measured. A full-bbox
+# obstruction on every cell would collapse detailed routing if any tool took an
+# OBS as a routing blockage without checking that the layer TYPE is IMPLANT.
+# Measured on a real 130-instance place-and-route run on BOTH images:
+#   OpenROAD tech layers 24 -> 30, but ROUTING_LAYER_COUNT stays 10 and every
+#   routing_level is unchanged (M1=1 .. M9=9, Pad=10) - only raw layer numbers
+#   shift by 6; 212 -> 212 masters; detailed_route 0 violations and 0 unrouted
+#   signal nets on both; and the routed DEF is BYTE-IDENTICAL,
+#   sha256 43906192d1bb9471873481cd6667ef657473f2621f68995b08f08c6d2220e2e3.
 COPY --from=nangate45-src /orfs/flow/platforms/asap7 /tmp/asap7
 RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && mkdir -p "$A7"/lib "$A7"/techlef "$A7"/lef "$A7"/gds \
       /foss/pdks/asap7/libs.tech/klayout/drc \
       /foss/pdks/asap7/libs.tech/librelane \
- && zcat /tmp/asap7/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
- && zcat /tmp/asap7/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib.gz > "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
- && zcat /tmp/asap7/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
- && zcat /tmp/asap7/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib.gz > "$A7"/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib \
- && cp /tmp/asap7/lib/asap7sc7p5t_SEQ_RVT_TT_nldm_220123.lib   "$A7"/lib/ \
+ && zcat /tmp/asap7/lib/NLDM/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
+ && zcat /tmp/asap7/lib/NLDM/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib.gz > "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
+ && zcat /tmp/asap7/lib/NLDM/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz     > "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
+ && zcat /tmp/asap7/lib/NLDM/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib.gz > "$A7"/lib/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib \
+ && cp /tmp/asap7/lib/NLDM/asap7sc7p5t_SEQ_RVT_TT_nldm_220123.lib   "$A7"/lib/ \
  && cp /tmp/asap7/lef/asap7_tech_1x_201209.lef                 "$A7"/techlef/ \
  && cp /tmp/asap7/lef/asap7sc7p5t_28_R_1x_220121a.lef          "$A7"/lef/ \
  && cp /tmp/asap7/gds/asap7sc7p5t_28_R_220121a.gds             "$A7"/gds/ \

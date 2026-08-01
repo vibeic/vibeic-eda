@@ -49,10 +49,20 @@ TOOLS = {
     "xyce":        ["XYCE_REF"],
     "yices2":      ["YICES2_REF"],
     "sv-elab":     ["SV_ELAB_REF"],
+    "fault":       ["FAULT_REF"],
+    # Three sibling repos, because upstream splits FasterCap across three and
+    # its CMakeLists does `add_subdirectory("../LinAlgebra")`. All three refs
+    # are in the tag, so none can move without the release pulling a new image.
+    "fastercap":   ["FASTERCAP_REF", "LINALGEBRA_REF", "GEOMETRY_REF"],
 }
 
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
-BAKE_VAR = re.compile(r'^variable\s+"([A-Z0-9_]+_REF)"\s*\{\s*default\s*=\s*"([^"]+)"', re.M)
+#: Both `*_REF` (the source commit) and `*_RECIPE` (the digest of HOW it is
+#: built). The pattern used to match only `_REF`, so the recipe half of every
+#: tag was invisible to this check on the bake side.
+BAKE_VAR = re.compile(
+    r'^variable\s+"([A-Z0-9_]+(?:_REF|_RECIPE))"\s*\{\s*default\s*=\s*"([^"]+)"',
+    re.M)
 
 
 def args_of(path: Path) -> dict:
@@ -70,9 +80,32 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    bake = dict(BAKE_VAR.findall(bake_p.read_text()))
+    bake_text = bake_p.read_text()
+    bake = dict(BAKE_VAR.findall(bake_text))
     compose = args_of(compose_p)
     bad, compared = [], 0
+
+    # EVERY BUILT TOOL MUST BE IN `TOOLS`, or its pins are simply never
+    # compared and this check reports agreement it never looked for.
+    #
+    # The table above is hand-written, so a tool added to docker-bake.hcl and
+    # not to it gets ZERO pin verification while the summary line still says
+    # "N pin(s) across M tool(s) agree". Measured on main when this was added:
+    # `fault` had been built and unregistered — its pins happened to be
+    # correct, which is the only reason it was latent rather than a second #41.
+    #
+    # Derived from what is BUILT (a bake target that also has a
+    # tools/<name>/Dockerfile), not from the tools directory alone: that
+    # directory can hold scaffolding the bake file does not build, and failing
+    # on those would be a finding about nothing.
+    built = ({m.group(1) for m in re.finditer(r'^target\s+"([\w-]+)"',
+                                              bake_text, re.M)}
+             & {d.parent.name for d in (ROOT / "tools").glob("*/Dockerfile")})
+    for name in sorted(built - set(TOOLS)):
+        bad.append(f"{name}: docker-bake.hcl builds it and tools/{name}/"
+                   f"Dockerfile pins it, but TOOLS in this file does not list "
+                   f"it — so none of its pins are compared and the summary "
+                   f"below counts agreement it never looked for")
 
     for tool, keys in TOOLS.items():
         tf = ROOT / "tools" / tool / "Dockerfile"
@@ -115,7 +148,30 @@ def main() -> int:
         rf = ROOT / "tools" / tool / "Dockerfile"
         if rf.is_file():
             import hashlib
-            want_tag += "-" + hashlib.sha256(rf.read_bytes()).hexdigest()[:6]
+            recipe = hashlib.sha256(rf.read_bytes()).hexdigest()[:6]
+            want_tag += "-" + recipe
+            # THE RECIPE HAS THREE SITES AND THIS CHECKED TWO. The digest is
+            # OF tools/<t>/Dockerfile (1); docker-bake.hcl's <T>_RECIPE decides
+            # what the built image is TAGGED (2); the root Dockerfile decides
+            # what is PULLED (3). Comparing only (1) against (3) leaves (2)
+            # free to drift, and (2) is the mirror of vibe-ic-eda#41: `bake`
+            # publishes under one tag while the composing Dockerfile pulls
+            # another, so the pull fails on an image nobody built. Measured
+            # when this was added: setting FAULT_RECIPE to a wrong value left
+            # this check printing "32 pin(s) across 15 tool(s) agree", rc 0.
+            declared = bake.get(tool.upper().replace("-", "_") + "_RECIPE")
+            compared += 1
+            if declared is None:
+                bad.append(f"{tool}: docker-bake.hcl has no "
+                           f"{tool.upper().replace('-', '_')}_RECIPE, so the "
+                           f"built image is tagged by something this check "
+                           f"cannot see")
+            elif declared != recipe:
+                bad.append(
+                    f"{tool}: the RECIPE digest disagrees — `bake` would "
+                    f"publish a tag the composing Dockerfile does not pull\n"
+                    f"      docker-bake.hcl          {declared}\n"
+                    f"      sha256(tools/{tool}/Dockerfile)[:6]  {recipe}")
         want = f"ghcr.io/vibeic/eda-tool-{tool}:{want_tag}"
         if pulled != want:
             bad.append(f"{tool}: Dockerfile pulls a tag the pins do not produce\n"

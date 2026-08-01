@@ -60,6 +60,11 @@
       "upstream": "AUCOHL/Fault"
     },
     {
+      "tool": "Geometry",
+      "upstream": "ediloren/Geometry",
+      "role": "FasterCap build-time sibling — `add_subdirectory(\"../Geometry\")`. Same story as LinAlgebra."
+    },
+    {
       "tool": "gtkwave",
       "role": "waveform viewer — the format reader behind every VCD/FST our cocotb and iverilog runs emit; a dump this cannot open is a failed measurement, not a passing one",
       "upstream": "gtkwave/gtkwave"
@@ -83,6 +88,11 @@
       "tool": "klayout",
       "role": "DRC / layout-edit / GDS streamout / extraction",
       "upstream": "KLayout/klayout"
+    },
+    {
+      "tool": "LinAlgebra",
+      "upstream": "ediloren/LinAlgebra",
+      "role": "FasterCap build-time sibling — FasterCap's own CMakeLists does `add_subdirectory(\"../LinAlgebra\")`, so FasterCap cannot be built from our fork without it. Mirrored 2026-08-01 (clone+push; the fork API returned 403). Missing it is why the image kept consuming the base image's FasterCap: building from our fork was impossible and nobody had tried."
     },
     {
       "tool": "magic",
@@ -111,7 +121,7 @@
     },
     {
       "tool": "OpenROAD-flow-scripts",
-      "role": "Nangate45 platform data — /foss/pdks/nangate45",
+      "role": "open PDK platform data, not a tool: 17 files sparse-checked out of flow/platforms/{nangate45,asap7} and re-staged into /foss/pdks/nangate45 (all 6 files) and /foss/pdks/asap7 (11 of 20). ZERO ORFS flow logic is consumed. Pinned by ARG OPENROAD_FLOW_SCRIPTS_REF in the composing Dockerfile; cbb78ec283a0acc259c5a9d468267a65f47261c3 = upstream master at 2026-08-01, mirrored as branch vibeic-orfs-pin-20260801. We carry NO commits of our own here (git rev-list --count origin/master ^upstream/master = 0), so the fork is a pure mirror.",
       "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts"
     },
     {

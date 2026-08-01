@@ -63,12 +63,12 @@ and fails on drift.
 
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
-| upstream projects the fork-gatekeeper tracks | **30** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
-| `vibeic/*` sources the build clones | **26** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
-| per-tool build artefacts (`tools/<name>/`) | **14** | `ls tools/*/Dockerfile \| wc -l` |
+| upstream projects the fork-gatekeeper tracks | **36** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| `vibeic/*` sources the build clones | **31** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
+| per-tool build artefacts (`tools/<name>/`) | **16** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
-| source refs pinned across all Dockerfiles | **28** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
-| …of those, pinned to a full commit SHA | **24** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| source refs pinned across all Dockerfiles | **32** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **29** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 
 <!-- /counts:local -->
 
@@ -215,13 +215,27 @@ pins live in three places by design:
 **So `grep -c '^ARG .*_REF=' Dockerfile` is not a fork count.** Four of those ten
 are upstream refs staged as *data*, not as tools —
 
-- `ORFS_REF` (`v3.0`) — an upstream
+- `OPENROAD_FLOW_SCRIPTS_REF` (`cbb78ec283a0`) — an upstream
   [OpenROAD-flow-scripts](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts)
-  tag, cloned sparsely only to stage two open PDK platforms (below).
+  commit, cloned sparsely only to stage two open PDK platforms (below). It is
+  upstream `master` at 2026-08-01, mirrored on our fork as branch
+  `vibeic-orfs-pin-20260801`; we carry no commits of our own on this repo.
+  It was the `v3.0` tag (`181e913`, 2024-01-04) through image `0.2.51`, and the
+  ARG was named `ORFS_REF` until this bump — renamed so the pin-currency
+  programs, which pair an ARG with a fork BY NAME, can finally see it.
 - `ASAP7SC_REF` / `ASAP7PDK_REF` / `ASAP7KL_REF` — upstream ASAP7 *data* repos
   (`asap7sc7p5t_28`, `asap7_pdk_r1p7`, `laurentc2/ASAP7_for_KLayout`) staged for the
   ASAP7 device-LVS source-of-truth. These three track `main`, not a SHA — see
   [Build from source](#build-from-source) on what that means for reproducibility.
+
+**Tracked but not built by us: `sv2v`.** The fork-gatekeeper mirrors
+[`zachjs/sv2v`](https://github.com/zachjs/sv2v) (clone+push, 2026-07-31) so an
+upstream fix is noticed, and the image does NOT build it — `/foss/tools/bin/sv2v`
+is the BASE image's binary. The tool is present and it is somebody else's, which
+is the same shape `eda-tool-fastercap` was in until it was built from our fork:
+`check_fork_only` cannot see it, because the tool IS there and IS the right
+version. Named here so "we track it" is not read as "we ship ours" — that
+distinction is what `check_doc_counts` refuses to let go unstated.
 
 ### Analog auto-layout track (ALIGN)
 
@@ -269,8 +283,8 @@ Remaining plan and open blockers:
 | `gf180mcuD` | iic-osic-tools base | real foundry enablement |
 | `ihp-sg13g2`, `ihp-sg13cmos5l` | iic-osic-tools base | real foundry enablement |
 | `ciel` | iic-osic-tools base | PDK manager |
-| `nangate45` | staged from the ORFS `v3.0` platform tree | **generic / non-foundry** |
-| `asap7` | staged from the ORFS `v3.0` platform tree | **predictive / non-foundry** |
+| `nangate45` | staged from the ORFS `cbb78ec283a0` platform tree (`v3.0` through image `0.2.51`; the six staged files are byte-identical across that move) | **generic / non-foundry** |
+| `asap7` | staged from the ORFS `cbb78ec283a0` platform tree (`v3.0` through image `0.2.51`) | **predictive / non-foundry** |
 
 **Be honest about the last two.** NanGate45 (FreePDK45 Open Cell Library, Si2,
 Apache-2.0) and ASAP7 (ASU/ARM 7nm FinFET predictive, BSD-3-Clause) are
@@ -437,10 +451,11 @@ sign-off deck" — never by process name, SKU, or rule id.
 
 ## Build from source
 
-The image is built entirely from source. **16 of the 20 source refs are pinned to a
+The image is built entirely from source. **17 of the 20 source refs are pinned to a
 full commit SHA** — every tool, ours and upstream alike — so the *tool* half of a
-rebuild is reproducible. The four that are not are the ORFS tag and the three ASAP7
-data refs, all covered under *What is not SHA-pinned* below:
+rebuild is reproducible. The three that are not are the ASAP7 data refs, covered
+under *What is not SHA-pinned* below. (It was 16 of 20 through image `0.2.51`,
+when the ORFS platform tree came in on the `v3.0` tag; that ref is now a SHA.)
 
 ```bash
 git clone https://github.com/vibeic/vibeic-eda.git
@@ -455,9 +470,10 @@ submodule-fetch failures seen on some hosts.
 
 **What is *not* SHA-pinned** — be aware before treating a rebuild as bit-reproducible:
 the runtime base (`hpretl/iic-osic-tools:latest`) and the OpenROAD builder base
-(`openroad/ubuntu24.04-dev:latest`) are `:latest`; `ORFS_REF` is a tag (`v3.0`); and the
-three ASAP7 asset refs default to `main`. Pin them with `--build-arg` if you need an
-exactly-repeatable rebuild.
+(`openroad/ubuntu24.04-dev:latest`) are `:latest`; and the three ASAP7 asset refs
+default to `main`. Pin them with `--build-arg` if you need an exactly-repeatable
+rebuild. (`ORFS_REF`, a tag, used to be a fourth entry on this list; it is now
+`OPENROAD_FLOW_SCRIPTS_REF` and holds a full SHA.)
 
 **Resources:** a full from-source build takes **1–2 h** (the 0.2.26 release run on the
 self-hosted `vibeic-builder` runner ran 1 h 39 m) and needs **≥ 60 GB free disk** — the

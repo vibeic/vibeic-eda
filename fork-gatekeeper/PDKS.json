@@ -56,9 +56,9 @@
     },
     {
       "name": "asap7",
-      "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7 + asap7sc7p5t_28 + laurentc2/ASAP7_for_KLayout",
+      "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts (physical enablement) + The-OpenROAD-Project/asap7_pdk_r1p7 + asap7sc7p5t_28 + laurentc2/ASAP7_for_KLayout (device-LVS golden)",
       "status": "ours",
-      "arrives": "staged by our Dockerfile from three vibeic mirrors, each pinned by ARG",
+      "arrives": "staged by our Dockerfile from FOUR vibeic mirrors: OpenROAD-flow-scripts (ARG OPENROAD_FLOW_SCRIPTS_REF = cbb78ec283a0acc259c5a9d468267a65f47261c3, the v3.0 tag through image 0.2.51) supplies the physical enablement — 5 RVT/TT Liberty + tech LEF + cell LEF + GDS + KLayout DRC + OpenRCX rules, 11 of the 20 files — and asap7sc7p5t_28 / asap7_pdk_r1p7 / ASAP7_for_KLayout (ARG ASAP7SC_REF / ASAP7PDK_REF / ASAP7KL_REF) supply the device-LVS source-of-truth, the other 9.",
       "version_file": null,
       "version_pattern": null,
       "read_by": "the asap7 flow (predictive 7nm, not manufacturable)"
@@ -67,7 +67,7 @@
       "name": "nangate45",
       "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts",
       "status": "ours",
-      "arrives": "staged by our Dockerfile from the vibeic ORFS mirror, pinned by ARG ORFS_REF",
+      "arrives": "staged by our Dockerfile from the vibeic ORFS mirror, pinned by ARG OPENROAD_FLOW_SCRIPTS_REF (cbb78ec283a0acc259c5a9d468267a65f47261c3 = upstream master at 2026-08-01, mirrored as branch vibeic-orfs-pin-20260801; the ARG was ORFS_REF holding the v3.0 tag through image 0.2.51). All six staged files are byte-identical across that move.",
       "version_file": null,
       "version_pattern": null,
       "read_by": "the nangate45 flow (FreePDK45, educational DRC only)"
