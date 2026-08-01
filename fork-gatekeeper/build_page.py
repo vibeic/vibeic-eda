@@ -282,7 +282,7 @@ STYLE = """<style>
 .enh-r.enh-done .enh-feat{color:var(--text-secondary,#3b4259);font-weight:400}
 </style>"""
 
-PAGE = """<!DOCTYPE html>
+PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
