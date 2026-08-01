@@ -112,11 +112,20 @@ def tree_basis(eda_root: Path) -> dict:
     # act on.
     dirty = [l.split(None, 1)[1].strip() for l in status.splitlines()
              if l.strip() and len(l.split(None, 1)) == 2]
-    behind = None
-    cnt = _git("rev-list", "--count", "HEAD..@{u}")
-    if cnt is not None and cnt.isdigit():
-        behind = int(cnt)
-    return {"head": head, "dirty_pin_files": dirty, "behind": behind}
+    # `@{u}` is UNDEFINED on a detached HEAD and on a branch with no upstream —
+    # and a detached worktree pinned to `origin/main` is exactly how this check
+    # should be run when the shared checkout is dirty, so the one tree we most
+    # want a currency statement about was the one that produced none. Fall back
+    # to the remote-tracking ref by name, and NAME which ref answered: "0 behind
+    # origin/main" and "I could not tell" must not print the same way.
+    behind, behind_basis = None, None
+    for ref in ("@{u}", "origin/main", "origin/master"):
+        cnt = _git("rev-list", "--count", f"HEAD..{ref}")
+        if cnt is not None and cnt.isdigit():
+            behind, behind_basis = int(cnt), ref
+            break
+    return {"head": head, "dirty_pin_files": dirty, "behind": behind,
+            "behind_basis": behind_basis}
 
 
 def pinned_refs(eda_root: Path) -> Dict[str, str]:
@@ -333,6 +342,41 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     return None
 
 
+def print_basis(basis: dict) -> None:
+    """State WHICH TREE answered, on every exit path.
+
+    Printed before the refusal too: "nothing was compared" and "nothing was
+    compared IN A TREE 15 COMMITS BEHIND" send a reader to different places, and
+    the second is the one that has actually happened.
+    """
+    _b = []
+    if basis.get("head"):
+        _b.append(f"HEAD {basis['head']}")
+    if basis.get("behind"):
+        _b.append(f"{basis['behind']} commit(s) BEHIND {basis['behind_basis']}")
+    elif basis.get("behind") == 0:
+        _b.append(f"up to date with {basis['behind_basis']} "
+                  f"(the local remote-tracking ref, as of the last fetch)")
+    elif basis.get("head"):
+        # Stated, because silence here reads as "up to date" — the one reading
+        # a stale checkout most needs not to be given.
+        _b.append("could NOT establish whether this tree is behind a remote "
+                  "(no upstream and no origin/main|master) — its currency is "
+                  "UNKNOWN, not confirmed")
+    if basis.get("dirty_pin_files"):
+        _b.append(f"{len(basis['dirty_pin_files'])} UNCOMMITTED pin file(s): "
+                  + ", ".join(basis["dirty_pin_files"][:4]))
+    if basis.get("note"):
+        _b.append(basis["note"])
+    print(f"  basis: this verdict describes the WORKING TREE — "
+          + ("; ".join(_b) if _b else "clean and current"))
+    if (basis.get("behind") or basis.get("dirty_pin_files")
+            or (basis.get("head") and basis.get("behind") is None)):
+        print("  ^ so it is NOT a statement about what SHIPS: a stale checkout "
+              "invents staleness that is not shipping, and an uncommitted "
+              "advance hides staleness that is.")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--eda-root",
@@ -340,8 +384,10 @@ def main(argv=None) -> int:
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
 
+    basis = tree_basis(Path(a.eda_root))
     pins = pinned_refs(Path(a.eda_root))
     if not pins:
+        print_basis(basis)
         print("[NOT CHECKED] no pinned refs found — nothing was compared, which "
               "is not a clean result", file=sys.stderr)
         return RC_NOTHING
@@ -360,23 +406,7 @@ def main(argv=None) -> int:
                        if r["verdict"] != "UPSTREAM_AVAILABLE")
     upstream_total = sum(r.get("behind", 0) for r in available)
 
-    basis = tree_basis(Path(a.eda_root))
-    _b = []
-    if basis.get("head"):
-        _b.append(f"HEAD {basis['head']}")
-    if basis.get("behind"):
-        _b.append(f"{basis['behind']} commit(s) BEHIND its remote")
-    if basis.get("dirty_pin_files"):
-        _b.append(f"{len(basis['dirty_pin_files'])} UNCOMMITTED pin file(s): "
-                  + ", ".join(basis["dirty_pin_files"][:4]))
-    if basis.get("note"):
-        _b.append(basis["note"])
-    print(f"  basis: this verdict describes the WORKING TREE — "
-          + ("; ".join(_b) if _b else "clean and current"))
-    if basis.get("behind") or basis.get("dirty_pin_files"):
-        print("  ^ so it is NOT a statement about what SHIPS: a stale checkout "
-              "invents staleness that is not shipping, and an uncommitted "
-              "advance hides staleness that is.")
+    print_basis(basis)
     print(f"check_pins_current: {len(results)} pin(s), "
           f"{len(results) - len(bad) - len(available)} at their branch tip, "
           f"{len(bad)} not, {len(available)} holding an upstream version "
