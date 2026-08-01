@@ -127,13 +127,55 @@ def test_tags_are_requested_even_when_releases_answered(monkeypatch):
 
 
 def test_tags_by_date_survives_a_failing_gh(monkeypatch):
-    """A GraphQL failure must degrade to "no tags", never raise into the tick."""
+    """A GraphQL failure must not raise into the tick — and must not answer.
+
+    THIS TEST OUTLIVED ITS OWN TRUTH. It asserted `== []` on a failing `gh`,
+    which is precisely the conflation vibeic-eda#49 was opened to remove: `[]`
+    also means "asked, and this repository has no tags", so `_releases` merged a
+    could-not-read feed as a repo with nothing to be behind and published it in
+    the `measured` status. #49 changed the contract to `None` = COULD NOT ASK,
+    and left this test asserting the old one — a red suite defending the defect
+    it was written against.
+
+    Both halves are pinned now, because "returns None" alone is satisfied by a
+    function that never answers at all.
+    """
     class R:
         returncode = 1
         stdout = ""
         stderr = "boom"
     monkeypatch.setattr(df.subprocess, "run", lambda *a, **k: R())
+    assert df._tags_by_date("x/y") is None
+
+
+def test_a_repo_with_no_tags_is_not_the_same_answer_as_a_failed_ask(monkeypatch):
+    """THE ACCEPT CASE, and the reason the distinction is worth having: a real
+    empty tag feed still returns `[]`."""
+    class R:
+        returncode = 0
+        stderr = ""
+        stdout = '{"data":{"repository":{"refs":{"nodes":[]}}}}'
+    monkeypatch.setattr(df.subprocess, "run", lambda *a, **k: R())
     assert df._tags_by_date("x/y") == []
+
+
+def test_unreadable_json_is_also_a_failed_ask(monkeypatch):
+    """The third failure path #49 names. A 0 exit code with a body that is not
+    the expected shape is still "could not ask"."""
+    class R:
+        returncode = 0
+        stderr = ""
+        stdout = "not json"
+    monkeypatch.setattr(df.subprocess, "run", lambda *a, **k: R())
+    assert df._tags_by_date("x/y") is None
+
+
+def test_a_failed_ask_does_not_raise_into_the_caller(monkeypatch):
+    """The half the old test was right about: whatever the answer, `_releases`
+    must tolerate it. `for t in (tags or [])` is what makes `None` safe."""
+    monkeypatch.setattr(df, "_tags_by_date", lambda *a, **k: None)
+    monkeypatch.setattr(df, "gh", lambda *a, **k: None)
+    df._releases("x/y")            # must not raise
 
 
 def test_tags_by_date_reads_an_annotated_tag(monkeypatch):
