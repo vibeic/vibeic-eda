@@ -3767,7 +3767,13 @@ def test_a_fork_behind_by_commits_alone_is_a_candidate():
     gate = _re.search(r"behind = \((.{0,200}?)\n.{0,120}?\)", gk_src, _re.S)
     assert gate, "the candidate gate is no longer a named `behind` expression"
     body = gate.group(0)
-    assert "behind_releases" in body and "behind_commits" in body, (
+    # The release side is now read through `release_gap()` — the one reader that
+    # screens a null out of the arithmetic instead of coercing it to zero — so the
+    # gate names the value it bound rather than the raw field. The property is
+    # unchanged and still asserted: BOTH counters take part in the OR.
+    assert ("behind_releases" in body or "_gap" in body), (
+        f"the candidate gate no longer reads the release gap at all:\n{body}")
+    assert "behind_commits" in body, (
         f"the candidate gate does not OR both counters:\n{body}")
 
 
@@ -3776,7 +3782,14 @@ def test_a_genuinely_level_fork_is_still_clean():
     calls every fork a candidate, which would make the tick assess the whole
     fleet forever. Both counters at zero must still be clean."""
     as_src = Path(A.__file__).read_text()
-    assert '(led.get("behind_releases") or 0) == 0' in as_src
+    # `(led.get("behind_releases") or 0) == 0` is gone ON PURPOSE: it read a null
+    # — a gap nobody could measure, or one there was nothing to measure — as a
+    # measured zero, and this gate is exactly where that became a published
+    # CLEAN. The clean gate still requires the release gap to be zero; it now
+    # requires it to be a zero somebody measured.
+    assert "rel_gap == 0" in as_src, (
+        "the clean check no longer requires the release gap to be zero, or it "
+        "stopped going through the one reader that screens out a null")
     assert '(led.get("behind_commits") or 0) == 0' in as_src, (
         "the clean check no longer requires commit distance to be zero too, so "
         "either every fork is dirty or the commit gap is ignored")

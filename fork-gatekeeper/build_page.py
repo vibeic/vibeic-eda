@@ -187,6 +187,38 @@ GAP = """<section>
     </div>
 </section>"""
 
+# --- WHY a pin sits where it sits -------------------------------------------
+# A release count cannot tell a pin that was NEGLECTED from one that is HELD ON
+# PURPOSE, and rendering both in the same visual language tells the reader
+# something false — the same reasoning the tracking-gap block already applies
+# when it excludes the rows that are somebody's deliberate state. The ledger
+# schema has no field for a RATIONALE, so until discover_forks.py records one it
+# lives here, keyed by the ledger's `tool`. A tool with NO entry renders plain:
+# an unexplained gap, which is the honest default.
+#
+#   kind "held" — deliberate ceiling. Taking the newer release breaks the build.
+#
+# WHAT WAS REMOVED HERE, AND WHY (2026-08-01). This table also carried a kind
+# "on-it" — "measured to be sitting on the newest release already; the count is
+# an artefact of the detector comparing dates" — for two tools, plus an `ours`
+# override that replaced the ledger's `base_release` on all three rows. That was
+# a DISPLAY-LAYER CORRECTION of a wrong MEASUREMENT, and it left the page arguing
+# with itself: the table cell said 1, the prose under it said the 1 was not real,
+# and the KPI at the top still counted it. The measurement is now made correctly
+# where the number is produced (`discover_forks.classify_releases`), which
+# reports 0 for those two and names the release we actually build as
+# `base_release`, so the rows no longer appear and the overrides have nothing
+# left to override. A note here may explain a real gap; it may never contradict
+# a number this page prints.
+PIN_NOTES = {
+    "Trilinos": {
+        "kind": "held",
+        "en": "Frozen at 16.2.1 on purpose: Trilinos 17.x deletes AztecOO, Amesos, Ifpack, EpetraExt and Isorropia, which Xyce still needs in order to configure and link.",
+        "zh": "刻意凍結在 16.2.1：Trilinos 17.x 已刪除 AztecOO、Amesos、Ifpack、EpetraExt、Isorropia，而 Xyce 至今仍需要它們才能 configure 與連結。",
+        "checked": "gh api repos/trilinos/Trilinos/contents/packages/{aztecoo,ifpack,epetraext,isorropia,amesos}?ref=trilinos-release-16-2-1 -> all present; the same five paths at trilinos-release-17-1-1 -> HTTP 404. Xyce side: XyceSuperBuild.cmake:84,91,92 sets Trilinos_ENABLE_EpetraExt / Isorropia / AztecOO = ON.",
+    },
+}
+
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
@@ -209,6 +241,9 @@ STYLE = """<style>
 .fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
 .fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
 .fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
+.fork-rel{border-left-color:#63a8ea;background:rgba(99,168,234,.07)}
+.fork-rel .fork-gap-list>li{margin-bottom:.55rem}
+.fork-rel .enh-pill{margin-left:.3rem}
 .fork-detail{background:rgba(120,150,180,.05)}
 .fork-detail td{padding:0}
 .fork-detail .inner{padding:1rem 1.2rem;display:none}
@@ -286,6 +321,8 @@ __NAV__
 
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
+
+<div class="fork-gap fork-rel" id="forkRel"></div>
         <p class="fork-caption" id="forkUpdated"></p>
         <p class="fork-caption" id="enhSummary"></p>
 
@@ -318,8 +355,44 @@ __FOOTER__
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
 const ENH = __ENH__;
+const PINNOTES = __PINNOTES__;
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
+// THREE CLAIMS, THREE RENDERINGS. `behind_releases` is null under TWO different
+// statuses and they are different sentences:
+//
+//   measured    — every upstream release was checked; the number is the answer,
+//                 and 0 means "checked, nothing there".
+//   unknown     — at least one release could not be decided. There is no number.
+//   not-probed  — the question has no subject: nothing pins this tool into the
+//                 image, or the upstream has published no release and no tag.
+//                 ELEVEN rows on the corpus the day this was written.
+//
+// `(d.behind_releases)||0` collapsed the last two onto the first and printed a
+// confident "0" pill for a row nobody compared against anything — the same
+// fabrication as the count this whole page was rebuilt to stop making. A test
+// greps the page for the coercion and executes these four readers in node
+// against all three statuses.
+const relStatus = d => {
+  if(!d) return "not-probed";
+  const s = d.behind_releases_status;
+  if(s === "measured" || s === "unknown" || s === "not-probed") return s;
+  if(d.behind_releases == null)
+    return (d.undetermined_releases||[]).length > 0 ? "unknown" : "not-probed";
+  return "measured";
+};
+const relUnknown = d => relStatus(d) === "unknown";
+const relGap = d => relStatus(d) === "measured"
+  ? (typeof (d && d.behind_releases) === "number" ? d.behind_releases : null)
+  : null;
+const relPill = d => {
+  const s = relStatus(d);
+  if(s === "unknown")
+    return `<span class="pilln behind" title="containment undetermined — not a count">?</span>`;
+  if(s === "not-probed")
+    return `<span class="pilln zero" title="no release was probed — nothing pins this tool, or the upstream publishes no release or tag">n/a</span>`;
+  return pill(relGap(d), 'behind');
+};
 
 // per-tool enhancement backlog (capability matrix vs commercial EDA), grouped by area
 const ENH_ICON = {done:"✅", todo:"⬜", deferred:"🔷", external:"⚪"};
@@ -394,7 +467,11 @@ function enhBlock(tool){
   // fine by design, because the default branch takes part in no build.
   const gapTools = LEDGERS.filter(d=>(d.ahead||0)===0 && (d.behind_commits||0)>0)
                           .sort((a,b)=>(b.behind_commits||0)-(a.behind_commits||0));
-  const withNewRel = LEDGERS.filter(d=>(d.behind_releases||0)>0).length;
+  const withNewRel = LEDGERS.filter(d=>relGap(d)>0).length;
+  // Counted and stated SEPARATELY, never folded into the number beside it: a tool
+  // whose release containment could not be decided is neither "has a new release"
+  // nor "is level with upstream", and the KPI has to be able to say so.
+  const unknownRel = LEDGERS.filter(d=>d.integrated && relUnknown(d)).length;
   const lastCheck = REPORT ? (REPORT.date||"") : "—";
   const enhVals = Object.values(ENH||{});
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
@@ -406,7 +483,9 @@ function enhBlock(tool){
     [totalPatches, {en:"Patches carried",zh:"揹著的補丁"}],
     [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
     [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
-    [withNewRel, {en:"Tools with a new release",zh:"有新 release 的工具"}],
+    [withNewRel + (unknownRel?` +${unknownRel}?`:``),
+     {en:"Tools with a new release (+N? = containment undetermined)",
+      zh:"有新 release 的工具（+N? = 無法判定是否已包含）"}],
     [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
@@ -421,9 +500,78 @@ function enhBlock(tool){
     }
   }
 
+  // WHICH tools have a new release. The KPI above is a bare count, and a count the
+  // reader cannot act on is not a report: it names no tool, no ref and no tag, so
+  // there is nothing to go and look at. Rendered in the same idiom as the
+  // tracking-gap block above. A row here is NOT automatically a gap — the marks
+  // come from PIN_NOTES in build_page.py, where each one cites what was measured.
+  //
+  // Rows whose containment could not be DECIDED are listed here too, and they are
+  // listed as undecided: no number, a distinct badge, and the literal error that
+  // stopped the measurement. Leaving them out would publish "every other tool is
+  // level with upstream" on evidence nobody has.
+  const relTools = LEDGERS.filter(d=>relGap(d)>0 || (d.integrated && relUnknown(d)))
+                          .sort((a,b)=>(relGap(b)==null?1e9:relGap(b))
+                                      -(relGap(a)==null?1e9:relGap(a)));
+  const relEl = document.getElementById("forkRel");
+  if (relEl) {
+    if (!relTools.length) {
+      relEl.innerHTML = '<p data-en="Every tracked tool is on the newest upstream release." data-zh="每個追蹤中的工具都在上游最新的 release 上。">Every tracked tool is on the newest upstream release.</p>';
+    } else {
+      const BADGE = {
+        "held":  {cls:"deferred", en:"HELD BY DESIGN", zh:"刻意凍結"}
+      };
+      const relRows = relTools.map(d=>{
+        const tool = d.tool||d.repo||"?";
+        const note = PINNOTES[tool];
+        // `base_release` is now the newest release MEASURED to be contained in the
+        // ref we build, so the page states what the ledger measured. The override
+        // that used to sit in front of it here was a display-layer repair of a
+        // wrong number, and it made the row disagree with its own count.
+        const ours = d.base_release || d.pinned_ref || "?";
+        const pin  = (d.pinned_ref && d.pinned_ref !== ours)
+          ? ` <span class="fork-mono" style="color:var(--text-muted,#6b7684)">(${esc(d.pinned_ref)})</span>` : "";
+        const latest = d.upstream_latest_release || "?";
+        const unk = relUnknown(d);
+        // A release EQUAL to the one we build is not a release we are missing, no
+        // matter what the detector counted — listing it as "in between" would be a
+        // plain falsehood on the page.
+        const tags = (d.new_releases||[]).map(r=>r&&r.tag).filter(t=>t && t!==ours);
+        const shown = tags.slice(0,6);
+        const more = tags.length > shown.length ? ` +${tags.length-shown.length}` : "";
+        const between = shown.length
+          ? `<span class="enh-note"><span data-en="Tags in between:" data-zh="中間的 tag：">Tags in between:</span> <span class="fork-mono">${esc(shown.join(", ")+more)}</span></span>`
+          : "";
+        // The releases nobody could decide, named with the error that stopped each
+        // one, so the reader's next move is a command rather than a guess.
+        const und = (d.undetermined_releases||[]);
+        const undTxt = und.length
+          ? `<span class="enh-note"><span data-en="Undetermined:" data-zh="無法判定：">Undetermined:</span> <span class="fork-mono">${esc(und.slice(0,4).map(u=>`${u&&u.tag||"?"} — ${u&&u.error||"?"}`).join(" · "))}${und.length>4?` +${und.length-4}`:``}</span></span>`
+          : "";
+        const b = note && BADGE[note.kind];
+        const badge = unk
+          ? `<span class="enh-pill deferred" data-en="CONTAINMENT UNDETERMINED" data-zh="無法判定是否已包含">CONTAINMENT UNDETERMINED</span>`
+          : (b ? `<span class="enh-pill ${b.cls}" data-en="${esc(b.en)}" data-zh="${esc(b.zh)}">${esc(b.en)}</span>` : "");
+        const why = note ? `<span class="enh-note" data-en="${esc(note.en)}" data-zh="${esc(note.zh)}">${esc(note.en)}</span>` : "";
+        // An undecided row states NO NUMBER. It used to be possible for this page
+        // to print a count and then explain, in the prose beneath it, that the
+        // count was not real; a page that argues with itself has already lost the
+        // reader it was written for.
+        const n = relGap(d);
+        const tail = unk
+          ? `<span data-en="the release gap could not be measured — ${und.length} upstream release(s) could not be checked for containment, so this is neither 0 nor a count" data-zh="這個 release 缺口量不出來 —— 有 ${und.length} 個上游 release 無法判定是否已包含，所以它既不是 0 也不是一個數字">the release gap could not be measured — ${und.length} upstream release(s) could not be checked for containment, so this is neither 0 nor a count</span>`
+          : (b && note.kind==="held")
+          ? `<b>${n}</b> <span data-en="measured to carry work we do not have — none of them adoptable" data-zh="經量測確實帶有我們沒有的東西 —— 但沒有一個能升上去">measured to carry work we do not have — none of them adoptable</span>`
+          : `<b>${n}</b> <span data-en="release(s) ahead of us" data-zh="個 release 在我們前面">release(s) ahead of us</span>`;
+        return `<li><code>${esc(tool)}</code> ${badge} — <span data-en="we build" data-zh="我們建置的是">we build</span> <span class="fork-mono">${esc(ours)}</span>${pin}, <span data-en="upstream latest" data-zh="上游最新">upstream latest</span> <span class="fork-mono">${esc(latest)}</span> — ${tail}${between}${undTxt}${why}</li>`;
+      }).join("");
+      relEl.innerHTML = `<h4 data-en="Tools with a new release (${relTools.length})" data-zh="有新 release 的工具（${relTools.length}）">Tools with a new release (${relTools.length})</h4><ul class="fork-gap-list">${relRows}</ul><p class="fork-gap-note" data-en="A release counts here only when it was MEASURED to carry work the ref each Dockerfile pins does not already contain — resolved to its target commit, deduplicated by commit, then tested by ancestry and by whether it changes any file relative to our pin. No publication date takes part. Not every row is a gap: HELD BY DESIGN is a deliberate ceiling — the newer release would break the build, so there is nothing here to close. CONTAINMENT UNDETERMINED means the check could not run for some release; that row has no count at all, and it is not zero. A row with no mark is an ordinary, unexplained gap." data-zh="一個 release 只有在「經量測確定帶有我們鎖定的 ref 尚未包含的內容」時才會被算進來 —— 先解析到它指向的 commit、依 commit 去重，再用 ancestry 以及「相對於我們的 pin 是否改到任何檔案」來測。完全不看發布日期。並不是每一列都是缺口：「刻意凍結」是刻意設下的天花板 —— 升上去會直接讓建置壞掉，這裡沒有東西要補。「無法判定是否已包含」代表某些 release 的檢查跑不起來；那一列根本沒有數字，而且它不等於零。沒有標記的那一列，才是一般的、還沒有人解釋的缺口。">A release counts here only when it was MEASURED to carry work our pinned ref does not contain. CONTAINMENT UNDETERMINED is not zero.</p>`;
+    }
+  }
+
   const rows = LEDGERS.map((d,i)=>{
     const ahead = d.ahead||0;
-    const newRel = d.behind_releases||0;
+    const newRel = relGap(d);   // null = undetermined; never coerced to 0 here
     const last = (d.sync_log&&d.sync_log.length)?d.sync_log[d.sync_log.length-1]:null;
     const verd = last ? `<span class="fork-verd ${esc(last.verdict||'')}">${esc(last.verdict||'')}</span> <span style="color:var(--text-muted,#6b7684)">${esc((last.date||'').slice(0,10))}</span>` : '<span style="color:var(--text-muted,#6b7684)">—</span>';
     // HOW the ref is pinned into the image. Almost every fork is a Dockerfile
@@ -444,7 +592,7 @@ function enhBlock(tool){
       <td>${pill(ahead,'ahead')}</td>
       <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
-      <td>${pill(newRel,'behind')}</td>
+      <td>${relPill(d)}</td>
       <td>${verd}</td>
     </tr>`;
     const commit = c => `<div class="fork-commit"><a class="sha" href="${esc(c.url||'#')}" target="_blank" rel="noopener">${esc(c.sha)}</a><span>${esc(c.title)}</span><span style="margin-left:auto">${esc(c.date)}</span></div>`;
@@ -453,9 +601,62 @@ function enhBlock(tool){
       : (d.integrated
           ? `<h5 data-en="Patches we carry" data-zh="我們揹著的補丁">Patches we carry</h5><p class="fork-caption" data-en="Pinned to upstream with no local patches yet." data-zh="鎖定於上游，尚無本地補丁。">Pinned to upstream with no local patches yet.</p>`
           : `<h5 data-en="Not layered into the image" data-zh="未納入 image">Not layered into the image</h5><p class="fork-caption" data-en="Forked, but the image uses upstream directly (no fix warranted) — nothing to sync." data-zh="已 fork，但 image 直接用上游（無需修補）— 無需同步。">Forked, but the image uses upstream directly — nothing to sync.</p>`);
-    const rel = (d.new_releases&&d.new_releases.length)
-      ? `<h5 style="margin-top:1rem" data-en="New upstream releases to integrate (${newRel})" data-zh="待整合的上游新 release（${newRel}）">New upstream releases to integrate (${newRel})</h5>` + d.new_releases.map(r=>`<div class="fork-commit"><span class="sha">${esc(r.tag||'')}</span><span style="margin-left:auto">${esc(r.date||'')}</span></div>`).join("")
-      : (d.integrated?`<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="On the latest upstream release." data-zh="已在上游最新 release。">On the latest upstream release.</p>`:"");
+    // The releases nobody could DECIDE, in the detail drawer, with the literal
+    // error each one failed on. Rendered BEFORE the "on the latest upstream
+    // release" reassurance, and suppressing it: a fork with an undecided release
+    // is not a fork that was checked and found level.
+    const undRows = (d.undetermined_releases||[]);
+    const undBlock = undRows.length
+      ? `<h5 style="margin-top:1rem" data-en="Releases whose containment could not be determined (${undRows.length})" data-zh="無法判定是否已包含的 release（${undRows.length}）">Releases whose containment could not be determined (${undRows.length})</h5>`
+        + undRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc(r&&r.error||'undetermined')}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
+      : "";
+    // Releases whose work is counted ONCE, under the release that carries it —
+    // prereleases of a release we are already counting. They are NOT contained in
+    // the ref we build (two of them measured 225 and 15 commits ahead of our pin),
+    // so they get a heading that says what they are instead of one that says we
+    // already have them.
+    const foldRows = (d.folded_releases||[]);
+    const foldBlock = foldRows.length
+      ? `<h5 style="margin-top:1rem" data-en="Prereleases counted under a later release (${foldRows.length})" data-zh="併入後續 release 一起計算的 prerelease（${foldRows.length}）">Prereleases counted under a later release (${foldRows.length})</h5>`
+        + foldRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc((r&&r.why)||('counted under '+((r&&r.counted_under)||'?')))}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
+      : "";
+    // Releases our pinned ref CARRIES — every commit they have exists in our ref
+    // under a different sha — while our ref has since moved past them, so merging
+    // one is not a no-op. They are not work we lack and are not counted; they are
+    // also not "contained", which claims our tree is already theirs. MEASURED:
+    // yices2 `yices-2.7.0`, cocotb `v1.5.0rc1` and klayout `v0.28.17-1` sat under
+    // the contained heading while a three-way merge of each into our pin
+    // CONFLICTS — on doc/sphinx/source/conf.py, documentation/source/release_notes.rst
+    // and azure-pipelines.yml respectively, in every case because our pin is ahead
+    // on that file. A row like this must not vanish from the page when it leaves
+    // the contained bucket.
+    const eqvRows = (d.patch_equivalent_releases||[]);
+    const eqvBlock = eqvRows.length
+      ? `<h5 style="margin-top:1rem" data-en="Releases our ref carries under different shas (${eqvRows.length})" data-zh="我們的 ref 以不同 sha 已帶著的 release（${eqvRows.length}）">Releases our ref carries under different shas (${eqvRows.length})</h5>`
+        + `<p class="fork-caption" data-en="Every commit these releases have exists in the ref we build, patch-for-patch, under a different sha — and the ref has moved on since, so adopting one is not a no-op. Nothing here is work we are missing." data-zh="這些 release 的每一個 commit 都以不同的 sha 存在於我們建置的 ref 裡（patch 逐一比對相同），而我們的 ref 之後又往前走了，所以重新採用並不是零變更。這裡沒有我們缺少的工作。">Every commit these releases have exists in the ref we build under a different sha; nothing here is work we are missing.</p>`
+        + eqvRows.map(r=>`<div class="fork-commit"><span class="sha">${esc(r&&r.tag||'?')}</span><span>${esc(r&&r.why||'')}</span><span style="margin-left:auto">${esc(r&&r.date||'')}</span></div>`).join("")
+      : "";
+    const relHead = relGap(d) == null ? (relUnknown(d) ? "?" : "n/a") : newRel;
+    const rel = ((d.new_releases&&d.new_releases.length)
+      ? `<h5 style="margin-top:1rem" data-en="New upstream releases to integrate (${relHead})" data-zh="待整合的上游新 release（${relHead}）">New upstream releases to integrate (${relHead})</h5>` + d.new_releases.map(r=>`<div class="fork-commit"><span class="sha">${esc(r.tag||'')}</span><span>${esc(r.why||'')}</span><span style="margin-left:auto">${esc(r.date||'')}</span></div>`).join("")
+      : (d.integrated && !undRows.length
+          // "Every upstream release was measured to be contained" is a claim about
+          // a measurement, and a NOT-PROBED row made none: it has no pin, or the
+          // upstream has published no release and no tag to compare against. The
+          // reassurance is only printed where it is true.
+          // "CONTAINED in the ref we build" is a claim about our TREE, and it is
+          // not the claim a patch-equivalent row makes: our ref carries that work
+          // under other shas and has since moved past it, so a merge of it is not
+          // a no-op. Printing the stronger sentence over those rows would restate
+          // on the page exactly the overstatement the bucket split removes from
+          // the ledger, so where such a row exists the sentence says what was
+          // actually measured.
+          ? (relStatus(d) === "measured"
+             ? (eqvRows.length
+                ? `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be already in the ref we build — ${eqvRows.length} of them as work the ref carries under different shas rather than as an ancestor of it." data-zh="每一個上游 release 都經量測確認已在我們建置的 ref 裡 —— 其中 ${eqvRows.length} 個是以不同 sha 被我們的 ref 帶著，而不是它的祖先。">Every upstream release was measured to be already in the ref we build.</p>`
+                : `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="Every upstream release was measured to be contained in the ref we build." data-zh="每一個上游 release 都經量測確認已包含在我們建置的 ref 裡。">Every upstream release was measured to be contained in the ref we build.</p>`)
+             : `<h5 style="margin-top:1rem" data-en="Releases" data-zh="Release">Releases</h5><p class="fork-caption" data-en="No upstream release was probed: this upstream publishes no release or tag, or nothing pins it into the image. That is not a gap of zero — nothing was compared." data-zh="沒有任何上游 release 被檢查過：這個上游沒有發布 release 或 tag，或是沒有東西把它鎖進 image。這不等於缺口為零 —— 根本沒有比較過。">No upstream release was probed — nothing was compared, which is not a gap of zero.</p>`)
+          :"")) + eqvBlock + foldBlock + undBlock;
     const log = (d.sync_log&&d.sync_log.length)
       ? `<h5 style="margin-top:1rem" data-en="Daily sync log" data-zh="每日同步 log">Daily sync log</h5>` + d.sync_log.slice(-10).reverse().map(s=>`<div class="fork-commit"><span class="sha">${esc((s.date||'').slice(0,10))}</span><span class="fork-verd ${esc(s.verdict||'')}">${esc(s.verdict||'')}</span><span>${esc(s.note||'')}</span></div>`).join("")
       : "";
@@ -822,6 +1023,7 @@ def build(out: Path):
             .replace("__INVENTORY__", inv_html)
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
+            .replace("__PINNOTES__", json.dumps(PIN_NOTES, ensure_ascii=False))
             .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
     html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
     out.write_text(html)
