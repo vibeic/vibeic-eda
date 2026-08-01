@@ -320,6 +320,47 @@ def released_record(eda_root: Path) -> dict:
         return {}
 
 
+def write_released_record(eda_root: Path, version: str,
+                          targets: Dict[str, List[str]]) -> dict:
+    """THE ONE writer of `RELEASED.json`. Returns the record it wrote.
+
+    vibeic-eda#51. This used to be an inline block inside the publish path, so
+    the ledger was written only by a release that went THROUGH that path.
+    0.2.53 was cut by hand in response to #45/#46 — VERSION advanced, the image
+    was built and published, and the record still described 0.2.52. By the
+    file's own contract ("a pin set not matching this has never been released")
+    main's shipped pin set had never shipped, and the next tick would have
+    published 0.2.54 byte-identical to 0.2.53.
+
+    Extracted so a hand release can record itself through the SAME code — see
+    `--record-release`. A second, hand-derived fingerprint would be the same
+    defect wearing a different hat: the fingerprint MUST be computed the way the
+    reader recomputes it or the record is unreproducible (measured on 0.2.45:
+    the shipped tree hashed to e4e0a5f6 while the file recorded 94d85fda, and
+    the next run started composing 0.2.46 with nothing changed).
+
+    MEASURED AFTER every edit this run made, so a later run can reproduce it
+    from the tree that shipped — `compose_recipe_hash` reads the root Dockerfile
+    that `rewrite_pin` and `retag_images` have already edited.
+    """
+    rec = {
+        "_comment": "What the last PUBLISHED image was built from. A pin set "
+                    "not matching this has never been released, however current "
+                    "the pins look. The fingerprint is measured AFTER every edit "
+                    "this run made, so a later run can reproduce it from the "
+                    "tree that shipped.",
+        "version": version,
+        "pins_fingerprint": pins_fingerprint({
+            **pinned_refs(eda_root),
+            **{f"recipe:{k}": recipe_hash(eda_root, k) for k in targets},
+            "recipe:__compose__": compose_recipe_hash(eda_root)}),
+        "pins": {k: v for k, v in sorted(pinned_refs(eda_root).items())},
+    }
+    (eda_root / "RELEASED.json").write_text(
+        json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    return rec
+
+
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
     """Every `x.y.z` this image has actually been tagged with, locally."""
     rc, out, _ = _sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
@@ -526,7 +567,36 @@ def main(argv=None) -> int:
     ap.add_argument("--json", default=None)
     ap.add_argument("--smoke-only", default=None, metavar="IMAGE",
                     help="run the tool smoke against an existing image and stop")
+    ap.add_argument("--record-release", default=None, metavar="VERSION",
+                    help="write RELEASED.json for a version published OUTSIDE "
+                         "this program (vibeic-eda#51), through the same writer "
+                         "the publish path uses. Refuses when VERSION does not "
+                         "match the VERSION file, because the record describes "
+                         "the tree it is written from.")
     a = ap.parse_args(argv)
+
+    if a.record_release:
+        root = Path(a.eda_root)
+        # The record is computed FROM THE TREE, so recording a version this tree
+        # is not is recording a pin set that version was never built from — the
+        # #51 defect with the numbers swapped.
+        vf = (root / "VERSION")
+        cur = vf.read_text().strip() if vf.is_file() else None
+        if cur != a.record_release:
+            print(f"[REFUSED] --record-release {a.record_release} but VERSION "
+                  f"says {cur!r}. The record is computed from THIS tree; "
+                  f"writing another version's name onto it records a pin set "
+                  f"that version was never built from.", file=sys.stderr)
+            return RC_NEEDS_HUMAN
+        rec = write_released_record(root, a.record_release, bake_targets(root))
+        print(f"RELEASED.json <- {rec['version']} "
+              f"fingerprint={rec['pins_fingerprint']} "
+              f"({len(rec['pins'])} pin(s))")
+        print("  NOTE: this records what THIS TREE would build. Verify the "
+              "published image was built from it — `check_release_recorded` "
+              "asks the registry, and the image's own "
+              "/vibeic/provenance/*.json name the refs it actually used.")
+        return RC_OK
 
     if a.smoke_only:
         bad = smoke_image(a.smoke_only)
@@ -867,20 +937,7 @@ def main(argv=None) -> int:
                 # two writes. The decision fingerprint (early) and the RECORDED
                 # fingerprint (here) answer different questions and only the
                 # second has to match the tree that shipped.
-                fp_final = pins_fingerprint({
-                    **pinned_refs(root),
-                    **{f"recipe:{k}": recipe_hash(root, k) for k in targets},
-                    "recipe:__compose__": compose_recipe_hash(root)})
-                (root / "RELEASED.json").write_text(json.dumps(
-                    {"_comment": "What the last PUBLISHED image was built from. "
-                                 "A pin set not matching this has never been "
-                                 "released, however current the pins look. The "
-                                 "fingerprint is measured AFTER every edit this "
-                                 "run made, so a later run can reproduce it from "
-                                 "the tree that shipped.",
-                     "version": new, "pins_fingerprint": fp_final,
-                     "pins": {k: v for k, v in sorted(pinned_refs(root).items())}},
-                    indent=2) + "\n", encoding="utf-8")
+                write_released_record(root, new, targets)
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
 
