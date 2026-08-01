@@ -292,6 +292,27 @@ def check_one(repo: str, pin: str) -> dict:
                       f"fork may garbage-collect it"}
 
 
+def declared_upstream(repo: str,
+                      forks_json: Optional[Path] = None) -> Optional[str]:
+    """The upstream WE declare for this fork in `FORKS.json`, or None.
+
+    Our own declaration, and the one `daily_merge` and `discover_forks` already
+    read — not a guess and not a second source of truth. It exists because
+    GitHub's `.parent` does not: a repo pushed up directly, or deleted and
+    recreated, carries no fork relationship at all.
+    """
+    f = forks_json or (Path(__file__).resolve().parent / "FORKS.json")
+    try:
+        d = json.loads(f.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    for entry in d.get("forks", []):
+        if str(entry.get("tool", "")).lower() == repo.lower():
+            up = str(entry.get("upstream") or "")
+            return up if "/" in up else None
+    return None
+
+
 def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     """Does this branch carry any commit of ours, or is it an upstream mirror?
 
@@ -323,6 +344,22 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
                 "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
     if not meta:
+        # GitHub's `.parent` is empty for any repo in the org that was not
+        # created BY forking — a repo pushed up directly, or one deleted and
+        # recreated, loses the relationship. MEASURED: 8 of the 28 pinned repos
+        # have no `.parent` (FasterCap, Fault, Geometry, LinAlgebra,
+        # OpenROAD-flow-scripts, Trilinos, cadical, kissat), and every one of
+        # them DECLARES its upstream in FORKS.json — the same declaration
+        # `daily_merge` and `discover_forks` already read.
+        #
+        # Without this, `branch_is_ours` returned None for all eight, the
+        # release program read that as "could not determine", and their pins
+        # could never be advanced by it: `fault chain --skip-boundary` landed in
+        # the fork and the release refused to ship it, reporting only
+        # STALE_UNDECIDED. An authority we own, unused, turning into a
+        # permanent silent block.
+        meta = declared_upstream(repo) or ""
+    if not meta:
         return None
     owner = meta.split("/")[0]
     rc, out, _ = _sh(["gh", "api",
@@ -339,6 +376,29 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
                          "--jq", ".name"], timeout=120)
     if ours_rc == 0 and up_rc != 0:
         return True
+
+    # LAST, and the one that answers for a repo with no fork RELATIONSHIP: is
+    # the branch TIP a commit the upstream repository has at all?
+    #
+    # The compare endpoint needs the two repos to be in one network, so for the
+    # eight repos below it 404s no matter which upstream is named — and the
+    # branch-existence test above cannot decide either, because upstream DOES
+    # have a `main`. Commit presence needs no relationship: a tip upstream has
+    # never seen was authored here.
+    #
+    # MEASURED both directions on Fault: our `10613da` and `0c90e3b` return 422
+    # "No commit found for SHA" from AUCOHL/Fault, while upstream's own tip
+    # `cf5509f` returns 200 there AND 200 in our fork. The negative control
+    # matters — without it, "everything 422s" would look like the same answer.
+    tip_rc, tip, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/commits/{branch}",
+                          "--jq", ".sha"], timeout=120)
+    if tip_rc == 0 and tip.strip():
+        up_has, _, _ = _sh(["gh", "api", f"repos/{meta}/commits/{tip.strip()}",
+                            "--jq", ".sha"], timeout=120)
+        # A tip upstream HAS is a mirror tip: advancing the pin to it adopts an
+        # upstream version, which is a decision, not a stale pin. That is the
+        # #23/#25 finding and it must keep answering False.
+        return up_has != 0
     return None
 
 

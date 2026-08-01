@@ -487,15 +487,36 @@ def test_a_branch_absent_upstream_is_conclusively_ours(monkeypatch):
 
 def test_a_transport_failure_is_still_unknown(monkeypatch):
     """The fail-safe must stay reachable. Upstream branch readable, ours not —
-    that is a broken measurement, not evidence of anything."""
+    that is a broken measurement, not evidence of anything.
+
+    The commit-presence probe (vibeic-eda#50) runs AFTER these and is scripted
+    to fail too: when nothing can be read, nothing is claimed.
+    """
     calls = iter([
         (0, "YosysHQ/yosys", ""),
         (1, "", "boom"),
         (0, "master", ""),   # upstream HAS the branch
         (1, "", "boom"),     # and we could not read ours
+        (1, "", "boom"),     # nor its tip
     ])
     monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
     assert C.branch_is_ours("yosys", "master") is None
+
+
+def test_a_readable_tip_answers_even_when_the_branch_read_failed(monkeypatch):
+    """The improvement the probe brings, stated so it is not mistaken for a
+    weakened fail-safe: a transient failure reading the BRANCH no longer ends
+    the enquiry when the TIP is readable and upstream demonstrably lacks it."""
+    calls = iter([
+        (0, "YosysHQ/yosys", ""),
+        (1, "", "boom"),      # compare failed
+        (0, "master", ""),    # upstream HAS the branch
+        (1, "", "boom"),      # transient: could not read ours
+        (0, "abc123", ""),    # ...but its tip reads fine
+        (1, "", "422"),       # and upstream has never seen that commit
+    ])
+    monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
+    assert C.branch_is_ours("yosys", "master") is True
 
 
 def test_unknown_is_not_reported_as_a_negative_finding():
