@@ -16,7 +16,7 @@ Measured:
     RELEASED.json "version"             0.2.52
     main tools/openroad/Dockerfile      OPENROAD_REF=47636465f9…
     RELEASED.json openroad pin          09d67f08f8…
-    ghcr.io/vibeic/vibeic-eda:0.2.53    EXISTS, and its own
+    the published 0.2.53 image        EXISTS, and its own
       /vibeic/provenance/openroad.json  {"ref":"47636465f969…"}
 
 So the shipped image carried main's pin set exactly, and by the ledger's own
