@@ -19,7 +19,26 @@
 
 FROM ubuntu:24.04 AS build
 ARG VERILATOR_REPO=https://github.com/vibeic/verilator.git
-ARG VERILATOR_REF=9a3cc0c7dd00d45c0cff7d6314b6c232aa2e6390  # pinned; branch vibeic/sv-tb-coverage (id 12: pow2-base Pow lowering + $countbits var-ctrl)
+# Pinned to vibeic/verilator master tip d32798653 (2026-08-01 02:24 +0800) --
+# the commit `git ls-remote origin master` returns, so the clone below can
+# reach it. Three commits over 9a3cc0c7d, and `git rev-list --count
+# master..upstream/master` is 0: this pin is FULLY CURRENT with upstream,
+# with nothing left behind for a later tick to carry.
+#
+# The three are one merge of ours carrying no authored content, plus:
+#   Fix gcov dump on warnings discarding later coverage counts (#8017)
+#   Internals: Refactor MT scheduling (#8012)
+#
+# Neither is checkable by presence, which is the trap here. #8012 is an
+# internals refactor of the multithreaded schedule with no user-visible flag,
+# so a regression surfaces as WRONG RESULTS under --threads>1 rather than as a
+# build failure; #8017 changes when coverage counters are dumped. `verilator
+# --version` flipping v5.050-122-g9a3cc0c7d -> v5.050-125-gd32798653 proves
+# only which source was compiled, not that either change works. Validate this
+# artefact with a --threads 2 verilate that emits non-empty output and a
+# coverage run that writes a non-empty coverage file -- not with the version
+# string and not with a --help flag count.
+ARG VERILATOR_REF=d32798653a48eaa7b7fd5c3dded1b25e22d76e93  # pinned; vibeic/verilator master tip, published as origin/master 2026-08-01; fully current with upstream
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf flex bison ca-certificates help2man perl python3 \
       libfl2 libfl-dev zlib1g zlib1g-dev \
