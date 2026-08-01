@@ -37,6 +37,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).parent          # version-controlled source
 sys.path.insert(0, str(HERE))
@@ -563,9 +564,29 @@ FOLDED = "folded"
 #: — `yices-2.7.0` is the release yices2 builds and must stay `base_release`. Only
 #: the heading changes, which is the whole of what was wrong.
 EQUIVALENT = "patch-equivalent"
+#: The buckets that mean OUR PIN HOLDS THIS RELEASE. They are what `base_release`
+#: may name and what anchors the trunk ordering — and they are read from the
+#: verdict that SURVIVED the re-proof, never from the one that went into it.
+IN_PIN_BUCKETS = (CONTAINED, EQUIVALENT)
 #: Buckets whose rows are re-proved from the repository before they are filed,
 #: and the claim each one makes. See `_verify_buckets`.
 VERIFIED_BUCKETS = (CONTAINED, EQUIVALENT)
+#: …and the buckets that cannot be re-proved until steps 4 and 5 have decided
+#: them, re-proved by the same machinery immediately afterwards.
+#:
+#: WHY THIS LIST EXISTS. Round 3 re-proved `contained` and `patch-equivalent` and
+#: nothing else. Measured over the 36 real clones with no network at all: 299
+#: rows, 229 re-proved, 70 NOT — superseded 59, new 9, undetermined 2. SUPERSEDED
+#: is the bucket that takes a release OUT of `behind_releases` on the strength of
+#: `_carried_by` and `_ancestor`, and two published zeroes (iverilog, gtkwave)
+#: rested entirely on it. Verifying the claims that put work INTO the ledger and
+#: not the ones that take it out leaves the cheaper direction unguarded — the
+#: direction in which a wrong answer looks like health.
+#:
+#: NEW is here too. Its claim is the negative one — "our pinned ref does not have
+#: this" — and it is re-proved by requiring `_verify_contained` to agree that our
+#: pin does not hold it.
+LATE_VERIFIED_BUCKETS = (SUPERSEDED, FOLDED, NEW)
 #: How many of OUR commits one patch-equivalence re-proof may hash before it gives
 #: up. Past it the row is recorded UNVERIFIABLE with the number, never assumed
 #: sound. Measured: the two real rows needed 341 and 2276, at 0.32s and 0.63s.
@@ -575,14 +596,73 @@ PATCHID_CAP = int(os.environ.get("GK_PATCHID_CAP") or "20000")
 MEASURED, UNKNOWN, NOT_PROBED = "measured", "unknown", "not-probed"
 
 
-def _git(repo, *args, stdin: str | None = None, timeout: int = 60):
-    """(rc, stdout, stderr) for a git command in `repo`. Never raises."""
+#: `rc` when the command DID NOT RUN. Not an exit status, because nothing exited:
+#: git never got as far as having an opinion. It is `None` so that the two tests
+#: this module is full of keep meaning what they say — `rc != 0` still catches it
+#: (nothing succeeded), while `rc == 1`, which is git's code for a CLEAN, DEFINITE
+#: NO, stops firing on a failure.
+DID_NOT_RUN = None
+
+
+class Git(NamedTuple):
+    """What one git command did. Unpacks as `(rc, out, err)` like a 3-tuple.
+
+    THE DEFECT THIS TYPE EXISTS TO REMOVE, and it is round 1's defect one layer
+    down. `_git` used to map every subprocess exception to `return 1, "", ...`,
+    and 1 is also git's own exit code for a clean negative — "not an ancestor",
+    "no merge base", "the merge conflicts". A `git merge-base` that TIMED OUT and
+    a `git merge-base` that ran and said "these two commits share no history"
+    arrived at every call site as the same three values, so callers stated the
+    second sentence when the first had happened:
+
+      * `_local_containment` announced "shares no ancestor with our pinned ref"
+        and, with an anchor, step 5 turned that into SUPERSEDED — the release
+        left the count while `behind_releases_status` stayed `measured`.
+        Measured end-to-end through `discover_one` with nothing patched but a
+        `git` on PATH that hangs on `merge-base`: a genuinely missing release
+        went from `behind=1 measured` to `behind=0 measured`.
+      * `_verify_contained` read the same 1 as a REFUTATION, so a timeout made a
+        genuinely contained release a bucket violation: `behind=0 measured`
+        became `behind=None unknown` and the sweep exited non-zero on a healthy
+        repository.
+
+    Severity was latent — the slowest real `merge-base` on the 36 clones is
+    0.126 s against a 60 s timeout — and latent is not the same as absent: it is
+    one slow disk, one loaded host or one 300 s `merge-tree` away, and it fails
+    in the direction that removes work from the count.
+
+    A failed command and a clean negative are DIFFERENT FACTS and are now
+    different values. `ran` is the question every caller has to answer before it
+    is allowed to have a verdict.
+    """
+    rc: int | None
+    out: str
+    err: str
+
+    @property
+    def ran(self) -> bool:
+        """Did git execute and exit? False means there is no answer here at all."""
+        return self.rc is not None
+
+    @property
+    def ok(self) -> bool:
+        """git ran and said YES (exit 0)."""
+        return self.rc == 0
+
+    @property
+    def said_no(self) -> bool:
+        """git ran and said NO — its exit code 1, a measurement, not a failure."""
+        return self.rc == 1
+
+
+def _git(repo, *args, stdin: str | None = None, timeout: int = 60) -> Git:
+    """What `git <args>` in `repo` did. Never raises; see `Git`."""
     try:
         r = subprocess.run(["git", "-C", str(repo), *args], input=stdin,
                            capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
-        return 1, "", f"{e.__class__.__name__}: {e}"
-    return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+        return Git(DID_NOT_RUN, "", f"{e.__class__.__name__}: {e}")
+    return Git(r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip())
 
 
 def _clone_for(tool: str) -> Path | None:
@@ -591,22 +671,32 @@ def _clone_for(tool: str) -> Path | None:
     return p if (p / ".git").exists() or (p / "HEAD").is_file() else None
 
 
-def _peel(repo, revs: list[str]) -> dict[str, str]:
+def _peel(repo, revs: list[str]) -> dict[str, str] | None:
     """{rev: commit sha} for the revs THIS clone holds — one subprocess for all.
+    None when the question was never put to git.
 
     `cat-file --batch-check` prints one line per input IN ORDER and prints
     `<input> missing` for an object the clone does not have, so the same call
     answers both "what commit is this name" and "is that commit here". A rev the
     clone cannot resolve is simply absent from the result: the caller must then
     ask somebody who can, never assume.
+
+    AN EMPTY DICT AND None ARE DIFFERENT ANSWERS. `{}` is "git looked and this
+    clone does not hold them"; None is "git did not look". The callers that route
+    on it — `local_ok`, the API fall-back — behave the same either way, but the
+    two re-proofs state a REASON on the row they decline to verify, and
+    "the release commit is not in this clone" is a claim about the clone that a
+    `cat-file` which never ran has not earned.
     """
     if not revs:
         return {}
-    rc, out, _ = _git(repo, "cat-file", "--batch-check=%(objectname) %(objecttype)",
-                      "--buffer", stdin="".join(f"{r}^{{commit}}\n" for r in revs))
-    if rc != 0 and not out:
+    r = _git(repo, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+             "--buffer", stdin="".join(f"{rev}^{{commit}}\n" for rev in revs))
+    if not r.ran:
+        return None
+    if r.rc != 0 and not r.out:
         return {}
-    lines = out.splitlines()
+    lines = r.out.splitlines()
     got = {}
     for rev, line in zip(revs, lines):
         parts = line.split()
@@ -622,12 +712,12 @@ def _range_counts(repo, base_sha: str, head_sha: str):
     separately from `git cherry`, because `git cherry` cannot report what it did
     not look at.
     """
-    rc, allc, _ = _git(repo, "rev-list", "--count", f"{base_sha}..{head_sha}", timeout=180)
-    rc2, nmc, _ = _git(repo, "rev-list", "--no-merges", "--count",
-                       f"{base_sha}..{head_sha}", timeout=180)
-    if rc != 0 or rc2 != 0 or not allc.isdigit() or not nmc.isdigit():
+    a = _git(repo, "rev-list", "--count", f"{base_sha}..{head_sha}", timeout=180)
+    n = _git(repo, "rev-list", "--no-merges", "--count",
+             f"{base_sha}..{head_sha}", timeout=180)
+    if not a.ok or not n.ok or not a.out.isdigit() or not n.out.isdigit():
         return None
-    return int(allc), int(nmc)
+    return int(a.out), int(n.out)
 
 
 def _patch_equivalent(repo, head_sha: str, base_sha: str):
@@ -702,10 +792,10 @@ def _patch_equivalent(repo, head_sha: str, base_sha: str):
         # Merge commits in the range. `git cherry` will not walk them, so whatever
         # it prints is a statement about a strict subset of the work in question.
         return None
-    rc, out, _ = _git(repo, "cherry", base_sha, head_sha, timeout=180)
-    if rc != 0:
+    walk = _git(repo, "cherry", base_sha, head_sha, timeout=180)
+    if not walk.ok:
         return None
-    lines = [ln for ln in out.splitlines() if ln.strip()]
+    lines = [ln for ln in walk.out.splitlines() if ln.strip()]
     if any(ln.startswith("+") for ln in lines):
         return False
     if len(lines) != n_nomerge:
@@ -738,13 +828,21 @@ def _merge_changes_nothing(repo, head_sha: str, base_sha: str, mb: str):
     no-op — it is reported as False here and the release stays counted. Git
     older than 2.38 has no `--write-tree`; that exits non-zero too, and the
     caller falls through to the next test rather than inventing an answer.
+
+    A merge-tree that DID NOT RUN is not a conflict either. `rc == 1` is the
+    exit code of a merge git performed and found conflicting; a merge git never
+    performed has no exit code at all (`Git.ran`), and reporting it as False
+    would be the same fold this round removes — here in the direction that keeps
+    a release counted, which is not a reason to leave it.
     """
-    rc, out, _ = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
-                      base_sha, head_sha, timeout=180)
-    if rc == 1:
+    r = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
+             base_sha, head_sha, timeout=180)
+    if not r.ran:
+        return None                      # git did not run: no merge, no verdict
+    if r.said_no:
         return False                     # conflicts: adopting it is not a no-op
-    first = (out.splitlines() or [""])[0].strip()
-    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
+    first = (r.out.splitlines() or [""])[0].strip()
+    if r.rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
         return None                      # no --write-tree (git < 2.38), or no tree printed
     trees = _tree_pair(repo, base_sha, base_sha)
     return None if trees is None else first == trees[0]
@@ -792,22 +890,41 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
 
     Returns (None, reason, False) when this clone cannot decide — a missing
     object, a git that would not run.
+
+    `disjoint` IS A MEASUREMENT AND MUST COME FROM ONE. It used to be reached by
+    `if rc != 0 or not mb`, which is true of a `git merge-base` that timed out
+    (`_git` returned 1 for every exception), of one killed by the OOM killer, and
+    of `rc == 128` — a bad object, git RUNNING and REFUSING. Any of those then
+    said "shares no ancestor with our pinned ref", and step 5 turns that into
+    SUPERSEDED as soon as we contain any release at all, so the release left the
+    count with `behind_releases_status` still reading `measured`. Measured
+    end-to-end through `discover_one`, no production code patched, a `git` on
+    PATH that hangs on `merge-base`: `behind=1 measured` became `behind=0
+    measured`. Only git's own exit 1 — and an exit 0 with nothing printed — is
+    the clean "these two share no history".
     """
-    rc, _, err = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
-    if rc == 0:
+    anc = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
+    if not anc.ran:
+        return None, f"git merge-base --is-ancestor did not run: {anc.err[:120]}", False
+    if anc.ok:
         return CONTAINED, "ancestor of our pinned ref", False
-    if rc not in (1,):                       # 1 = a clean "no"; anything else is a failure
-        return None, f"git merge-base --is-ancestor failed: {err[:120]}", False
-    rc, mb, err = _git(repo, "merge-base", tag_sha, pin_sha)
-    if rc != 0 or not mb:
-        # No shared history at all. The trees are the only remaining question,
-        # and answering it is still a measurement, not a guess.
+    if not anc.said_no:                      # 1 = a clean "no"; anything else is a failure
+        return None, f"git merge-base --is-ancestor failed: {anc.err[:120]}", False
+    mbr = _git(repo, "merge-base", tag_sha, pin_sha)
+    if not mbr.ran:
+        return None, f"git merge-base did not run: {mbr.err[:120]}", False
+    mb = mbr.out
+    if mbr.said_no or (mbr.ok and not mb):
+        # git looked and there is no shared history at all. The trees are the
+        # only remaining question, and answering it is still a measurement.
         trees = _tree_pair(repo, tag_sha, pin_sha)
         if trees is None:
-            return None, f"git merge-base failed: {err[:120]}", False
+            return None, "could not read the trees of the release and our pinned ref", False
         if trees[0] == trees[1]:
             return CONTAINED, "identical tree to our pinned ref", False
         return NEW, "shares no ancestor with our pinned ref", True
+    if not mbr.ok:
+        return None, f"git merge-base failed: {mbr.err[:120]}", False
     trees = _tree_pair(repo, tag_sha, mb)
     if trees is None:
         return None, "could not read the trees of the release and the merge-base", False
@@ -855,35 +972,56 @@ def _verify_contained(repo, tag_sha: str, pin_sha: str):
     None means the proof could not be RUN (a missing object, a git without
     `merge-tree --write-tree`). None is not a violation and never becomes one:
     it is recorded as unverifiable, with the reason, and the row stands.
+
+    WHICH IS EXACTLY WHY NO COMMAND THAT DID NOT RUN MAY RETURN False HERE. False
+    is a REFUTATION: it nulls the row's verdict, files it under
+    `undetermined_releases`, nulls the tool's count and exits the sweep non-zero.
+    Two sites used to hand that verdict to a git that never answered — `rc == 1`
+    from a timed-out `merge-base`, and `rc == 1` from a timed-out `merge-tree`,
+    both of them indistinguishable from git's clean "no shared history" and
+    "this merge conflicts". Measured through `discover_one` with a `git` on PATH
+    that hangs on the re-proof's own `merge-base`: a genuinely contained release
+    went from `behind=0 measured` to `behind=None unknown`, and the sweep exited
+    non-zero on a repository with nothing wrong with it.
     """
-    if not _peel(repo, [tag_sha, pin_sha]).get(tag_sha):
+    have = _peel(repo, [tag_sha, pin_sha])
+    if have is None:
+        return None, "git could not be asked whether this clone holds the release commit"
+    if not have.get(tag_sha):
         return None, "the release commit is not in this clone"
-    rc, _, err = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
-    if rc == 0:
+    anc = _git(repo, "merge-base", "--is-ancestor", tag_sha, pin_sha)
+    if not anc.ran:
+        return None, f"merge-base --is-ancestor did not run: {anc.err[:100]}"
+    if anc.ok:
         return True, "ancestor of our pinned ref"
-    if rc != 1:
-        return None, f"merge-base --is-ancestor failed: {err[:100]}"
+    if not anc.said_no:
+        return None, f"merge-base --is-ancestor failed: {anc.err[:100]}"
     trees = _tree_pair(repo, tag_sha, pin_sha)
     if trees is None:
         return None, "could not read the trees of the release and our pinned ref"
     if trees[0] == trees[1]:
         return True, "identical tree to our pinned ref"
-    rc, mb, err = _git(repo, "merge-base", tag_sha, pin_sha)
-    if rc == 1 or (rc == 0 and not mb):
+    mbr = _git(repo, "merge-base", tag_sha, pin_sha)
+    if not mbr.ran:
+        return None, f"merge-base did not run: {mbr.err[:100]}"
+    mb = mbr.out
+    if mbr.said_no or (mbr.ok and not mb):
         return False, "shares no ancestor with our pinned ref, and its tree is not ours"
-    if rc != 0:
-        return None, f"merge-base failed: {err[:100]}"
+    if not mbr.ok:
+        return None, f"merge-base failed: {mbr.err[:100]}"
     mtrees = _tree_pair(repo, tag_sha, mb)
     if mtrees is not None and mtrees[0] == mtrees[1]:
         return True, "changes no file relative to the merge-base with our pinned ref"
-    rc, out, _ = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
-                      pin_sha, tag_sha, timeout=300)
-    if rc == 1:
-        conflicted = [ln for ln in out.splitlines() if ln.startswith("CONFLICT")]
+    mt = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
+              pin_sha, tag_sha, timeout=300)
+    if not mt.ran:
+        return None, f"merge-tree --write-tree did not run: {mt.err[:100]}"
+    if mt.said_no:
+        conflicted = [ln for ln in mt.out.splitlines() if ln.startswith("CONFLICT")]
         return False, ("merging it into our pinned ref CONFLICTS: "
                        + (conflicted[0][:160] if conflicted else "unresolved"))
-    first = (out.splitlines() or [""])[0].strip()
-    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
+    first = (mt.out.splitlines() or [""])[0].strip()
+    if not mt.ok or not re.fullmatch(r"[0-9a-f]{40}", first):
         return None, "git merge-tree --write-tree is unavailable (git < 2.38)"
     if first == trees[1]:
         return True, "merging it into our pinned ref changes no file"
@@ -898,10 +1036,10 @@ def _patch_id_set(repo, rng: str, cap: int):
     it. One process pair for the whole range: measured 0.63s over cocotb's 2276
     commits.
     """
-    rc, cnt, _ = _git(repo, "rev-list", "--count", "--no-merges", rng, timeout=300)
-    if rc != 0 or not cnt.isdigit():
+    cnt = _git(repo, "rev-list", "--count", "--no-merges", rng, timeout=300)
+    if not cnt.ok or not cnt.out.isdigit():
         return None
-    if int(cnt) > cap:
+    if int(cnt.out) > cap:
         return None
     # The one shell pipeline in this module, because `git patch-id` reads the diff
     # stream `git log -p` writes and there is no plumbing form that does both. Every
@@ -932,7 +1070,10 @@ def _verify_patch_equivalent(repo, tag_sha: str, pin_sha: str):
     holding a merge commit cannot have had every commit compared, and this says
     so directly rather than inferring it from what a walk printed.
     """
-    if not _peel(repo, [tag_sha, pin_sha]).get(tag_sha):
+    have = _peel(repo, [tag_sha, pin_sha])
+    if have is None:
+        return None, "git could not be asked whether this clone holds the release commit"
+    if not have.get(tag_sha):
         return None, "the release commit is not in this clone"
     counts = _range_counts(repo, pin_sha, tag_sha)
     if counts is None:
@@ -955,9 +1096,124 @@ def _verify_patch_equivalent(repo, tag_sha: str, pin_sha: str):
     return True, f"all {len(theirs)} of its commits are patch-identical to ones we carry"
 
 
-def _verify_buckets(repo, groups: dict, pin_sha: str) -> dict:
-    """Re-prove every CONTAINED and EQUIVALENT verdict, and REFUSE the ones that
-    do not survive. Returns what was checked, so a clean result over zero rows is
+def _verify_not_contained(repo, tag_sha: str, pin_sha: str):
+    """Re-prove NEW. (True / False / None, why).
+
+    NEW's claim is the negative one — our pinned ref does NOT already hold this
+    release — so its re-proof is `_verify_contained` failing to find any of the
+    four proofs. True here means "and it did not find one", which is the row
+    standing; False means our own re-prover says we DO contain a release the
+    classifier counted as missing, and that contradiction is not a measurement
+    either.
+    """
+    ok, why = _verify_contained(repo, tag_sha, pin_sha)
+    if ok is None:
+        return None, why
+    if ok is False:
+        return True, f"our pinned ref does not hold it: {why}"
+    return False, f"our pinned ref DOES hold it — {why} — so it is not a release we lack"
+
+
+def _verify_carried_by(repo, tag_sha: str, by_sha: str, by_tag: str):
+    """Re-prove "`by_sha` already carries every commit `tag_sha` has".
+
+    The claim `_carried_by` makes, re-derived WITHOUT `git cherry`: ancestry
+    first, then the patch-id set comparison `_verify_patch_equivalent` performs —
+    which also refuses a range holding merge commits, because a range with a
+    merge in it cannot have had every commit compared by anything that walks
+    `max_parents=1`.
+    """
+    anc = _git(repo, "merge-base", "--is-ancestor", tag_sha, by_sha)
+    if not anc.ran:
+        return None, f"merge-base --is-ancestor did not run: {anc.err[:100]}"
+    if anc.ok:
+        return True, f"an ancestor of {by_tag}, which carries it"
+    if not anc.said_no:
+        return None, f"merge-base --is-ancestor failed: {anc.err[:100]}"
+    ok, why = _verify_patch_equivalent(repo, tag_sha, by_sha)
+    return ok, f"{why} (against {by_tag})"
+
+
+def _verify_disjoint(repo, tag_sha: str, pin_sha: str):
+    """Re-prove "this release shares no ancestor with the line we track".
+
+    THE ONE THAT USED TO BE FREE. `_local_containment` reached this by way of
+    `if rc != 0 or not mb`, so a `merge-base` that timed out asserted it. Here it
+    is asserted only by a `merge-base` that RAN and found nothing, and a
+    merge-base that exists refutes it outright.
+    """
+    mbr = _git(repo, "merge-base", tag_sha, pin_sha)
+    if not mbr.ran:
+        return None, f"merge-base did not run: {mbr.err[:100]}"
+    if mbr.said_no or (mbr.ok and not mbr.out):
+        return True, "git finds no merge-base between it and our pinned ref"
+    if not mbr.ok:
+        return None, f"merge-base failed: {mbr.err[:100]}"
+    return False, (f"it DOES share history with our pinned ref — merge-base "
+                   f"{mbr.out[:12]} — so it is not an abandoned line")
+
+
+def _verify_trunk_order(repo, tag_sha: str, base_sha: str, fp: str | None):
+    """Re-prove "its line left the upstream trunk BEFORE the line of the release
+    we build left it" — the ordering step 5 drops a release on.
+
+    Both trunk points are recomputed here from the clone rather than read out of
+    `_t`'s cache, and the ordering is recomputed too. A row whose trunk points
+    only the API could supply is unverifiable from the repository and says so.
+    """
+    if not fp:
+        return None, "we have no fork point, so no trunk point can be recomputed"
+    tp = {}
+    for name, sha in (("this release", tag_sha), ("the release we build", base_sha)):
+        r = _git(repo, "merge-base", sha, fp)
+        if not r.ran:
+            return None, f"merge-base for {name} did not run: {r.err[:80]}"
+        if not r.ok or not re.fullmatch(r"[0-9a-f]{40}", r.out or ""):
+            return None, f"the trunk point of {name} could not be recomputed from this clone"
+        tp[name] = r.out
+    t_g, t_base = tp["this release"], tp["the release we build"]
+    anc = _git(repo, "merge-base", "--is-ancestor", t_base, t_g)
+    if not anc.ran:
+        return None, f"merge-base --is-ancestor did not run: {anc.err[:80]}"
+    if anc.said_no:
+        return True, (f"its line left the trunk at {t_g[:12]}, which is not a descendant "
+                      f"of {t_base[:12]} where the line we build left it")
+    if anc.ok:
+        return False, (f"its trunk point {t_g[:12]} IS a descendant of {t_base[:12]} — "
+                       f"it is not behind the release we build")
+    return None, f"merge-base --is-ancestor failed: {anc.err[:80]}"
+
+
+def _verify_removed(repo, g: dict, pin_sha: str, fp: str | None):
+    """Re-prove a SUPERSEDED or FOLDED row from the BASIS step 4/5 recorded.
+
+    Each of those steps drops a release out of `behind_releases` for one stated
+    reason, and each reason is a question the repository can be asked again:
+
+      carried-by  — the release we build (or the final release) already holds
+                    every commit this one has;
+      disjoint    — it shares no history with the line we track at all;
+      trunk-order — its line left the upstream trunk before ours did.
+
+    A row that reached one of those buckets WITHOUT recording its basis is
+    unverifiable rather than assumed sound; there is no such path today, and if
+    one is ever added the ledger will say so instead of going quiet.
+    """
+    basis = g.get("basis") or {}
+    kind = basis.get("kind")
+    if kind == "carried-by":
+        return _verify_carried_by(repo, g["sha"], basis["sha"], basis.get("tag") or "it")
+    if kind == "disjoint":
+        return _verify_disjoint(repo, g["sha"], pin_sha)
+    if kind == "trunk-order":
+        return _verify_trunk_order(repo, g["sha"], basis["sha"], fp)
+    return None, f"the row records no basis for {g.get('verdict')}, so there is nothing to re-prove"
+
+
+def _verify_buckets(repo, groups: dict, pin_sha: str, buckets=VERIFIED_BUCKETS,
+                    fp: str | None = None) -> dict:
+    """Re-prove every verdict in `buckets`, and REFUSE the ones that do not
+    survive. Returns what was checked, so a clean result over zero rows is
     visible as such rather than reading like a pass.
 
     A refuted row does not become NEW. Turning a self-contradiction into a
@@ -966,21 +1222,32 @@ def _verify_buckets(repo, groups: dict, pin_sha: str) -> dict:
     honest disposition for that release is that WE DO NOT KNOW. It goes to
     UNDETERMINED, which nulls the count for that tool and states the reason on
     the row.
+
+    Called twice per tool, because the two families of verdict do not exist at
+    the same moment: the containment buckets are decided in step 3 and re-proved
+    before anything is filed in one; SUPERSEDED and FOLDED do not exist until
+    steps 4 and 5 have run, and are re-proved the moment they do.
     """
     checked, unverifiable, violations = 0, [], []
+    by_bucket: dict[str, int] = {}
     for g in groups.values():
-        if g.get("verdict") not in VERIFIED_BUCKETS:
+        if g.get("verdict") not in buckets:
             continue
         claim = g["verdict"]
         if repo is None:
             ok, why = None, "no local clone holds both ends; decided over the API"
         elif claim == CONTAINED:
             ok, why = _verify_contained(repo, g["sha"], pin_sha)
-        else:
+        elif claim == EQUIVALENT:
             ok, why = _verify_patch_equivalent(repo, g["sha"], pin_sha)
+        elif claim == NEW:
+            ok, why = _verify_not_contained(repo, g["sha"], pin_sha)
+        else:
+            ok, why = _verify_removed(repo, g, pin_sha, fp)
         row = {"tag": g["tags"][0], "claim": claim, "reason": why}
         if ok is True:
             checked += 1
+            by_bucket[claim] = by_bucket.get(claim, 0) + 1
         elif ok is None:
             unverifiable.append(row)
         else:
@@ -989,15 +1256,27 @@ def _verify_buckets(repo, groups: dict, pin_sha: str) -> dict:
             g["why"] = (f"classified {claim} — {g.get('why')} — but an independent check "
                         f"of the repository refutes it: {why}. A verdict that contradicts "
                         f"itself is not a measurement")
-    return {"checked": checked, "unverifiable": unverifiable, "violations": violations}
+    return {"checked": checked, "by_bucket": by_bucket,
+            "unverifiable": unverifiable, "violations": violations}
+
+
+def _merge_checks(a: dict, b: dict) -> dict:
+    """The two re-proof passes, as one record."""
+    out = {"checked": a["checked"] + b["checked"],
+           "by_bucket": dict(a.get("by_bucket") or {}),
+           "unverifiable": a["unverifiable"] + b["unverifiable"],
+           "violations": a["violations"] + b["violations"]}
+    for k, v in (b.get("by_bucket") or {}).items():
+        out["by_bucket"][k] = out["by_bucket"].get(k, 0) + v
+    return out
 
 
 def _tree_pair(repo, a: str, b: str):
     """(tree(a), tree(b)) or None if either could not be read."""
-    rc, out, _ = _git(repo, "cat-file", "--batch-check=%(objectname)", "--buffer",
-                      stdin=f"{a}^{{tree}}\n{b}^{{tree}}\n")
-    lines = out.splitlines()
-    if rc != 0 or len(lines) != 2:
+    r = _git(repo, "cat-file", "--batch-check=%(objectname)", "--buffer",
+             stdin=f"{a}^{{tree}}\n{b}^{{tree}}\n")
+    lines = r.out.splitlines()
+    if not r.ok or len(lines) != 2:
         return None
     if not all(re.fullmatch(r"[0-9a-f]{40}", ln.strip()) for ln in lines):
         return None
@@ -1092,7 +1371,8 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     out = {"new": [], "contained": [], "equivalent": [], "superseded": [], "folded": [],
            "undetermined": [], "behind": None, "status": NOT_PROBED, "base": None,
            "api_calls": 0, "clone": None,
-           "bucket_check": {"checked": 0, "unverifiable": [], "violations": []}}
+           "bucket_check": {"checked": 0, "by_bucket": {},
+                            "unverifiable": [], "violations": []}}
     if not ref or not rels:
         return out
 
@@ -1104,7 +1384,10 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     #    (free), then one `git ls-remote` per side (no API budget), then give up
     #    on the ones still unresolved. `pinned_ref_full` is not always a sha:
     #    ORFS pins the TAG `v3.0`, so the pin is peeled by the same machinery.
-    shas = _peel(clone, tags + [ref]) if clone else {}
+    # `_peel` answering None (git would not run) is not "the clone lacks them":
+    # it means nothing was learned, and the remote is asked exactly as it is when
+    # the clone genuinely lacks them.
+    shas = (_peel(clone, tags + [ref]) if clone else {}) or {}
     if ref not in shas or any(t not in shas for t in tags):
         for url in (f"https://github.com/{up_full}.git", f"https://github.com/{ORG}/{tool}.git"):
             remote = _ls_remote_tags(url)
@@ -1167,17 +1450,6 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         g["why"] = why
         g["verdict"] = verdict
         g["disjoint"] = disjoint
-        # WHY it is contained matters for picking `base_release`: only a release
-        # our PIN contains is a release we build. A prerelease folded into its
-        # final one (step 4) is contained for COUNTING purposes and is not a
-        # candidate to name as the version we ship.
-        #
-        # EQUIVALENT counts here. `yices-2.7.0` is patch-equivalent rather than an
-        # ancestor, and it IS the release yices2 builds; excluding it would move
-        # that row's `base_release` back to `Yices-2.6.4` and its count from 0 to
-        # 2 — measured, and the reason the merge test does not simply gate this
-        # branch.
-        g["in_pin"] = verdict in VERIFIED_BUCKETS
 
     # 3b. RE-PROVE THE BUCKETS BEFORE ANYTHING IS FILED IN ONE. Round 2 wrote this
     #     invariant as a test and the only input it ever saw was a fixture built to
@@ -1185,6 +1457,32 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     #     runs here, on every sweep, over the rows this sweep is about to file, and
     #     a row it refutes is held UNDETERMINED rather than published.
     out["bucket_check"] = _verify_buckets(graph, groups, pin_sha)
+
+    # 3c. …AND EVERYTHING DOWNSTREAM READS THE VERDICT THAT SURVIVED IT.
+    #
+    #     `in_pin` used to be assigned in the loop above, from the verdict as
+    #     CLASSIFIED — before 3b ran. `_verify_buckets` refutes a row by nulling
+    #     its verdict, and nothing cleared `in_pin`, so a row the sweep had just
+    #     REFUSED was still the newest release our pin was held to contain: it was
+    #     published as `base_release` and it became `ref_t`, the trunk anchor every
+    #     other release's SUPERSEDED/NEW decision is ordered against.
+    #
+    #     Measured, on the fixture that plants a refutable claim in the production
+    #     path: `undetermined_releases = [v2.0]`, `bucket_check.violations = [v2.0]`,
+    #     `base_release = v2.0`. One file said "we cannot verify that we contain
+    #     v2.0" and "the release we build is v2.0".
+    #
+    #     WHY it is contained still matters for picking `base_release`: only a
+    #     release our PIN contains is a release we build. A prerelease folded into
+    #     its final one (step 4) is contained for COUNTING purposes and is not a
+    #     candidate to name as the version we ship.
+    #
+    #     EQUIVALENT counts here. `yices-2.7.0` is patch-equivalent rather than an
+    #     ancestor, and it IS the release yices2 builds; excluding it would move
+    #     that row's `base_release` back to `Yices-2.6.4` and its count from 0 to
+    #     2 — measured, and the reason the merge test does not simply gate this.
+    for g in groups.values():
+        g["in_pin"] = g["verdict"] in IN_PIN_BUCKETS
 
     # 4. COLLAPSE a prerelease into a final release that already carries its work.
     #    The `prerelease` flag is the API's own; the containment is ancestry OR
@@ -1211,6 +1509,9 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
             if _carried_by(graph, tool, up_full, g["sha"], f["sha"], out) is True:
                 g["verdict"] = FOLDED
                 g["folded_into"] = f["tags"][0]
+                # WHAT THIS ROW RESTS ON, recorded so step 5b can ask the
+                # repository the same question again by a different route.
+                g["basis"] = {"kind": "carried-by", "sha": f["sha"], "tag": f["tags"][0]}
                 g["why"] = (f"prerelease whose work {f['tags'][0]} already carries; counted "
                             f"once, under {f['tags'][0]}, not contained in our pinned ref")
                 break
@@ -1220,7 +1521,7 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     #    where R's line left it; a release counts only when t(base) is an ancestor
     #    of t(R), i.e. its line left the trunk no earlier than the line of the
     #    newest release we actually contain.
-    fp = (_peel(clone, [fork_point]).get(fork_point) if (clone and fork_point)
+    fp = ((_peel(clone, [fork_point]) or {}).get(fork_point) if (clone and fork_point)
           else fork_point)
     tpoint: dict[str, str | None] = {}
 
@@ -1263,6 +1564,8 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         if (base_g is not None and g is not base_g
                 and _carried_by(graph, tool, up_full, g["sha"], base_g["sha"], out) is True):
             g["verdict"] = SUPERSEDED
+            g["basis"] = {"kind": "carried-by", "sha": base_g["sha"],
+                          "tag": base_g["tags"][0]}
             g["why"] = (f"its work is carried by {base_g['tags'][0]}, which our pinned ref "
                         f"already contains — there is nothing here to advance to")
             continue
@@ -1274,6 +1577,8 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         if g.get("disjoint"):
             if base_g is not None:
                 g["verdict"] = SUPERSEDED
+                g["basis"] = {"kind": "disjoint", "sha": base_g["sha"],
+                              "tag": base_g["tags"][0]}
                 g["why"] = ("shares no ancestor with the line we track — an abandoned "
                             "history, not a release any rebase could reach")
             else:
@@ -1297,9 +1602,27 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
                         "could not be established")
         elif not anc:
             g["verdict"] = SUPERSEDED
+            g["basis"] = ({"kind": "trunk-order", "sha": base_g["sha"],
+                           "tag": base_g["tags"][0]} if base_g is not None else
+                          {"kind": "trunk-order-without-a-base"})
             g["why"] = (f"its line left the upstream trunk at {tg[:12]}, before the line of "
                         f"{base_g['tags'][0] if base_g else 'our pinned ref'} left it at "
                         f"{ref_t[:12]} — an older series, not a release we could advance to")
+
+    # 5b. RE-PROVE THE BUCKETS THAT TAKE A RELEASE OUT OF THE COUNT. Step 3b could
+    #     not: SUPERSEDED and FOLDED do not exist until steps 4 and 5 have run. So
+    #     the same treatment is applied the moment they do, from the BASIS each
+    #     step recorded, by implementations that do not go through `git cherry`
+    #     (`_carried_by`) or through `_ancestor`'s cached trunk points.
+    #
+    #     Round 3 re-proved only the buckets that assert we HAVE something. On the
+    #     36 real clones, offline, that left 59 SUPERSEDED rows re-proved by
+    #     nothing — including both of the live zeroes that rest entirely on them.
+    #     A wrong CONTAINED overstates our health loudly; a wrong SUPERSEDED
+    #     deletes a release we owe from the count and reads exactly like health.
+    out["bucket_check"] = _merge_checks(
+        out["bucket_check"],
+        _verify_buckets(graph, groups, pin_sha, LATE_VERIFIED_BUCKETS, fp=fp))
 
     # 6. REPORT. `base_release` is the newest release we were MEASURED to contain
     #    — the release we actually build — not the newest one dated before our
@@ -1322,6 +1645,18 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         else:
             out["undetermined"].append({**row, "error": g.get("why") or "undetermined"})
     out["base"] = base_g["tags"][0] if base_g is not None else None
+    # WHAT THE RE-PROOF COVERED, beside what it found. `checked` alone is a count
+    # of successes, and a count of successes cannot say which rows nobody looked
+    # at — which is precisely how 59 SUPERSEDED rows went unexamined behind a
+    # line reading "271 rows re-proved". Coverage is published per bucket so the
+    # unverified part of the ledger is visible in the ledger.
+    out["bucket_check"]["coverage"] = {
+        "buckets_reproved": sorted(set(VERIFIED_BUCKETS) | set(LATE_VERIFIED_BUCKETS)),
+        "rows": {k: len(out[k]) for k in
+                 ("contained", "equivalent", "new", "superseded", "folded", "undetermined")},
+        # An undetermined row is the only kind no re-proof is owed, because it
+        # asserts nothing about the release: it says we could not find out.
+        "rows_that_assert_nothing": len(out["undetermined"])}
     if out["undetermined"]:
         out["status"], out["behind"] = UNKNOWN, None
     else:
@@ -1336,11 +1671,19 @@ def _ancestor(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     with "could not tell", and each of them must choose the answer that does not
     invent a fact: a prerelease that cannot be shown to be superseded stays
     counted, and a release whose position cannot be established is undetermined.
+
+    AND THE THIRD VALUE ONLY WORKS IF THE FAILURES REACH IT. `rc in (0, 1)` was
+    true of a `git` that never ran, because `_git` returned 1 for every
+    exception — so a timeout became a definite "not an ancestor" and returned
+    without ever falling through to the API. That is the reading that decides
+    `SUPERSEDED` at the trunk-order site: "its line left the upstream trunk
+    before ours did" is what a failed subprocess used to say, and SUPERSEDED
+    REMOVES the release from the count.
     """
     if clone is not None:
-        rc, _, _ = _git(clone, "merge-base", "--is-ancestor", a, b)
-        if rc in (0, 1):
-            return rc == 0
+        r = _git(clone, "merge-base", "--is-ancestor", a, b)
+        if r.ran and r.rc in (0, 1):
+            return r.ok
     if out["api_calls"] >= API_PROBE_CAP:
         return None
     out["api_calls"] += 1
@@ -1375,9 +1718,9 @@ def _merge_base(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     if a == b:
         return a
     if clone is not None:
-        rc, mb, _ = _git(clone, "merge-base", a, b)
-        if rc == 0 and re.fullmatch(r"[0-9a-f]{40}", mb or ""):
-            return mb
+        r = _git(clone, "merge-base", a, b)
+        if r.ok and re.fullmatch(r"[0-9a-f]{40}", r.out or ""):
+            return r.out
     if out["api_calls"] >= API_PROBE_CAP:
         return None
     for repo in (f"{ORG}/{tool}", up_full):
@@ -1496,29 +1839,29 @@ def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
     if not up_sha:
         return None
     have = _peel(clone, [up_sha, head])
-    if up_sha not in have or head not in have:
+    if have is None or up_sha not in have or head not in have:
         return None
     up_sha, head_sha = have[up_sha], have[head]
-    rc, mb, _ = _git(clone, "merge-base", up_sha, head_sha)
-    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", mb or ""):
+    mbr = _git(clone, "merge-base", up_sha, head_sha)
+    if not mbr.ok or not re.fullmatch(r"[0-9a-f]{40}", mbr.out or ""):
         return None
-    rc, counts, _ = _git(clone, "rev-list", "--left-right", "--count",
-                         f"{up_sha}...{head_sha}")
-    parts = counts.split()
-    if rc != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+    mb = mbr.out
+    lr = _git(clone, "rev-list", "--left-right", "--count", f"{up_sha}...{head_sha}")
+    parts = lr.out.split()
+    if not lr.ok or len(parts) != 2 or not all(p.isdigit() for p in parts):
         return None
     behind, ahead = int(parts[0]), int(parts[1])
-    rc, log, _ = _git(clone, "log", f"--max-count={CAP}",
-                      "--format=%H%x1f%ad%x1f%s", "--date=short", f"{mb}..{head_sha}")
+    lg = _git(clone, "log", f"--max-count={CAP}",
+              "--format=%H%x1f%ad%x1f%s", "--date=short", f"{mb}..{head_sha}")
     commits = []
-    if rc == 0 and log:
-        for line in reversed(log.splitlines()):
+    if lg.ok and lg.out:
+        for line in reversed(lg.out.splitlines()):
             f = line.split("\x1f")
             if len(f) == 3:
                 commits.append({"sha": f[0], "html_url": f"https://github.com/{ORG}/{tool}/commit/{f[0]}",
                                 "commit": {"message": f[2], "author": {"date": f[1]}}})
-    rc, mbline, _ = _git(clone, "show", "-s", "--format=%H%x1f%ad%x1f%s", "--date=short", mb)
-    mf = mbline.split("\x1f") if rc == 0 else []
+    shw = _git(clone, "show", "-s", "--format=%H%x1f%ad%x1f%s", "--date=short", mb)
+    mf = shw.out.split("\x1f") if shw.ok else []
     mb_commit = {"sha": mb, "html_url": f"https://github.com/{up_full}/commit/{mb}",
                  "commit": {"message": mf[2] if len(mf) == 3 else "",
                             "author": {"date": mf[1] if len(mf) == 3 else ""}}}
@@ -1783,15 +2126,23 @@ def main():
          "image_version": image_version,
          gk_state.PROVENANCE_KEY: gk_state.provenance(), "forks": index},
         indent=2, ensure_ascii=False) + "\n")
-    _checked = sum(((json.loads((LEDGER / f"{f['tool']}.json").read_text())
-                     .get("release_containment") or {}).get("bucket_check") or {})
-                   .get("checked", 0)
-                   for f in FORKS if (LEDGER / f"{f['tool']}.json").is_file())
+    _checks = [((json.loads((LEDGER / f"{f['tool']}.json").read_text())
+                 .get("release_containment") or {}).get("bucket_check") or {})
+               for f in FORKS if (LEDGER / f"{f['tool']}.json").is_file()]
+    _checked = sum(c.get("checked", 0) for c in _checks)
+    _unver = sum(len(c.get("unverifiable") or []) for c in _checks)
+    _by: dict[str, int] = {}
+    for c in _checks:
+        for k, v in (c.get("by_bucket") or {}).items():
+            _by[k] = _by.get(k, 0) + v
+    # SAY WHICH BUCKETS, not just how many rows. A total is the shape that let 59
+    # unexamined SUPERSEDED rows sit behind a reassuring number.
     print(f"wrote {len(index)} ledgers · image {image_version} → {LEDGER}")
-    print(f"  bucket re-proof: {_checked} contained/patch-equivalent row(s) re-proved "
-          f"from the clones, {len(refuted)} tool(s) refuted")
+    print(f"  bucket re-proof: {_checked} row(s) re-proved from the clones "
+          f"({', '.join(f'{k}={v}' for k, v in sorted(_by.items())) or 'none'}), "
+          f"{_unver} unverifiable, {len(refuted)} tool(s) refuted")
     if refuted:
-        print("  BUCKET INVARIANT VIOLATED — these rows claimed containment their own "
+        print("  BUCKET INVARIANT VIOLATED — these rows made a claim their own "
               "repository refutes. They were held UNDETERMINED, not published:")
         for tool, vs in refuted.items():
             for v in vs:

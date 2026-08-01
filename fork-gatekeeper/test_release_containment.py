@@ -54,6 +54,7 @@ sys.path.insert(0, str(HERE))
 
 import discover_forks as df           # noqa: E402
 import build_page as bp               # noqa: E402
+import gk_state                       # noqa: E402
 import pr_notify as prn               # noqa: E402
 
 ORG = "vibeic"
@@ -1585,6 +1586,60 @@ def test_the_bucket_check_is_not_vacuous_on_an_honest_run(monkeypatch):
 # over zero rows is the defect, not the absence of one.
 # ════════════════════════════════════════════════════════════════════════════
 
+def _corpus_writers(ledgers):
+    """The commits that WROTE this corpus, as the ledgers themselves record."""
+    return sorted({(led.get(gk_state.PROVENANCE_KEY) or {}).get("commit")
+                   for led in ledgers} - {None})
+
+
+def _corpus_is_of_the_code_under_test(ledgers, key):
+    """('yes' | 'no' | 'unknown', why) — was this corpus written by code that
+    emits `key` at all?
+
+    THE QUESTION THE NON-VACUITY ASSERTION IS REALLY ASKING, and it was asking it
+    by proxy. `assert present` fires when no ledger carries the bucket key, and
+    the reason it fires is meant to be "the sweep stopped writing what it
+    verifies". On a clean checkout it fired for a different reason entirely: the
+    corpus in `~/.cache` was last written on 2026-07-31 by commit fdb754c4a2b9,
+    two rounds before the bucket existed. That is not a defect in the code under
+    test and never was; it is the absence of a corpus OF the code under test.
+
+    So the two are told apart by MEASUREMENT rather than by weakening the
+    assertion: every ledger records the commit that wrote it, and this checkout
+    can be asked what that commit's `discover_forks.py` contained. A writer whose
+    own source has no `patch_equivalent_releases` in it could not have emitted
+    one, and a corpus it wrote proves nothing either way — that is a SKIP, with
+    the commit named. A writer whose source DOES contain the key had every
+    opportunity, so a corpus without it is a real failure and stays one.
+
+    'unknown' — no provenance at all, or a commit this checkout does not have —
+    is a skip too, and for the same reason the module refuses everywhere else: a
+    question that could not be put to git does not get answered in either
+    direction.
+    """
+    writers = _corpus_writers(ledgers)
+    if not writers:
+        return "unknown", "no ledger records which checkout wrote it"
+    r = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--show-prefix"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return "unknown", "this checkout is not a git repository, so no writer can be read"
+    rel = r.stdout.strip() + Path(df.__file__).name
+    emits = {}
+    for c in writers:
+        b = subprocess.run(["git", "-C", str(HERE), "cat-file", "-p", f"{c}:{rel}"],
+                           capture_output=True, text=True)
+        emits[c] = (key in b.stdout) if b.returncode == 0 else None
+    if any(v is True for v in emits.values()):
+        return "yes", (f"written by {', '.join(c for c, v in emits.items() if v)}, whose "
+                       f"{rel} emits `{key}`")
+    if emits and all(v is False for v in emits.values()):
+        return "no", (f"written by {', '.join(emits)}, whose {rel} has no `{key}` in it — "
+                      f"this corpus predates the bucket")
+    return "unknown", (f"this checkout cannot read the source of "
+                       f"{', '.join(c for c, v in emits.items() if v is None)}")
+
+
 def _corpus_ledgers():
     led_dir = df.LEDGER
     if not led_dir.is_dir():
@@ -1713,13 +1768,22 @@ def test_every_contained_release_in_the_REAL_ledger_survives_an_independent_chec
             else:
                 violations.append(f"{led['tool']} {row['tag']}: {why} "
                                   f"| filed as: {row.get('why')}")
+    # The refutation half runs against ANY corpus, whoever wrote it: a row that
+    # is there and is wrong is wrong. Only the non-vacuity half below needs to
+    # know whose code produced the file.
     assert not violations, (
         f"{len(violations)} row(s) in {led_dir} are filed under `contained_releases` "
         f"while an independent check of the repository says our pinned ref neither "
         f"contains them nor merges them as a no-op:\n  " + "\n  ".join(violations))
+    state, whose = _corpus_is_of_the_code_under_test(ledgers, "contained_releases")
+    if state != "yes":
+        pytest.skip(f"the corpus at {led_dir} is not one the code under test produced "
+                    f"({whose}), so its silence about `contained_releases` says nothing "
+                    f"about this code. Run discover_forks.py to produce one — until then "
+                    f"this half of the invariant checked NOTHING on this host")
     assert with_bucket, (
-        f"no ledger in {led_dir} carries a `contained_releases` key — this corpus "
-        f"predates the bucket, so nothing was checked")
+        f"no ledger in {led_dir} carries a `contained_releases` key — and it was written "
+        f"by code that emits one ({whose}), so the sweep stopped writing what it verifies")
     assert checked, (
         f"{with_bucket} ledger(s) in {led_dir} but ZERO rows could be verified "
         f"({len(unverifiable)} unverifiable: {unverifiable[:5]}). A clean result over "
@@ -1760,9 +1824,15 @@ def test_every_patch_equivalent_release_in_the_REAL_ledger_survives_an_independe
     assert not violations, (
         f"row(s) filed under `patch_equivalent_releases` in {led_dir} that an "
         f"independent patch-id comparison refutes:\n  " + "\n  ".join(violations))
+    state, whose = _corpus_is_of_the_code_under_test(ledgers, "patch_equivalent_releases")
+    if state != "yes":
+        pytest.skip(f"the corpus at {led_dir} was not produced by the code under test "
+                    f"({whose}), so nothing here was checked. Run discover_forks.py to "
+                    f"produce one")
     assert present, (
-        f"no ledger in {led_dir} carries a `patch_equivalent_releases` key — the "
-        f"corpus was not produced by the code under test, so nothing was checked")
+        f"no ledger in {led_dir} carries a `patch_equivalent_releases` key — and it was "
+        f"written by code that emits one ({whose}), so the bucket was dropped from what "
+        f"the sweep publishes")
 
 
 def test_the_sweep_itself_records_the_bucket_check_for_every_tool_it_measured():
@@ -1788,3 +1858,562 @@ def test_the_sweep_itself_records_the_bucket_check_for_every_tool_it_measured():
              for l in measured
              if l["release_containment"]["bucket_check"].get("violations")}
     assert not dirty, f"the sweep recorded bucket violations and published anyway: {dirty}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROUND 4 — A COMMAND THAT DID NOT RUN IS NOT AN ANSWER
+#
+# Round 1 removed a 404 that had been folded into the same boolean as a measured
+# "not contained". `_git` was doing the same thing one layer down: every
+# subprocess exception became `return 1, "", …`, and 1 is git's own exit code for
+# a CLEAN, DEFINITE NO — "not an ancestor", "no merge base", "this merge
+# conflicts". A timeout and a measurement arrived at every call site as the same
+# three values.
+#
+# HOW THESE ARE PROVOKED. The real thing is a `git` on PATH that hangs; that is
+# how the defects below were first measured, end to end through `discover_one`
+# with no production code patched at all, and it costs 60 s of real sleeping per
+# affected call. The tests raise `TimeoutExpired` at the boundary where a hanging
+# git really delivers it — `subprocess.run`, matched on the argv of the ONE
+# command under test, everything else delegating to the real one. Same exception,
+# same code path, same inputs, no production symbol replaced.
+# ════════════════════════════════════════════════════════════════════════════
+
+_REAL_RUN = subprocess.run
+
+
+def _hang(monkeypatch, matches):
+    """Make every `git` invocation whose argv satisfies `matches` time out."""
+    def fake(cmd, *a, **kw):
+        if isinstance(cmd, (list, tuple)) and matches(list(cmd)):
+            raise subprocess.TimeoutExpired(list(cmd), kw.get("timeout") or 60)
+        return _REAL_RUN(cmd, *a, **kw)
+    monkeypatch.setattr(df.subprocess, "run", fake)
+
+
+def _merge_base_calls(cmd):
+    return "merge-base" in cmd and "--is-ancestor" not in cmd
+
+
+def test_a_git_that_did_not_run_does_not_return_gits_code_for_a_clean_no(monkeypatch):
+    """THE ROOT, at the one function every other measurement goes through.
+
+    A `git` that cannot be executed at all — here a real, instant `PermissionError`
+    from a non-executable file, not a simulation of one — must not come back
+    wearing exit code 1. Exit code 1 is what git says when it RAN and the answer
+    is no.
+
+    PATH is REPLACED rather than prepended to, measured: `execvp` treats EACCES as
+    "keep looking" and finds the real git further down, so a shim in front of a
+    working git proves nothing. With this PATH there is no other git to find.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        shim = Path(d) / "bin"
+        shim.mkdir()
+        (shim / "git").write_text("#!/bin/sh\nexit 0\n")     # never made executable
+        monkeypatch.setenv("PATH", str(shim))
+        rc, out, err = df._git(Path(d), "merge-base", "--is-ancestor", "a", "b")
+    assert "Error" in err, f"the fixture did not stop git from running at all: {err!r}"
+    assert rc != 1, (
+        f"a git that could not be executed came back as rc=1, which is git's exit code "
+        f"for a clean 'no'. Every caller that reads 1 as a fact now has one: {err[:120]}")
+    assert rc != 0, "…and it must not read as success either"
+
+
+def test_a_merge_base_that_did_not_run_is_not_a_release_that_left_our_history(monkeypatch):
+    """H1, end to end and on a PUBLISHED FIELD.
+
+    `v1.0` carries a file we plainly do not have; `v0.9` is an ancestor of our pin
+    and anchors the comparison. With `git merge-base` timing out,
+    `_local_containment` used to read the exception's rc=1 as "shares no ancestor
+    with our pinned ref", set `disjoint`, and step 5 turned that into SUPERSEDED —
+    so the release we owe left the count while the row still said `measured`.
+
+    Measured with a hanging `git` on PATH and nothing else changed:
+        control  behind_releases=1 measured   new=['v1.0']
+        shim     behind_releases=0 measured   superseded=['v1.0']
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        c0 = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v0.9", c0)
+        _git(repo, "checkout", "-q", "-b", "rel", c0)
+        _git(repo, "tag", "v1.0", _commit(repo, "brand-new.txt", "work we lack\n", "2026-02-01"))
+        _git(repo, "checkout", "-q", "master")
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _hang(monkeypatch, _merge_base_calls)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-02", False),
+                                  ("v0.9", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert "v1.0" not in _tags_of(led, "superseded_releases"), (
+        "a release was declared to share no ancestor with the line we track — an "
+        "abandoned history — on the strength of a `git merge-base` that never ran")
+    assert led["behind_releases"] is None and led["behind_releases_status"] == "unknown", (
+        f"the count survived a measurement that did not happen: "
+        f"behind={led['behind_releases']} status={led['behind_releases_status']}")
+    assert "v1.0" in _tags_of(led, "undetermined_releases"), \
+        "the release neither counted nor said why it could not be decided"
+
+
+def test_a_release_we_lack_is_still_counted_when_git_answers(monkeypatch):
+    """THE CONTROL for the two above. Same fixture, real git, and the release is
+    counted — so the assertions there are about the timeout, not about a fixture
+    that produces nulls whatever happens."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        c0 = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v0.9", c0)
+        _git(repo, "checkout", "-q", "-b", "rel", c0)
+        _git(repo, "tag", "v1.0", _commit(repo, "brand-new.txt", "work we lack\n", "2026-02-01"))
+        _git(repo, "checkout", "-q", "master")
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-02", False),
+                                  ("v0.9", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert _tags_of(led) == ["v1.0"] and led["behind_releases"] == 1
+    assert led["behind_releases_status"] == "measured"
+
+
+def test_a_merge_base_that_did_not_run_does_not_refute_a_release_we_contain(monkeypatch):
+    """H2a, at the re-prover itself. `_verify_contained` returning False is a
+    REFUTATION: it nulls the row, files it under `undetermined_releases`, nulls
+    the tool's count and exits the sweep non-zero. A `git merge-base` that never
+    ran must not be able to produce one."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        (repo / "VERSION").write_text("1.0.0rc1\n")
+        c0 = _commit(repo, "f", "x", "2026-01-01")
+        _git(repo, "checkout", "-q", "-b", "rel-1", c0)
+        _commit(repo, "VERSION", "1.0.0rc2\n", "2026-02-01")
+        final = _commit(repo, "VERSION", "1.0.0\n", "2026-02-02")
+        _git(repo, "checkout", "-q", "master")
+        _commit(repo, "VERSION", "1.0.0\n", "2026-02-03")
+        pin = _commit(repo, "f", "y", "2026-03-01")
+        ok, why = df._verify_contained(clones / TOOL, final, pin)
+        assert ok is True, f"the fixture is not a contained release to begin with: {why}"
+        _hang(monkeypatch, _merge_base_calls)
+        timed_out, why2 = df._verify_contained(clones / TOOL, final, pin)
+    assert timed_out is not False, (
+        f"a re-proof whose `git merge-base` never ran REFUTED a release our pinned ref "
+        f"genuinely contains, saying: {why2!r}")
+    assert timed_out is None, "…and the honest disposition is 'could not be re-proved'"
+
+
+def test_the_sweep_does_not_refuse_a_row_because_the_re_proof_timed_out(monkeypatch):
+    """H2a end to end, on PUBLISHED FIELDS. Only the re-proof's own `merge-base`
+    times out — it is the second of the run, the classification's having already
+    answered — so the row is classified exactly as it is on a healthy host and
+    only the verification is starved.
+
+    Measured with a hanging `git` on PATH, `GK_SHIM_FROM=2`:
+        control  behind=0 measured  base=v1.0  checked=2  violations=[]
+        shim     behind=None unknown  undetermined=['v1.0']  and the sweep exits non-zero
+    """
+    seen = []
+
+    def second_merge_base_onward(cmd):
+        if not _merge_base_calls(cmd):
+            return False
+        seen.append(cmd)
+        return len(seen) >= 2
+
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        (repo / "VERSION").write_text("1.0.0rc1\n")
+        c0 = _commit(repo, "f", "x", "2026-01-01")
+        _git(repo, "tag", "v0.9", c0)
+        _git(repo, "checkout", "-q", "-b", "rel-1", c0)
+        _commit(repo, "VERSION", "1.0.0rc2\n", "2026-02-01")
+        _git(repo, "tag", "v1.0", _commit(repo, "VERSION", "1.0.0\n", "2026-02-02"))
+        _git(repo, "checkout", "-q", "master")
+        _commit(repo, "VERSION", "1.0.0\n", "2026-02-03")
+        pin = _commit(repo, "f", "y", "2026-03-01")
+        _hang(monkeypatch, second_merge_base_onward)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-02-02", False),
+                                  ("v0.9", "2026-01-01", False)],
+                        fork_point=(pin, "2026-03-01"))
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert not chk.get("violations"), (
+        f"a timed-out re-proof was recorded as the repository REFUTING a row, which "
+        f"exits the sweep non-zero on a healthy host: {chk.get('violations')}")
+    assert "v1.0" in _tags_of(led, "contained_releases"), \
+        "the row was withdrawn because its verification could not be run"
+    assert led["behind_releases"] == 0 and led["behind_releases_status"] == "measured"
+    assert chk.get("unverifiable"), \
+        "a re-proof that could not run left no trace at all — that is the silent part"
+
+
+# ── H2b — the verdict the check refused is still the verdict everyone reads ──
+
+def _lying_containment(monkeypatch, sha):
+    """Claim CONTAINED for one release that plainly is not — the injection the
+    round-3 bucket test already uses, and the only way to get a REAL refutation
+    out of a healthy fixture (classifier and re-prover agree by construction when
+    both are told the truth)."""
+    real = df._local_containment
+
+    def lying(repo_, tag_sha, pin_sha, _real=real, _s=sha):
+        if tag_sha == _s:
+            return df.CONTAINED, "a claim nothing checked", False
+        return _real(repo_, tag_sha, pin_sha)
+    monkeypatch.setattr(df, "_local_containment", lying)
+
+
+def test_a_refuted_row_is_not_published_as_the_release_we_build(monkeypatch):
+    """H2b. `_verify_buckets` refutes a row by nulling its verdict; `in_pin` was
+    set BEFORE the check ran and nothing cleared it, and `base_release` is chosen
+    from `in_pin`.
+
+    Measured: `undetermined_releases = ['v2.0']`, `bucket_check.violations =
+    ['v2.0']`, `base_release = 'v2.0'`. The ledger said "we cannot verify that we
+    contain v2.0" and "the release we build is v2.0" in the same file.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        rel = _commit(repo, "brand-new.txt", "work we plainly do not have\n", "2026-02-01")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+        _lying_containment(monkeypatch, rel)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert "v2.0" in _tags_of(led, "undetermined_releases"), "the fixture stopped refuting"
+    assert led["base_release"] != "v2.0", (
+        "the ledger publishes as `base_release` — the release we build — a row the same "
+        "sweep refused to verify and filed under `undetermined_releases`")
+    assert led["base_release"] == "v1.0", (
+        f"`base_release` must fall back to the newest release that SURVIVED the check, "
+        f"not to nothing: {led['base_release']!r}")
+
+
+def test_a_refuted_row_does_not_anchor_the_trunk_order_for_the_others(monkeypatch):
+    """The second half of H2b, and the one that changes another release's BUCKET.
+
+    `ref_t` — the trunk point every other release is ordered against — is taken
+    from the same refuted row. `v1.5`'s line left the trunk after `v1.0`'s and
+    before `v2.0`'s, so anchoring on the refuted `v2.0` files it SUPERSEDED, "an
+    older series, not a release we could advance to", and it leaves the count.
+    Anchored on the release that actually survived verification it is what it is:
+    a release we do not have.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "trunk-a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        b = _commit(repo, "trunk-b", "b", "2026-01-05")
+        c = _commit(repo, "trunk-c", "c", "2026-01-08")
+        pin = _commit(repo, "trunk-d", "d", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "mid", b)
+        _git(repo, "tag", "v1.5", _commit(repo, "mid-work.txt", "theirs\n", "2026-01-20"))
+        _git(repo, "checkout", "-q", "-b", "late", c)
+        rel = _commit(repo, "late-work.txt", "theirs too\n", "2026-02-01")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+        _lying_containment(monkeypatch, rel)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.5", "2026-01-20", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert "v1.5" not in _tags_of(led, "superseded_releases"), (
+        "a release was dropped from the count as 'an older series' by comparing it "
+        "against the trunk point of a row the sweep had just refused to verify")
+    assert "v1.5" in _tags_of(led, "new_releases"), \
+        f"v1.5 is a release we do not have; it is in no counted bucket: {led['new_releases']}"
+
+
+# ── THE BUCKET THAT REMOVES RELEASES FROM THE COUNT ─────────────────────────
+
+def test_a_superseded_release_is_re_proved_before_it_leaves_the_count(monkeypatch):
+    """`VERIFIED_BUCKETS` re-proved `contained` and `patch-equivalent` and nothing
+    else. SUPERSEDED is the bucket that takes a release OUT of
+    `behind_releases` — on the corpus, offline over the 36 real clones, 59 rows of
+    it, including both of the live zeroes that rest on it — and nothing re-proved
+    a single one.
+
+    Here `_carried_by` claims the release we build already carries a release that
+    adds a file nobody has. Nothing downstream of step 5 could tell that from a
+    true one, which is the point: the count must not shrink on a claim no second
+    implementation will stand behind.
+    """
+    real = df._carried_by
+
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        rel = _commit(repo, "brand-new.txt", "work nobody carries\n", "2026-02-01")
+        _git(repo, "tag", "v2.0", rel)
+        _git(repo, "checkout", "-q", "master")
+
+        def lying(clone, tool, up_full, x, y, out, _real=real, _s=rel):
+            return True if x == _s else _real(clone, tool, up_full, x, y, out)
+
+        monkeypatch.setattr(df, "_carried_by", lying)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert "v2.0" not in _tags_of(led, "superseded_releases"), (
+        "a release left `behind_releases` on a superseded claim that an independent "
+        "check of the repository refutes, and nothing re-proved it")
+    assert led["behind_releases"] is None and led["behind_releases_status"] == "unknown", (
+        f"the count shrank on a refuted claim: behind={led['behind_releases']} "
+        f"status={led['behind_releases_status']}")
+    assert any(v["claim"] == df.SUPERSEDED for v in chk.get("violations") or []), \
+        f"the run recorded no violation for the superseded row it refused: {chk}"
+
+
+def test_an_honest_superseded_release_survives_the_re_proof(monkeypatch):
+    """THE NEGATIVE CONTROL for the check above, and the anti-vacuity half.
+
+    `v0.9-old` really is behind us: its line left the upstream trunk at the root,
+    before `v1.0`'s line left it, and no rebase reaches it. The re-proof must
+    leave it exactly where it is — a check that refuses everything protects
+    nothing — and it must SAY it re-proved a superseded row, because a `checked`
+    total that never distinguishes buckets is how 59 unexamined rows hid behind a
+    reassuring number.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        root = _commit(repo, "root", "r", "2026-01-01")
+        _git(repo, "checkout", "-q", "-b", "old", root)
+        _git(repo, "tag", "v0.9-old", _commit(repo, "old-work.txt", "old series\n", "2026-01-03"))
+        _git(repo, "checkout", "-q", "master")
+        a = _commit(repo, "a", "a", "2026-01-05")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.0", "2026-01-06", False),
+                                  ("v0.9-old", "2026-01-03", False)],
+                        fork_point=(pin, "2026-01-10"))
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert _tags_of(led, "superseded_releases") == ["v0.9-old"], (
+        f"the re-proof refused a release that genuinely is behind us: "
+        f"superseded={_tags_of(led, 'superseded_releases')} "
+        f"undetermined={_tags_of(led, 'undetermined_releases')}")
+    assert not chk.get("violations"), f"an honest run reported a violation: {chk}"
+    assert led["behind_releases"] == 0 and led["behind_releases_status"] == "measured"
+    assert (chk.get("by_bucket") or {}).get(df.SUPERSEDED) == 1, (
+        f"the record does not say that the bucket which REMOVES a release from the "
+        f"count was re-proved at all: {chk}")
+
+
+def test_an_is_ancestor_that_did_not_run_does_not_order_a_release_behind_us(monkeypatch):
+    """`_ancestor` is the other reader that took rc=1 as a fact, and it is the one
+    the trunk ordering rests on: `_ancestor(t(base), t(R))` returning False files
+    R as "an older series, not a release we could advance to" and drops it.
+
+    `--is-ancestor` between the two TRUNK POINTS is starved here; the containment
+    probes, which end at our pin, are left alone. Pre-fix that exception came back
+    as a definite "not an ancestor" and never fell through to the API at all.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "trunk-a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        b = _commit(repo, "trunk-b", "b", "2026-01-05")
+        pin = _commit(repo, "trunk-c", "c", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "mid", b)
+        _git(repo, "tag", "v1.5", _commit(repo, "mid-work.txt", "theirs\n", "2026-01-20"))
+        _git(repo, "checkout", "-q", "master")
+        _hang(monkeypatch, lambda c: "--is-ancestor" in c and c[-1] != pin)
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v1.5", "2026-01-20", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    assert "v1.5" not in _tags_of(led, "superseded_releases"), (
+        "a release was ordered behind us — and dropped — by an `is-ancestor` probe "
+        "that never ran")
+    assert led["behind_releases"] is None and led["behind_releases_status"] == "unknown", \
+        f"the count survived: behind={led['behind_releases']} {led['behind_releases_status']}"
+
+
+def test_a_folded_prerelease_is_re_proved_too(monkeypatch):
+    """FOLDED removes a release from the count exactly as SUPERSEDED does — the
+    prerelease is counted under the final that carries it — so it is re-proved by
+    the same machinery, from the same recorded basis."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        pre = _commit(repo, "feature.txt", "the work\n", "2026-02-01")
+        _git(repo, "tag", "v2.0rc1", pre)
+        _git(repo, "tag", "v2.0", _commit(repo, "notes.txt", "notes\n", "2026-02-02"))
+        _git(repo, "checkout", "-q", "master")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v2.0rc1", "2026-02-01", True),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    chk = (led.get("release_containment") or {}).get("bucket_check") or {}
+    assert _tags_of(led, "folded_releases") == ["v2.0rc1"], \
+        f"the fixture stopped folding: {_tags_of(led, 'folded_releases')}"
+    assert not chk.get("violations"), f"the fold was refuted: {chk['violations']}"
+    assert (chk.get("by_bucket") or {}).get(df.FOLDED) == 1, (
+        f"the fold — a release removed from the count — was re-proved by nothing: {chk}")
+
+
+def test_the_ledger_says_which_buckets_the_re_proof_covered(monkeypatch):
+    """Unverifiability has to be VISIBLE, not inferred from the absence of a
+    number. `checked` counts successes and cannot say which rows nobody looked
+    at, which is how a line reading "271 rows re-proved" sat on top of 59
+    unexamined ones."""
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d)
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        _git(repo, "tag", "v2.0", _commit(repo, "new.txt", "theirs\n", "2026-02-01"))
+        _git(repo, "checkout", "-q", "master")
+        led = _discover(monkeypatch, clones, pin,
+                        releases=[("v2.0", "2026-02-02", False),
+                                  ("v1.0", "2026-01-02", False)],
+                        fork_point=(pin, "2026-01-10"))
+    cov = ((led.get("release_containment") or {}).get("bucket_check") or {}).get("coverage")
+    assert cov, "the ledger does not say what the re-proof covered at all"
+    assert set(cov["buckets_reproved"]) >= {df.CONTAINED, df.EQUIVALENT, df.SUPERSEDED,
+                                            df.FOLDED, df.NEW}, (
+        f"a bucket that decides the count is published as re-proved by nothing: "
+        f"{cov['buckets_reproved']}")
+    rows = cov["rows"]
+    accounted = ((led["release_containment"]["bucket_check"]["checked"])
+                 + len(led["release_containment"]["bucket_check"]["unverifiable"])
+                 + cov["rows_that_assert_nothing"])
+    assert accounted == sum(rows.values()), (
+        f"{sum(rows.values())} rows published, {accounted} accounted for by the "
+        f"re-proof record: {rows} {led['release_containment']['bucket_check']}")
+
+
+# ── THE SUITE ITSELF — a corpus nobody produced is not a failing invariant ───
+
+def _fake_corpus(monkeypatch, tmp: Path, written_by: str | None, extra=None):
+    tmp.mkdir(parents=True, exist_ok=True)
+    led = {"tool": TOOL, "pinned_ref_full": "0" * 40, **(extra or {})}
+    if written_by:
+        led[gk_state.PROVENANCE_KEY] = {"commit": written_by}
+    (tmp / f"{TOOL}.json").write_text(json.dumps(led))
+    monkeypatch.setattr(df, "LEDGER", tmp)
+
+
+def _commit_before_the_bucket(key: str):
+    """The commit whose `discover_forks.py` predates `key`, measured from this
+    repository rather than written down."""
+    # An ABSOLUTE pathspec: with `git -C <subdir>` a relative one is resolved
+    # against that subdir, and `fork-gatekeeper/discover_forks.py` matched nothing
+    # from inside `fork-gatekeeper/` — which made this test skip itself.
+    path = str(Path(df.__file__).resolve())
+    r = subprocess.run(["git", "-C", str(HERE), "log", "-S", key, "--format=%H", "--", path],
+                       capture_output=True, text=True)
+    shas = (r.stdout or "").split()
+    if r.returncode != 0 or not shas:
+        return None
+    p = subprocess.run(["git", "-C", str(HERE), "rev-parse", f"{shas[-1]}^"],
+                       capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+def test_a_corpus_written_before_the_bucket_existed_is_a_skip_with_a_reason(monkeypatch):
+    """On a clean checkout `pytest -q` was `2 failed, 367 passed`: the corpus in
+    `~/.cache` was written on 2026-07-31 by commit fdb754c4a2b9, two rounds before
+    either bucket key existed, and the non-vacuity assertions read its silence as
+    the code under test having stopped writing them.
+
+    A corpus no version of this code produced says nothing about this code. That
+    is a skip — and it names the commit, so it cannot be mistaken for a pass.
+    """
+    old = _commit_before_the_bucket("patch_equivalent_releases")
+    if not old:
+        pytest.skip("this checkout cannot identify a commit predating the bucket")
+    with tempfile.TemporaryDirectory() as d:
+        _fake_corpus(monkeypatch, Path(d) / "ledger", written_by=old)
+        with pytest.raises(pytest.skip.Exception) as e:
+            test_every_patch_equivalent_release_in_the_REAL_ledger_survives_an_independent_check()
+    assert old[:12] in str(e.value) or old in str(e.value), \
+        f"the skip does not say WHICH writer produced the corpus: {e.value}"
+
+
+def _must_fail(fn, what):
+    """Run a test function and require an AssertionError out of it.
+
+    A SKIP is not an acceptable outcome and is turned into a failure here, which
+    is the whole point of this helper: `pytest.raises(AssertionError)` lets
+    `Skipped` straight through, and the outer test then skips too. Measured
+    against a naive gate — one that skips whenever the key is absent, with no
+    measurement of who wrote the corpus — the guard below reported SKIPPED, which
+    is a checker reporting nothing while looking like it ran.
+    """
+    try:
+        fn()
+    except AssertionError as e:
+        return str(e)
+    except BaseException as e:                       # noqa: BLE001 — incl. pytest's Skipped
+        pytest.fail(f"{what}: got {e.__class__.__name__} instead of a failure — {e}")
+    pytest.fail(f"{what}: it passed")
+
+
+def test_a_corpus_this_code_wrote_without_the_bucket_is_still_a_failure(monkeypatch):
+    """The other side of the same gate, and the reason it is not a way out. If the
+    corpus WAS produced by code that emits the key — HEAD's own — and the key is
+    not there, the sweep stopped publishing what it verifies, and that is a
+    failure exactly as before."""
+    head = subprocess.run(["git", "-C", str(HERE), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    if head.returncode != 0:
+        pytest.skip("not a git checkout")
+    with tempfile.TemporaryDirectory() as d:
+        _fake_corpus(monkeypatch, Path(d) / "ledger", written_by=head.stdout.strip())
+        why = _must_fail(
+            test_every_patch_equivalent_release_in_the_REAL_ledger_survives_an_independent_check,
+            "a corpus written by the code under test, with the bucket key missing, "
+            "must still be a failure")
+    assert "patch_equivalent_releases" in why
+
+
+def test_a_corpus_with_rows_is_checked_whoever_wrote_it(monkeypatch):
+    """And the gate never suppresses a REFUTATION. A foreign corpus that carries
+    rows still has every one of them re-proved; only the assertion about what is
+    ABSENT is gated, because absence is the only part whose meaning depends on
+    who wrote the file."""
+    old = _commit_before_the_bucket("patch_equivalent_releases") or "0" * 40
+    with tempfile.TemporaryDirectory() as d:
+        clones = Path(d) / "clones"
+        repo = _repo(clones / TOOL)
+        a = _commit(repo, "a", "a", "2026-01-01")
+        _git(repo, "tag", "v1.0", a)
+        pin = _commit(repo, "b", "b", "2026-01-10")
+        _git(repo, "checkout", "-q", "-b", "rel", a)
+        _git(repo, "tag", "v2.0", _commit(repo, "new.txt", "theirs\n", "2026-02-01"))
+        monkeypatch.setattr(df, "FORK_CLONES", clones, raising=False)
+        _fake_corpus(monkeypatch, Path(d) / "ledger", written_by=old,
+                     extra={"pinned_ref_full": pin,
+                            "patch_equivalent_releases": [{"tag": "v2.0", "why": "a lie"}]})
+        why = _must_fail(
+            test_every_patch_equivalent_release_in_the_REAL_ledger_survives_an_independent_check,
+            "a foreign corpus carrying a refutable row must still be refuted")
+    assert "v2.0" in why, f"the row was not re-proved at all: {why}"
