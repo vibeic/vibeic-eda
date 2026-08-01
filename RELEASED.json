@@ -1,12 +1,12 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.53",
-  "pins_fingerprint": "23b5bc2ea926",
+  "version": "0.2.54",
+  "pins_fingerprint": "20c5cd982510",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
     "FasterCap": "afca8f5e55bbc8e19555f65fc29962fb475c8ebb",
-    "Fault": "0c90e3b14b7f1a940f4120da8ac03037847309f4",
+    "Fault": "10613daaa7c488c2988d8dd5851e78fae456cc54",
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
     "OpenROAD": "47636465f969284bf70ac422957f8c5f9c3d79aa",

@@ -22,7 +22,7 @@
 
 FROM swift:5.9 AS build
 ARG FAULT_REPO=https://github.com/vibeic/Fault.git
-ARG FAULT_REF=0c90e3b14b7f1a940f4120da8ac03037847309f4  # pinned; main tip carrying the
+ARG FAULT_REF=10613daaa7c488c2988d8dd5851e78fae456cc54  # pinned; main tip carrying the
 #   --skip-synth output fix (chain.swift). Was `fix/skip-synth-honours-output`, a BRANCH
 #   NAME — and that branch no longer exists: `git ls-remote vibeic/Fault` lists only
 #   `main`. The work was merged into main as 0c90e3b (2026-07-31) and the branch was
