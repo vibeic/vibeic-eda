@@ -44,7 +44,7 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
-variable "OPENROAD_RECIPE" { default = "78200d" }
+variable "OPENROAD_RECIPE" { default = "6a8f5f" }
 variable "YOSYS_RECIPE" { default = "586160" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "5d88d6" }
@@ -67,7 +67,7 @@ variable "SV_ELAB_RECIPE" { default = "799906" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "09d67f08f8b4b2f094c4435fe5e6ad49cec725dc" }
+variable "OPENROAD_REF"    { default = "47636465f969284bf70ac422957f8c5f9c3d79aa" }
 variable "YOSYS_REF"       { default = "715cea078ff8d413b6c2dad6b91299d5aa759246" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
