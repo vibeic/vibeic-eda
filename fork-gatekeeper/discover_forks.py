@@ -369,8 +369,19 @@ def _iso_date(raw) -> str:
     return head if _ISO_DATE_RE.fullmatch(head) else ""
 
 
-def _tags_by_date(up_full: str, limit: int = 30) -> list[dict]:
-    """Tags newest-first WITH dates, in one call. [] if it could not be asked.
+def _tags_by_date(up_full: str, limit: int = 30) -> list[dict] | None:
+    """Tags newest-first WITH dates, in one call.
+
+    `None` = COULD NOT ASK. `[]` = asked, and this repository has no tags.
+
+    vibeic-eda#49. All three failure paths used to return `[]`, which is also a
+    legitimate and common answer, and the docstring said so — "[] if it could not
+    be asked" — naming the conflation without closing it. `_releases` then merged
+    that list, so a repository whose tag feed could not be read presented as one
+    with nothing to be behind, in the `measured` status. That is the sentence #47
+    removed from the containment path, one function upstream of it: containment
+    can now say "I could not decide", but it was being handed an input that had
+    already decided, wrongly and silently.
 
     The REST tags endpoint gives neither a date nor a meaningful order — it
     returned `v2.0` first for OpenROAD, whose newest tag is `26Q3`. GraphQL can
@@ -386,15 +397,15 @@ def _tags_by_date(up_full: str, limit: int = 30) -> list[dict]:
             ["gh", "api", "graphql", "-f", f"query={q}",
              "-F", f"o={owner}", "-F", f"n={name}", "-F", f"k={limit}"],
             capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return []
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None                      # could not ask
     if r.returncode != 0:
-        return []
+        return None                      # could not ask
     try:
         nodes = (json.loads(r.stdout).get("data") or {}).get(
             "repository", {}).get("refs", {}).get("nodes") or []
     except (json.JSONDecodeError, AttributeError):
-        return []
+        return None                      # could not ask
     out = []
     for nd in nodes:
         tgt = nd.get("target") or {}
@@ -407,8 +418,11 @@ def _tags_by_date(up_full: str, limit: int = 30) -> list[dict]:
     return out
 
 
-def _releases(up_full: str) -> list[dict]:
+def _releases(up_full: str) -> list[dict] | None:
     """Upstream versions newest-first: [{tag, date}] — releases AND tags, merged.
+
+    `None` = NEITHER source could be asked. `[]` = both answered, and there are
+    no versions. The caller must not read the first as the second (#49).
 
     vibeic-eda#31. This used to return as soon as the RELEASE list was non-empty,
     so the tag fallback only ever fired for a project that had never published a
@@ -436,22 +450,26 @@ def _releases(up_full: str) -> list[dict]:
     # None (a tag with no release record) means UNKNOWN, not False.
     pre: dict[str, bool] = {}
     rel = gh(f"repos/{up_full}/releases?per_page=30")
-    if isinstance(rel, list):
+    rel_answered = isinstance(rel, list)
+    if rel_answered:
         for r in rel:
             tag = r.get("tag_name")
             if tag:
                 merged[tag] = _iso_date(r.get("published_at"))
                 pre[tag] = bool(r.get("prerelease"))
 
-    for t in _tags_by_date(up_full):
+    tags = _tags_by_date(up_full)
+    for t in (tags or []):
         merged.setdefault(t["tag"], t["date"])
 
     if not merged:
-        # Neither source answered. NOT "this project has no versions" — a caller
-        # that reads an empty list here concludes we are current, which is the
-        # failure this function is being fixed for. Left empty deliberately and
-        # visibly: the ledger records upstream_latest_release=None, which is a
-        # missing value rather than a reassuring one.
+        # NEITHER SOURCE ANSWERED is not "this project has no versions", and
+        # until #49 both arrived here as the same `[]`. A caller reading that
+        # empty list concludes we are current. Now the two are told apart at
+        # the source: the releases endpoint answered iff it returned a list, and
+        # `_tags_by_date` returns None only when it could not be asked.
+        if not rel_answered and tags is None:
+            return None
         return []
 
     # Undated entries sort last rather than first: an unknown date must never
@@ -2340,10 +2358,23 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     # `pin_date` (the fork-point date) stays in the ledger as display metadata; no
     # arithmetic that produces `behind_releases` reads it any more.
     rels = _releases(up_full)
-    led["upstream_releases"] = rels[:15]
-    led["upstream_latest_release"] = rels[0]["tag"] if rels else None
-    cl = classify_releases(tool, up_full, rels, ref,
-                           fork_point=(led.get("fork_point") or {}).get("sha"))
+    if rels is None:
+        # #49: neither the release endpoint nor the tag feed could be asked. A
+        # classification run over an empty list would answer "behind 0, MEASURED"
+        # — the exact sentence this file spent five rounds removing from the
+        # containment path. The vocabulary for this already exists; use it.
+        led["upstream_releases"] = []
+        led["upstream_latest_release"] = None
+        led["release_source_error"] = ("neither the releases endpoint nor the "
+                                       "tag feed could be read")
+        cl = {"new": [], "contained": [], "equivalent": [], "superseded": [],
+              "folded": [], "undetermined": [], "behind": None,
+              "status": "UNKNOWN", "base": None, "api_calls": 0, "clone": None}
+    else:
+        led["upstream_releases"] = rels[:15]
+        led["upstream_latest_release"] = rels[0]["tag"] if rels else None
+        cl = classify_releases(tool, up_full, rels, ref,
+                               fork_point=(led.get("fork_point") or {}).get("sha"))
     led["new_releases"] = cl["new"]
     led["contained_releases"] = cl["contained"][:15]
     # NAMED FOR THE CLAIM IT MAKES. Our pinned ref carries every commit these

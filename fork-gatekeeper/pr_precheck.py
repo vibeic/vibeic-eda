@@ -23,6 +23,8 @@ Verdict (also the exit code):
   REVIEW         (1)  base is AHEAD of the PR (behind_by>0) — inspect for a dup fix
   REDUNDANT_RISK (2)  a base-only commit already Closes/Fixes an issue this PR claims
                       — the code change is very likely superseded; land test-only or reject
+  UNMEASURED     (3)  the base/head compare could not be read at all — neither half of
+                      the verdict was established. NOT an OK (#48).
 
 This is a SIGNAL, not a verdict machine: REDUNDANT_RISK means "prove the base
 already fixes it (build the base and run the PR's own test) before landing",
@@ -82,15 +84,25 @@ def precheck(repo: str, pr: int) -> dict:
 
     # base-only commits = commits in base that head does NOT have (head...base).
     # These are the superseding-fix candidates the PR was authored without.
+    # vibeic-eda#48. `or {}` used to map a FAILED API call onto the same `0` that
+    # means "the base has not moved", and `base_only` onto the same `[]` that
+    # means "the base added nothing" — so the redundancy loop below iterated over
+    # nothing and `redundant` came out empty for the reason round 3 of #47 names:
+    # empty output accepted as proof. BOTH halves of the verdict were satisfiable
+    # by one non-measurement, and the direction is the dangerous one — a
+    # reviewer-side gate goes from stop to go on a network blip.
     cmp_data = _gh_json(f"repos/{repo}/compare/{quote(head, safe='')}...{quote(base, safe='')}")
-    behind_by = (cmp_data or {}).get("ahead_by", 0)     # base ahead of head == head behind base
-    base_only = (cmp_data or {}).get("commits", []) or []
+    if cmp_data is None:
+        behind_by, base_only = None, None
+    else:
+        behind_by = cmp_data.get("ahead_by", 0)   # base ahead of head == head behind base
+        base_only = cmp_data.get("commits") or []
 
     # does a base-only commit already Close/Fix an issue this PR claims? Parse the
     # base messages with the SAME closing-keyword-anchored regex used for the PR body,
     # so a bare "see #124" mention never trips it — only an actual close/fix/resolve.
     redundant = []
-    for c in base_only:
+    for c in (base_only or []):
         msg = c.get("commit", {}).get("message", "")
         closed = {_issue_number(t) for t in _ISSUE_RE.findall(msg)}
         shared = pr_issues & closed
@@ -99,7 +111,11 @@ def precheck(repo: str, pr: int) -> dict:
                               "issues": sorted(shared),
                               "headline": msg.splitlines()[0][:80]})
 
-    if redundant:
+    if base_only is None:
+        # Not a pass and not a failure: the question was never answered. Its own
+        # code, so a caller cannot read it as either (#48).
+        verdict, code = "UNMEASURED", 3
+    elif redundant:
         verdict, code = "REDUNDANT_RISK", 2
     elif behind_by > 0:
         verdict, code = "REVIEW", 1
@@ -124,6 +140,10 @@ def _print(rep: dict) -> None:
     if rep["verdict"] == "REDUNDANT_RISK":
         print("  → the base already fixes this. PROVE it (build base + run the PR's own "
               "test) before landing; prefer test-only graft or reject the code change.")
+    elif rep["verdict"] == "UNMEASURED":
+        print("  → the base/head compare could not be read, so neither "
+              "\"the base has not moved\" nor \"it added nothing\" was "
+              "established. Re-run before landing; this is not an OK.")
     elif rep["verdict"] == "REVIEW":
         print("  → base advanced since the PR branched; re-test on the REBASED tree and "
               "check for a duplicate fix before landing (mergeable=CLEAN is not enough).")
