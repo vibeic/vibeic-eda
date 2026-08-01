@@ -124,14 +124,34 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
                [{"tool": c["tool"], "arg": c.get("dockerfile_arg"), "branch": c.get("vibeic_branch"),
                  "release": c.get("upstream_latest_release"), "upstream": c.get("upstream")}
                 for c in candidates])}
+    # THE OTHER `shell=True` IN THIS TREE, and the one whose command is not even
+    # written here — `cmd` comes from `regression.json` and today is
+    # `bash build_and_regress.sh`, but the field takes any shell text, pipelines
+    # included. A pipeline's exit status is its LAST command's, so under the
+    # default `/bin/sh` a producer that failed inside it would be invisible; that
+    # is the defect round 5 measured in `discover_forks._patch_id_set`, and the
+    # fact that this site does not read the status at all makes it worse rather
+    # than safer. `bash -o pipefail -c` is used instead of `shell=True` because
+    # `/bin/sh` here is `dash` and `pipefail` is not POSIX, and the status is now
+    # recorded on every candidate so a harness that fails without writing
+    # GK_RESULT stops being indistinguishable from one that never ran.
+    argv = ["/bin/bash", "-o", "pipefail", "-c", cmd]
     try:
-        subprocess.run(cmd, shell=True, cwd=cwd, timeout=cfg.get("timeout", 21600), env=env)
+        r = subprocess.run(argv, cwd=cwd, timeout=cfg.get("timeout", 21600), env=env)
     except subprocess.TimeoutExpired:
         return {c["tool"]: {"status": "timeout", "detail": "harness timed out"} for c in candidates}
+    except OSError as e:
+        return {c["tool"]: {"status": "harness_error",
+                            "detail": f"the harness could not be started: {e}"}
+                for c in candidates}
     try:
         arr = json.loads(Path(result_path).read_text())
-        return {r["tool"]: r for r in arr}
+        return {r_["tool"]: r_ for r_ in arr}
     except (OSError, json.JSONDecodeError):
+        if r.returncode != 0:
+            return {c["tool"]: {"status": "harness_error",
+                                "detail": f"the harness exited {r.returncode} and wrote no "
+                                          f"{result_path}"} for c in candidates}
         return {}
 
 

@@ -25,6 +25,14 @@ upstream release is the merge candidate; the daily gatekeeper rebases our branch
 it, bumps the Dockerfile ARG, and rebuilds the vibeic-eda image (the green gate).
 
     python3 discover_forks.py            # refresh ledger/<tool>.json + ledger/index.json
+
+EXIT STATUS — three outcomes, not two. `0` the sweep measured everything and
+nothing contradicts itself; `1` at least one row made a claim its own repository
+REFUTES (a defect in us, printed under "BUCKET INVARIANT VIOLATED"); `2` the sweep
+ran and at least one release could not be decided at all, so that tool's
+`behind_releases` and `base_release` are withheld. 2 is not a refutation and must
+not be read as one — it is a slow disk, a clone missing an object, an exhausted
+API budget. It is also not success, which is what it used to report.
 """
 from __future__ import annotations
 
@@ -32,9 +40,9 @@ import base64
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -595,6 +603,29 @@ PATCHID_CAP = int(os.environ.get("GK_PATCHID_CAP") or "20000")
 #: `behind_releases` is an int ONLY under this status. The other two carry None.
 MEASURED, UNKNOWN, NOT_PROBED = "measured", "unknown", "not-probed"
 
+#: THE SWEEP'S OWN THREE ANSWERS, and the third of them is what round 5 adds.
+#:
+#: A REFUTATION AND A NON-MEASUREMENT ARE NOT THE SAME EVENT, so they must not
+#: share an exit status any more than they share a bucket. A refutation is our own
+#: repository contradicting our own claim: a defect in this code or in the ledger,
+#: reproducible, and it should stop a pipeline. A row nothing could measure is a
+#: slow disk, a loaded host, a clone missing an object, an API budget — none of
+#: them a contradiction, and filing them under "BUCKET INVARIANT VIOLATED" would
+#: print a false sentence and turn the daily cron red on a transient.
+#:
+#: BUT EXIT 0 IS ALSO FALSE FOR THEM, and that is the shape this round exists to
+#: remove. The measured defect ended `violations=[] -> main() exits 0` while the
+#: ledger said the release we build could not be established; a sweep that reports
+#: success while recording that it could not measure is a check that lies. So the
+#: third outcome gets a third status: the run happened, nothing contradicts itself,
+#: and at least one release was not decided. A caller can gate on `!= 0`, on
+#: `== 1`, or ignore 2 deliberately — what it can no longer do is fail to notice.
+#:
+#: Measured on the live corpus the day this was written: 34 tools, every one
+#: `measured`, zero undetermined rows — so a healthy sweep still exits 0 and this
+#: status is not a permanent red.
+EXIT_CLEAN, EXIT_REFUTED, EXIT_NOT_MEASURED = 0, 1, 2
+
 
 #: `rc` when the command DID NOT RUN. Not an exit status, because nothing exited:
 #: git never got as far as having an opinion. It is `None` so that the two tests
@@ -665,6 +696,191 @@ def _git(repo, *args, stdin: str | None = None, timeout: int = 60) -> Git:
     return Git(r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip())
 
 
+def _exit_phrase(rc: int | None) -> str:
+    """How a command ended, in a sentence that cannot be mistaken for a verdict.
+
+    A SIGNAL GIVES A NEGATIVE RETURNCODE. `subprocess` reports a process the
+    kernel killed with signal N as `-N`, so a SIGKILLed git arrives as `rc ==
+    -9`: not 0, not 1, and not any exit code git itself can produce. Every
+    `rc != 0` in this module therefore covers two different events — git refused,
+    and git was destroyed — and a message that guesses between them (the module
+    used to answer a killed `merge-tree` with "git merge-tree --write-tree is
+    unavailable (git < 2.38)") sends the reader after the wrong fault.
+    """
+    if rc is None:
+        return "it never ran"
+    if rc < 0:
+        return f"killed by signal {-rc}"
+    return f"exit {rc}"
+
+
+class Probe(NamedTuple):
+    """What ONE containment prover concluded — and whether it got to conclude.
+
+    THE DEFECT THIS TYPE EXISTS TO REMOVE, and it is the same defect as `Git`'s,
+    one layer further out. Round 4 made `_git` tri-state, so a subprocess that
+    never ran stopped arriving as git's exit code 1. That value was then
+    propagated CORRECTLY into `_merge_changes_nothing`, which answered None — and
+    `_local_containment` read None the way it read False and FELL THROUGH TO NEW.
+
+    NEW is not silence. It is an assertion: "this release carries commits and file
+    changes our pinned ref does not have". Measured end to end through
+    `discover_one`, no production module patched, a `git` on PATH that never
+    returns from `merge-tree`, on a release our pin genuinely contains (its
+    three-way merge writes exactly the tree we already build, and no other test
+    can see that):
+
+        control  behind=0 measured  base=v1.0  contained=[v1.0,v0.9]  violations=[]
+        shim     behind=1 measured  base=v0.9  new=[v1.0]
+                 unverifiable=[(v1.0,new,"merge-tree --write-tree did not run")]
+                 violations=[]   ->  main() exits 0
+
+    `behind_releases_status` still read `measured`; the row landed only in
+    `unverifiable`, which nothing refuses on; and `base_release` — the release we
+    build — moved. A hung subprocess changed the release we build, and the sweep
+    exited 0.
+
+    SO A PROVER NOW REPORTS TWO THINGS, and the caller has to read both. `value`
+    is True (proved), False (ran, and the evidence says NO) or None (no verdict).
+    `ran` separates the two ways to have no verdict, which is the rule this round
+    installs: NO RESULT ("git never answered") and NO DATA ("git answered, and
+    what it can see does not decide this") must never be the same value. Only a
+    prover that RAN may contribute to the negative verdict NEW; one that did not
+    contributes UNDETERMINED, which asserts nothing at all.
+    """
+    value: bool | None
+    ran: bool
+    why: str = ""
+
+    @property
+    def proved(self) -> bool:
+        """It ran and it PROVED the property. The only value that may be relied on."""
+        return self.value is True
+
+    @property
+    def refuted(self) -> bool:
+        """It ran and the evidence says NO — a measurement, not a failure."""
+        return self.value is False
+
+
+def _no_result(why: str) -> Probe:
+    """A prover that did not run. Contributes to no verdict in either direction."""
+    return Probe(None, False, why)
+
+
+def _no_data(why: str) -> Probe:
+    """A prover that ran and cannot decide this input. It has still measured
+    something, and the caller may fall through to a prover that can see more."""
+    return Probe(None, True, why)
+
+
+class Pipe(NamedTuple):
+    """What `a | b` did — EVERY stage's exit status, not just the last one.
+
+    A SHELL PIPELINE'S EXIT STATUS IS ITS LAST COMMAND'S, and that is how a
+    producer that failed became an empty success. `_patch_id_set` ran
+
+        git log -p --no-merges --format='commit %H' <rng> | git patch-id --stable
+
+    under `shell=True` and screened it with `if r.returncode != 0: return None`.
+    `git patch-id` exits 0 on empty input, so the screen COULD NOT SEE the
+    producer fail. Measured with no shim and no monkeypatch, by deleting one blob
+    object from a real clone — which is how clones actually break:
+
+        git log -p alone         -> rc=128  fatal: unable to read <blob>
+        THE PIPELINE AS WRITTEN  -> rc=0    stdout=''
+        _patch_id_set            -> set()          (None would be honest)
+        _verify_patch_equivalent -> (True, "all 0 of its commits are patch-identical
+                                            to ones we carry")
+        _verify_carried_by       -> (True, ...)
+
+    `_verify_carried_by` is the re-proof round 4 added to close its own finding
+    that the verification layer checked what ADDS to the count and not what
+    REMOVES from it. So the re-proof of a removal was satisfiable by a command
+    that failed: round 2's defect (`all([])` as proof) and round 4's defect (a
+    command that did not run read as a clean result) in one expression, inside
+    the code written to remove both.
+
+    `rc` is one entry per stage, `None` for a stage that never ran at all. `ran`
+    and `ok` are the two questions a caller has to answer before it is allowed a
+    verdict, and neither of them can be answered by the last stage alone.
+    """
+    rc: tuple[int | None, ...]
+    out: str
+    err: str
+
+    @property
+    def ran(self) -> bool:
+        """Did EVERY stage execute and exit?"""
+        return bool(self.rc) and all(c is not None for c in self.rc)
+
+    @property
+    def ok(self) -> bool:
+        """Did every stage exit 0? A producer that failed makes this False."""
+        return bool(self.rc) and all(c == 0 for c in self.rc)
+
+
+def _pipe(*stages: list[str], timeout: int = 900) -> Pipe:
+    """Run `stages[0] | stages[1] | …` with NO SHELL, and report EVERY status.
+
+    WHY NOT `set -o pipefail`, AND WHY NOT `PIPESTATUS`. Both work, and both keep
+    a shell in a place that has no other use for one. `pipefail` is not in POSIX
+    `sh` — the interpreter `shell=True` actually uses is `/bin/sh`, which on this
+    host is `dash` — so it would have to come with `executable="/bin/bash"`, i.e.
+    a second dependency added to make the first one safe. `PIPESTATUS` is bash
+    only, for the same reason. Dropping the shell removes the failure mode rather
+    than reporting it: with no shell there is no aggregate status to mistake for
+    the producer's, and no quoting either, so `shlex.quote` on every interpolated
+    path — the workaround a clone directory with a space in its name needed —
+    goes away with it. The producer's stderr is kept, because "unable to read
+    <blob>" is the sentence that says which object the clone is missing.
+    """
+    procs: list[subprocess.Popen] = []
+    # Every stage's stderr goes to ONE temporary FILE, never to a pipe nobody is
+    # reading: a stage that blocks writing its diagnostics while the next stage
+    # waits for its input is a deadlock, and the diagnostics are the whole reason
+    # to keep them.
+    with tempfile.TemporaryFile(mode="w+", errors="replace") as err:
+        try:
+            try:
+                prev = None
+                for argv in stages:
+                    p = subprocess.Popen(
+                        argv,
+                        stdin=prev.stdout if prev is not None else subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=err, text=True)
+                    if prev is not None:
+                        # So an upstream stage sees EPIPE if a downstream one exits.
+                        prev.stdout.close()
+                    procs.append(p)
+                    prev = p
+            except OSError as e:
+                for p in procs:
+                    p.kill()
+                    p.wait()
+                return Pipe(tuple([None] * len(stages)), "",
+                            f"{e.__class__.__name__}: {e}")
+            out, _ = procs[-1].communicate(timeout=timeout)
+            for p in procs[:-1]:
+                p.wait(timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as e:
+            for p in procs:
+                p.kill()
+                try:
+                    p.wait(timeout=10)
+                except subprocess.SubprocessError:
+                    pass
+            return Pipe(tuple([None] * len(stages)), "",
+                        f"{e.__class__.__name__}: {e}")
+        finally:
+            for p in procs:
+                if p.stdout is not None and not p.stdout.closed:
+                    p.stdout.close()
+        err.seek(0)
+        return Pipe(tuple(p.returncode for p in procs), out or "",
+                    (err.read() or "").strip())
+
+
 def _clone_for(tool: str) -> Path | None:
     """The local clone that can answer for `tool`, or None."""
     p = FORK_CLONES / tool
@@ -722,7 +938,10 @@ def _range_counts(repo, base_sha: str, head_sha: str):
 
 def _patch_equivalent(repo, head_sha: str, base_sha: str):
     """Does every commit `head_sha` has and `base_sha` lacks already exist in
-    `base_sha` under a DIFFERENT sha? True / False / None (could not tell).
+    `base_sha` under a DIFFERENT sha? A `Probe` — and the caller must read
+    `.ran` as well as `.value`, because "git would not run" and "git ran and
+    this walk cannot see the answer" are different facts with different
+    consequences and used to be the same `None`.
 
     `git cherry <base> <head>` walks `base..head` and prints each commit prefixed
     `-` when a commit reachable from `base` (back to their merge-base) produces
@@ -778,39 +997,45 @@ def _patch_equivalent(repo, head_sha: str, base_sha: str):
     THE FAILURE DIRECTION THIS MUST NOT HAVE. A release we genuinely lack has at
     least one commit whose patch nothing of ours reproduces, so `git cherry`
     prints a `+` and the release stays counted. Anything that is not a clean run
-    of git — a missing object, a timeout, a non-zero exit — returns None, and
-    None never means "contained" at the call site. Nor does an incomplete walk:
-    a range this function could not see all of is None too. There is no input
-    for which a failure OR A BLIND SPOT of this function removes a release from
-    the count.
+    of git — a missing object, a timeout, a non-zero exit — has no verdict, and
+    no verdict never means "contained" at the call site. Nor does an incomplete
+    walk: a range this function could not see all of has no verdict either. There
+    is no input for which a failure OR A BLIND SPOT of this function removes a
+    release from the count.
     """
     counts = _range_counts(repo, base_sha, head_sha)
     if counts is None:
-        return None
+        return _no_result("git rev-list would not size the range")
     n_all, n_nomerge = counts
     if n_all != n_nomerge:
         # Merge commits in the range. `git cherry` will not walk them, so whatever
         # it prints is a statement about a strict subset of the work in question.
-        return None
+        # git RAN and said so: this is a blind spot of the walk, not a failure of
+        # the machine, and the caller may go on to the one test that can see a
+        # merge. It is `_no_data`, not `_no_result`.
+        return _no_data(f"the range holds {n_all - n_nomerge} merge commit(s), which "
+                        f"`git cherry` does not walk")
     walk = _git(repo, "cherry", base_sha, head_sha, timeout=180)
     if not walk.ok:
-        return None
+        return _no_result(f"git cherry did not answer (exit {walk.rc}): {walk.err[:100]}")
     lines = [ln for ln in walk.out.splitlines() if ln.strip()]
     if any(ln.startswith("+") for ln in lines):
-        return False
+        return Probe(False, True, "at least one of its commits reproduces no patch of ours")
     if len(lines) != n_nomerge:
         # The walk and the range disagree about how many commits there are. That
         # is not a "no": it is this function failing to account for the range.
-        return None
+        return _no_data(f"git cherry printed {len(lines)} line(s) for a range of "
+                        f"{n_nomerge} commit(s)")
     # Every commit in the range was walked, and every one of them was `-`. An
     # empty range lands here too and is True for the right reason: there is
     # nothing in it that we lack.
-    return all(ln.startswith("-") for ln in lines) or not lines
+    return Probe(all(ln.startswith("-") for ln in lines) or not lines, True,
+                 f"git cherry accounted for all {n_nomerge} commit(s) in the range")
 
 
 def _merge_changes_nothing(repo, head_sha: str, base_sha: str, mb: str):
     """Would merging `head_sha` into `base_sha` change base's tree at all?
-    Returns True (it would change nothing) / False / None (could not tell).
+    A `Probe`: proved (it would change nothing) / refuted / no verdict.
 
     This is the adoption question asked literally: `git merge-tree --write-tree`
     performs the real three-way merge the gatekeeper would perform and writes the
@@ -834,18 +1059,33 @@ def _merge_changes_nothing(repo, head_sha: str, base_sha: str, mb: str):
     performed has no exit code at all (`Git.ran`), and reporting it as False
     would be the same fold this round removes — here in the direction that keeps
     a release counted, which is not a reason to leave it.
+
+    AND NOR IS IT A VERDICT OF ANY KIND. Every one of the three ways this ends
+    without a merge is `_no_result`: no merge was performed, so nothing about
+    this release was measured, and the caller may not fall through to NEW on the
+    strength of it. That fall-through is what round 5 removes; see `Probe`.
     """
     r = _git(repo, "merge-tree", "--write-tree", f"--merge-base={mb}",
              base_sha, head_sha, timeout=180)
-    if not r.ran:
-        return None                      # git did not run: no merge, no verdict
+    if not r.ran:                        # git did not run: no merge, no verdict
+        return _no_result(f"merge-tree --write-tree did not run: {r.err[:100]}")
     if r.said_no:
-        return False                     # conflicts: adopting it is not a no-op
+        return Probe(False, True, "merging it conflicts, so adopting it is not a no-op")
     first = (r.out.splitlines() or [""])[0].strip()
     if r.rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", first):
-        return None                      # no --write-tree (git < 2.38), or no tree printed
+        # A merge that produced no tree. That is git < 2.38 without `--write-tree`,
+        # a bad object, or a git the kernel killed — `rc` is NEGATIVE for the last
+        # one, which is why this may not be written as `rc == 1` or `rc != 0` and
+        # left to speak for git's version. Say the exit status and let the reader
+        # tell them apart.
+        return _no_result(f"merge-tree --write-tree produced no tree "
+                          f"({_exit_phrase(r.rc)}): {r.err[:100]}")
     trees = _tree_pair(repo, base_sha, base_sha)
-    return None if trees is None else first == trees[0]
+    if trees is None:
+        return _no_result("the tree of our pinned ref could not be read")
+    return Probe(first == trees[0], True,
+                 "the merged tree is the tree we already build" if first == trees[0]
+                 else "the merged tree is not the tree we already build")
 
 
 def _local_containment(repo, tag_sha: str, pin_sha: str):
@@ -891,6 +1131,18 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
     Returns (None, reason, False) when this clone cannot decide — a missing
     object, a git that would not run.
 
+    AND THAT INCLUDES RUNNING OUT OF QUESTIONS. NEW is the last line of this
+    function and it used to be unconditional, which made the ABSENCE OF A PROOF
+    into a POSITIVE CLAIM: "carries commits and file changes our pinned ref does
+    not have" is an assertion about the release, and a `merge-tree` that never ran
+    is not evidence for it. The two remaining tests are asked as `Probe`s, and NEW
+    is spoken only when both of them RAN and both said no. If either produced no
+    result the answer is None — the release is undetermined, this tool's count and
+    `base_release` are withheld, and the sweep says so in its exit status. Measured
+    with a `git` on PATH that never returns from `merge-tree`, on a release whose
+    three-way merge writes exactly the tree we build: `behind=0 measured
+    base=v1.0` became `behind=1 measured base=v0.9 new=[v1.0]`.
+
     `disjoint` IS A MEASUREMENT AND MUST COME FROM ONE. It used to be reached by
     `if rc != 0 or not mb`, which is true of a `git merge-base` that timed out
     (`_git` returned 1 for every exception), of one killed by the OOM killer, and
@@ -931,17 +1183,41 @@ def _local_containment(repo, tag_sha: str, pin_sha: str):
     if trees[0] == trees[1]:
         return (CONTAINED,
                 "changes no file relative to the merge-base with our pinned ref", False)
-    if _patch_equivalent(repo, tag_sha, pin_sha) is True:
+    pe = _patch_equivalent(repo, tag_sha, pin_sha)
+    if pe.proved:
         # EQUIVALENT, not CONTAINED — see the constant. Our pin carries the work;
         # our pin is not the same tree, and may not even merge it cleanly.
         return (EQUIVALENT,
                 "every commit it has that our pinned ref lacks is patch-identical "
                 "(git patch-id --stable) to a commit our pinned ref already carries, "
                 "and our pinned ref has since moved on from it", False)
-    if _merge_changes_nothing(repo, tag_sha, pin_sha, mb) is True:
+    mn = _merge_changes_nothing(repo, tag_sha, pin_sha, mb)
+    if mn.proved:
         return (CONTAINED,
                 "merging it into our pinned ref produces the tree we already build — "
                 "it changes no file", False)
+    # THE DEFAULT IS THE DEFECT, and this is where it was. Reaching the end of the
+    # list without a proof used to RETURN NEW — and NEW is not the absence of a
+    # claim, it is the claim "this release carries commits and file changes our
+    # pinned ref does not have". A prover that never ran had just been made to say
+    # so honestly (`Probe.ran`, round 4's `Git.ran` one layer out) and the honesty
+    # was thrown away one line later.
+    #
+    # NEW is now spoken only when EVERY remaining prover RAN and every one of them
+    # said no. When one did not run there is no negative to state: the release is
+    # UNDETERMINED, which asserts nothing, nulls this tool's count, withholds
+    # `base_release`, and — since round 5 — makes the sweep exit 2 rather than 0.
+    #
+    # `_no_data` is deliberately NOT `_no_result` here: a `git cherry` that cannot
+    # walk a merge has still measured the range, and the merge test that CAN see a
+    # merge has just answered. Only a prover that produced nothing at all suppresses
+    # the verdict, which is why the round-2 evil-merge shape still counts.
+    if not (pe.ran and mn.ran):
+        stalled = [p.why for p in (pe, mn) if not p.ran]
+        return (None,
+                "no test could show our pinned ref already holds it, and the tests that "
+                "would have decided it did not run, so whether we have it was never "
+                "measured: " + "; ".join(stalled), False)
     return NEW, "carries commits and file changes our pinned ref does not have", False
 
 
@@ -1022,7 +1298,14 @@ def _verify_contained(repo, tag_sha: str, pin_sha: str):
                        + (conflicted[0][:160] if conflicted else "unresolved"))
     first = (mt.out.splitlines() or [""])[0].strip()
     if not mt.ok or not re.fullmatch(r"[0-9a-f]{40}", first):
-        return None, "git merge-tree --write-tree is unavailable (git < 2.38)"
+        # NOT "git < 2.38". That was the only cause this line named, and a git the
+        # kernel killed lands here too — `rc == -9`, which is neither 0 nor 1 nor
+        # any exit code git can produce. Naming one cause for a condition that has
+        # three sends the reader after a version that is not the problem; measured
+        # with a `git` on PATH that SIGKILLs itself on `merge-tree`, which reported
+        # "git merge-tree --write-tree is unavailable (git < 2.38)" on git 2.43.
+        return None, (f"git merge-tree --write-tree produced no tree "
+                      f"({_exit_phrase(mt.rc)}): {mt.err[:100] or 'no diagnostics'}")
     if first == trees[1]:
         return True, "merging it into our pinned ref changes no file"
     return False, "merging it into our pinned ref changes files our pinned ref does not have"
@@ -1035,27 +1318,34 @@ def _patch_id_set(repo, rng: str, cap: int):
     performs internally, run here WITHOUT `git cherry`, so this can disagree with
     it. One process pair for the whole range: measured 0.63s over cocotb's 2276
     commits.
+
+    AN EMPTY SET AND None ARE DIFFERENT ANSWERS, and until round 5 a failure
+    produced the first. The two processes ran under `shell=True` and the result
+    was screened with `if r.returncode != 0`, which is the SHELL's status, which
+    is the LAST command's — and `git patch-id` exits 0 on empty input. So a
+    `git log -p` that died on a missing blob came back as a clean, empty answer,
+    and an empty answer is what both callers read as PROOF: `theirs - ours` is
+    empty for every `ours`, so `_verify_patch_equivalent` and `_verify_carried_by`
+    each answered "all 0 of its commits are patch-identical to ones we carry".
+    Measured on a real clone with one blob deleted; see `Pipe`. `_pipe` reports
+    every stage's status, so a producer that failed is now a `None` — "we could
+    not find out" — which is what it always was.
     """
     cnt = _git(repo, "rev-list", "--count", "--no-merges", rng, timeout=300)
     if not cnt.ok or not cnt.out.isdigit():
         return None
     if int(cnt.out) > cap:
         return None
-    # The one shell pipeline in this module, because `git patch-id` reads the diff
-    # stream `git log -p` writes and there is no plumbing form that does both. Every
-    # interpolated value is quoted: a clone path with a space would otherwise make
-    # this return None, and a None here reads as "could not verify" rather than as
-    # the failure it would be.
-    try:
-        r = subprocess.run(
-            f"git -C {shlex.quote(str(repo))} log -p --no-merges "
-            f"--format='commit %H' {shlex.quote(rng)} | git patch-id --stable",
-            shell=True, capture_output=True, text=True, timeout=900)
-    except (OSError, subprocess.SubprocessError):
+    # No shell: `git patch-id` reads the diff stream `git log -p` writes and there
+    # is no plumbing form that does both, but a pipe does not need an interpreter.
+    # Without one there is no aggregate status to mistake for the producer's, and
+    # nothing to quote — `--format=commit %H` is one argv entry, not a shell word.
+    p = _pipe(["git", "-C", str(repo), "log", "-p", "--no-merges",
+               "--format=commit %H", rng],
+              ["git", "patch-id", "--stable"], timeout=900)
+    if not p.ok:
         return None
-    if r.returncode != 0:
-        return None
-    return {ln.split()[0] for ln in (r.stdout or "").splitlines() if ln.strip()}
+    return {ln.split()[0] for ln in (p.out or "").splitlines() if ln.strip()}
 
 
 def _verify_patch_equivalent(repo, tag_sha: str, pin_sha: str):
@@ -1253,6 +1543,15 @@ def _verify_buckets(repo, groups: dict, pin_sha: str, buckets=VERIFIED_BUCKETS,
         else:
             violations.append({**row, "filed_as": g.get("why")})
             g["verdict"] = None
+            # REFUTED IS A MEASUREMENT; UNDETERMINED-BECAUSE-NOTHING-RAN IS NOT.
+            # Both null the verdict and both land in `undetermined_releases`, and
+            # `base_release` must treat them differently: an independent check of
+            # the repository has established that our pin does NOT hold this
+            # release, so an older release may take its place as the one we build
+            # (round 4's H2b constraint). A release nobody could measure may not be
+            # stepped over that way — we do not know that it is not the one we
+            # build. This flag is the difference, recorded where it is decided.
+            g["refuted"] = True
             g["why"] = (f"classified {claim} — {g.get('why')} — but an independent check "
                         f"of the repository refutes it: {why}. A verdict that contradicts "
                         f"itself is not a measurement")
@@ -1401,7 +1700,11 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
     pin_sha = shas.get(ref) or (ref if re.fullmatch(r"[0-9a-f]{40}", ref or "") else None)
     if not pin_sha:
         out["status"] = UNKNOWN
-        out["undetermined"] = [{**r, "sha": shas.get(r["tag"]),
+        # `refuted` on EVERY undetermined row, including the two that are filed
+        # before a verdict exists. The flag is what tells "an independent check of
+        # the repository says this is not contained" from "nothing measured it",
+        # and a row that omits it says neither — the shape this round removes.
+        out["undetermined"] = [{**r, "sha": shas.get(r["tag"]), "refuted": False,
                                 "error": f"our pinned ref {ref!r} could not be resolved "
                                          f"to a commit"} for r in rels]
         return out
@@ -1414,7 +1717,7 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         sha = shas.get(r["tag"])
         if not sha:
             out["undetermined"].append(
-                {**r, "sha": None,
+                {**r, "sha": None, "refuted": False,
                  "error": "the tag could not be resolved to a commit in the fork clone, "
                           "the upstream remote or our mirror"})
             continue
@@ -1643,8 +1946,34 @@ def classify_releases(tool: str, up_full: str, rels: list[dict], ref: str | None
         elif g["verdict"] == FOLDED:
             out["folded"].append({**row, "counted_under": g.get("folded_into")})
         else:
-            out["undetermined"].append({**row, "error": g.get("why") or "undetermined"})
-    out["base"] = base_g["tags"][0] if base_g is not None else None
+            out["undetermined"].append({**row, "error": g.get("why") or "undetermined",
+                                        # See `_verify_buckets`: a refuted row was
+                                        # MEASURED not to be contained; an unmeasured
+                                        # one was not measured at all.
+                                        "refuted": bool(g.get("refuted"))})
+    # `base_release` — AND WHEN IT MUST NOT BE NAMED AT ALL.
+    #
+    # Round 4 established that a row the re-proof REFUTED must not be published as
+    # the release we build, and that the honest replacement is the newest release
+    # that survived the check, "not nothing" — because a refutation is a
+    # measurement: the repository was asked and it says our pin does not hold that
+    # release, so an older one really is the newest we hold.
+    #
+    # A row NOTHING COULD MEASURE gives no such licence, and stepping over it is
+    # the same fall-through this round removes at `_local_containment`, one field
+    # further on. Measured: with `merge-tree` never returning, the release our pin
+    # genuinely builds became undetermined and `base_release` moved from `v1.0` to
+    # `v0.9` — a different, older tag published as "the release we build", from a
+    # sweep that had just recorded that it could not tell. The count is already
+    # withheld for the same reason two lines below; this is the same claim about
+    # the same fact and it is withheld with it, under the same status.
+    unmeasured = [r["tag"] for r in out["undetermined"] if not r.get("refuted")]
+    out["base"] = None if unmeasured else (base_g["tags"][0] if base_g is not None else None)
+    if unmeasured and base_g is not None:
+        out["base_withheld"] = (
+            f"the newest release our pinned ref was measured to contain is "
+            f"{base_g['tags'][0]}, but containment could not be measured at all for "
+            f"{', '.join(unmeasured)}, so which release we build is not established")
     # WHAT THE RE-PROOF COVERED, beside what it found. `checked` alone is a count
     # of successes, and a count of successes cannot say which rows nobody looked
     # at — which is precisely how 59 SUPERSEDED rows went unexamined behind a
@@ -1708,7 +2037,7 @@ def _carried_by(clone, tool: str, up_full: str, a: str, b: str, out: dict):
     anc = _ancestor(clone, tool, up_full, a, b, out)
     if anc is True:
         return True
-    if clone is not None and _patch_equivalent(clone, a, b) is True:
+    if clone is not None and _patch_equivalent(clone, a, b).proved:
         return True
     return None if anc is None else False
 
@@ -2038,7 +2367,13 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                                   # WHAT WAS RE-PROVED, and how much of it. `checked`
                                   # is here so a clean result over zero rows reads as
                                   # zero rows rather than as a pass.
-                                  "bucket_check": cl["bucket_check"]}
+                                  "bucket_check": cl["bucket_check"],
+                                  # WHY THERE IS NO `base_release`, when there is a
+                                  # release we were measured to contain but a row
+                                  # nobody could measure sits beside it. A null with
+                                  # no sentence next to it is the value this module
+                                  # exists to stop publishing.
+                                  "base_withheld": cl.get("base_withheld")}
     led["base_release"] = cl["base"]
 
     led.setdefault("last_sync", None)
@@ -2090,6 +2425,7 @@ def main():
     # something false is the defect this module was rewritten to remove and it must
     # not be able to reappear quietly.
     refuted: dict[str, list] = {}
+    unmeasured: dict[str, list] = {}
     for fork in FORKS:
         prev = LEDGER / f"{fork['tool']}.json"
         sync_log, last_sync = [], None
@@ -2114,6 +2450,11 @@ def main():
         _bc = (led.get("release_containment") or {}).get("bucket_check") or {}
         if _bc.get("violations"):
             refuted[fork["tool"]] = _bc["violations"]
+        # …AND THE ROWS NOTHING COULD MEASURE, which are not the same thing and
+        # must not be reported as the same thing. See the exit status below.
+        _un = [r for r in (led.get("undetermined_releases") or []) if not r.get("refuted")]
+        if _un:
+            unmeasured[fork["tool"]] = _un
         _st = release_gap_status(led)
         _n = ("unknown" if _st == UNKNOWN
               else ("not-probed" if _st == NOT_PROBED else release_gap(led)))
@@ -2147,8 +2488,18 @@ def main():
         for tool, vs in refuted.items():
             for v in vs:
                 print(f"    {tool:16} {v['tag']:24} [{v['claim']}] {v['reason']}")
-    return len(refuted)
+    if unmeasured:
+        print("  NOT MEASURED — containment could not be decided for these releases, so "
+              "the count and `base_release` are withheld for their tools:")
+        for tool, rows in unmeasured.items():
+            for r in rows:
+                print(f"    {tool:16} {r['tag']:24} {(r.get('error') or '')[:110]}")
+    # THREE OUTCOMES, THREE EXIT STATUSES, and the third one is what this round
+    # adds. See `EXIT_*`.
+    if refuted:
+        return EXIT_REFUTED
+    return EXIT_NOT_MEASURED if unmeasured else EXIT_CLEAN
 
 
 if __name__ == "__main__":
-    sys.exit(1 if main() else 0)
+    sys.exit(main())
