@@ -74,6 +74,51 @@ def _gh(path: str, jq: Optional[str] = None, paginate: bool = False):
     return out if rc == 0 else ""
 
 
+def tree_basis(eda_root: Path) -> dict:
+    """WHICH TREE this verdict describes: HEAD, dirty pin files, behind-count.
+
+    `pinned_refs` reads the Dockerfiles off the FILESYSTEM, so every verdict
+    here is about the working tree it was run in — not about what ships. That
+    distinction is not academic: on 2026-08-01 this reported
+    `OpenROAD b6fd2b2fe STALE` while `origin/main` carried `47636465f9` and had
+    shipped it as 0.2.53. The checkout was 14 commits behind with an
+    uncommitted pin edit, and the report named neither.
+
+    It fails in BOTH directions. A stale checkout invents staleness that is not
+    shipping (what happened), and an uncommitted ADVANCE hides staleness that
+    is — the tree would read current while the release is not.
+
+    Not a refusal: advancing a pin legitimately runs this on a dirty tree. The
+    basis is STATED so the reader knows which tree answered.
+    """
+    def _git(*a):
+        try:
+            r = subprocess.run(["git", "-C", str(eda_root), *a],
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    head = _git("rev-parse", "--short", "HEAD")
+    if head is None:
+        return {"head": None, "dirty_pin_files": [], "behind": None,
+                "note": "not a git checkout — the basis of this verdict is "
+                        "unknown"}
+    status = _git("status", "--porcelain", "--", "tools", "Dockerfile",
+                  "docker-bake.hcl") or ""
+    # SPLIT, not sliced. `--porcelain` is `XY<space>PATH`, but a staged entry
+    # is `M <space>PATH` and a fixed offset ate the first character of the
+    # filename — a report that names `ockerfile` is a report a reader cannot
+    # act on.
+    dirty = [l.split(None, 1)[1].strip() for l in status.splitlines()
+             if l.strip() and len(l.split(None, 1)) == 2]
+    behind = None
+    cnt = _git("rev-list", "--count", "HEAD..@{u}")
+    if cnt is not None and cnt.isdigit():
+        behind = int(cnt)
+    return {"head": head, "dirty_pin_files": dirty, "behind": behind}
+
+
 def pinned_refs(eda_root: Path) -> Dict[str, str]:
     """fork repo -> pinned SHA, over every Dockerfile that clones a vibeic fork.
 
@@ -315,6 +360,23 @@ def main(argv=None) -> int:
                        if r["verdict"] != "UPSTREAM_AVAILABLE")
     upstream_total = sum(r.get("behind", 0) for r in available)
 
+    basis = tree_basis(Path(a.eda_root))
+    _b = []
+    if basis.get("head"):
+        _b.append(f"HEAD {basis['head']}")
+    if basis.get("behind"):
+        _b.append(f"{basis['behind']} commit(s) BEHIND its remote")
+    if basis.get("dirty_pin_files"):
+        _b.append(f"{len(basis['dirty_pin_files'])} UNCOMMITTED pin file(s): "
+                  + ", ".join(basis["dirty_pin_files"][:4]))
+    if basis.get("note"):
+        _b.append(basis["note"])
+    print(f"  basis: this verdict describes the WORKING TREE — "
+          + ("; ".join(_b) if _b else "clean and current"))
+    if basis.get("behind") or basis.get("dirty_pin_files"):
+        print("  ^ so it is NOT a statement about what SHIPS: a stale checkout "
+              "invents staleness that is not shipping, and an uncommitted "
+              "advance hides staleness that is.")
     print(f"check_pins_current: {len(results)} pin(s), "
           f"{len(results) - len(bad) - len(available)} at their branch tip, "
           f"{len(bad)} not, {len(available)} holding an upstream version "
