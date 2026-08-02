@@ -96,7 +96,18 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 FROM alpine/git AS tb-src
 ARG COCOTB_REF=1d79fec0e424e628aba4abd66ab910a9450c5755  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
-ARG PYUVM_REF=ca55221c171d841a864f6ff273c797601757eddf  # master tip. Was
+ARG PYUVM_REF=16b8ec066e7fe5ad1f81f059bf646013fa969e4e  # master tip. Advanced from
+#   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
+#   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
+#   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
+#   (4a28e54) and 16b8ec0, which keys the start_item arity cache on the function
+#   object instead of `id(function)` — `id()` is reused after garbage collection, so
+#   the cache could return another function's arity. Its test file is 170 lines.
+#   NOT claimed here: the merge 8253c4e restored `do_write`/`do_read` door dispatch
+#   that the upstream merge would otherwise have dropped without conflicting — but
+#   both ends of this bump already carry them (2 defs at ca55221 AND at 16b8ec0), so
+#   that restoration is a fact about the merge, not a gain from moving this pin.
+#   Previously was
 #   d2f1736 (branch vibeic/integration) — branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
 #   Advanced to master in #35: `git cherry` says master carries 1 patch the pin
 #   lacked and the pin carried 0 master lacked, so this is a strict gain. The
