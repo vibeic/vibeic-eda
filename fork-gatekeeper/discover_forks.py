@@ -2286,6 +2286,38 @@ def _ls_remote_head(url: str, branch: str) -> str | None:
     return None
 
 
+def _unpinned_head_compare(tool: str, up_full: str, up_branch: str, head: str):
+    """Answer the gap question for a fork the image does not pin.
+
+    Every other route asks about a PINNED ref, so an unpinned fork falls through
+    all of them and is recorded `undetermined` — which reads as "we asked and
+    could not tell". For a mirror that sits exactly on the upstream head that is
+    the wrong word: the question is answerable, cheaply, and the answer is zero.
+
+    Two `ls-remote` calls settle it — no clone, no API compare, no fork network.
+
+    Returns `(cmp, source)` when it can answer, `(err_cmp, None)` when it has
+    something honest to say about why it cannot, and `(None, None)` when it has
+    nothing to add and the caller's own refusal should stand.
+
+    EQUALITY IS THE ONLY CONCLUSION DRAWN. When the heads differ, the SIZE of the
+    gap is not knowable from two SHAs, and a guess would land on "barely behind" —
+    the reassuring direction, which is the one that gets believed. That stays
+    undetermined and says what it would take to answer.
+    """
+    ours = _ls_remote_head(f"https://github.com/{ORG}/{tool}.git", head)
+    theirs = _ls_remote_head(f"https://github.com/{up_full}.git", up_branch)
+    if not ours or not theirs:
+        return None, None
+    if ours == theirs:
+        return ({"merge_base_commit": {"sha": ours},
+                 "ahead_by": 0, "behind_by": 0, "commits": []},
+                "unpinned-head-identical")
+    return ({"_err": (f"{ORG}/{tool} is not pinned by the image, and its head "
+                      f"{ours[:12]} is not {up_full}@{up_branch} {theirs[:12]}; "
+                      f"the SIZE of that gap needs a clone")}, None)
+
+
 def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
     """`compare`-shaped answer for `<upstream branch>...<our head>` from the clone.
 
@@ -2488,6 +2520,12 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                    "behind_by": _rev.get("behind_by", 0),
                    "commits": _rev.get("commits") or []}
             led["compare_direction"], source = "from-upstream", "upstream-compare"
+    if cmp.get("_err") and not ref:
+        # NO PIN IS NOT NO QUESTION — see `_unpinned_head_compare`.
+        _unp, _src = _unpinned_head_compare(tool, up_full, up_branch, head)
+        if _unp is not None:
+            cmp, source = _unp, _src
+
     if cmp.get("_err") and not can_cross_repo:
         cmp = {"_err": (f"{cmp['_err']}; {ORG}/{tool} is a mirror rather than a GitHub "
                         f"fork (fork=false, parent=null), so no cross-repo compare "
