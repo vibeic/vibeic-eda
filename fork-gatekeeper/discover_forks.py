@@ -2551,7 +2551,7 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         # neighbouring question and said zero.
         #
         # DERIVED, not matched on author names: our commits are the ones upstream
-        # does not have, so the unshipped ones are `pin..HEAD` minus anything
+        # does not have, so the unshipped ones are `pin..origin/<branch>` minus anything
         # upstream already carries. An outside contributor's commit to our fork
         # counts too, which an email pattern would have missed.
         #

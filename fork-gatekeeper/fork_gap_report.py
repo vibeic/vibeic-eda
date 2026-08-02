@@ -105,7 +105,8 @@ def upstream_head(clone: Path) -> Optional[str]:
 
 def ours_past_the_pin(clone: Path, pin: str, up: str,
                       tip: str) -> Optional[List[dict]]:
-    """Our commits that the image does NOT ship: `pin..HEAD` minus what upstream has.
+    """Our commits that the image does NOT ship: `pin..<published tip>` minus
+    what upstream has.
 
     Q2 was first answered with the ledger's `integrated` flag — "does the image
     build from our fork at all". It does, for OpenROAD and iverilog and three
