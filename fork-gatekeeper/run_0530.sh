@@ -83,6 +83,17 @@ fi
 #
 # It runs LAST and UNCONDITIONALLY — after a failed publish is exactly when it
 # matters, so it must not sit behind any of the exits above.
+# THE TWO DAILY NUMBERS ARE MEASURED BY ONE PROGRAM, ALWAYS THE SAME WAY.
+# They were measured by hand on 2026-08-02 and the hand got them wrong twice in
+# one evening: a missing pin fell back to the clone's HEAD, which makes the gap
+# identically 0, and "behind" was read as one number when it is two (SYNC lag vs
+# RELEASE lag, which need opposite fixes). Both mistakes produced a reassuring
+# answer. A measurement that has to be remembered is not a measurement.
+python3 "${DIR}/fork_gap_report.py" \
+    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" >> "${LOG}" 2>&1
+GAP=$?
+echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
+
 python3 "${DIR}/check_ledger_is_fresh.py" \
     --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/ledger_freshness.json" >> "${LOG}" 2>&1
 FRESH=$?
