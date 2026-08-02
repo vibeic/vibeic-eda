@@ -29,7 +29,7 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:4763646-6a8f5f
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:02b847a-b71252
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:715cea0-586160
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-5d88d6
