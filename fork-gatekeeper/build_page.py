@@ -340,7 +340,7 @@ __NAV__
                 <th data-en="Our patches" data-zh="我們的補丁">Our patches</th>
                 <th class="fork-hide-sm" data-en="On release" data-zh="目前 release">On release</th>
                 <th data-en="Upstream latest" data-zh="上游最新">Upstream latest</th>
-                <th data-en="New releases" data-zh="新 release">New releases</th>
+                <th data-en="In image" data-zh="有進 image">In image</th>
                 <th data-en="Last check" data-zh="最後檢查">Last check</th>
             </tr></thead>
             <tbody id="forkRows"></tbody>
@@ -481,6 +481,19 @@ function enhBlock(tool){
   const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
   const patchForks    = LEDGERS.filter(d=>(d.ahead||0)>0).length;
+  // THE SECOND DAILY QUESTION: are our own commits actually IN the shipped image?
+  // `totalPatches` answers "how many patches do we HOLD", which is not the same
+  // thing. A fork can carry 57 of our commits and ship none of them, because the
+  // image does not build from it — measured 2026-08-02: 4 of 36 forks
+  // (ciel / open_pdks / sv2v / IHP-Open-PDK) are consumed from the BASE image, so
+  // anything we land in them never reaches a user. Today they carry 0 patches, so
+  // the shipped count happens to equal the held count — that is luck, not design,
+  // and the day someone lands a fix in one of them the two numbers diverge
+  // silently. See vibeic-eda#60. `integrated` is the ledger's own word for
+  // "reaches the shipped image", by ARG pin or vendored inside one.
+  const shipPatches   = LEDGERS.filter(d=>d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
+  const strandPatches = LEDGERS.filter(d=>!d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
+  const notBuilt      = LEDGERS.filter(d=>!d.integrated).length;
   // THE TRACKING GAP. Forked, but neither worked on (ahead==0) nor kept current
   // (behind_commits>0) — the only rows that are nobody's deliberate state.
   // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
@@ -545,6 +558,9 @@ function enhBlock(tool){
     [totalPatches,
      {en:`Our commits upstream does not have (${patchForks} fork(s))`,
       zh:`我們自己的 commit，上游沒有的（${patchForks} 個 fork）`}],
+    [shipPatches + (strandPatches?` (+${strandPatches} NOT shipped)`:``),
+     {en:`Our commits that reach the shipped image — ${notBuilt} fork(s) the image does NOT build from`,
+      zh:`真正進到出貨 image 的自有 commit —— 有 ${notBuilt} 個 fork，image 不是從我們的版本建置`}],
     [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
     [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
@@ -662,6 +678,17 @@ function enhBlock(tool){
     const pin = d.integrated
       ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}${pinHow?`<br><span style="color:var(--text-muted,#6b7684);font-size:.68rem">${pinHow}</span>`:''}`
       : `<span style="color:var(--text-muted,#6b7684)" data-en="not layered" data-zh="未納入">not layered</span>`;
+    // DOES OUR WORK IN THIS FORK ACTUALLY SHIP? A fork can carry N of our commits
+    // and deliver none of them, because the image consumes the BASE image's copy
+    // instead (vibeic-eda#60). Replacing the release-gap column with this one is
+    // deliberate: release tagging conventions differ per project, so "behind by
+    // N releases" measured something that was not the question, while "do our
+    // fixes reach a user" is a question with an operational answer.
+    const inImagePill = d => d.integrated
+      ? `<span class="pill ok" data-en="yes" data-zh="有">yes</span>`
+      : ((d.ahead||0) > 0
+          ? `<span class="pill bad" data-en="NO — ${d.ahead} of our commit(s) not shipped" data-zh="沒有 —— 我們的 ${d.ahead} 個 commit 沒出貨">NO · ${d.ahead} stranded</span>`
+          : `<span class="pill warn" data-en="no — image uses the base image's copy" data-zh="沒有 —— image 用的是 base image 的版本">no</span>`);
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
@@ -669,7 +696,7 @@ function enhBlock(tool){
       <td>${pill(ahead,'ahead')}</td>
       <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
-      <td>${relPill(d)}</td>
+      <td>${inImagePill(d)}</td>
       <td>${verd}</td>
     </tr>`;
     const commit = c => `<div class="fork-commit"><a class="sha" href="${esc(c.url||'#')}" target="_blank" rel="noopener">${esc(c.sha)}</a><span>${esc(c.title)}</span><span style="margin-left:auto">${esc(c.date)}</span></div>`;
