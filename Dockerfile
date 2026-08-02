@@ -29,14 +29,14 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:09d67f0-78200d
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:715cea0-586160
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:4763646-6a8f5f
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:6fd92ce-7021b9
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-5d88d6
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf9ff9d-d06e70
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7cb6ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:9a3cc0c-8b2650
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:4843b1a-b9ea52
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
@@ -44,6 +44,7 @@ ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-75d582
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:0c90e3b-a7d4fd
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:595ea43-627132d-de03ffe-dcae0f
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -69,6 +70,7 @@ FROM ${IMG_XYCE} AS img-xyce
 FROM ${IMG_YICES2} AS img-yices2
 FROM ${IMG_SV_ELAB} AS img-sv-elab
 FROM ${IMG_FAULT} AS img-fault
+FROM ${IMG_FASTERCAP} AS img-fastercap
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +482,14 @@ COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.
 COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
 COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
+# FasterCap: the base image ships /foss/tools/bin/FasterCap as a SYMLINK to
+# /foss/tools/rftoolkit/bin/FasterCap. Overwriting the RESOLVED path is what
+# actually replaces the binary users run -- an overlay beside it would leave the
+# symlink pointing at the base's Jun-2 build with every version string matching.
+COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap
+COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
+COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \

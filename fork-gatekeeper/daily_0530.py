@@ -119,9 +119,33 @@ def step1_upstream(g, main, rep):
     r = sh(*g, "merge", "--no-edit", "-m",
            f"Merge upstream into {main} (daily 05:30)", ub)
     if r.returncode:
+        # Collect the evidence BEFORE aborting, and route it to the SAME AI step
+        # that already handles our-branch conflicts. It did not reach that step
+        # before: `step2b_ai_decisions` only read `rep["conflicted"]`, which
+        # `step2_ours` fills, so an UPSTREAM conflict printed "needs a human" and
+        # nothing came back for it.
+        #
+        # That is backwards for the invariant the owner states first: "upstream's
+        # contributions are all in". A conflict taking upstream commits is
+        # precisely the case where that invariant is at risk, and it was the one
+        # case with no decision-maker. Measured 2026-08-01: OpenSTA (11 upstream
+        # commits) and OpenROAD (4) both sat here.
+        files = [l for l in out(*g, "diff", "--name-only",
+                                "--diff-filter=U").splitlines() if l.strip()]
+        commits = [{"sha": s[:12],
+                    "subject": out(*g, "log", "-1", "--format=%s", s),
+                    "author": out(*g, "log", "-1", "--format=%an", s)}
+                   for s in out(*g, "rev-list", f"{main}..{ub}").split()[:20]]
         sh(*g, "merge", "--abort")
-        rep["upstream"] = f"CONFLICT taking {behind} upstream commit(s) — needs a human"
-        rep["needs_human"] = True
+        rep["upstream"] = f"CONFLICT taking {behind} upstream commit(s)"
+        rep.setdefault("conflicted", []).append({
+            "branch": ub,
+            "direction": "upstream -> our mainline",
+            "commits": int(behind or 0),
+            "conflicting_files": files,
+            "our_commits": commits,
+            "merge_stderr": (r.stderr or r.stdout or "").strip()[-800:],
+        })
     else:
         rep["upstream"] = f"merged {behind} upstream commit(s)"
 
@@ -247,7 +271,10 @@ def step2_ours(g, main, rep):
         else:
             merged.append({"branch": b, "commits": len(mine)})
     rep["merged"] = merged
-    rep["conflicted"] = conflicted
+    # APPEND, never assign: step1 may already have put an upstream conflict here,
+    # and step1 runs first. Assigning would drop the very conflicts that put the
+    # "upstream is all in" invariant at risk -- and it would do it silently.
+    rep.setdefault("conflicted", []).extend(conflicted)
     rep["carried_nothing_new"] = len(empty)
 
 
