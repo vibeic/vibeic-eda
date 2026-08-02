@@ -126,7 +126,15 @@ echo "   cmd          : ${CMD[*]:-<image default>}   (entrypoint stays image-bak
 echo "== removing old container (if any)"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-declare -a RUN=( docker run -d --name "$NAME" )
+# `--init` because the container's command is `sleep infinity`, and PID 1 owns
+# reaping. `sleep` never calls wait(), so every process reparented to it after
+# its own parent exits stays a zombie for the life of the container. Measured on
+# a worker after a day of runs: 11 defunct `yosys`, and — the part that costs
+# real time — a zombie reports its LIFETIME-AVERAGE %CPU, so `ps` showed 96.5,
+# 89.1, 16.5 … on a completely idle host. Every "is this machine busy?" check
+# reads that as work in progress. docker-init (tini) execs the command as its
+# child and reaps, so the same question gets a true answer.
+declare -a RUN=( docker run -d --init --name "$NAME" )
 [[ -n "$USER_SPEC" ]] && RUN+=( -u "$USER_SPEC" )
 [[ -n "$WORKDIR"  ]] && RUN+=( -w "$WORKDIR" )
 RUN+=( "${BINDS[@]}" "$IMAGE" )
