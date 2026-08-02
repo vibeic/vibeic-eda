@@ -221,11 +221,12 @@ pins live in three places by design:
 **So `grep -c '^ARG .*_REF=' Dockerfile` is not a fork count.** Four of those ten
 are upstream refs staged as *data*, not as tools —
 
-- `OPENROAD_FLOW_SCRIPTS_REF` (`cbb78ec283a0`) — an upstream
+- `OPENROAD_FLOW_SCRIPTS_REF` (`66f174f8e14f`) — an upstream
   [OpenROAD-flow-scripts](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts)
   commit, cloned sparsely only to stage two open PDK platforms (below). It is
-  upstream `master` at 2026-08-01, mirrored on our fork as branch
-  `vibeic-orfs-pin-20260801`; we carry no commits of our own on this repo.
+  upstream `master` at 2026-08-03; we carry no commits of our own on this repo,
+  so this pin is bumped deliberately rather than by `daily_release`, which
+  correctly declines to move a pure mirror on its own judgement.
   It was the `v3.0` tag (`181e913`, 2024-01-04) through image `0.2.51`, and the
   ARG was named `ORFS_REF` until this bump — renamed so the pin-currency
   programs, which pair an ARG with a fork BY NAME, can finally see it.
@@ -289,8 +290,8 @@ Remaining plan and open blockers:
 | `gf180mcuD` | iic-osic-tools base | real foundry enablement |
 | `ihp-sg13g2`, `ihp-sg13cmos5l` | iic-osic-tools base | real foundry enablement |
 | `ciel` | iic-osic-tools base | PDK manager |
-| `nangate45` | staged from the ORFS `cbb78ec283a0` platform tree (`v3.0` through image `0.2.51`; the six staged files are byte-identical across that move) | **generic / non-foundry** |
-| `asap7` | staged from the ORFS `cbb78ec283a0` platform tree (`v3.0` through image `0.2.51`) | **predictive / non-foundry** |
+| `nangate45` | staged from the ORFS `66f174f8e14f` platform tree (`v3.0` through image `0.2.51`, and on to `66f174f8e14f`; the six staged files are byte-identical across every one of those moves) | **generic / non-foundry** |
+| `asap7` | staged from the ORFS `66f174f8e14f` platform tree (`v3.0` through image `0.2.51`, and on to `66f174f8e14f`) | **predictive / non-foundry** |
 
 **Be honest about the last two.** NanGate45 (FreePDK45 Open Cell Library, Si2,
 Apache-2.0) and ASAP7 (ASU/ARM 7nm FinFET predictive, BSD-3-Clause) are
