@@ -460,6 +460,22 @@ function enhBlock(tool){
 (function(){
   const imageVer = (LEDGERS[0]||{}).image_version || "—";
   const totalPatches = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
+  // THE TWO NUMBERS THIS PAGE EXISTS FOR.
+  //
+  // 1. How far behind upstream is each fork we ship? Measured in COMMITS, not releases:
+  //    projects tag on wildly different conventions, and a tag says nothing about whether
+  //    the hotfix we care about is in our image. A commit gap does.
+  // 2. How much of our own work is in the image that upstream does not have?
+  //
+  // `behind_commits === null` means the comparison COULD NOT BE RUN (a fork with no
+  // resolvable upstream branch, or one past GitHub's compare cap). That is not zero, and
+  // folding it into zero would report a clean gap we never measured — so it is carried as
+  // its own number and rendered beside the gap, never summed into it.
+  const behindKnown   = LEDGERS.filter(d=>typeof d.behind_commits === "number");
+  const behindUnknown = LEDGERS.length - behindKnown.length;
+  const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
+  const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
+  const patchForks    = LEDGERS.filter(d=>(d.ahead||0)>0).length;
   // THE TRACKING GAP. Forked, but neither worked on (ahead==0) nor kept current
   // (behind_commits>0) — the only rows that are nobody's deliberate state.
   // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
@@ -467,12 +483,16 @@ function enhBlock(tool){
   // fine by design, because the default branch takes part in no build.
   const gapTools = LEDGERS.filter(d=>(d.ahead||0)===0 && (d.behind_commits||0)>0)
                           .sort((a,b)=>(b.behind_commits||0)-(a.behind_commits||0));
-  const withNewRel = LEDGERS.filter(d=>relGap(d)>0).length;
   // Counted and stated SEPARATELY, never folded into the number beside it: a tool
   // whose release containment could not be decided is neither "has a new release"
   // nor "is level with upstream", and the KPI has to be able to say so.
   const unknownRel = LEDGERS.filter(d=>d.integrated && relUnknown(d)).length;
-  const lastCheck = REPORT ? (REPORT.date||"") : "—";
+  // "Last daily check" must mean WHEN THE DATA ON THIS PAGE WAS GATHERED. It used to
+  // read REPORT.date, which comes from a separate reports/YYYY-MM-DD.json written by a
+  // different step — so when that step stopped running the card kept showing an old date
+  // beside freshly-gathered numbers, and looked like the whole page was stale. The
+  // ledger's own generated_at cannot drift from the ledger it stamps.
+  const lastCheck = ((LEDGERS[0]||{}).generated_at || (REPORT&&REPORT.date) || "").slice(0,10) || "—";
   const enhVals = Object.values(ENH||{});
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
@@ -480,12 +500,14 @@ function enhBlock(tool){
   const kpis = [
     [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
-    [totalPatches, {en:"Patches carried",zh:"揹著的補丁"}],
+    [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``),
+     {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured)`,
+      zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零）`}],
+    [totalPatches,
+     {en:`Our commits upstream does not have (${patchForks} fork(s))`,
+      zh:`我們自己的 commit，上游沒有的（${patchForks} 個 fork）`}],
     [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
     [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
-    [withNewRel + (unknownRel?` +${unknownRel}?`:``),
-     {en:"Tools with a new release (+N? = containment undetermined)",
-      zh:"有新 release 的工具（+N? = 無法判定是否已包含）"}],
     [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
