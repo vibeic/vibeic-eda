@@ -491,9 +491,28 @@ function enhBlock(tool){
   // and the day someone lands a fix in one of them the two numbers diverge
   // silently. See vibeic-eda#60. `integrated` is the ledger's own word for
   // "reaches the shipped image", by ARG pin or vendored inside one.
-  const shipPatches   = LEDGERS.filter(d=>d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
-  const strandPatches = LEDGERS.filter(d=>!d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
-  const notBuilt      = LEDGERS.filter(d=>!d.integrated).length;
+  // WRONG FIRST CUT, kept as the comment it earned. This keyed on `integrated`
+  // — "does the image build from our fork at all" — and read
+  // "345 shipped, 0 stranded". The image DOES build from our OpenROAD fork, and
+  // three of our commits were still sitting past the pin, unshipped. `integrated`
+  // is a fact about the Dockerfile; it says nothing about where the PIN stopped.
+  // A card built to answer "do our commits reach the image" answered a
+  // neighbouring question and said zero.
+  //
+  // `ours_unshipped` is now derived in the ledger as `pin..fork_tip` minus what
+  // upstream already has — no author-name matching, so an outside contributor's
+  // commit to our fork counts too.
+  //
+  // SUBSTANTIVE is the number shown, because all 5 unshipped commits on the day
+  // this was written were MERGE commits whose content is upstream's. A merge of
+  // ours carrying upstream work is not a fix of ours going unshipped, and
+  // counting it would cry wolf on every sync.
+  const unshipAll = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped==="number"?d.ours_unshipped:0),0);
+  const unship    = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped_substantive==="number"?d.ours_unshipped_substantive:0),0);
+  const unknownShip = LEDGERS.filter(d=>d.integrated && d.ours_unshipped==null).length;
+  const totalOurs = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
+  const shipPatches = totalOurs - unshipAll;
+  const notBuilt    = LEDGERS.filter(d=>!d.integrated).length;
   // THE TRACKING GAP. Forked, but neither worked on (ahead==0) nor kept current
   // (behind_commits>0) — the only rows that are nobody's deliberate state.
   // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
@@ -561,9 +580,9 @@ function enhBlock(tool){
     // the only interesting part of that difference, and it is already inside this
     // card as `(+N NOT shipped)`. So the inventory count is gone and the shipped
     // count stays.
-    [shipPatches + (strandPatches?` (+${strandPatches} NOT shipped)`:``),
-     {en:`Our commits that reach the shipped image — ${notBuilt} fork(s) the image does NOT build from`,
-      zh:`真正進到出貨 image 的自有 commit —— 有 ${notBuilt} 個 fork，image 不是從我們的版本建置`}],
+    [`${shipPatches}/${totalOurs}` + (unship?` — ${unship} NOT shipped`:``) + (unknownShip?` +${unknownShip}?`:``),
+     {en:`Our commits that reach the shipped image (${unshipAll} past the pin, ${unship} of them substantive; ${notBuilt} fork(s) not built from ours; +N? = could not be measured)`,
+      zh:`真正進到出貨 image 的自有 commit（${unshipAll} 個卡在 pin 之後，其中 ${unship} 個是實質修改；${notBuilt} 個 fork 不是從我們的版本建置；+N? = 量不到）`}],
     // REMOVED: "Untracked forks (no patches, not synced)". It counted
     // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
     // FORKS.json itself describes as "a pure mirror… we carry NO commits of our

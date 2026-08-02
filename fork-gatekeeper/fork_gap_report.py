@@ -103,6 +103,44 @@ def upstream_head(clone: Path) -> Optional[str]:
     return None
 
 
+def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
+    """Our commits that the image does NOT ship: `pin..HEAD` minus what upstream has.
+
+    Q2 was first answered with the ledger's `integrated` flag — "does the image
+    build from our fork at all". It does, for OpenROAD and iverilog and three
+    more, and the answer published was "0 stranded" while a fix of ours from that
+    same morning sat past the pin, unbuilt. `integrated` is a fact about the
+    Dockerfile; where the PIN STOPPED is a different fact, and it is the one the
+    question asks about.
+
+    DERIVED, not author-matched. Our commits are by definition the ones upstream
+    does not carry, so a set difference finds them — including a commit an
+    outside contributor landed on our fork, which an @vibeic/@defintek email
+    pattern silently drops.
+
+    `merge` is recorded per commit rather than filtered out here, because the two
+    populations need opposite handling: a merge of ours whose CONTENT is
+    upstream's is not our fix going unshipped, and counting it would raise an
+    alarm after every routine 05:30 sync. The headline counts substantive only;
+    the merge count stays visible so the lag is never invisible either.
+
+    None (never []) when it cannot be derived — an unresolvable pin is NOT zero.
+    """
+    out = _git(clone, "rev-list", f"{pin}..HEAD", "--not", up, timeout=120)
+    if out is None:
+        return None
+    rows: List[dict] = []
+    for sha in out.split():
+        meta = _git(clone, "show", "-s", "--format=%p\x1f%an\x1f%ad\x1f%s",
+                    "--date=short", sha, timeout=30)
+        if meta is None:
+            return None                      # partial truth is not truth here
+        parents, an, ad, subj = (meta.split("\x1f") + ["", "", "", ""])[:4]
+        rows.append({"sha": sha[:12], "merge": len(parents.split()) >= 2,
+                     "author": an, "date": ad, "subject": subj})
+    return rows
+
+
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
     pins = pins_from_dockerfiles(repo)
     rows: List[dict] = []
@@ -160,12 +198,22 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         if row["pin"]:
             row["release_lag"] = count(clone, row["pin"], "HEAD")
             row["image_behind"] = count(clone, row["pin"], up)
+            ours = ours_past_the_pin(clone, row["pin"], up)
+            row["ours_unshipped"] = None if ours is None else len(ours)
+            row["ours_unshipped_substantive"] = (
+                None if ours is None else len([c for c in ours if not c["merge"]]))
+            row["unshipped_commits"] = (
+                [] if ours is None else [c for c in ours if not c["merge"]])
         elif not row["integrated"]:
             row["note"] = "image does not build from our fork (no ARG pin) — see vibeic-eda#60"
         else:
             row["note"] = "PIN NOT FOUND in any Dockerfile — NOT MEASURED, not zero"
         rows.append(row)
 
+    for r in rows:
+        r.setdefault("ours_unshipped", None)
+        r.setdefault("ours_unshipped_substantive", None)
+        r.setdefault("unshipped_commits", [])
     measurable = [r for r in rows if r["image_behind"] is not None]
     unmeasured = [r for r in rows
                   if r["image_behind"] is None and r["integrated"]]
@@ -180,6 +228,14 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         "q1_unmeasured": [r["tool"] for r in unmeasured],
         "q2_forks_not_built_from_ours": [r["tool"] for r in not_built],
         "q2_our_commits_stranded": sum(r.get("ahead") or 0 for r in stranded),
+        "q2_ours_past_the_pin": sum(r["ours_unshipped"] or 0 for r in rows),
+        "q2_ours_past_the_pin_substantive":
+            sum(r["ours_unshipped_substantive"] or 0 for r in rows),
+        "q2_unshipped_commits": [dict(c, tool=r["tool"])
+                                 for r in rows for c in r["unshipped_commits"]],
+        "q2_unmeasured_ship": [r["tool"] for r in rows
+                               if r["integrated"] and r["pin"]
+                               and r["ours_unshipped"] is None],
         "rows": rows,
     }
 
@@ -220,11 +276,20 @@ def main(argv=None) -> int:
           f"{len(rep['q2_forks_not_built_from_ours'])}"
           f" ({', '.join(rep['q2_forks_not_built_from_ours']) or 'none'})")
     print(f"      our commits stranded in them        : {rep['q2_our_commits_stranded']}")
-    if rep["q1_unmeasured"]:
-        print(f"  NOT MEASURED (never counted as zero) : {', '.join(rep['q1_unmeasured'])}")
+    print(f"      our commits PAST THE PIN (not shipped): "
+          f"{rep['q2_ours_past_the_pin_substantive']} substantive"
+          f"  (+{rep['q2_ours_past_the_pin'] - rep['q2_ours_past_the_pin_substantive']}"
+          f" merge commits, content is upstream's)")
+    for c in rep["q2_unshipped_commits"]:
+        print(f"          {c['tool']}/{c['sha']}  {c['date']}  {c['author']}")
+        print(f"              {c['subject']}")
+    unmeasured = rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+    if unmeasured:
+        print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
         return 2
     return 0 if (rep["q1_image_behind_upstream"] == 0
-                 and not rep["q2_forks_not_built_from_ours"]) else 1
+                 and not rep["q2_forks_not_built_from_ours"]
+                 and rep["q2_ours_past_the_pin_substantive"] == 0) else 1
 
 
 if __name__ == "__main__":
