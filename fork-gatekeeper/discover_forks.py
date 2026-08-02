@@ -180,6 +180,33 @@ def parse_dockerfile_pins(text: str) -> dict:
         # where it actually writes the ref.
         _tail = text[m.end(): m.end() + 400]
         _head = text[max(0, m.start() - 200): m.start()]
+        # [C] MULTI-CLONE RUN, paired by the clone's DESTINATION PATH — the only
+        # evidence in the file that is not a distance.
+        #
+        # vibeic-eda#54. `tools/fastercap/Dockerfile` clones three sibling
+        # upstreams and then checks each out in its own `git -C <dir>`. The [B]
+        # rule takes the FIRST `checkout` after each URL, so all three resolved
+        # to `FASTERCAP_REF`. MEASURED before this change:
+        #
+        #     fastercap    arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #     geometry     arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #     linalgebra   arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #
+        # "How far is our Geometry behind ediloren/Geometry" cannot be answered
+        # from a commit that exists only in FasterCap's history, which is why all
+        # three reported `behind_commits = null`.
+        #
+        # `git -C <dir>` states WHICH clone a checkout applies to, so this needs
+        # no proximity at all. It fires only when both the destination and a
+        # matching `-C` checkout are present; every other shape falls through to
+        # [A]/[B] unchanged (measured: 31 pin entries across every Dockerfile,
+        # exactly these 2 changed).
+        _path_am = None
+        _dm = re.match(r'["\']?\s+(/\S+)', text[m.end(): m.end() + 120])
+        if _dm:
+            _path_am = re.search(
+                r"git\s+-C\s+" + re.escape(_dm.group(1))
+                + r"\s+checkout\s+\$\{(\w+_REF)\}", text)
         # On the [A] side, LAST match wins: three clones sharing a RUN put several
         # `--branch` refs in the look-behind, and the one belonging to this URL is
         # the closest, not the first. `re.search` returns the first, which paired
@@ -193,6 +220,14 @@ def parse_dockerfile_pins(text: str) -> dict:
             am = _M(_b[-1])
         if not am:
             am = re.search(r"\$\{(\w+_REF)\}", _tail)
+        # [C] wins over [A]/[B] when it applies: `git -C <dir>` is a statement of
+        # WHICH clone the ref belongs to, while the others are proximity. Applied
+        # HERE rather than where it is computed, because the [B] line above
+        # reassigns `am` unconditionally — the first version of this fix set `am`
+        # before that line and was silently overwritten. The measurement did not
+        # move at all, which is how it was caught.
+        if _path_am is not None:
+            am = _path_am
         if am and am.group(1) in args:
             arg = am.group(1)
             # The instruction that CLONES this repo, not merely one the URL
@@ -2271,7 +2306,33 @@ def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
         return None
     have = _peel(clone, [up_sha, head])
     if have is None or up_sha not in have or head not in have:
-        return None
+        # STALE IS NOT UNANSWERABLE (vibeic-eda#54). Refusing on a stale clone is
+        # right — a clone that has not seen upstream reports fewer commits behind
+        # than there are, and every consumer reads small numbers as health. But
+        # NOTHING in this producer ever fetched; only `prepare_merge_pr` and
+        # `daily_merge` do, so a tool that never goes through a merge PR was
+        # stale FOREVER and the refusal was permanent with it.
+        #
+        # MEASURED on Trilinos, a mirror (`fork=false, parent=null`) that
+        # therefore never reaches the merge path: the clone could not answer, the
+        # cross-repo API compare cannot resolve for a mirror, and the row printed
+        # `behind_commits = null` beside a sampled "behind 1257". With the branch
+        # fetched, the same clone answers in seconds — and the answer is 0. Our
+        # pin 5edda67161cc is LEVEL with upstream master 763aa751877, carrying
+        # 407 commits of restored packages on top. The page was reporting an
+        # unmeasurable gap on a fork that has no gap.
+        #
+        # One bounded fetch of the one branch being asked about, then ask again.
+        # A failed fetch changes nothing — the refusal below still stands — so
+        # this can turn "could not ask" into an answer and can never turn a stale
+        # clone into a confident wrong one.
+        _f = _git(clone, "fetch", "--quiet",
+                  f"https://github.com/{up_full}.git", up_branch, timeout=600)
+        if not _f.ok:
+            return None
+        have = _peel(clone, [up_sha, head])
+        if have is None or up_sha not in have or head not in have:
+            return None
     up_sha, head_sha = have[up_sha], have[head]
     mbr = _git(clone, "merge-base", up_sha, head_sha)
     if not mbr.ok or not re.fullmatch(r"[0-9a-f]{40}", mbr.out or ""):
