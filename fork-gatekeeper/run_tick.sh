@@ -434,6 +434,33 @@ else
     ship_rc=2
 fi
 
+# vibeic-eda#60 — the mirror image of the check above. `check_our_commits_ship`
+# asks whether a commit of ours is reachable from the branch its PIN names;
+# this asks whether a fork carrying commits of ours is pinned AT ALL.
+#
+# Latent today: the four unpinned forks (ciel, open_pdks, sv2v, IHP-Open-PDK)
+# carry zero of our commits, so the condition is unreachable. It activates on
+# the first patch, when the ledger reports ahead=1 on a fork the image does not
+# build from — and a number going UP is the last place anyone looks for a
+# failure. Added while it is free.
+#
+# Placed AFTER the block above, not inside the comment paragraph that describes
+# it: the first attempt anchored on the earliest mention of
+# `check_our_commits_ship.py` in this file, which is prose, and `bash -n`
+# accepted the result.
+UNSHIP_OUT="${LOG_DIR}/unshippable-patches.txt"
+unship_rc=0
+if [ -f "${DIR}/check_unshippable_patches.py" ]; then
+    python3 "${DIR}/check_unshippable_patches.py" > "${UNSHIP_OUT}" 2>&1
+    unship_rc=$?
+    tail -1 "${UNSHIP_OUT}" | sed 's/^/[unship] /' | tee -a "${LOG}"
+    [ "${unship_rc}" = "1" ] && log "[unship] a fork carries patches that cannot reach the image (vibeic-eda#60)"
+else
+    echo "MISSING: ${DIR}/check_unshippable_patches.py — nothing asked" > "${UNSHIP_OUT}"
+    log "[unship] nothing was checked, which is not a clean result"
+    unship_rc=2
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
