@@ -716,7 +716,9 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # set_layer_rc estimate) is staged alongside as `setRC.asap7.tcl` for reference. ASAP7
 # ships ONE (typical) corner only → single-corner `.nom` SPEF (min/max disclosed absent).
 # WHAT THE cbb78ec283a0 PIN CHANGED HERE, measured image-to-image against the
-# published ghcr.io/vibeic/vibeic-eda:0.2.51. The staged inventory is the same
+# published ghcr.io/vibeic/vibeic-eda:0.2.51 (image-version:history — the version
+# IS the measurement's subject; moving it would claim a re-measurement).
+# The staged inventory is the same
 # 20 files at the same paths; exactly three of them differ, all from the single
 # upstream commit "add Implant layers to asap7sc7p5t_28 lef files":
 #   asap7_tech_1x_201209.lef         830a032810b0 -> 7694bf4f8ef2  (+25/-0)

@@ -2,7 +2,11 @@
 
 `check_fork_presence_claims.py` carried:
 
-    DEFAULT_IMAGE = "ghcr.io/vibeic/vibeic-eda:0.2.46"
+    DEFAULT_IMAGE = "ghcr.io/vibeic/vibeic-eda:0.2.46"   # image-version:history
+                                                        # — the SUPERSEDED value
+                                                        # this test forbids;
+                                                        # bumping it erases the
+                                                        # defect it documents
 
 while this repo's VERSION said 0.2.47. Every default run therefore checked the
 ledger's absence claims against a PUBLISHED-BUT-SUPERSEDED image and passed —

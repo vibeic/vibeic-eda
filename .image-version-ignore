@@ -4,7 +4,7 @@
 # measurement was taken against a version it was not taken against.
 
 # Every reference in this file is of the form
-#     Measured: `ls /foss/tools` in `ghcr.io/vibeic/vibeic-eda:0.2.31`
+#     Measured: `ls /foss/tools` in `ghcr.io/vibeic/vibeic-eda:0.2.31`  (image-version:history — this line is the EXAMPLE, not a pointer)
 # — it records WHICH IMAGE WAS INSPECTED to produce the tables below it. Bumping
 # those to the current version would claim the inventory was re-measured when it
 # was not. There is no install command anywhere in the file (checked: zero

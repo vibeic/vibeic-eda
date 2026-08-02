@@ -147,6 +147,28 @@ def install_doc_refs(root: Path):
     return out
 
 
+#: An INLINE opt-out, for a historical reference in a file that also carries — or
+#: could later carry — live ones. vibeic-eda#53 follow-up.
+#:
+#: The ignore mechanism was path-glob only, so the three unregistered pointers
+#: on main could be silenced only by silencing whole files:
+#:
+#:   .image-version-ignore:7   the ignore file's OWN comment, quoting an example
+#:   Dockerfile:719            "measured image-to-image against …:0.2.51"
+#:   fork-gatekeeper/test_presence_default_image_tracks_version.py:5
+#:                             the superseded DEFAULT_IMAGE the test exists to forbid
+#:
+#: Every one is prose that must NOT move — rewriting it would state that a
+#: measurement was taken against a version it was not taken against, which is the
+#: rule `.image-version-ignore` already states in its own header. But glob-ignoring
+#: `Dockerfile` would leave a future live pointer there unchecked, and glob-ignoring
+#: the test file would silence the very drift it guards.
+#:
+#: So the opt-out is per LINE and must be written on the line it excuses, where a
+#: reader of that line sees it.
+HISTORY_LINE_MARK = "image-version:history"
+
+
 def ghcr_hits(root: Path, ignore):
     """(rel, lineno, version) for every ghcr.io/...:X.Y.Z in tracked files, minus history/ignore."""
     r = _sh(["git", "grep", "-nI", "-E", r"ghcr\.io/vibeic/vibeic-eda:[0-9]+\.[0-9]+\.[0-9]+"], root)
@@ -157,6 +179,8 @@ def ghcr_hits(root: Path, ignore):
             continue
         rel, lineno, text = parts
         if is_history(rel) or _matches(rel, ignore):
+            continue
+        if HISTORY_LINE_MARK in text:
             continue
         for m in GHCR_RE.finditer(text):
             out.append((rel, int(lineno), m.group(1)))
