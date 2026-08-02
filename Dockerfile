@@ -117,14 +117,14 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
 #   fictional process; no real foundry, no LVS deck). The iic-osic-tools base ships
 #   sky130/gf180/sg13g2 but NOT nangate45, so we fetch it from the OpenROAD-flow-scripts
 #   `nangate45` platform (the reference open 45nm flow, pinned by ARG ORFS_REF to the
-#   upstream master tip cbb78ec283a0, 2026-08-01; it was the v3.0 tag through image
-#   0.2.51) and, in
+#   upstream master tip 66f174f8e14f, 2026-08-03; it was the v3.0 tag through image
+#   0.2.51 and cbb78ec283a0 after it) and, in
 #   the runtime stage, re-stage it into the open_pdks libs.ref/<scl>/ layout the plugin's
 #   PDK resolvers expect. Registered in the plugin as PDK `nangate45`
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=cbb78ec283a0acc259c5a9d468267a65f47261c3  # pinned; branch vibeic-orfs-pin-20260801 -- upstream master tip at 2026-08-01, mirrored on our fork
+ARG OPENROAD_FLOW_SCRIPTS_REF=66f174f8e14f7cdd178a1e1d37c915d28ac3e24d  # pinned; branch master -- upstream master tip at 2026-08-03. Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
@@ -697,7 +697,7 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # the asap7 KLayout deck gives an EDUCATIONAL DRC — but it is NOT a manufacturable
 # foundry sign-off (no real foundry, no LVS deck; ASAP7 uses a 4x-scaled drawn
 # geometry convention). Re-stage the ORFS asap7 platform (ARG ORFS_REF, master tip
-# cbb78ec283a0 as of 2026-08-01; v3.0 through image 0.2.51) into the open_pdks
+# 66f174f8e14f as of 2026-08-03; v3.0 through 0.2.51, then cbb78ec283a0) into the open_pdks
 # libs.ref/<scl>/ layout the plugin's PDK resolvers expect. The std-cell library is
 # `asap7sc7p5t` (7.5-track). We stage the DEFAULT RVT (R) VT flavor at the TYPICAL
 # (TT / "TC") corner: asap7 splits Liberty into 5 functional groups (AO / INVBUF /
@@ -715,6 +715,11 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 # `libs.tech/{librelane,openlane}/rules.openrcx.*.nom[.magic]`). `setRC.tcl` (per-layer
 # set_layer_rc estimate) is staged alongside as `setRC.asap7.tcl` for reference. ASAP7
 # ships ONE (typical) corner only → single-corner `.nom` SPEF (min/max disclosed absent).
+# STILL TRUE AT 66f174f8e14f: that pin advances ORFS by 4 upstream commits, and
+# `git diff --name-only cbb78ec283a0..66f174f8e14f` touches 5 files, NONE of them
+# under flow/platforms/{nangate45,asap7} — so every file staged below is
+# byte-identical and the measurement recorded here is unchanged.
+#
 # WHAT THE cbb78ec283a0 PIN CHANGED HERE, measured image-to-image against the
 # published ghcr.io/vibeic/vibeic-eda:0.2.51. The staged inventory is the same
 # 20 files at the same paths; exactly three of them differ, all from the single
