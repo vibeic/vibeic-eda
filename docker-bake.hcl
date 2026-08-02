@@ -45,14 +45,14 @@ variable "TAG" { default = "dev" }
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
 variable "OPENROAD_RECIPE" { default = "b71252" }
-variable "YOSYS_RECIPE" { default = "586160" }
+variable "YOSYS_RECIPE" { default = "7021b9" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "5d88d6" }
 variable "LVS_RECIPE" { default = "e2e322" }
 variable "FASTERCAP_RECIPE" { default = "416e37" }
-variable "IVERILOG_RECIPE" { default = "d06e70" }
+variable "IVERILOG_RECIPE" { default = "1c5ee8" }
 variable "KLAYOUT_RECIPE" { default = "7ef8ee" }
-variable "VERILATOR_RECIPE" { default = "c6e5fa" }
+variable "VERILATOR_RECIPE" { default = "c03e8e" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
 variable "XSCHEM_RECIPE" { default = "f0bdeb" }
 variable "SLANG_RECIPE" { default = "d87240" }
@@ -68,7 +68,7 @@ variable "SV_ELAB_RECIPE" { default = "799906" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "02b847ad3070fbb9e996fd3e52d01a777687618b" }
-variable "YOSYS_REF"       { default = "715cea078ff8d413b6c2dad6b91299d5aa759246" }
+variable "YOSYS_REF"       { default = "6fd92ced3c75db60b785b143082dde842b794ae0" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
@@ -81,9 +81,9 @@ variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "cf9ff9dcb7c74f90db67ee40fc8905b7992daaef" }
+variable "IVERILOG_REF"    { default = "2de52ec41fea4515c1cf7d161fb13d2d655dbb75" }
 variable "KLAYOUT_REF"     { default = "a5a7a2d6be41d4f66338eacdc65ceb573985c3ee" }
-variable "VERILATOR_REF"   { default = "d32798653a48eaa7b7fd5c3dded1b25e22d76e93" }
+variable "VERILATOR_REF"   { default = "be47a7ba042a998f84f55221bb7ae54d5bab20ee" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
 variable "XSCHEM_REF" { default = "ff2f4824c1a24e158d218f44db11cc682b4881c8" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }

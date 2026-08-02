@@ -30,13 +30,13 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:02b847a-b71252
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:715cea0-586160
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:6fd92ce-7021b9
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-5d88d6
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf9ff9d-d06e70
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:2de52ec-1c5ee8
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d327986-c6e5fa
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:be47a7b-c03e8e
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
@@ -94,7 +94,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=9809cffe559184e099f4d3b0082a912a5c7a0939  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=1d79fec0e424e628aba4abd66ab910a9450c5755  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REF=ca55221c171d841a864f6ff273c797601757eddf  # master tip. Was
 #   d2f1736 (branch vibeic/integration) — branch vibeic/integration is V5 RAL accessors + V7 TLM comparators + V6 sequencer arbitration; suite is the exact union (441/535), 0 failures
