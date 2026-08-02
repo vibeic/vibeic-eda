@@ -322,6 +322,72 @@ RUN printf '{"repo":"%s","ref":"%s","netgen_repo":"%s","netgen_ref":"%s"}' \\
 '''
 
 
+#: vibeic-eda#54 — the shape the distance heuristics cannot resolve: N clones
+#: FIRST, then N checkouts. Every `checkout` sits after every URL, so "the first
+#: checkout after this URL" hands all three the first one.
+_SIBLINGS_THEN_CHECKOUTS = '''
+ARG FASTERCAP_REPO=https://github.com/vibeic/FasterCap.git
+ARG FASTERCAP_REF=aaaaaaaaaaaa
+ARG LINALGEBRA_REPO=https://github.com/vibeic/LinAlgebra.git
+ARG LINALGEBRA_REF=bbbbbbbbbbbb
+ARG GEOMETRY_REPO=https://github.com/vibeic/Geometry.git
+ARG GEOMETRY_REF=cccccccccccc
+RUN mkdir -p /src \\
+ && git clone --filter=blob:none "${FASTERCAP_REPO}"  /src/FasterCap \\
+ && git clone --filter=blob:none "${LINALGEBRA_REPO}" /src/LinAlgebra \\
+ && git clone --filter=blob:none "${GEOMETRY_REPO}"   /src/Geometry \\
+ && git -C /src/FasterCap  checkout ${FASTERCAP_REF} \\
+ && git -C /src/LinAlgebra checkout ${LINALGEBRA_REF} \\
+ && git -C /src/Geometry   checkout ${GEOMETRY_REF}
+'''
+
+
+def test_siblings_cloned_then_checked_out_each_keep_their_own_ref():
+    """vibeic-eda#54, the defect. MEASURED on the real Dockerfile before the
+    fix, all three resolved to the same arg AND the same sha:
+
+        fastercap    arg=FASTERCAP_REF  ref=afca8f5e55bb
+        geometry     arg=FASTERCAP_REF  ref=afca8f5e55bb
+        linalgebra   arg=FASTERCAP_REF  ref=afca8f5e55bb
+
+    "How far is our Geometry behind ediloren/Geometry" cannot be answered from
+    a commit that exists only in FasterCap's history, so all three reported
+    `behind_commits = null` — the gap unmeasurable by construction.
+
+    `git -C <dir>` states WHICH clone a checkout applies to, so the pairing here
+    needs no proximity at all."""
+    pins = df.parse_dockerfile_pins(_SIBLINGS_THEN_CHECKOUTS)
+    assert pins.get("fastercap", {}).get("arg") == "FASTERCAP_REF"
+    assert pins.get("linalgebra", {}).get("arg") == "LINALGEBRA_REF"
+    assert pins.get("geometry", {}).get("arg") == "GEOMETRY_REF"
+    # The ref, not only the arg name: an arg that resolved correctly while the
+    # sha came from elsewhere would still be unusable as a comparison base.
+    assert pins["fastercap"]["ref"] == "a" * 12
+    assert pins["linalgebra"]["ref"] == "b" * 12
+    assert pins["geometry"]["ref"] == "c" * 12
+
+
+def test_the_real_fastercap_dockerfile_pairs_correctly():
+    """Driven on the shipped file, because the fixture proves only the fixture
+    — and this defect lived in a real Dockerfile whose three ARGs were already
+    correct. A restructure that reintroduces the ambiguity is caught here."""
+    import pathlib as _pl
+    df_path = _pl.Path(__file__).resolve().parents[1] / "tools/fastercap/Dockerfile"
+    if not df_path.is_file():
+        return
+    pins = df.parse_dockerfile_pins(df_path.read_text(encoding="utf-8"))
+    args = {k: (pins.get(k) or {}).get("arg")
+            for k in ("fastercap", "linalgebra", "geometry")}
+    assert args == {"fastercap": "FASTERCAP_REF",
+                    "linalgebra": "LINALGEBRA_REF",
+                    "geometry": "GEOMETRY_REF"}, args
+    refs = {(pins.get(k) or {}).get("ref")
+            for k in ("fastercap", "linalgebra", "geometry")}
+    assert len(refs) == 3, (
+        "three sibling repositories resolved to fewer than three distinct "
+        f"commits — at least one is pinned to another repo's history: {refs}")
+
+
 def test_the_branch_form_is_parsed():
     """`--branch ${REF}` puts the ref BEFORE the URL. Searching only forward
     missed it entirely, and OpenROAD-flow-scripts — which supplies

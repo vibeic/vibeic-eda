@@ -130,9 +130,34 @@ def parse_dockerfile_pins(text: str) -> dict:
     # tracking, which reads exactly like a fork with no pin.
     for _rv, _url in re.findall(r"ARG\s+(\w+_REPO)\s*=\s*(\S+)", text):
         text = text.replace("${%s}" % _rv, _url)
+    # A PIN IS A COMMIT. Which branch it belongs to is a git question with an exact
+    # answer, and this used to be answered by reading English prose instead.
+    #
+    # The old pattern was `#[^\n]*branch\s+(\S+)` — `[^\n]*` is GREEDY, so it consumed
+    # the whole comment and backtracked to the LAST "branch X" on the line. Measured on
+    # origin/main, that produced three corrupted values out of 17 Dockerfiles:
+    #
+    #   COCOTB_REF    -> 'this'                          from "the feature branch this
+    #                                                     used to track was deleted"
+    #   SBY_REF       -> 'vibeic/integration:'           trailing colon from a list
+    #   TRILINOS_REF  -> 'vibeic/xyce-trilinos-16.2.1),' the PREVIOUS pin, in parentheses,
+    #                                                     punctuation included
+    #
+    # The Trilinos one was not cosmetic: everything downstream measured that retired
+    # branch, so the daily round reported 1257 commits behind and handed a human 31 file
+    # conflicts every morning, for a branch the comment itself calls the fallback — while
+    # the branch we actually ship is 0 behind upstream (vibeic-eda#55).
+    #
+    # So: take the FIRST mention, strip the punctuation an English sentence leaves behind,
+    # and refuse anything that is not shaped like a branch name. The comment is
+    # DOCUMENTATION; `_branch_at_head` is the authority, and `led["vibeic_branch"]` prefers
+    # it. This value survives only as the fallback for when git cannot answer.
     branches = {}
-    for m in re.finditer(r"ARG\s+(\w+_REF)\s*=\s*\S+\s*#[^\n]*branch\s+(\S+)", text):
-        branches[m.group(1)] = m.group(2)
+    for m in re.finditer(r"ARG\s+(\w+_REF)\s*=\s*\S+\s*#([^\n]*)", text):
+        arg, comment = m.group(1), m.group(2)
+        b = _branch_from_comment(comment)
+        if b:
+            branches[arg] = b
     instrs = _instructions(text)
     pins = {}
     for m in re.finditer(r"github\.com/vibeic/([A-Za-z0-9_.-]+?)\.git", text):
@@ -155,6 +180,33 @@ def parse_dockerfile_pins(text: str) -> dict:
         # where it actually writes the ref.
         _tail = text[m.end(): m.end() + 400]
         _head = text[max(0, m.start() - 200): m.start()]
+        # [C] MULTI-CLONE RUN, paired by the clone's DESTINATION PATH — the only
+        # evidence in the file that is not a distance.
+        #
+        # vibeic-eda#54. `tools/fastercap/Dockerfile` clones three sibling
+        # upstreams and then checks each out in its own `git -C <dir>`. The [B]
+        # rule takes the FIRST `checkout` after each URL, so all three resolved
+        # to `FASTERCAP_REF`. MEASURED before this change:
+        #
+        #     fastercap    arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #     geometry     arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #     linalgebra   arg=FASTERCAP_REF  ref=afca8f5e55bb
+        #
+        # "How far is our Geometry behind ediloren/Geometry" cannot be answered
+        # from a commit that exists only in FasterCap's history, which is why all
+        # three reported `behind_commits = null`.
+        #
+        # `git -C <dir>` states WHICH clone a checkout applies to, so this needs
+        # no proximity at all. It fires only when both the destination and a
+        # matching `-C` checkout are present; every other shape falls through to
+        # [A]/[B] unchanged (measured: 31 pin entries across every Dockerfile,
+        # exactly these 2 changed).
+        _path_am = None
+        _dm = re.match(r'["\']?\s+(/\S+)', text[m.end(): m.end() + 120])
+        if _dm:
+            _path_am = re.search(
+                r"git\s+-C\s+" + re.escape(_dm.group(1))
+                + r"\s+checkout\s+\$\{(\w+_REF)\}", text)
         # On the [A] side, LAST match wins: three clones sharing a RUN put several
         # `--branch` refs in the look-behind, and the one belonging to this URL is
         # the closest, not the first. `re.search` returns the first, which paired
@@ -168,6 +220,14 @@ def parse_dockerfile_pins(text: str) -> dict:
             am = _M(_b[-1])
         if not am:
             am = re.search(r"\$\{(\w+_REF)\}", _tail)
+        # [C] wins over [A]/[B] when it applies: `git -C <dir>` is a statement of
+        # WHICH clone the ref belongs to, while the others are proximity. Applied
+        # HERE rather than where it is computed, because the [B] line above
+        # reassigns `am` unconditionally — the first version of this fix set `am`
+        # before that line and was silently overwritten. The measurement did not
+        # move at all, which is how it was caught.
+        if _path_am is not None:
+            am = _path_am
         if am and am.group(1) in args:
             arg = am.group(1)
             # The instruction that CLONES this repo, not merely one the URL
@@ -274,6 +334,32 @@ def _gitlink_sha(repo: str, ref: str, path: str) -> str | None:
     return None
 
 
+_BRANCH_WORD = re.compile(r"\bbranch\s+(\S+)")
+#: A branch name may carry these, but never at the very end of a prose mention.
+_TRAILING_PROSE = "(),.;:\"'"
+
+
+def _branch_from_comment(comment: str) -> str | None:
+    """The branch a pin comment names, or None when it names nothing branch-shaped.
+
+    Takes the FIRST mention, not the last: a comment that documents a pin change reads
+    "branch <new> … Previous pin: <sha> (branch <old>)", so the last mention is the branch
+    being retired. Strips trailing sentence punctuation, and rejects ordinary words —
+    "only this branch does." must not yield a branch called `does.`, and "the feature
+    branch this used to track was deleted" must not yield `this`.
+
+    A branch name here is either namespaced (`vibeic/…`) or a known bare default. Anything
+    else is prose, and prose is not data.
+    """
+    for raw in _BRANCH_WORD.findall(comment):
+        cand = raw.strip(_TRAILING_PROSE)
+        if not cand:
+            continue
+        if "/" in cand or cand in ("master", "main", "develop", "trunk"):
+            return cand
+    return None
+
+
 def _branch_at_head(repo: str, sha: str) -> str | None:
     """The branch of `repo` whose HEAD is `sha`, when exactly one is — else None.
 
@@ -285,6 +371,39 @@ def _branch_at_head(repo: str, sha: str) -> str | None:
     if isinstance(d, list) and len(d) == 1 and isinstance(d[0], dict):
         return d[0].get("name")
     return None
+
+
+def _branch_for_pin(tool: str, sha: str) -> str | None:
+    """git's answer for which branch our pin is on, with OUR branch preferred
+    when several share the tip.
+
+    `_branch_at_head` abstains on ambiguity, and for `prepare_merge_pr`'s
+    vendored-pin path that is right — it declines to open a PR rather than guess.
+    But it abstains on the ONE case vibeic-eda#55 is about. Measured:
+
+        repos/vibeic/Trilinos/commits/5edda67161cc…/branches-where-head
+          -> ["master", "vibeic/xyce-trilinos-17.2-epetra-restored"]
+
+    Two branches, so the git answer is None and the ledger falls back to the
+    COMMENT — the source the issue exists to stop trusting. The comment happens
+    to be right today only because the improved parser now takes the first
+    mention; a later edit to that sentence puts the daily 31-conflict merge back.
+
+    Where several branches share a tip, one of them is ours and that is not a
+    coincidence: `vibeic/xyce-trilinos-17.2-epetra-restored` is the branch the
+    merge path must target, because merging upstream into `master` is a
+    different operation with a different meaning. When NONE of the shared tips
+    is ours there is no basis to choose, and this abstains exactly as before.
+    """
+    if not sha:
+        return None
+    d = gh(f"repos/{ORG}/{tool}/commits/{sha}/branches-where-head")
+    names = [b.get("name") for b in d
+             if isinstance(b, dict) and b.get("name")] if isinstance(d, list) else []
+    if len(names) == 1:
+        return names[0]
+    ours = sorted(n for n in names if n.startswith("vibeic"))
+    return ours[0] if ours else None
 
 
 def expand_vendored_pins(pins: dict, max_depth: int = 3) -> dict:
@@ -2187,7 +2306,33 @@ def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
         return None
     have = _peel(clone, [up_sha, head])
     if have is None or up_sha not in have or head not in have:
-        return None
+        # STALE IS NOT UNANSWERABLE (vibeic-eda#54). Refusing on a stale clone is
+        # right — a clone that has not seen upstream reports fewer commits behind
+        # than there are, and every consumer reads small numbers as health. But
+        # NOTHING in this producer ever fetched; only `prepare_merge_pr` and
+        # `daily_merge` do, so a tool that never goes through a merge PR was
+        # stale FOREVER and the refusal was permanent with it.
+        #
+        # MEASURED on Trilinos, a mirror (`fork=false, parent=null`) that
+        # therefore never reaches the merge path: the clone could not answer, the
+        # cross-repo API compare cannot resolve for a mirror, and the row printed
+        # `behind_commits = null` beside a sampled "behind 1257". With the branch
+        # fetched, the same clone answers in seconds — and the answer is 0. Our
+        # pin 5edda67161cc is LEVEL with upstream master 763aa751877, carrying
+        # 407 commits of restored packages on top. The page was reporting an
+        # unmeasurable gap on a fork that has no gap.
+        #
+        # One bounded fetch of the one branch being asked about, then ask again.
+        # A failed fetch changes nothing — the refusal below still stands — so
+        # this can turn "could not ask" into an answer and can never turn a stale
+        # clone into a confident wrong one.
+        _f = _git(clone, "fetch", "--quiet",
+                  f"https://github.com/{up_full}.git", up_branch, timeout=600)
+        if not _f.ok:
+            return None
+        have = _peel(clone, [up_sha, head])
+        if have is None or up_sha not in have or head not in have:
+            return None
     up_sha, head_sha = have[up_sha], have[head]
     mbr = _git(clone, "merge-base", up_sha, head_sha)
     if not mbr.ok or not re.fullmatch(r"[0-9a-f]{40}", mbr.out or ""):
@@ -2257,7 +2402,17 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     ref = pin.get("ref")
     led["pinned_ref"] = (ref or "")[:12] if ref else None
     led["pinned_ref_full"] = ref
-    led["vibeic_branch"] = pin.get("branch")
+    # git first, comment second. `_branch_at_head` answers from the repository; the
+    # comment is a human note that has been wrong three times (vibeic-eda#55). When both
+    # answer and disagree, the git answer wins and the disagreement is recorded, because a
+    # comment that has drifted from the pin it annotates is itself worth seeing.
+    _git_branch = _branch_for_pin(tool, pin.get("ref") or "")
+    _cmt_branch = pin.get("branch")
+    led["vibeic_branch"] = _git_branch or _cmt_branch
+    led["vibeic_branch_source"] = ("git" if _git_branch
+                                   else "comment" if _cmt_branch else None)
+    if _git_branch and _cmt_branch and _git_branch != _cmt_branch:
+        led["vibeic_branch_comment_disagrees"] = _cmt_branch
     led["dockerfile_arg"] = pin.get("arg")
     # A fork the image never fetches is forked but NOT layered in. Track it honestly:
     # such a tool uses upstream directly, so there is nothing to sync into the image.
