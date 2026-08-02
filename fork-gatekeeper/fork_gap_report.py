@@ -103,8 +103,10 @@ def upstream_head(clone: Path) -> Optional[str]:
     return None
 
 
-def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
-    """Our commits that the image does NOT ship: `pin..HEAD` minus what upstream has.
+def ours_past_the_pin(clone: Path, pin: str, up: str,
+                      tip: str) -> Optional[List[dict]]:
+    """Our commits that the image does NOT ship: `pin..<published tip>` minus
+    what upstream has.
 
     Q2 was first answered with the ledger's `integrated` flag — "does the image
     build from our fork at all". It does, for OpenROAD and iverilog and three
@@ -126,7 +128,7 @@ def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
 
     None (never []) when it cannot be derived — an unresolvable pin is NOT zero.
     """
-    out = _git(clone, "rev-list", f"{pin}..HEAD", "--not", up, timeout=120)
+    out = _git(clone, "rev-list", f"{pin}..{tip}", "--not", up, timeout=120)
     if out is None:
         return None
     rows: List[dict] = []
@@ -139,6 +141,75 @@ def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
         rows.append({"sha": sha[:12], "merge": len(parents.split()) >= 2,
                      "author": an, "date": ad, "subject": subj})
     return rows
+
+
+def vendored_pin(forks_root: Path, led: dict) -> Optional[str]:
+    """The effective pin of a fork that reaches the image INSIDE another fork.
+
+    OpenSTA has no `ARG OPENSTA_REF`, because the image never clones it: OpenROAD
+    carries it at `src/sta` and the build compiles `//src/sta:opensta` out of that
+    tree. Its pin is therefore whatever commit OpenROAD's submodule points at, at
+    OpenROAD's own pin — a real, exact answer that this program reported as NOT
+    MEASURED simply because it looked in one place.
+
+    Resolved here rather than read from the ledger's `pinned_ref_full`, so this
+    program does not inherit another program's answer. The ledger's value is then
+    compared against it, and a disagreement is surfaced rather than silently
+    broken in favour of one side: two derivations of one fact that disagree is a
+    finding.
+
+    None when it cannot be resolved. Never a fallback to the host ref or to HEAD —
+    the wrong-but-plausible pin is exactly what made every lagging tool read
+    "0 behind" the first time this was measured by hand.
+    """
+    host, path = led.get("vendored_in"), led.get("vendored_path")
+    host_ref = led.get("vendored_host_ref")
+    if not (host and path and host_ref):
+        return None
+    row = _git(forks_root / host, "ls-tree", host_ref, path, timeout=60)
+    if not row:
+        return None
+    parts = row.split()
+    # `160000 commit <sha>\t<path>` — a gitlink. Anything else is not a submodule
+    # pointer and must not be read as one.
+    if len(parts) < 3 or parts[0] != "160000" or parts[1] != "commit":
+        return None
+    return parts[2]
+
+
+def published_tip(clone: Path, led: dict) -> Optional[str]:
+    """Our fork's PUBLISHED line — never the clone's HEAD.
+
+    These clones are shared. `HEAD` is whatever the last process to touch the
+    directory left checked out, and that is not a fact about our fork.
+
+    Measured 2026-08-02, both directions in one sweep, on the run that produced
+    this function:
+
+      OpenSTA   HEAD sat on `fix/max-fanout-applicability-…`, a branch another
+                session had created and committed to 25 minutes earlier. Counting
+                `pin..HEAD` reported that in-progress commit as "our fix is not in
+                the shipped image" — work that was never claimed to be shipped and
+                may never land.
+
+      OpenROAD  HEAD sat one commit BEHIND `origin/master`, because a fix had just
+                merged and this clone had not fetched. The same count would have
+                MISSED a landed fix that genuinely is not in the image.
+
+    An overcount and an undercount from one wrong reference. `origin/<branch>` is
+    the tip we actually publish, so it is the only defensible answer to "have our
+    commits reached the image".
+
+    None when it cannot be resolved — never a fall back to HEAD.
+    """
+    cands = []
+    if led.get("vibeic_branch"):
+        cands.append("origin/%s" % led["vibeic_branch"])
+    cands += ["origin/master", "origin/main"]
+    for c in cands:
+        if _git(clone, "rev-parse", "--verify", "-q", c):
+            return c
+    return None
 
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
@@ -154,7 +225,7 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         tool = led.get("tool") or lf.stem
         clone = forks_root / tool
         row = {"tool": tool, "integrated": bool(led.get("integrated")),
-               "pin_source": "ARG",
+               "pin_source": "ARG", "pin_disagreement": None,
                "ahead": led.get("ahead"), "pin": None,
                "sync_lag": None, "release_lag": None, "image_behind": None,
                "note": None}
@@ -184,6 +255,19 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
                 row["pin_source"] = ("vendored in " + str(led.get("vendored_in"))
                                      if led.get("vendored_in") else "branch pin")
 
+        # A vendored fork has no ARG of its own; its pin lives one level in.
+        if row["pin"] is None:
+            vp = vendored_pin(forks_root, led)
+            if vp:
+                row["pin"] = vp
+                row["pin_source"] = (
+                    f"{led.get('vendored_in')}@"
+                    f"{(led.get('vendored_host_ref') or '')[:12]}:{led.get('vendored_path')}")
+                claimed = led.get("pinned_ref_full")
+                if claimed and claimed != vp:
+                    row["pin_disagreement"] = (
+                        f"ledger says {claimed[:12]}, the submodule pointer says {vp[:12]}")
+
         if not clone.is_dir():
             row["note"] = "no clone — NOT MEASURED"
             rows.append(row); continue
@@ -194,11 +278,16 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
             row["note"] = "no upstream remote — NOT MEASURED"
             rows.append(row); continue
 
-        row["sync_lag"] = count(clone, "HEAD", up)
+        tip = published_tip(clone, led)
+        if tip is None:
+            row["note"] = "no published origin branch — NOT MEASURED"
+            rows.append(row); continue
+        row["tip"] = tip
+        row["sync_lag"] = count(clone, tip, up)
         if row["pin"]:
-            row["release_lag"] = count(clone, row["pin"], "HEAD")
+            row["release_lag"] = count(clone, row["pin"], tip)
             row["image_behind"] = count(clone, row["pin"], up)
-            ours = ours_past_the_pin(clone, row["pin"], up)
+            ours = ours_past_the_pin(clone, row["pin"], up, tip)
             row["ours_unshipped"] = None if ours is None else len(ours)
             row["ours_unshipped_substantive"] = (
                 None if ours is None else len([c for c in ours if not c["merge"]]))
@@ -283,7 +372,12 @@ def main(argv=None) -> int:
     for c in rep["q2_unshipped_commits"]:
         print(f"          {c['tool']}/{c['sha']}  {c['date']}  {c['author']}")
         print(f"              {c['subject']}")
-    unmeasured = rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+    disagreed = [r for r in rep["rows"] if r.get("pin_disagreement")]
+    for r in disagreed:
+        print(f"  PIN DISAGREEMENT {r['tool']}: {r['pin_disagreement']}")
+
+    unmeasured = (rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+                  + [r["tool"] for r in disagreed])
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
         return 2

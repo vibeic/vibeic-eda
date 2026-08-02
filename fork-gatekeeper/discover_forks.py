@@ -2551,7 +2551,7 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         # neighbouring question and said zero.
         #
         # DERIVED, not matched on author names: our commits are the ones upstream
-        # does not have, so the unshipped ones are `pin..HEAD` minus anything
+        # does not have, so the unshipped ones are `pin..origin/<branch>` minus anything
         # upstream already carries. An outside contributor's commit to our fork
         # counts too, which an email pattern would have missed.
         #
@@ -2560,10 +2560,33 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         # the two overstates the risk, and the number is meant to be actionable.
         led["ours_unshipped"] = None
         led["ours_unshipped_substantive"] = None
+        #
+        # MEASURED AGAINST THE PUBLISHED TIP, NOT `HEAD`. These clones are shared,
+        # so HEAD is whatever the last process to touch the directory left checked
+        # out — not a fact about our fork. Both failure directions were measured on
+        # 2026-08-02 in a single sweep:
+        #
+        #   OpenSTA   HEAD sat on `fix/max-fanout-applicability-…`, a branch another
+        #             session had created and committed to 25 minutes earlier. That
+        #             in-progress commit counted as "our fix has not reached the
+        #             image" — work nobody ever claimed was shipped.
+        #   OpenROAD  HEAD sat one commit BEHIND origin/master after a fix merged
+        #             and this clone had not fetched, so the same count MISSED a
+        #             landed fix that genuinely is not in the image.
+        #
+        # An overcount and an undercount from one wrong reference.
         _cl = _clone_for(tool)
         _pinref = pin.get("ref") or ""
-        if _cl is not None and _pinref and up_branch:
-            _r = _git(_cl, "rev-list", f"{_pinref}..HEAD", "--not",
+        _tip = None
+        if _cl is not None:
+            for _c in ([f"origin/{led['vibeic_branch']}"] if led.get("vibeic_branch") else []) \
+                      + ["origin/master", "origin/main"]:
+                if _git(_cl, "rev-parse", "--verify", "-q", _c).rc == 0:
+                    _tip = _c
+                    break
+        led["ours_unshipped_measured_against"] = _tip
+        if _cl is not None and _pinref and up_branch and _tip:
+            _r = _git(_cl, "rev-list", f"{_pinref}..{_tip}", "--not",
                       f"upstream/{up_branch}")
             if _r.rc == 0:
                 _sh = [x for x in _r.out.split() if x]
