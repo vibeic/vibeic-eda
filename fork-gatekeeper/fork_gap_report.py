@@ -141,6 +141,40 @@ def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
     return rows
 
 
+def vendored_pin(forks_root: Path, led: dict) -> Optional[str]:
+    """The effective pin of a fork that reaches the image INSIDE another fork.
+
+    OpenSTA has no `ARG OPENSTA_REF`, because the image never clones it: OpenROAD
+    carries it at `src/sta` and the build compiles `//src/sta:opensta` out of that
+    tree. Its pin is therefore whatever commit OpenROAD's submodule points at, at
+    OpenROAD's own pin — a real, exact answer that this program reported as NOT
+    MEASURED simply because it looked in one place.
+
+    Resolved here rather than read from the ledger's `pinned_ref_full`, so this
+    program does not inherit another program's answer. The ledger's value is then
+    compared against it, and a disagreement is surfaced rather than silently
+    broken in favour of one side: two derivations of one fact that disagree is a
+    finding.
+
+    None when it cannot be resolved. Never a fallback to the host ref or to HEAD —
+    the wrong-but-plausible pin is exactly what made every lagging tool read
+    "0 behind" the first time this was measured by hand.
+    """
+    host, path = led.get("vendored_in"), led.get("vendored_path")
+    host_ref = led.get("vendored_host_ref")
+    if not (host and path and host_ref):
+        return None
+    row = _git(forks_root / host, "ls-tree", host_ref, path, timeout=60)
+    if not row:
+        return None
+    parts = row.split()
+    # `160000 commit <sha>\t<path>` — a gitlink. Anything else is not a submodule
+    # pointer and must not be read as one.
+    if len(parts) < 3 or parts[0] != "160000" or parts[1] != "commit":
+        return None
+    return parts[2]
+
+
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
     pins = pins_from_dockerfiles(repo)
     rows: List[dict] = []
@@ -154,7 +188,7 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         tool = led.get("tool") or lf.stem
         clone = forks_root / tool
         row = {"tool": tool, "integrated": bool(led.get("integrated")),
-               "pin_source": "ARG",
+               "pin_source": "ARG", "pin_disagreement": None,
                "ahead": led.get("ahead"), "pin": None,
                "sync_lag": None, "release_lag": None, "image_behind": None,
                "note": None}
@@ -183,6 +217,19 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
                 row["pin"] = cand
                 row["pin_source"] = ("vendored in " + str(led.get("vendored_in"))
                                      if led.get("vendored_in") else "branch pin")
+
+        # A vendored fork has no ARG of its own; its pin lives one level in.
+        if row["pin"] is None:
+            vp = vendored_pin(forks_root, led)
+            if vp:
+                row["pin"] = vp
+                row["pin_source"] = (
+                    f"{led.get('vendored_in')}@"
+                    f"{(led.get('vendored_host_ref') or '')[:12]}:{led.get('vendored_path')}")
+                claimed = led.get("pinned_ref_full")
+                if claimed and claimed != vp:
+                    row["pin_disagreement"] = (
+                        f"ledger says {claimed[:12]}, the submodule pointer says {vp[:12]}")
 
         if not clone.is_dir():
             row["note"] = "no clone — NOT MEASURED"
@@ -283,7 +330,12 @@ def main(argv=None) -> int:
     for c in rep["q2_unshipped_commits"]:
         print(f"          {c['tool']}/{c['sha']}  {c['date']}  {c['author']}")
         print(f"              {c['subject']}")
-    unmeasured = rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+    disagreed = [r for r in rep["rows"] if r.get("pin_disagreement")]
+    for r in disagreed:
+        print(f"  PIN DISAGREEMENT {r['tool']}: {r['pin_disagreement']}")
+
+    unmeasured = (rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+                  + [r["tool"] for r in disagreed])
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
         return 2
