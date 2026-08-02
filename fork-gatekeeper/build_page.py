@@ -222,6 +222,10 @@ PIN_NOTES = {
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
+.fork-stale{background:#3a1d1d;border:1px solid #7a3030;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
+.fork-stale b{color:#fff}
+.fork-kpi.is-stale{border-color:#7a3030;background:#221316}
+.fork-kpi.is-stale .n{color:#ff9d9d}
 .fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
 .fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:#f5f8fb;word-break:break-all}
 .fork-kpi .l{font-size:.8rem;color:#9fb0c0;margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
@@ -319,6 +323,7 @@ __NAV__
             <p data-en="Each fork keeps the upstream source pristine and carries our enhancements as a small, rebasable patch series (the Debian / kernel model). The daily Gatekeeper detects new upstream commits, rebases our patches on top, runs the full open-source EDA regression (build + the real benchmark ICs), and only auto-merges when that review is green — otherwise it defers the commit and records why. Every carried patch tracks whether it has been sent upstream, so our permanent delta stays minimal." data-zh="每個 fork 保持上游原始碼零修改，把我們的強化以一小疊可重貼的補丁序列揹著（Debian／kernel 模型）。每日 Gatekeeper 偵測上游新 commit、把我們的補丁重貼上去、跑完整開源 EDA 回歸（build + 真實 benchmark IC），只有審查全綠才自動 merge — 否則 defer 該 commit 並記錄原因。每個揹著的補丁都追蹤是否已送回上游，讓永久 delta 保持最小。">Each fork keeps the upstream source pristine and carries our enhancements as a small, rebasable patch series (the Debian / kernel model). The daily Gatekeeper detects new upstream commits, rebases our patches on top, runs the full open-source EDA regression (build + the real benchmark ICs), and only auto-merges when that review is green — otherwise it defers the commit and records why. Every carried patch tracks whether it has been sent upstream, so our permanent delta stays minimal.</p>
         </div>
 
+        <div class="fork-stale" id="forkStale" hidden></div>
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
 
@@ -492,7 +497,41 @@ function enhBlock(tool){
   // different step — so when that step stopped running the card kept showing an old date
   // beside freshly-gathered numbers, and looked like the whole page was stale. The
   // ledger's own generated_at cannot drift from the ledger it stamps.
-  const lastCheck = ((LEDGERS[0]||{}).generated_at || (REPORT&&REPORT.date) || "").slice(0,10) || "—";
+  const generatedAt = (LEDGERS[0]||{}).generated_at || (REPORT&&REPORT.date) || "";
+  const lastCheck = generatedAt.slice(0,10) || "—";
+  // STALENESS IS COMPUTED IN THE VIEWER'S BROWSER, not at build time, and that is
+  // the whole point (vibeic-eda#58).
+  //
+  // The daily tick published NOTHING for two days. Both of its steps exited 1 into
+  // a log nobody reads, and the only visible symptom was this page quietly
+  // describing an older world — noticed by a person, not by anything we built.
+  //
+  // A build-time banner cannot catch that: this page is rebuilt BY the tick, so a
+  // check that runs while building it is a check inside the process that stopped
+  // running. It would never render. Computing the age when the page is VIEWED works
+  // even when nothing has rebuilt it for a week, which is exactly the case that
+  // needs to be loud.
+  //
+  // THRESHOLD 30 h — one daily round plus six hours of slack for a long one.
+  //
+  // Stated honestly, because the trade is real: a timestamp CANNOT distinguish "the
+  // round ran and upstream was quiet" from "the round did not run" until enough time
+  // has passed that no successful round could have left data this old. So this fires
+  // on the morning AFTER a missed round, not at the moment one is missed, and there
+  // is no threshold that does better from this signal alone. Measured against the
+  // incident that prompted it (ledger frozen 2026-08-01T22:51): 30 h fires on 08-03,
+  // 36 h fires the same day but later, and neither would have fired on 08-02.
+  // Detecting the miss AS it happens needs the round to report its own liveness,
+  // which is a separate mechanism and belongs to whatever runs the round.
+  //
+  // A clock-skewed FUTURE timestamp is reported as "could not tell" rather than as
+  // freshness — the one direction that must never read as healthy.
+  const genMs = Date.parse(generatedAt);
+  const ageH  = isFinite(genMs) ? (Date.now() - genMs) / 3600000 : NaN;
+  const stale = isFinite(ageH) && ageH > 30;
+  const ahead = isFinite(ageH) && ageH < -1;
+  const ageTxt = !isFinite(ageH) ? "" : (ageH < 48
+      ? `${Math.round(ageH)} h` : `${Math.floor(ageH/24)} d`);
   const enhVals = Object.values(ENH||{});
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
@@ -508,10 +547,26 @@ function enhBlock(tool){
       zh:`我們自己的 commit，上游沒有的（${patchForks} 個 fork）`}],
     [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
     [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
-    [lastCheck, {en:"Last daily check",zh:"最後每日檢查"}],
+    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
+     {en:"Last daily check", zh:"最後每日檢查"}],
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
-    `<div class="fork-kpi"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+    `<div class="fork-kpi${l.en==="Last daily check"&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+  const staleEl = document.getElementById("forkStale");
+  if (staleEl && (stale || ahead || (generatedAt && !isFinite(genMs)))) {
+    const en = ahead
+      ? `This page's data is stamped in the FUTURE (${esc(lastCheck)}). Its age cannot be judged, so treat every number below as unverified.`
+      : !isFinite(genMs)
+      ? `This page's data carries no readable timestamp, so its age cannot be judged. Treat every number below as unverified.`
+      : `<b>This page is ${esc(ageTxt)} out of date.</b> The daily round last gathered data on ${esc(lastCheck)}. Every number below describes that day, not today — a round that did not publish leaves these figures unchanged, which looks identical to upstream having been quiet.`;
+    const zh = ahead
+      ? `本頁資料的時間戳在未來（${esc(lastCheck)}），無法判斷新舊，以下數字請一律視為未經驗證。`
+      : !isFinite(genMs)
+      ? `本頁資料沒有可讀的時間戳，無法判斷新舊，以下數字請一律視為未經驗證。`
+      : `<b>本頁已過期 ${esc(ageTxt)}。</b>最後一次每日彙集是 ${esc(lastCheck)}。以下每個數字描述的是那一天而不是今天 —— 一輪沒有發布會讓這些數字原封不動，看起來和「上游沒有變動」一模一樣。`;
+    staleEl.innerHTML = `<span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>`;
+    staleEl.hidden = false;
+  }
   const gapEl = document.getElementById("forkGap");
   if (gapEl) {
     if (!gapTools.length) {
