@@ -74,7 +74,21 @@ else
     echo "[$(date -Is)] build_page SKIPPED — the ledger did not refresh" >> "${LOG}"
 fi
 
+# THE ROUND MUST NOTICE ITS OWN SILENCE (vibeic-eda#58). Three consecutive days
+# published nothing and raised no alert: the round exited 1 into a log, and the
+# only visible symptom was a public page that did not move — noticed by a person,
+# on day three. Every step above reports ITS OWN exit; none of them answers "did
+# today's numbers actually reach the ledger?", which is the question a reader of
+# the page is really asking.
+#
+# It runs LAST and UNCONDITIONALLY — after a failed publish is exactly when it
+# matters, so it must not sit behind any of the exits above.
+python3 "${DIR}/check_ledger_is_fresh.py" \
+    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/ledger_freshness.json" >> "${LOG}" 2>&1
+FRESH=$?
+echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
+
 # 0 only when BOTH are clean; the six steps' own 1 means "a case still needs a
 # human", which is information, not noise.
-if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] || [ "${PAGE}" -ne 0 ]; then exit 1; fi
+if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ]; then exit 1; fi
 exit 0

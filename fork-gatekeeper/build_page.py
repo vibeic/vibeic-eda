@@ -555,14 +555,26 @@ function enhBlock(tool){
     [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``),
      {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured)`,
       zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零）`}],
-    [totalPatches,
-     {en:`Our commits upstream does not have (${patchForks} fork(s))`,
-      zh:`我們自己的 commit，上游沒有的（${patchForks} 個 fork）`}],
+    // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
+    // read 345 beside this one's 345 — the same number twice, which invites the
+    // reader to think one of them means something else. Held-but-not-shipped is
+    // the only interesting part of that difference, and it is already inside this
+    // card as `(+N NOT shipped)`. So the inventory count is gone and the shipped
+    // count stays.
     [shipPatches + (strandPatches?` (+${strandPatches} NOT shipped)`:``),
      {en:`Our commits that reach the shipped image — ${notBuilt} fork(s) the image does NOT build from`,
       zh:`真正進到出貨 image 的自有 commit —— 有 ${notBuilt} 個 fork，image 不是從我們的版本建置`}],
-    [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
-    [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
+    // REMOVED: "Untracked forks (no patches, not synced)". It counted
+    // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
+    // FORKS.json itself describes as "a pure mirror… we carry NO commits of our
+    // own here". Calling a deliberate mirror "lost contact" is a label that
+    // manufactures an anomaly out of the intended state, and being behind is
+    // already counted by the commits-behind card.
+    // REMOVED: "Capabilities tracked" (566). That is capability coverage against
+    // the commercial suites — a different question from either daily one, and on
+    // a fork-sync page it reads as if 566 were something about upstream. It still
+    // has its own explained section further down the page, where the sentence
+    // around it says what it is.
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
      {en:"Last daily check", zh:"最後每日檢查"}],
   ];
