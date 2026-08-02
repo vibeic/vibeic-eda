@@ -361,6 +361,57 @@ def write_released_record(eda_root: Path, version: str,
     return rec
 
 
+def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
+    """Commit VERSION + RELEASED.json. vibeic-eda#71.
+
+    THE PUBLISH HALF IS DURABLE AND THE RECORD HALF WAS NOT. `docker push` puts
+    the image in a registry, where it stays; `write_released_record` writes a
+    file in the WORKING TREE and this program never shells out to git — measured
+    by reading it, `_sh(["git", ...])` appears nowhere. So a checkout, a landing
+    sequence, or anyone tidying a dirty tree discards the record, and the
+    registry and the repo then disagree about what the current release is.
+
+    Observed: 0.2.57 was built, smoke-tested and pushed, and `VERSION` +
+    `RELEASED.json` on main both still said 0.2.56 — with a fingerprint that no
+    longer reproduced, so `check_release_recorded` read "this pin set has never
+    been released" about a pin set that had.
+
+    COMMITS ONLY THE TWO RECORD FILES, by explicit path. A release run's tree
+    also holds the pin edits it made; those are a separate decision that goes
+    through review, and sweeping them in would publish an unreviewed pin change
+    under a release commit. Never `-A`.
+
+    Does not push: whether the record reaches origin is the caller's call, and a
+    failed push must not look like a failed release. Returns (committed, note)
+    and never raises — a release that published successfully must not be
+    reported as failed because a commit could not be made.
+    """
+    files = ["VERSION", "RELEASED.json"]
+    present = [f for f in files if (eda_root / f).is_file()]
+    if not present:
+        return False, "neither VERSION nor RELEASED.json exists"
+    rc, out, err = _sh(["git", "-C", str(eda_root), "status", "--porcelain",
+                        "--"] + present, timeout=60)
+    if rc != 0:
+        return False, f"git status failed: {(err or out).strip()[:120]}"
+    if not out.strip():
+        return False, "record already matches HEAD — nothing to commit"
+    rc, out, err = _sh(["git", "-C", str(eda_root), "add", "--"] + present,
+                       timeout=60)
+    if rc != 0:
+        return False, f"git add failed: {(err or out).strip()[:120]}"
+    msg = (f"release: record {version} as published\n"
+           f"\n"
+           f"Written by daily_release after the image was pushed. The publish is "
+           f"durable (it is in a registry); this is the half that was not "
+           f"(vibeic-eda#71).\n")
+    rc, out, err = _sh(["git", "-C", str(eda_root), "commit", "-m", msg,
+                        "--"] + present, timeout=120)
+    if rc != 0:
+        return False, f"git commit failed: {(err or out).strip()[:160]}"
+    return True, f"recorded {version} in a commit"
+
+
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
     """Every `x.y.z` this image has actually been tagged with, locally."""
     rc, out, _ = _sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
@@ -938,6 +989,12 @@ def main(argv=None) -> int:
                 # fingerprint (here) answer different questions and only the
                 # second has to match the tree that shipped.
                 write_released_record(root, new, targets)
+                # #71 — and COMMIT it. Only when the image was actually pushed:
+                # a LOCAL ONLY build has published nothing, so recording it as
+                # released would assert a release nobody can pull.
+                if pushed:
+                    _ok, _note = commit_release_record(root, new)
+                    print(f"  record: {_note}")
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
 
