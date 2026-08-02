@@ -14,3 +14,18 @@
 # Registered 2026-07-30 while cutting 0.2.46; the two references had been at
 # 0.2.31 since before that and were failing --check as "unregistered".
 docs/TOOL_INVENTORY.md
+
+# `Dockerfile` — PATH-level on purpose, not the per-line marker.
+#
+# The root Dockerfile is an INPUT TO THE IMAGE: `compose_recipe_hash` digests it
+# whole, comments included, deliberately (a comment-only edit used not to move the
+# fingerprint, and that was the hole #19/#20 fixed). So editing it to add a
+# marker invalidates RELEASED.json until the next real build — measured, by doing
+# exactly that: the 0.2.56 record stopped reproducing (c2b9b8b9a843 vs
+# 3a0b5d567c32) and `check_release_recorded` failed.
+#
+# A file that may not be touched cannot carry an inline opt-out, so the exemption
+# has to be the path. The cost is low and checkable: every live image reference in
+# this file is `eda-tool-*` or the `hpretl/...` base, never `vibeic-eda:X.Y.Z` —
+# a version of ours appears here only as the SUBJECT of a measurement.
+Dockerfile
