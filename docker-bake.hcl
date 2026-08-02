@@ -58,7 +58,7 @@ variable "XSCHEM_RECIPE" { default = "f0bdeb" }
 variable "SLANG_RECIPE" { default = "d87240" }
 variable "XYCE_RECIPE" { default = "0e8664" }
 variable "YICES2_RECIPE" { default = "04c594" }
-variable "FAULT_RECIPE" { default = "a7d4fd" }
+variable "FAULT_RECIPE" { default = "9a9a54" }
 variable "SV_ELAB_RECIPE" { default = "799906" }
 
 
