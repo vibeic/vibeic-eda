@@ -128,21 +128,27 @@ instead of asserted:
 
 <!-- counts:github -->
 
-| in the `vibeic` org, measured 2026-07-29 | count | reproduce |
+| in the `vibeic` org, measured 2026-08-02 | count | reproduce |
 |---|---|---|
-| repos with `fork = true` | **45** | `gh api --paginate 'orgs/vibeic/repos?per_page=100' --jq '[.[] \| select(.fork)] \| length'` |
+| repos with `fork = true` | **21** | `gh api --paginate 'orgs/vibeic/repos?per_page=100' --jq '[.[] \| select(.fork)] \| length'` |
 | distinct upstream projects behind them | **21** | `gh api --paginate 'orgs/vibeic/repos?per_page=100' --jq '.[] \| select(.fork) \| .name' \| xargs -I@ gh api repos/vibeic/@ --jq .parent.full_name \| sort -u \| wc -l` |
 
 <!-- /counts:github -->
 
-**45 and 21 differ by a defect, not by a definition.** Twenty-five of the 45 repos
-are `sv-elab` and `sv-elab-1` … `sv-elab-24`: one upstream, forked 25 times on
-2026-07-28 inside 5 m 14 s, every copy 850 KB and identical. Twenty-four are
-redundant. They are named here rather than averaged into a tidier number, and
-they are left in place because deleting a repo is irreversible and is the owner's
-call. **21 is the count that means *projects*,** and it agrees with `FORKS.json`
-in both directions — nothing declared that the org does not have, nothing forked
-that is undeclared. Full detail:
+**The two counts now agree, and the history of why they once did not is worth
+keeping.** Measured 2026-07-29 the first row read **45**, because `sv-elab` had
+been forked 25 times on 2026-07-28 inside 5 m 14 s — `sv-elab` and `sv-elab-1` …
+`sv-elab-24`, every copy 850 KB and identical, 24 of them redundant. That entry
+named them rather than averaging them into a tidier number, and left them in
+place, because deleting a repo is irreversible and was the owner's call to make.
+
+The owner has since made it: only `sv-elab` remains, and both rows read 21. The
+row is updated rather than removed, because a count that once disagreed with its
+own reproduce command is exactly what this table exists to surface — the number
+was wrong for four days and the command in the next column is the only reason
+that was catchable. **21 is the count that means *projects*,** and it agrees with
+`FORKS.json` in both directions — nothing declared that the org does not have,
+nothing forked that is undeclared. Full detail:
 [`docs/TOOL_INVENTORY.md`](./docs/TOOL_INVENTORY.md).
 
 The second command costs one API call per fork on purpose: the repo-**list**
