@@ -512,6 +512,42 @@ def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
             "tail": (r.stdout or "").strip()[-600:]}
 
 
+def same_content_divergence(g, main: str) -> str | None:
+    """The remote's sha when it holds the SAME TREE as ours under a different
+    commit, else None. vibeic-eda#61.
+
+    `FasterCap` failed its nightly push every night from 2026-08-01 and would
+    have kept failing forever:
+
+        ! [rejected]  master -> master (non-fast-forward)
+
+    One change, committed twice. Same subject, same date, and — the part that
+    settles it — the same tree:
+
+        local  HEAD^{tree}          76f4e291e08d
+        remote origin/master^{tree} 76f4e291e08d
+
+    differing only in author metadata, because the mirror was created by
+    clone+push (the fork API returns 403) and the same patch was later applied
+    in a clone with no shared history. Neither commit is an ancestor of the
+    other, so `ahead 1 / behind 1` is STRUCTURAL: re-running the sync cannot fix
+    it, it reproduces it.
+
+    DERIVED FROM THE TWO TREE HASHES, so there is no list of mirrors to keep up
+    to date — any fork that lands in this shape is handled. And it is the honest
+    reading: with equal trees there is nothing of OURS to publish, only a
+    different way of spelling the same content, so adopting the remote discards
+    nothing. The caller proves that equality again immediately before resetting.
+    """
+    ours = out(*g, "rev-parse", f"{main}^{{tree}}")
+    theirs = out(*g, "rev-parse", f"origin/{main}^{{tree}}")
+    if not ours or not theirs or ours != theirs:
+        return None
+    a = out(*g, "rev-parse", main)
+    b = out(*g, "rev-parse", f"origin/{main}")
+    return b if a and b and a != b else None
+
+
 def main_(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--apply", action="store_true",
@@ -548,12 +584,44 @@ def main_(argv=None) -> int:
             sh(*g, "checkout", "-q", main)
             step1_upstream(g, main, rep)
             step2_ours(g, main, rep)
-            r = sh(*g, "push", "-q", "origin", main)
-            rep["push"] = "ok" if r.returncode == 0 else f"REJECTED: {r.stderr.strip()[:120]}"
-            if r.returncode:
-                rep["needs_human"] = True
+            # EQUAL TREES, DIFFERENT SHAS -> adopt the remote, do not push
+            # (vibeic-eda#61). Checked BEFORE the push, because the push would
+            # be rejected and that rejection is indistinguishable from a lost
+            # race once it has happened.
+            adopt = same_content_divergence(g, main)
+            if adopt:
+                # Re-prove losslessness immediately before acting: `reset --hard`
+                # on a tree that is no longer equal would discard content.
+                if out(*g, "rev-parse", f"{main}^{{tree}}") == \
+                        out(*g, "rev-parse", f"origin/{main}^{{tree}}"):
+                    _was = out(*g, "rev-parse", main)
+                    sh(*g, "update-ref", f"refs/salvage/pre-adopt-{_was[:12]}", _was)
+                    sh(*g, "reset", "--hard", f"origin/{main}")
+                    rep["push"] = (f"ADOPTED origin/{main} {adopt[:12]} — same tree, "
+                                   f"different commit; nothing of ours to publish")
+                    rep["diverged_same_content"] = True
+                    step4_prune(g, main, rep, True)
+                else:
+                    rep["push"] = ("SKIPPED — the trees stopped matching between "
+                                   "the check and the reset")
+                    rep["needs_human"] = True
             else:
-                step4_prune(g, main, rep, True)
+                r = sh(*g, "push", "-q", "origin", main)
+                if r.returncode == 0:
+                    rep["push"] = "ok"
+                    step4_prune(g, main, rep, True)
+                elif "non-fast-forward" in (r.stderr or ""):
+                    # A DIVERGENCE is not a lost race, and only one of the two is
+                    # worth waking someone for. Rendering both as `REJECTED` with
+                    # `needs_human` is how a nightly alarm that fires every single
+                    # night stops being read.
+                    rep["push"] = (f"DIVERGED: our {main} and origin/{main} share no "
+                                   f"ancestor and their trees differ — retrying "
+                                   f"will not resolve it")
+                    rep["needs_human"] = True
+                else:
+                    rep["push"] = f"REJECTED: {r.stderr.strip()[:120]}"
+                    rep["needs_human"] = True
         else:
             step4_prune(g, main, rep, False)
         needs_human |= rep.get("needs_human", False)
