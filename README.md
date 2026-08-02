@@ -357,7 +357,7 @@ on `vibeic/klayout-signoff-int`, which is the `KLAYOUT_REF` pinned in the Docker
 **Headless / batch (CI, scripted flows):**
 ```bash
 docker rm -f vibeic-eda 2>/dev/null || true   # "name already in use"? drop the old container first
-docker run -d --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.56 --skip sleep infinity
+docker run -d --init --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.56 --skip sleep infinity
 docker exec vibeic-eda yosys --version
 docker exec vibeic-eda openroad -version
 ```
@@ -370,7 +370,7 @@ into the container from the host — the plugin's phase-3 place-&-route step doe
 `cd <host_project_path>` — need the project tree mounted at the **same path** inside the
 container, or you get `cd: No such file or directory`. Start it with an identity mount:
 ```bash
-docker run -d --name vibeic-eda \
+docker run -d --init --name vibeic-eda \
   -v "$PWD:$PWD" -w "$PWD" \
   ghcr.io/vibeic/vibeic-eda:0.2.56 --skip sleep infinity
 # then point the MCP at it:  EDA_CONTAINER=vibeic-eda
