@@ -103,7 +103,8 @@ def upstream_head(clone: Path) -> Optional[str]:
     return None
 
 
-def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
+def ours_past_the_pin(clone: Path, pin: str, up: str,
+                      tip: str) -> Optional[List[dict]]:
     """Our commits that the image does NOT ship: `pin..HEAD` minus what upstream has.
 
     Q2 was first answered with the ledger's `integrated` flag — "does the image
@@ -126,7 +127,7 @@ def ours_past_the_pin(clone: Path, pin: str, up: str) -> Optional[List[dict]]:
 
     None (never []) when it cannot be derived — an unresolvable pin is NOT zero.
     """
-    out = _git(clone, "rev-list", f"{pin}..HEAD", "--not", up, timeout=120)
+    out = _git(clone, "rev-list", f"{pin}..{tip}", "--not", up, timeout=120)
     if out is None:
         return None
     rows: List[dict] = []
@@ -173,6 +174,41 @@ def vendored_pin(forks_root: Path, led: dict) -> Optional[str]:
     if len(parts) < 3 or parts[0] != "160000" or parts[1] != "commit":
         return None
     return parts[2]
+
+
+def published_tip(clone: Path, led: dict) -> Optional[str]:
+    """Our fork's PUBLISHED line — never the clone's HEAD.
+
+    These clones are shared. `HEAD` is whatever the last process to touch the
+    directory left checked out, and that is not a fact about our fork.
+
+    Measured 2026-08-02, both directions in one sweep, on the run that produced
+    this function:
+
+      OpenSTA   HEAD sat on `fix/max-fanout-applicability-…`, a branch another
+                session had created and committed to 25 minutes earlier. Counting
+                `pin..HEAD` reported that in-progress commit as "our fix is not in
+                the shipped image" — work that was never claimed to be shipped and
+                may never land.
+
+      OpenROAD  HEAD sat one commit BEHIND `origin/master`, because a fix had just
+                merged and this clone had not fetched. The same count would have
+                MISSED a landed fix that genuinely is not in the image.
+
+    An overcount and an undercount from one wrong reference. `origin/<branch>` is
+    the tip we actually publish, so it is the only defensible answer to "have our
+    commits reached the image".
+
+    None when it cannot be resolved — never a fall back to HEAD.
+    """
+    cands = []
+    if led.get("vibeic_branch"):
+        cands.append("origin/%s" % led["vibeic_branch"])
+    cands += ["origin/master", "origin/main"]
+    for c in cands:
+        if _git(clone, "rev-parse", "--verify", "-q", c):
+            return c
+    return None
 
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
@@ -241,11 +277,16 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
             row["note"] = "no upstream remote — NOT MEASURED"
             rows.append(row); continue
 
-        row["sync_lag"] = count(clone, "HEAD", up)
+        tip = published_tip(clone, led)
+        if tip is None:
+            row["note"] = "no published origin branch — NOT MEASURED"
+            rows.append(row); continue
+        row["tip"] = tip
+        row["sync_lag"] = count(clone, tip, up)
         if row["pin"]:
-            row["release_lag"] = count(clone, row["pin"], "HEAD")
+            row["release_lag"] = count(clone, row["pin"], tip)
             row["image_behind"] = count(clone, row["pin"], up)
-            ours = ours_past_the_pin(clone, row["pin"], up)
+            ours = ours_past_the_pin(clone, row["pin"], up, tip)
             row["ours_unshipped"] = None if ours is None else len(ours)
             row["ours_unshipped_substantive"] = (
                 None if ours is None else len([c for c in ours if not c["merge"]]))
