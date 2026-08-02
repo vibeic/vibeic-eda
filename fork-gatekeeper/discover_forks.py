@@ -2538,6 +2538,42 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         led["behind_commits"] = cmp.get("behind_by", 0)       # informational (commit granularity)
         led["carried_patches"] = [_commit_brief(c) for c in (cmp.get("commits") or [])][:CAP]
         led["fork_point_status"] = source
+
+        # OUR OWN WORK THAT THE IMAGE DOES NOT SHIP. `ahead` is what our FORK
+        # carries beyond upstream; it says nothing about whether the image's PIN
+        # reached it. The pin can sit anywhere behind the fork tip, and everything
+        # after it — including our own fixes — is simply not in the shipped image.
+        #
+        # Measured 2026-08-02: the page's card read "345 shipped, 0 stranded"
+        # because it keyed on `integrated` (does the image build from our fork at
+        # all). It does, and OpenROAD still had 3 of our commits sitting past the
+        # pin. A card built to answer "do our commits reach the image" answered a
+        # neighbouring question and said zero.
+        #
+        # DERIVED, not matched on author names: our commits are the ones upstream
+        # does not have, so the unshipped ones are `pin..HEAD` minus anything
+        # upstream already carries. An outside contributor's commit to our fork
+        # counts too, which an email pattern would have missed.
+        #
+        # `merge_only` is broken out because a merge commit authored by us whose
+        # CONTENT is upstream's is not a fix of ours going unshipped — conflating
+        # the two overstates the risk, and the number is meant to be actionable.
+        led["ours_unshipped"] = None
+        led["ours_unshipped_substantive"] = None
+        _cl = _clone_for(tool)
+        _pinref = pin.get("ref") or ""
+        if _cl is not None and _pinref and up_branch:
+            _r = _git(_cl, "rev-list", f"{_pinref}..HEAD", "--not",
+                      f"upstream/{up_branch}")
+            if _r.rc == 0:
+                _sh = [x for x in _r.out.split() if x]
+                led["ours_unshipped"] = len(_sh)
+                _sub = 0
+                for _c in _sh:
+                    _m = _git(_cl, "show", "-s", "--format=%p", _c, timeout=30)
+                    if _m.rc == 0 and len(_m.out.split()) < 2:
+                        _sub += 1          # one parent => not a merge
+                led["ours_unshipped_substantive"] = _sub
         # Classify releases by the FORK POINT (merge-base) date — the point where our
         # branch diverges from upstream = the release our patches are based on. Using a
         # patch's own author date is wrong: rebasing onto a new release preserves the

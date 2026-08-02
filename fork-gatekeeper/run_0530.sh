@@ -74,7 +74,32 @@ else
     echo "[$(date -Is)] build_page SKIPPED — the ledger did not refresh" >> "${LOG}"
 fi
 
+# THE ROUND MUST NOTICE ITS OWN SILENCE (vibeic-eda#58). Three consecutive days
+# published nothing and raised no alert: the round exited 1 into a log, and the
+# only visible symptom was a public page that did not move — noticed by a person,
+# on day three. Every step above reports ITS OWN exit; none of them answers "did
+# today's numbers actually reach the ledger?", which is the question a reader of
+# the page is really asking.
+#
+# It runs LAST and UNCONDITIONALLY — after a failed publish is exactly when it
+# matters, so it must not sit behind any of the exits above.
+# THE TWO DAILY NUMBERS ARE MEASURED BY ONE PROGRAM, ALWAYS THE SAME WAY.
+# They were measured by hand on 2026-08-02 and the hand got them wrong twice in
+# one evening: a missing pin fell back to the clone's HEAD, which makes the gap
+# identically 0, and "behind" was read as one number when it is two (SYNC lag vs
+# RELEASE lag, which need opposite fixes). Both mistakes produced a reassuring
+# answer. A measurement that has to be remembered is not a measurement.
+python3 "${DIR}/fork_gap_report.py" \
+    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" >> "${LOG}" 2>&1
+GAP=$?
+echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
+
+python3 "${DIR}/check_ledger_is_fresh.py" \
+    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/ledger_freshness.json" >> "${LOG}" 2>&1
+FRESH=$?
+echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
+
 # 0 only when BOTH are clean; the six steps' own 1 means "a case still needs a
 # human", which is information, not noise.
-if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] || [ "${PAGE}" -ne 0 ]; then exit 1; fi
+if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ]; then exit 1; fi
 exit 0

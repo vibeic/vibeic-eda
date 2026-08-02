@@ -491,9 +491,28 @@ function enhBlock(tool){
   // and the day someone lands a fix in one of them the two numbers diverge
   // silently. See vibeic-eda#60. `integrated` is the ledger's own word for
   // "reaches the shipped image", by ARG pin or vendored inside one.
-  const shipPatches   = LEDGERS.filter(d=>d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
-  const strandPatches = LEDGERS.filter(d=>!d.integrated).reduce((a,d)=>a+(d.ahead||0),0);
-  const notBuilt      = LEDGERS.filter(d=>!d.integrated).length;
+  // WRONG FIRST CUT, kept as the comment it earned. This keyed on `integrated`
+  // — "does the image build from our fork at all" — and read
+  // "345 shipped, 0 stranded". The image DOES build from our OpenROAD fork, and
+  // three of our commits were still sitting past the pin, unshipped. `integrated`
+  // is a fact about the Dockerfile; it says nothing about where the PIN stopped.
+  // A card built to answer "do our commits reach the image" answered a
+  // neighbouring question and said zero.
+  //
+  // `ours_unshipped` is now derived in the ledger as `pin..fork_tip` minus what
+  // upstream already has — no author-name matching, so an outside contributor's
+  // commit to our fork counts too.
+  //
+  // SUBSTANTIVE is the number shown, because all 5 unshipped commits on the day
+  // this was written were MERGE commits whose content is upstream's. A merge of
+  // ours carrying upstream work is not a fix of ours going unshipped, and
+  // counting it would cry wolf on every sync.
+  const unshipAll = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped==="number"?d.ours_unshipped:0),0);
+  const unship    = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped_substantive==="number"?d.ours_unshipped_substantive:0),0);
+  const unknownShip = LEDGERS.filter(d=>d.integrated && d.ours_unshipped==null).length;
+  const totalOurs = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
+  const shipPatches = totalOurs - unshipAll;
+  const notBuilt    = LEDGERS.filter(d=>!d.integrated).length;
   // THE TRACKING GAP. Forked, but neither worked on (ahead==0) nor kept current
   // (behind_commits>0) — the only rows that are nobody's deliberate state.
   // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
@@ -555,14 +574,26 @@ function enhBlock(tool){
     [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``),
      {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured)`,
       zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零）`}],
-    [totalPatches,
-     {en:`Our commits upstream does not have (${patchForks} fork(s))`,
-      zh:`我們自己的 commit，上游沒有的（${patchForks} 個 fork）`}],
-    [shipPatches + (strandPatches?` (+${strandPatches} NOT shipped)`:``),
-     {en:`Our commits that reach the shipped image — ${notBuilt} fork(s) the image does NOT build from`,
-      zh:`真正進到出貨 image 的自有 commit —— 有 ${notBuilt} 個 fork，image 不是從我們的版本建置`}],
-    [gapTools.length, {en:"Untracked forks (no patches, not synced)",zh:"失聯的 fork（沒補丁也沒跟上）"}],
-    [enhRows, {en:"Capabilities tracked",zh:"追蹤能力數"}],
+    // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
+    // read 345 beside this one's 345 — the same number twice, which invites the
+    // reader to think one of them means something else. Held-but-not-shipped is
+    // the only interesting part of that difference, and it is already inside this
+    // card as `(+N NOT shipped)`. So the inventory count is gone and the shipped
+    // count stays.
+    [`${shipPatches}/${totalOurs}` + (unship?` — ${unship} NOT shipped`:``) + (unknownShip?` +${unknownShip}?`:``),
+     {en:`Our commits that reach the shipped image (${unshipAll} past the pin, ${unship} of them substantive; ${notBuilt} fork(s) not built from ours; +N? = could not be measured)`,
+      zh:`真正進到出貨 image 的自有 commit（${unshipAll} 個卡在 pin 之後，其中 ${unship} 個是實質修改；${notBuilt} 個 fork 不是從我們的版本建置；+N? = 量不到）`}],
+    // REMOVED: "Untracked forks (no patches, not synced)". It counted
+    // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
+    // FORKS.json itself describes as "a pure mirror… we carry NO commits of our
+    // own here". Calling a deliberate mirror "lost contact" is a label that
+    // manufactures an anomaly out of the intended state, and being behind is
+    // already counted by the commits-behind card.
+    // REMOVED: "Capabilities tracked" (566). That is capability coverage against
+    // the commercial suites — a different question from either daily one, and on
+    // a fork-sync page it reads as if 566 were something about upstream. It still
+    // has its own explained section further down the page, where the sentence
+    // around it says what it is.
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
      {en:"Last daily check", zh:"最後每日檢查"}],
   ];
