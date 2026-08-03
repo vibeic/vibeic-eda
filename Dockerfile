@@ -358,7 +358,41 @@ RUN unset PYTHONPATH \
 # Adopting a NEW base is deliberately not the fork rule: we do not control this
 # image and cannot review it commit by commit, so it is a considered bump with a
 # smoke pass behind it, never an automatic merge.
+
+# ── provenance collector ────────────────────────────────────────────────────
+# vibeic-eda#77. Each tool used to COPY its own `/vibeic/provenance/<tool>.json`
+# into the final image, and every COPY is a LAYER: 15 layers to carry 15 tiny
+# JSON files into one directory.
+#
+# overlay2 stops at 128 stacked layers and 0.2.61 measured 127 — `docker pull`
+# already failed on 2 of 5 fleet hosts with `failed to register layer: max depth
+# exceeded`, on machines with 1.5 TB free. It is a cliff, not a slope: the next
+# release or two would have taken every overlay2 host off the image at once.
+#
+# Gathering them here costs layers in an INTERMEDIATE stage, which do not reach
+# the final image — only the single COPY out of it does. 15 -> 1.
+FROM ${BASE_IMAGE} AS provenance
+RUN mkdir -p /vibeic/provenance
+COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
+COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
+COPY --from=img-sat-solvers /vibeic/provenance/sat-solvers.json /vibeic/provenance/sat-solvers.json
+COPY --from=img-ngspice /vibeic/provenance/ngspice.json /vibeic/provenance/ngspice.json
+COPY --from=img-lvs /vibeic/provenance/lvs.json /vibeic/provenance/lvs.json
+COPY --from=img-iverilog /vibeic/provenance/iverilog.json /vibeic/provenance/iverilog.json
+COPY --from=img-klayout /vibeic/provenance/klayout.json /vibeic/provenance/klayout.json
+COPY --from=img-verilator /vibeic/provenance/verilator.json /vibeic/provenance/verilator.json
+COPY --from=img-gtkwave /vibeic/provenance/gtkwave.json /vibeic/provenance/gtkwave.json
+COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.json
+COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
+COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
+COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
+COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
+COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
+
 FROM ${BASE_IMAGE}
+
+# vibeic-eda#77 — one layer for all 15 tool provenance records.
+COPY --from=provenance /vibeic/provenance /vibeic/provenance
 LABEL org.opencontainers.image.title="vibeic-eda"
 LABEL org.opencontainers.image.description="Forked+enhanced OSS EDA toolchain (vibeic): iic-osic-tools base + vibeic/* patched EDA-tool forks with gatekeeper-verified FAIL->PASS proofs (see FIX_STATUS.md)."
 LABEL org.opencontainers.image.source="https://github.com/vibeic"
@@ -367,12 +401,11 @@ LABEL org.opencontainers.image.source="https://github.com/vibeic"
 USER root
 # --- vibeic/OpenROAD (native 24.04 build → RUNPATH /opt/or-tools, no lib bundling) ---
 COPY --from=img-openroad /opt/or-tools /opt/or-tools
-COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/openroad
+COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/
 # The standalone `sta`, which the artefact now carries (vibeic-eda#8). Without
 # this line the base image's own copy survives at the same path — it answers
 # every smoke-test command, so the omission was invisible, and it had 0 of the
 # 10 vibeic superset commands that `openroad`'s built-in engine has all of.
-COPY --from=img-openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/sta
 # Clean-replace the base tool dirs FIRST so no stale base files survive the COPY merge —
 # e.g. the base's ghdl.so yosys plugin is built against the old ABI and would crash yosys 0.66.
 #
@@ -442,8 +475,7 @@ RUN cp -a /foss/rescue/bin/. /foss/tools/yosys/bin/ \
  && rm -rf /foss/rescue \
  && rm -f /foss/tools/bin/sby
 # external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
-COPY --from=img-sat-solvers /usr/local/bin/kissat /foss/tools/bin/kissat
-COPY --from=img-sat-solvers /usr/local/bin/cadical /foss/tools/bin/cadical
+COPY --from=img-sat-solvers /usr/local/bin/kissat /usr/local/bin/cadical /foss/tools/bin/
 # --- vibeic/ngspice ---
 COPY --from=img-ngspice /foss/tools/ngspice /foss/tools/ngspice
 # --- vibeic/magic + vibeic/netgen ---
@@ -587,27 +619,12 @@ COPY --from=img-klayout /klayout/bld /foss/tools/klayout-vibeic
 # be moved while a file in a layer cannot. `check_image_provenance.py` reads
 # them back out of the built image and fails if any disagrees with its pin.
 
-COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
-COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
-COPY --from=img-sat-solvers /vibeic/provenance/sat-solvers.json /vibeic/provenance/sat-solvers.json
-COPY --from=img-ngspice /vibeic/provenance/ngspice.json /vibeic/provenance/ngspice.json
-COPY --from=img-lvs /vibeic/provenance/lvs.json /vibeic/provenance/lvs.json
-COPY --from=img-iverilog /vibeic/provenance/iverilog.json /vibeic/provenance/iverilog.json
-COPY --from=img-klayout /vibeic/provenance/klayout.json /vibeic/provenance/klayout.json
-COPY --from=img-verilator /vibeic/provenance/verilator.json /vibeic/provenance/verilator.json
-COPY --from=img-gtkwave /vibeic/provenance/gtkwave.json /vibeic/provenance/gtkwave.json
-COPY --from=img-xschem /vibeic/provenance/xschem.json /vibeic/provenance/xschem.json
-COPY --from=img-slang /vibeic/provenance/slang.json /vibeic/provenance/slang.json
-COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
-COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
 # FasterCap: the base image ships /foss/tools/bin/FasterCap as a SYMLINK to
 # /foss/tools/rftoolkit/bin/FasterCap. Overwriting the RESOLVED path is what
 # actually replaces the binary users run -- an overlay beside it would leave the
 # symlink pointing at the base's Jun-2 build with every version string matching.
 COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap
 COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
-COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
-COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
 RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
