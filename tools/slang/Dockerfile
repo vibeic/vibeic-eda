@@ -23,7 +23,7 @@
 FROM ubuntu:24.04 AS build
 
 ARG SLANG_REPO=https://github.com/vibeic/slang.git
-ARG SLANG_REF=99197ea10f8d7a476af46718eaacf1b5e93b5e74
+ARG SLANG_REF=df21c1e7af587d612a25735ff307b240e5470a61
 ARG BOOST_VERSION=1.88.0
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
