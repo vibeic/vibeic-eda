@@ -930,8 +930,32 @@ def assess(tool: str) -> dict:
     # been triaged. Say so explicitly — a range whose only outstanding item is a
     # deliberate SKIP is DECIDED, not pending, and must not read as open work.
     rep["decided"] = sorted(s for s in decided if any(c["sha"] == s for c in commits))
-    rep["outstanding"] = [c["sha"] for c in assessed
-                          if c["decision"] == "human" and c.get("recommend") != "skip"]
+    # A RECOMMENDATION IS NOT A DECISION. This read
+    # `decision == "human" and recommend != "skip"`, on the reasoning in the comment
+    # above — that a deliberate SKIP is settled, not open. True, and it describes a
+    # different value: a deliberate skip is `decision == "recorded:skip"`, which the
+    # `decided` bucket already counts. What the excluded rows carry is the ASSESSOR's
+    # suggestion while the decision column still says `human` — nobody has decided
+    # them.
+    #
+    # MEASURED on the 2026-08-04 tick, headline vs its own table:
+    #     cocotb      17 claimed   61 rows marked human
+    #     open_pdks    9 claimed   15 rows marked human
+    #     slang        0 claimed    1 row  marked human
+    # 51 commits the assessor itself would not settle, absent from every summary a
+    # human reads. slang is the shape at its clearest: its file says nothing needs
+    # review, so the tool is skipped, and its one commit is marked human.
+    #
+    # The exclusion sat INSIDE the single owned derivation, so unifying three
+    # disagreeing counts (the incident recorded above `_ROW_PREDICATES`) made all
+    # three readers agree on the same understated number. Consistency was reached;
+    # correctness was not, and agreement is what stopped anyone looking.
+    rep["outstanding"] = [c["sha"] for c in assessed if c["decision"] == "human"]
+    # Kept so the documents can still lead with what the assessor would adopt without
+    # hiding what it would not — the triage signal the exclusion was reaching for.
+    rep["outstanding_rec_adopt"] = [c["sha"] for c in assessed
+                                    if c["decision"] == "human"
+                                    and c.get("recommend") != "skip"]
     # DISCLOSURE: the commits the judge never reached a conclusion about. Without this the
     # report cannot distinguish "judged, and unremarkable" from "never judged" — which is
     # exactly how a truncated reply published itself as 105 high-risk findings.
@@ -1070,7 +1094,13 @@ _ROW_PREDICATES = {
     "clearly_safe": lambda c: c.get("decision") == "auto-safe",
     "carried": lambda c: c.get("decision") == "carried",
     "decided": lambda c: str(c.get("decision") or "").startswith("recorded:"),
-    "outstanding": lambda c: c.get("decision") == "human" and c.get("recommend") != "skip",
+    # `decision == "human"` and nothing else: the column means "a human must decide",
+    # so every row carrying it is outstanding. Filtering by the assessor's `recommend`
+    # here confused a suggestion with a decision — see the note at the `outstanding`
+    # list. A settled skip is `recorded:skip`, which `decided` already claims.
+    "outstanding": lambda c: c.get("decision") == "human",
+    "outstanding_rec_adopt": lambda c: (c.get("decision") == "human"
+                                        and c.get("recommend") != "skip"),
     "not_assessed": lambda c: c.get("category") == NOT_ASSESSED,
     "unreachable": lambda c: bool(c.get("reachability_conflict")),
     "unconfirmed": lambda c: bool(c.get("sampling_conflict")),
@@ -1325,12 +1355,15 @@ def render_md(rep: dict) -> str:
     n = summary_counts(rep)
     n_carried, n_decided = n["carried"], n["decided"]
     n_safe, n_open = n["clearly_safe"], n["outstanding"]
+    n_open_adopt = min(n.get("outstanding_rec_adopt") or 0, n_open)
     L = [f"## {tool} — selective-merge assessment",
          f"Range **{rep['base_release']} → {rep['latest']}** · {n['commits']} upstream "
          f"commit(s) · our branch carries patches over "
          f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
-         f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**", ""]
+         f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**"
+         + (f" ({n_open_adopt} the assessor would adopt · {n_open - n_open_adopt} it "
+            f"would skip — its recommendation, not a decision)" if n_open else ""), ""]
     L += _provenance_lines(rep)
     L += _derived_lines(n)
     # An assessment that did not complete must SAY SO, above the table, before a reader

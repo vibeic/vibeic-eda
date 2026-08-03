@@ -756,7 +756,11 @@ def test_369_unknown_outstanding_still_reads_as_needing_review():
     rep = _rep(commit_count=3, carried=["a"], commits=rows)
     rep.pop("outstanding")
     n = A.summary_counts(rep)
-    assert n["outstanding"] == 1, "the rows say exactly one commit needs a decision"
+    # BOTH `human` rows count. This asserted 1, excluding the `recommend: "skip"`
+    # one — in a test whose own docstring says a report must never read as
+    # "nothing to do". The assessor's recommendation is not a decision, and the
+    # decision column on that row says `human`.
+    assert n["outstanding"] == 2, "both rows are marked human, so both need a decision"
     assert n["derived"] == [], "an exact recount must not be reported as inferred"
     # and with NEITHER the list nor the rows, the arithmetic that remains errs toward
     # review: 5 commits, 1 safe, 1 carried, 1 decided -> 2 open, never 0.
@@ -1791,11 +1795,14 @@ def test_the_structured_value_is_reached_before_any_arithmetic():
             {"decision": "human", "recommend": "skip"}]
     rep = {"tool": "t", "status": "assessed", "commit_count": 5, "commits": rows}
     n = A.summary_counts(rep)
-    assert (n["clearly_safe"], n["carried"], n["decided"], n["outstanding"]) == (1, 1, 1, 1)
+    # outstanding is 2, not 1: `recorded:skip` is a settled decision and is counted
+    # under `decided`, but `human` + `recommend: "skip"` is only the assessor's
+    # suggestion on a row nobody has decided.
+    assert (n["clearly_safe"], n["carried"], n["decided"], n["outstanding"]) == (1, 1, 1, 2)
     assert n["derived"] == [], "the rows were available and arithmetic ran anyway"
     # a corrupt (non-list) summary field must fall through to the rows, not blow up
     n2 = A.summary_counts({**rep, "outstanding": 4})
-    assert n2["outstanding"] == 1, n2
+    assert n2["outstanding"] == 2, n2
 
 
 def test_an_unknown_count_still_reads_as_needing_review():
@@ -3806,3 +3813,51 @@ def test_an_assessment_that_returned_nothing_is_named_not_counted_as_fresh():
         "a None assessment is no longer named; a tool nobody assessed would "
         "read as one with nothing to assess")
     assert "not isinstance(r, dict)" in src
+
+
+# ── a recommendation is not a decision (2026-08-04) ─────────────────────────
+
+def test_a_recommended_skip_still_needs_a_human_decision():
+    """`decision: human` + `recommend: skip` is OPEN, not settled.
+
+    MEASURED on the 2026-08-04 tick, each file's headline against its own table:
+
+        cocotb      17 claimed    61 rows marked human
+        open_pdks    9 claimed    15 rows marked human
+        slang        0 claimed     1 row  marked human
+
+    51 commits the assessor itself declined to settle, absent from every summary a
+    human reads. slang shows it at its clearest: the file announced that nothing
+    needed review, so the tool would be skipped entirely, while its single commit
+    was marked `human`.
+
+    A settled skip exists and is spelled `recorded:skip` — counted under `decided`,
+    which is why dropping the exclusion cannot double-count anything.
+    """
+    rows = [{"decision": "human", "recommend": "skip"},
+            {"decision": "human", "recommend": "adopt"},
+            {"decision": "recorded:skip"},
+            {"decision": "auto-safe"}]
+    n = A.summary_counts({"tool": "t", "status": "assessed",
+                          "commit_count": 4, "commits": rows})
+    assert n["outstanding"] == 2, (
+        f"a recommended skip was dropped from the count that decides whether anyone "
+        f"looks at this tool. got {n}")
+    assert n["decided"] == 1, "a RECORDED skip is settled and stays settled"
+    assert n["clearly_safe"] == 1
+
+
+def test_the_headline_shows_the_split_without_hiding_the_total():
+    """The exclusion was reaching for a real signal — what the assessor would adopt.
+
+    That signal is kept, as a breakdown beside the honest total, so a reader can
+    still triage without the skipped rows disappearing."""
+    rows = [{"sha": "a", "decision": "human", "recommend": "skip",
+             "category": "other", "summary": "", "title": ""},
+            {"sha": "b", "decision": "human", "recommend": "adopt",
+             "category": "bugfix", "summary": "", "title": ""}]
+    md = A.render_md({"tool": "t", "status": "assessed", "base_release": "1",
+                      "latest": "2", "our_patch_files": 0, "commit_count": 2,
+                      "commits": rows})
+    assert "needs human decision: 2" in md, md[:400]
+    assert "1 the assessor would adopt" in md and "1 it would skip" in md, md[:400]
