@@ -81,7 +81,7 @@ ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3dddccd-799906
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:99900f9-a5d597
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-416e37
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned

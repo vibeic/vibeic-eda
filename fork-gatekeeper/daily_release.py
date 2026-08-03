@@ -659,6 +659,27 @@ def main(argv=None) -> int:
         return RC_NEEDS_HUMAN if bad else RC_OK
 
     root = Path(a.eda_root)
+
+    # COHERENCE BEFORE ANYTHING ELSE (vibeic-eda#75 follow-up). A pin stated
+    # three different ways must state the same thing before it is worth asking
+    # whether it is CURRENT — otherwise this program moves a variable while the
+    # image keeps pulling the old tag, which is what it just did to sv-elab.
+    #
+    # `check_pins_agree` already existed and already caught it. It was wired
+    # ONLY into `.github/workflows/release.yml`, and Actions is disabled at the
+    # account level (vibe-ic#550) — MEASURED: `gh run list` reports ZERO runs of
+    # any workflow in this repo, ever. So the gate produced no verdict, the
+    # dry-run said "nothing to do", and the disagreement was found by running it
+    # by hand. A gate wired to a rail that never moves is the #693 shape.
+    _agree = subprocess.run([sys.executable, str(root / "tools" / "check_pins_agree.py")],
+                            capture_output=True, text=True)
+    if _agree.returncode != 0:
+        sys.stdout.write(_agree.stdout)
+        sys.stderr.write(_agree.stderr)
+        print("[REFUSED] the pins disagree with themselves; a release cut here "
+              "ships something other than what it says.", file=sys.stderr)
+        return RC_NEEDS_HUMAN
+
     pins = pinned_refs(root)
     args_of = ref_arg_names(root)
     targets = bake_targets(root)

@@ -54,18 +54,18 @@ variable "OPENROAD_RECIPE" { default = "50eae6" }
 variable "YOSYS_RECIPE" { default = "7021b9" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "5d88d6" }
-variable "LVS_RECIPE" { default = "e2e322" }
+variable "LVS_RECIPE" { default = "46a666" }
 variable "FASTERCAP_RECIPE" { default = "416e37" }
-variable "IVERILOG_RECIPE" { default = "1c5ee8" }
+variable "IVERILOG_RECIPE" { default = "727186" }
 variable "KLAYOUT_RECIPE" { default = "7ef8ee" }
-variable "VERILATOR_RECIPE" { default = "c03e8e" }
+variable "VERILATOR_RECIPE" { default = "11b80b" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
 variable "XSCHEM_RECIPE" { default = "f0bdeb" }
 variable "SLANG_RECIPE" { default = "d87240" }
 variable "XYCE_RECIPE" { default = "0e8664" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
-variable "SV_ELAB_RECIPE" { default = "799906" }
+variable "SV_ELAB_RECIPE" { default = "a5d597" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
