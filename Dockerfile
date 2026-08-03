@@ -40,6 +40,33 @@ ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:be47a7b-c03e8e
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
+# vibeic-eda#60 — three forks the image used to take from the BASE image, so
+# our patches to them could not reach a user. Zero divergence from upstream
+# today, which is exactly why the wiring is cheap now and the first patch
+# would otherwise have shipped nothing.
+ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:6662fa5-a942c0
+ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:714d1bb-adea1b
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
+
+# open_pdks — PINNED AND VERIFIED, not rebuilt. vibeic-eda#60.
+#
+# The sky130A and gf180mcuD the image ships are NOT built here: they are
+# prebuilt PDK volumes that `ciel` materialises, and /foss/pdks/sky130A is a
+# symlink into /foss/pdks/ciel/sky130/versions/<open_pdks-sha>/sky130A. So the
+# PDK version IS an open_pdks commit — it was simply never declared, which is
+# what made #60 read as "no pin at all".
+#
+# MEASURED: b344c97e IS a commit in vibeic/open_pdks. It is NOT reachable from
+# our default branch (18 commits ours-not-shipped, 12 shipped-not-ours) — it
+# sits on upstream's open_pdks-1.0 line, which is the line the prebuilt volumes
+# are cut from.
+#
+# So this declares the pin and ASSERTS it at build time. It deliberately does
+# NOT `ciel build` from our default tip: that would ship a DIFFERENT sky130A
+# from the one every published benchmark result was measured against, and a
+# change of that size does not belong smuggled into a wiring commit. Advancing
+# it is its own reviewable decision, and now it is one that has a pin to move.
+ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
@@ -66,6 +93,9 @@ FROM ${IMG_VERILATOR} AS img-verilator
 FROM ${IMG_GTKWAVE} AS img-gtkwave
 FROM ${IMG_XSCHEM} AS img-xschem
 FROM ${IMG_SLANG} AS img-slang
+FROM ${IMG_SV2V} AS img-sv2v
+FROM ${IMG_CIEL} AS img-ciel
+FROM ${IMG_IHP_OPEN_PDK} AS img-ihp-open-pdk
 FROM ${IMG_XYCE} AS img-xyce
 FROM ${IMG_YICES2} AS img-yices2
 FROM ${IMG_SV_ELAB} AS img-sv-elab
@@ -443,11 +473,38 @@ COPY --from=img-verilator /foss/tools/verilator /foss/tools/verilator
 # not a thing; a RUN that removes them before the COPY is.
 
 RUN rm -rf /foss/tools/gtkwave /foss/tools/xschem /foss/tools/slang \
-           /foss/tools/xyce
+           /foss/tools/xyce \
+           /foss/tools/bin/sv2v /usr/local/bin/ciel /opt/ciel \
+           /foss/pdks/ihp-sg13g2
 COPY --from=img-gtkwave /foss/tools/gtkwave /foss/tools/gtkwave
 COPY --from=img-xschem /foss/tools/xschem /foss/tools/xschem
 COPY --from=img-slang /foss/tools/slang /foss/tools/slang
 COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
+COPY --from=img-sv2v /foss/tools/bin/sv2v /foss/tools/bin/sv2v
+COPY --from=img-ciel /opt/ciel /opt/ciel
+COPY --from=img-ihp-open-pdk /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13g2
+# ciel ships as a venv; the base image put it on PATH at /usr/local/bin.
+RUN ln -sf /opt/ciel/bin/ciel /usr/local/bin/ciel
+# #60 — the open_pdks pin is a CLAIM about what shipped, so check it. A pin that
+# nobody verifies is the state this issue was filed about, one level up: the
+# number would be declared and the image could still carry something else.
+#
+# RE-DECLARED HERE, and that line is the whole check. An `ARG` before the first
+# `FROM` is in scope for the `FROM` lines ONLY; inside a stage it expands to the
+# EMPTY STRING unless redeclared. MEASURED on the first compose build: the
+# assertion printed `open_pdks pin OK: sky130A <- ` with nothing after the
+# arrow, because `case "$tgt" in *""*)` matches every string. The guard passed
+# by checking nothing — the exact shape #60 is about, inside #60's own fix.
+ARG OPEN_PDKS_REF
+RUN set -e; \
+    test -n "${OPEN_PDKS_REF}" || { echo "FAIL: OPEN_PDKS_REF is empty in this stage — an ARG declared before FROM must be redeclared inside it, or this check compares against nothing." >&2; exit 1; }; \
+    for fam in sky130A gf180mcuD; do \
+      tgt=$(readlink -f "/foss/pdks/$fam" || true); \
+      case "$tgt" in \
+        *"${OPEN_PDKS_REF}"*) echo "open_pdks pin OK: $fam <- ${OPEN_PDKS_REF}" ;; \
+        *) echo "FAIL: /foss/pdks/$fam resolves to '$tgt', which does not carry the declared OPEN_PDKS_REF=${OPEN_PDKS_REF}. The image ships a PDK this Dockerfile does not name." >&2; exit 1 ;; \
+      esac; \
+    done
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future
 # recipe change that stops producing a file cannot silently leave the base's

@@ -47,6 +47,13 @@ TOOLS = {
     "xschem":      ["XSCHEM_REF"],
     "slang":       ["SLANG_REF"],
     "xyce":        ["XYCE_REF"],
+    # vibeic-eda#60 — three forks the image used to inherit from the base
+    # image. Registered here at the same time as the bake target, because
+    # this gate's own message is that an unregistered tool is one whose
+    # pins are never compared while the summary counts agreement.
+    "sv2v":        ["SV2V_REF"],
+    "ciel":        ["CIEL_REF"],
+    "ihp-open-pdk": ["IHP_OPEN_PDK_REF"],
     "yices2":      ["YICES2_REF"],
     "sv-elab":     ["SV_ELAB_REF"],
     "fault":       ["FAULT_REF"],

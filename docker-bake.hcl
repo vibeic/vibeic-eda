@@ -44,6 +44,12 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
+variable "SV2V_REF"    { default = "6662fa5da71f87797598060f17728b284b99a9fc" }
+variable "SV2V_RECIPE" { default = "a942c0" }
+variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
+variable "CIEL_RECIPE" { default = "adea1b" }
+variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
+variable "IHP_OPEN_PDK_RECIPE" { default = "46d595" }
 variable "OPENROAD_RECIPE" { default = "50eae6" }
 variable "YOSYS_RECIPE" { default = "7021b9" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
@@ -109,6 +115,27 @@ target "_tool" {
   platforms  = ["linux/amd64"]
   cache-from = ["type=gha"]
   cache-to   = ["type=gha,mode=max"]
+}
+
+target "sv2v" {
+  context  = "tools/sv2v"
+  dockerfile = "Dockerfile"
+  args     = { SV2V_REF = SV2V_REF }
+  tags     = tool_tags("sv2v", SV2V_REF, SV2V_RECIPE)
+}
+
+target "ciel" {
+  context  = "tools/ciel"
+  dockerfile = "Dockerfile"
+  args     = { CIEL_REF = CIEL_REF }
+  tags     = tool_tags("ciel", CIEL_REF, CIEL_RECIPE)
+}
+
+target "ihp-open-pdk" {
+  context  = "tools/ihp-open-pdk"
+  dockerfile = "Dockerfile"
+  args     = { IHP_OPEN_PDK_REF = IHP_OPEN_PDK_REF }
+  tags     = tool_tags("ihp-open-pdk", IHP_OPEN_PDK_REF, IHP_OPEN_PDK_RECIPE)
 }
 
 target "openroad" {
@@ -241,7 +268,7 @@ target "sv-elab" {
 }
 
 group "tools" {
-  targets = ["openroad", "yosys", "sat-solvers", "ngspice",
+  targets = ["openroad", "yosys", "sat-solvers", "ngspice", "sv2v", "ciel", "ihp-open-pdk",
              "lvs", "iverilog", "klayout", "verilator",
              "gtkwave", "xschem", "slang", "xyce",
              "yices2", "sv-elab", "fault", "fastercap"]
@@ -270,6 +297,9 @@ target "eda-local" {
   inherits = ["eda"]
   tags     = ["${REGISTRY}/vibeic-eda:local"]
   contexts = {
+    "ghcr.io/vibeic/eda-tool-sv2v:${short(SV2V_REF)}-${SV2V_RECIPE}" = "target:sv2v"
+    "ghcr.io/vibeic/eda-tool-ciel:${short(CIEL_REF)}-${CIEL_RECIPE}" = "target:ciel"
+    "ghcr.io/vibeic/eda-tool-ihp-open-pdk:${short(IHP_OPEN_PDK_REF)}-${IHP_OPEN_PDK_RECIPE}" = "target:ihp-open-pdk"
     "ghcr.io/vibeic/eda-tool-openroad:${short(OPENROAD_REF)}-${OPENROAD_RECIPE}"      = "target:openroad"
     "ghcr.io/vibeic/eda-tool-yosys:${short(YOSYS_REF)}-${YOSYS_RECIPE}"            = "target:yosys"
     "ghcr.io/vibeic/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}-${SAT_SOLVERS_RECIPE}" = "target:sat-solvers"
