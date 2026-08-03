@@ -78,7 +78,7 @@ variable "YOSYS_REF"       { default = "6fd92ced3c75db60b785b143082dde842b794ae0
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "2d15ecb34c1b606cf653bafbdd21315b6bc21962" }
-variable "MAGIC_REF"       { default = "9d3ed4b16b5e5d6570846b448b89ed7d953cd14b" }
+variable "MAGIC_REF"       { default = "0da4c3b60886ccc4f114d1d089f6e54fc6462868" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
@@ -87,16 +87,16 @@ variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "2de52ec41fea4515c1cf7d161fb13d2d655dbb75" }
+variable "IVERILOG_REF"    { default = "0d75e8d22288d4ac9a703c08f1efa5f3fb89292f" }
 variable "KLAYOUT_REF"     { default = "a5a7a2d6be41d4f66338eacdc65ceb573985c3ee" }
-variable "VERILATOR_REF"   { default = "be47a7ba042a998f84f55221bb7ae54d5bab20ee" }
+variable "VERILATOR_REF"   { default = "2f6445bc4d4fe44e4f865ec1f7c87ed911ca539c" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
 variable "XSCHEM_REF" { default = "ff2f4824c1a24e158d218f44db11cc682b4881c8" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
 variable "SLANG_REF" { default = "99197ea10f8d7a476af46718eaacf1b5e93b5e74" }
 variable "XYCE_REF" { default = "d72b5846a0397ddf852a49305cb6f395457685ca" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
-variable "SV_ELAB_REF" { default = "3dddccd478618d68f8a5e160fb4b5783c4da35d4" }
+variable "SV_ELAB_REF" { default = "99900f9185abc5375400da4a72b1ed689290d014" }
 
 function "short" {
   params = [ref]
