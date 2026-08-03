@@ -77,7 +77,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
 # rules out of a wiring change on purpose: it would ship a DIFFERENT sky130A
 # from the one every published benchmark result was measured against. That is
 # its own reviewable decision and it has not been made.
-ARG OPEN_PDKS_REF=3d3fa0b4650b13f4ee5c403ed22832a896dee080
+ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
