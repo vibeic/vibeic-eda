@@ -66,7 +66,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
 # from the one every published benchmark result was measured against, and a
 # change of that size does not belong smuggled into a wiring commit. Advancing
 # it is its own reviewable decision, and now it is one that has a pin to move.
-ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
+ARG OPEN_PDKS_REF=3d3fa0b4650b13f4ee5c403ed22832a896dee080
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
@@ -124,9 +124,9 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=1d79fec0e424e628aba4abd66ab910a9450c5755  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=562d2400d70d3b77d87136e36eeda9d48c2de55c  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
-ARG PYUVM_REF=16b8ec066e7fe5ad1f81f059bf646013fa969e4e  # master tip. Advanced from
+ARG PYUVM_REF=f7e85478fba744426a6604f89c096dbfe2b724c7  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
