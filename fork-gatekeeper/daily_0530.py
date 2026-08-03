@@ -615,9 +615,39 @@ def main_(argv=None) -> int:
                     # worth waking someone for. Rendering both as `REJECTED` with
                     # `needs_human` is how a nightly alarm that fires every single
                     # night stops being read.
-                    rep["push"] = (f"DIVERGED: our {main} and origin/{main} share no "
-                                   f"ancestor and their trees differ — retrying "
-                                   f"will not resolve it")
+                    #
+                    # MEASURE IT — do not assert it (vibeic-eda#75). This branch
+                    # used to emit "share no ancestor and their trees differ,
+                    # retrying will not resolve it" as a FIXED STRING for every
+                    # non-fast-forward, so an ordinary ahead/behind divergence was
+                    # reported as unresolvable. Measured on OpenROAD after a round
+                    # that said exactly that: `merge-base` returns 98251dfc, and
+                    # the state is 12-ahead / 3-behind. Both halves of the claim
+                    # were false, and "retrying will not resolve it" is the
+                    # load-bearing half — it tells the next reader, human or cron,
+                    # that there is nothing to do, which is how a fork stops being
+                    # chased without anyone deciding to stop chasing it. The 10
+                    # commits the same line reports as merged then sit as sync lag
+                    # indefinitely, because origin is what `fork_gap_report` reads.
+                    _mb = out(*g, "merge-base", main, f"origin/{main}") or ""
+                    _ahead = out(*g, "rev-list", "--count",
+                                 f"origin/{main}..{main}") or "?"
+                    _behind = out(*g, "rev-list", "--count",
+                                  f"{main}..origin/{main}") or "?"
+                    if _mb:
+                        rep["push"] = (
+                            f"BEHIND: origin/{main} moved — {_ahead} ahead / "
+                            f"{_behind} behind, common ancestor {_mb[:12]}. "
+                            f"Integrate origin and push again; this IS resolvable.")
+                        rep["diverged_kind"] = "behind"
+                    else:
+                        rep["push"] = (
+                            f"DIVERGED: our {main} and origin/{main} share no "
+                            f"ancestor — retrying will not resolve it")
+                        rep["diverged_kind"] = "unrelated"
+                    rep["merge_base"] = _mb[:40]
+                    rep["ahead"] = _ahead
+                    rep["behind"] = _behind
                     rep["needs_human"] = True
                 else:
                     rep["push"] = f"REJECTED: {r.stderr.strip()[:120]}"
