@@ -33,10 +33,10 @@ ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:29e3e63-50eae6
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:6fd92ce-7021b9
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:2d15ecb-5d88d6
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:9d3ed4b-0334b7d-e2e322
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:2de52ec-1c5ee8
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:0da4c3b-0334b7d-46a666
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:0d75e8d-727186
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:be47a7b-c03e8e
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:2f6445b-11b80b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:99197ea-d87240
@@ -66,7 +66,18 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
 # from the one every published benchmark result was measured against, and a
 # change of that size does not belong smuggled into a wiring commit. Advancing
 # it is its own reviewable decision, and now it is one that has a pin to move.
-ARG OPEN_PDKS_REF=3d3fa0b4650b13f4ee5c403ed22832a896dee080
+# vibeic-eda#74 tried to advance this to 3d3fa0b4 and the build guard above
+# refused it, correctly. This ARG is not a build input — it ASSERTS which
+# open_pdks commit the PREBUILT ciel volume carries, and that volume is cut from
+# upstream's open_pdks-1.0 line. 3d3fa0b4 is on master, so the assertion became
+# false and the image would have shipped a PDK the Dockerfile does not name.
+# MEASURED: the build failed at exactly this check.
+#
+# Advancing it for real means cutting a new PDK volume, which the note above
+# rules out of a wiring change on purpose: it would ship a DIFFERENT sky130A
+# from the one every published benchmark result was measured against. That is
+# its own reviewable decision and it has not been made.
+ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
