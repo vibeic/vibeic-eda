@@ -124,12 +124,49 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
             "recipe:__compose__": DR.compose_recipe_hash(eda_root)})
         stats["fingerprint_now"] = fp_now
         if rec.get("pins_fingerprint") != fp_now:
-            findings.append(
-                f"RELEASED.json names {version} but its fingerprint "
-                f"{rec.get('pins_fingerprint')!r} is not the one this tree "
-                f"recomputes ({fp_now}). The record is UNREPRODUCIBLE, so every "
-                f"later run reads 'this pin set has never been released' — the "
-                f"0.2.45 failure, from the other direction.")
+            # #73 — a fingerprint mismatch has TWO causes and they need opposite
+            # actions. The record names the pin set it was built from, so the
+            # split is decidable from data already on disk:
+            #
+            #   pins MOVED since the release  -> nothing is wrong. This is the
+            #       normal state of the tree between a release and the next one,
+            #       and reporting it as a broken record leaves the tick red for
+            #       the whole interval. Observed the day #71 landed: 0.2.58 was
+            #       recorded correctly, #72 then advanced the pyuvm pin, and the
+            #       checker called the good record unreproducible.
+            #   pins IDENTICAL and the fingerprint still differs -> the record
+            #       genuinely cannot be re-derived from the tree it claims. That
+            #       is the 0.2.45 shape and stays a finding.
+            #
+            # `recipe:` entries are deliberately NOT compared: they hash file
+            # CONTENT, so an unrelated Dockerfile edit changes them without any
+            # pin moving. The question here is "did the PINS move", and the
+            # recorded `pins` map is the only thing that answers it.
+            recorded_pins = rec.get("pins")
+            tree_pins = DR.pinned_refs(eda_root)
+            stats["pins_moved"] = (isinstance(recorded_pins, dict)
+                                   and recorded_pins != tree_pins)
+            if stats["pins_moved"]:
+                moved = sorted(
+                    k for k in set(recorded_pins) | set(tree_pins)
+                    if recorded_pins.get(k) != tree_pins.get(k))
+                stats["pins_moved_names"] = moved
+                stats["note"] = (
+                    f"PINS_AHEAD — {version} is recorded correctly and "
+                    f"{len(moved)} pin(s) have advanced since it shipped "
+                    f"({', '.join(moved[:4])}"
+                    + (", …" if len(moved) > 4 else "") + "). The current pin "
+                    "set has genuinely not been released; the next release "
+                    "closes it. NOT a broken record.")
+            else:
+                findings.append(
+                    f"RELEASED.json names {version} and records the SAME pin "
+                    f"set this tree has, yet its fingerprint "
+                    f"{rec.get('pins_fingerprint')!r} is not the one recomputed "
+                    f"({fp_now}). The record is UNREPRODUCIBLE — the 0.2.45 "
+                    f"failure, from the other direction. (A pin advance would "
+                    f"show as PINS_AHEAD instead; it does not, so the record "
+                    f"itself is wrong.)")
 
     return ("FINDINGS" if findings else "OK"), findings, stats
 
@@ -156,9 +193,19 @@ def main(argv=None) -> int:
     if verdict == "FINDINGS":
         return RC_FINDINGS
     if stats.get("published"):
-        print(f"[PASS] {a.image}:{stats['version']} is published and "
-              f"RELEASED.json records it, with a fingerprint this tree "
-              f"reproduces ({stats.get('fingerprint_now')})")
+        # #73 — say WHICH pass this is. "with a fingerprint this tree
+        # reproduces" is false on the PINS_AHEAD path, and a green line that
+        # states something untrue is the shape this repo keeps paying for: the
+        # reader stops looking, and the fact that the current pin set is
+        # unreleased goes unsaid.
+        if stats.get("pins_moved"):
+            print(f"[PASS] {a.image}:{stats['version']} is published and "
+                  f"RELEASED.json records it correctly. "
+                  f"{stats.get('note', '')}")
+        else:
+            print(f"[PASS] {a.image}:{stats['version']} is published and "
+                  f"RELEASED.json records it, with a fingerprint this tree "
+                  f"reproduces ({stats.get('fingerprint_now')})")
     else:
         print(f"[PASS] {a.image}:{stats['version']} is not published yet; "
               f"RELEASED.json correctly still names {stats['recorded']!r} — "
