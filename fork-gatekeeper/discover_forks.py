@@ -258,6 +258,39 @@ def parse_dockerfile_pins(text: str) -> dict:
                                   "repo": tool,
                                   "submodules": bool(_SUBMODULE_INIT.search(step)),
                                   "recursive": bool(_SUBMODULE_RECURSIVE.search(step))}
+
+    # ── ARG-ONLY PINS: declared, verified, and cloned by nobody ───────────────
+    #
+    # The loop above records a pin only where it can see a `github.com/vibeic/<tool>`
+    # URL, because a pin has always meant "the build clones this at this ref". That
+    # is not the only way a fork can determine what ships.
+    #
+    # `open_pdks` is the case (vibeic-eda#60). The image's sky130A and gf180mcuD are
+    # prebuilt PDK volumes ciel materialises, and /foss/pdks/sky130A is a symlink
+    # into .../versions/<open_pdks-sha>/ — so the PDK version IS an open_pdks commit,
+    # and the composing Dockerfile now declares `ARG OPEN_PDKS_REF` and ASSERTS at
+    # build time that the shipped symlink carries it. There is no clone, so the loop
+    # above saw nothing and the ledger read `integrated=false` about a fork that
+    # decides what every DRC and LVS run reads.
+    #
+    # `integrated` means "our fork determines what the image ships". A pin the build
+    # ENFORCES does that whether or not a `git clone` appears. Recorded with
+    # `pinned_via` so the row says HOW, rather than quietly looking like a clone.
+    for _arg, _ref in re.findall(r"^ARG\s+(\w+)_REF\s*=\s*([0-9a-f]{40})\s*$",
+                                 orig_text, re.M):
+        _tool = _arg.lower()
+        if _tool in pins:
+            continue                      # the URL-driven loop already has it
+        # Only when the SAME file enforces it. A bare ARG nobody checks is a
+        # comment with a colour, and treating it as integration would be the
+        # unverified-pin defect #60 is about, one level up.
+        if f"${{{_arg}_REF}}" not in orig_text.split(f"ARG {_arg}_REF", 1)[-1]:
+            continue
+        pins[_tool] = {"ref": _ref, "arg": f"{_arg}_REF",
+                       "branch": branches.get(f"{_arg}_REF"), "repo": _tool,
+                       "submodules": False, "recursive": False,
+                       "pinned_via": f"{_arg}_REF, asserted at build time "
+                                     f"(no clone — the artefact is prebuilt)"}
     return pins
 
 
