@@ -329,6 +329,32 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
     }
 
 
+# ── vibeic-eda#60 — the unpinned four, and the contradiction they make cheap ──
+#
+# `open_pdks`, `ciel`, `sv2v` and `IHP-Open-PDK` are forks the image does not
+# build from: no `ARG <TOOL>_REF`, no clone, the base image's copies. All four
+# carry ZERO patches today, so nothing is lost — and that is why it is easy to
+# miss. Whether to wire them in or stop forking them is the owner's call
+# (vibeic-eda#60 states both options and declines to pick); until it is made,
+# this is a standing state and not a new finding.
+#
+# Recorded as a baseline that MAY ONLY SHRINK, the same shape this org uses for
+# `flow_step_can_fail_check` and `checker_execution_wiring_audit`. Without it
+# this report is permanently rc=1 for a reason nobody is acting on, and a report
+# that is always red is one people route around — which would hide the condition
+# below on the day it first becomes true.
+_UNPINNED_BASELINE = frozenset({"open_pdks", "ciel", "sv2v", "IHP-Open-PDK"})
+
+# ── the contradiction, which NO baseline excuses ─────────────────────────────
+#
+# A fork with no pin that is nonetheless AHEAD is carrying a patch that cannot
+# ship. The ledger will report `ahead=1` truthfully and the row will read like
+# success. Today the condition is unreachable for all four — zero divergence
+# from upstream — which is exactly why guarding it now is cheap, and why it is
+# separate from the baseline above: being on a known list excuses NOT BEING
+# BUILT FROM. It does not excuse carrying a patch that cannot reach a user.
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", type=Path, default=Path("/home/reyerchu/vibeic-eda"))
@@ -381,8 +407,36 @@ def main(argv=None) -> int:
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
         return 2
+    # #60 — a fork carrying a patch it cannot ship. No baseline excuses this:
+    # the baseline covers "not built from", not "patched and unshippable".
+    _stranded_rows = [r for r in rep["rows"]
+                      if not r["integrated"] and (r.get("ahead") or 0) > 0]
+    if _stranded_rows:
+        print()
+        print(f"  [FAIL] {len(_stranded_rows)} fork(s) carry commits that CANNOT "
+              f"SHIP — no ARG pin, so the image does not build from them:")
+        for r in _stranded_rows:
+            print(f"      {r['tool']}: ahead={r['ahead']} with no pin. Either "
+                  f"wire it into the Dockerfile or drop the patch; a fork that "
+                  f"is patched and unbuilt reports success while shipping "
+                  f"nothing (vibeic-eda#60).")
+        return 1
+
+    # The four unpinned forks are a recorded, owner-pending state. NEW ones are
+    # not, and a baseline that grew is a regression accommodated rather than
+    # fixed — so both directions are checked.
+    _unpinned = set(rep["q2_forks_not_built_from_ours"])
+    _new = sorted(_unpinned - _UNPINNED_BASELINE)
+    _gone = sorted(_UNPINNED_BASELINE - _unpinned)
+    if _gone:
+        print(f"  [NOTE] baseline shrank — now pinned or no longer forked: "
+              f"{', '.join(_gone)}. Remove them from _UNPINNED_BASELINE.")
+    if _new:
+        print(f"  [FAIL] {len(_new)} fork(s) newly not built from ours: "
+              f"{', '.join(_new)}")
+        return 1
+
     return 0 if (rep["q1_image_behind_upstream"] == 0
-                 and not rep["q2_forks_not_built_from_ours"]
                  and rep["q2_ours_past_the_pin_substantive"] == 0) else 1
 
 
