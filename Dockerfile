@@ -371,8 +371,11 @@ RUN unset PYTHONPATH \
 #
 # Gathering them here costs layers in an INTERMEDIATE stage, which do not reach
 # the final image — only the single COPY out of it does. 15 -> 1.
-FROM ${BASE_IMAGE} AS provenance
-RUN mkdir -p /vibeic/provenance
+# `scratch`, and no RUN: the collector only gathers files. The first attempt
+# used ${BASE_IMAGE} and `RUN mkdir -p /vibeic/provenance`, which FAILED —
+# that base runs as uid 1000 and cannot write `/`. COPY creates its own
+# destination directories, so the mkdir was never needed.
+FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
 COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
 COPY --from=img-sat-solvers /vibeic/provenance/sat-solvers.json /vibeic/provenance/sat-solvers.json
