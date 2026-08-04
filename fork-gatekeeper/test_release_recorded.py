@@ -219,3 +219,42 @@ def test_the_gate_returns_the_documented_exit_codes(tmp_path, monkeypatch):
     R.write_released_record(root, "0.2.53", R.bake_targets(root))
     monkeypatch.setattr(C, "published", lambda *a, **k: True)
     assert C.main(["--eda-root", str(root)]) == C.RC_OK
+
+
+# ── the branch that SUPPRESSES the finding had no test at all ───────────────
+#
+# `pins_moved` decides between "nothing is wrong, the pins advanced since the
+# release" and "this record cannot be re-derived". Only the second had a test,
+# and it was red. A suppressing branch with no test is how an empty pin map came
+# to read as PINS_AHEAD: `{}` compares unequal to any real tree, so the record
+# most likely to be broken took the branch that says nothing is wrong.
+
+def test_an_EMPTY_recorded_pin_map_cannot_claim_the_pins_moved(tmp_path, monkeypatch):
+    """No pins recorded means we cannot tell — which is not the same as fine.
+
+    A record written by a writer predating the `pins` field, or a truncated one,
+    carries `{}`. That is precisely the record most likely to be unreproducible,
+    and it was the one the UNREPRODUCIBLE check could never reach."""
+    root = _tree(tmp_path)
+    _record(root, "0.2.53", fingerprint="notthedigest", pins={})
+    monkeypatch.setattr(C, "published", lambda *a, **k: True)
+    verdict, findings, stats = C.audit(root)
+    assert stats.get("pins_moved") is not True, (
+        "an empty pin map was read as evidence that the pins moved")
+    assert verdict == "FINDINGS", (verdict, findings, stats)
+
+
+def test_a_REAL_pin_advance_still_reads_as_PINS_AHEAD(tmp_path, monkeypatch):
+    """The guard on the fix above: it must not turn every mismatch into a finding.
+
+    Between a release and the next one the pins legitimately move, and calling
+    that a broken record leaves the tick red for the whole interval — the
+    regression observed the day #71 landed."""
+    root = _tree(tmp_path)
+    _record(root, "0.2.53", fingerprint="notthedigest",
+            pins={"yosys": "b" * 40})          # non-empty AND different
+    monkeypatch.setattr(C, "published", lambda *a, **k: True)
+    verdict, findings, stats = C.audit(root)
+    assert stats.get("pins_moved") is True, stats
+    assert verdict != "FINDINGS", (verdict, findings)
+    assert "PINS_AHEAD" in (stats.get("note") or ""), stats

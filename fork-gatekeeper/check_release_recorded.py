@@ -144,7 +144,25 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
             # recorded `pins` map is the only thing that answers it.
             recorded_pins = rec.get("pins")
             tree_pins = DR.pinned_refs(eda_root)
+            # AN EMPTY PIN MAP CANNOT ESTABLISH THAT THE PINS MOVED. `{}` compares
+            # unequal to any real tree, so without the truth test below, a record
+            # carrying no pins read as PINS_AHEAD — the branch that says "nothing is
+            # wrong" — and the UNREPRODUCIBLE finding could never fire for it.
+            #
+            # That is the wrong way round. A record with no pin map is the one most
+            # likely to be broken: written by a writer that predates the field, or
+            # truncated. The check that exists to catch an unreproducible record was
+            # unreachable for exactly the records most likely to be unreproducible,
+            # and it reported OK rather than reporting that it could not tell.
+            #
+            # Caught by `test_an_unreproducible_fingerprint_is_a_finding`, which had
+            # been red — its fixture records `pins: {}` and expected FINDINGS, and
+            # the failing NEGATIVE CONTROL was the disclosure. `bool(recorded_pins)`
+            # is the whole fix: no pins recorded means we cannot claim they moved,
+            # so the mismatch falls through to the finding, matching the fail-safe
+            # direction the rest of this module already takes.
             stats["pins_moved"] = (isinstance(recorded_pins, dict)
+                                   and bool(recorded_pins)
                                    and recorded_pins != tree_pins)
             if stats["pins_moved"]:
                 moved = sorted(
