@@ -28,7 +28,16 @@ import importlib.util
 import sys
 import types
 
-_spec = importlib.util.spec_from_file_location("df_s", "discover_forks.py")
+from pathlib import Path as _Path
+
+# RESOLVED AGAINST THIS FILE, not the working directory. As a bare
+# "discover_forks.py" this collected only when pytest was invoked FROM this
+# directory; from anywhere else it raised FileNotFoundError during collection and
+# took the whole run to rc=2 — "could not even collect", which is not a test
+# result at all. It went unnoticed because nothing ever ran the suite from
+# anywhere else. Wiring it into the 05:30 round is what surfaced it.
+_spec = importlib.util.spec_from_file_location(
+    "df_s", str(_Path(__file__).resolve().parent / "discover_forks.py"))
 df = importlib.util.module_from_spec(_spec)
 sys.modules["df_s"] = df
 _spec.loader.exec_module(df)

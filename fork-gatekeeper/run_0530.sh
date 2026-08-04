@@ -55,6 +55,29 @@ python3 "${DIR}/check_round_code_is_current.py" >> "${LOG}" 2>&1
 CODE=$?
 echo "[$(date -Is)] check_round_code_is_current exit ${CODE}" >> "${LOG}"
 
+# ...and does that code still pass its own tests? NOTHING RAN THEM.
+#
+# The check above asks whether this checkout is CURRENT. It cannot ask whether
+# the code is CORRECT, and until this line the answer was nobody's job: the only
+# `pytest` invocations anywhere in the repo were inside the test files
+# themselves. Measured 2026-08-04: five tests had been failing for at least seven
+# releases, and 0.2.63 published with all five red. Among them was a NEGATIVE
+# CONTROL — `an_unreproducible_fingerprint_is_a_finding` — which meant the
+# release-record checker had genuinely stopped detecting an unreproducible
+# record, and the disclosure was sitting in a red suite nobody ran.
+#
+# A suite that can be red for seven releases without anything noticing is not a
+# suite, it is a directory of files. This is what makes it one.
+#
+# GATES THE PUBLISH HALF, NOT THE MERGE HALF — the same split, and for the same
+# reason, as `check_round_code_is_current` above: bringing upstream into our line
+# is useful even from code whose tests are red, and blocking it would trade a
+# correctness-reporting problem for a synchronisation one. What it does block is
+# putting today's date on numbers produced by logic that fails its own tests.
+python3 -m pytest -q "${DIR}" >> "${LOG}" 2>&1
+TESTS=$?
+echo "[$(date -Is)] fork-gatekeeper tests exit ${TESTS}" >> "${LOG}"
+
 # Step 5 — build + verify + publish, and the plugin-repo gatekeeper tick.
 "${DIR}/run_tick.sh" >> "${GK_STATE_DIR}/cron.log" 2>&1
 TICK=$?
@@ -79,7 +102,7 @@ echo "[$(date -Is)] discover_forks exit ${DISC}" >> "${LOG}"
 # notice than yesterday's page — the same reasoning the ledger branch below already
 # encodes. rc=2 (could not tell) does NOT block: a transient fetch failure and a
 # proven-stale program are different risks, and only the second earns a dark page.
-if [ "${DISC}" -eq 0 ] && [ "${CODE}" -ne 1 ]; then
+if [ "${DISC}" -eq 0 ] && [ "${CODE}" -ne 1 ] && [ "${TESTS}" -eq 0 ]; then
     python3 "${DIR}/build_page.py" --out /home/reyerchu/vibeic.ai/eda-forks.html >> "${LOG}" 2>&1
     PAGE=$?
     echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
@@ -93,7 +116,9 @@ else
     # `build_page exit` (rather than reading the log in order) would read it as a
     # healthy publish. A step that did not run reports that it did not run.
     PAGE=0
-    if [ "${CODE}" -eq 1 ]; then
+    if [ "${TESTS}" -ne 0 ]; then
+        echo "[$(date -Is)] build_page SKIPPED — the round's own tests fail; publishing would date-stamp numbers from logic that does not pass. See the pytest output above." >> "${LOG}"
+    elif [ "${CODE}" -eq 1 ]; then
         echo "[$(date -Is)] build_page SKIPPED — this checkout runs superseded code; see check_round_code_is_current above" >> "${LOG}"
     else
         echo "[$(date -Is)] build_page SKIPPED — the ledger did not refresh" >> "${LOG}"
@@ -128,5 +153,6 @@ echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
 # 0 only when BOTH are clean; the six steps' own 1 means "a case still needs a
 # human", which is information, not noise.
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
-   || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ]; then exit 1; fi
+   || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
+   || [ "${TESTS}" -ne 0 ]; then exit 1; fi
 exit 0
