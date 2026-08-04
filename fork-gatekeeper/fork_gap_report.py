@@ -66,16 +66,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # IMPORTED, never re-derived — see its docstring, and vibeic-eda#29 for what two
 # copies of one rule cost.
 import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79)
+# IMPORTED for `_ls_remote_head`, never re-spelled: three programs now need to
+# ask a remote what a branch really points at, and a fourth copy of that rule is
+# how this same defect reached three files. See `fetch_confirms_current`.
+import discover_forks  # noqa: E402
 
 ARG_RE = re.compile(r"ARG\s+([A-Z0-9_]*?)_REF\s*=\s*([0-9a-f]{7,40})")
 
 
-def _git(repo: Path, *args: str, timeout: int = 60) -> Optional[str]:
+#: A command that never answered — killed on the clock, or unable to launch.
+#: DISTINCT from any exit code the tool itself chose, exactly as `daily_0530`
+#: defines it, so "we never got an answer" cannot be read as "git said no".
+RC_NO_ANSWER = 124
+#: A fetch pulls objects and legitimately runs long. `daily_0530` and
+#: `daily_merge` both bound theirs at 1800; matched deliberately, so the three
+#: programs that fetch the same clones cannot disagree about how long is too long.
+FETCH_TIMEOUT_S = 1800
+
+
+def _run(repo: Path, *args: str, timeout: int = 60):
+    """The CompletedProcess, so a caller that needs the EXIT STATUS can have it.
+
+    `_git` below keeps its old signature and its old meaning; this exists because
+    the fetch guard needs to tell "git answered non-zero" from "git never
+    answered", and a function that returns `Optional[str]` has already thrown
+    that distinction away.
+    """
     try:
-        r = subprocess.run(["git", "-C", str(repo), *args],
-                           capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, RC_NO_ANSWER, "",
+                                           f"no answer: timed out after {timeout}s")
+    except (OSError, subprocess.SubprocessError) as exc:      # noqa: BLE001
+        return subprocess.CompletedProcess(args, RC_NO_ANSWER, "",
+                                           f"no answer: {type(exc).__name__}: {exc}")
+
+
+def _first_error_line(cp) -> str:
+    """The line of a failed command's output that NAMES the cause.
+
+    git puts the diagnosis first and the boilerplate last, so `stderr[-1]` on an
+    unreachable remote is `and the repository exists.` — a fragment identifying
+    nothing. Same reasoning, and the same choice, as `daily_0530._first_error_line`.
+    """
+    for ln in ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines():
+        ln = ln.strip()
+        if ln:
+            return ln[:160]
+    return "no error text"
+
+
+def _git(repo: Path, *args: str, timeout: int = 60) -> Optional[str]:
+    r = _run(repo, *args, timeout=timeout)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -118,6 +161,102 @@ def assertions_from_dockerfiles(repo: Path, ref: str = "origin/main") -> Dict[st
         for stem, sha in pin_kinds.contents_assertions(body).items():
             out.setdefault(stem, sha)
     return out
+
+
+def fetch_confirms_current(clone: Path, up_ref: str, do_fetch: bool = True):
+    """Is `up_ref` CONFIRMED to be the remote's current tip? Returns `(ok, why)`.
+
+    `ok=False` means the tracking state is UNKNOWN — which is neither "current"
+    nor "behind", and must not be rendered as either.
+
+    THE THIRD SITE OF ONE DEFECT. This program's fetch discarded its result
+    entirely::
+
+        if fetch:
+            _git(clone, "fetch", "-q", "--all", timeout=180)   # result dropped
+
+    Every number below it — `sync_lag`, `release_lag`, `image_behind` — is a
+    `rev-list` against `upstream/<branch>`, a REMOTE-TRACKING REF that is only
+    meaningful if the fetch refreshed it. A fetch that did not left this program
+    counting against whatever the clone last managed to fetch, and a stale ref
+    counts FEWER commits behind than there are. Small numbers read as health, and
+    this program's numbers are what the published page prints.
+
+    That it happened here is the part worth recording: `fork_gap_report` is the
+    AUDITOR. `daily_0530` had the same defect in two places (fixed in 2b33719),
+    `discover_forks._local_compare` never had it, and the program whose job is to
+    check the other two was the last to check itself.
+
+    THE GUARD IS ON THE CLASS, NOT ON THE STORY, for the reason 2b33719 measured
+    and this program does not get to re-litigate: reading the exit status is
+    NECESSARY BUT NOT SUFFICIENT. It covers only the failures git chooses to
+    report as failures. A fetch can exit 0 and refresh nothing. So:
+
+      1. read the status — a failed fetch is UNKNOWN, full stop;
+      2. snapshot the ref before and compare after — if it MOVED, that is proof
+         the fetch reached the remote and no further question is needed;
+      3. when it moved NOTHING, ask the remote directly. That is the one case
+         where "the remote had nothing new" and "the fetch refreshed nothing"
+         are locally indistinguishable, so nothing local can separate them.
+
+    ASKING THE REMOTE IS `discover_forks._ls_remote_head`, IMPORTED. It is the
+    function `_local_compare` already uses for this exact question, and there are
+    now three programs that need the answer. A fourth spelling of one rule is how
+    two programs came to say opposite things about the same four pins (#29) — and
+    it is how this defect reached three files in the first place.
+
+    COST: one single-ref `ls-remote` per fork whose fetch moved nothing, ~0.3-1 s,
+    skipped entirely whenever the ref moved.
+    """
+    # `--no-fetch` MEANS NO NETWORK, AND THAT INCLUDES THIS CHECK.
+    #
+    # The defect is on the FETCH path: a fetch ran, did not do its job, and its
+    # result was thrown away. `--no-fetch` does not take that path — it is the
+    # documented way to ask about the clones EXACTLY AS THEY STAND, and a guard
+    # that reached for the network there would make an offline mode need a
+    # network and surprise every caller of a flag whose name promises otherwise.
+    #
+    # MEASURED while writing this, and the reason this is a deliberate scoping
+    # rather than an oversight: confirming in `--no-fetch` mode flags the real
+    # yosys clone STALE (its `upstream/main` is 468ba27d91ae; the remote reports
+    # main at d5f179524913) and takes the whole run to rc=2. That staleness is
+    # REAL and worth someone's attention — but it is a fact about a shared clone
+    # nobody refreshed, not about a fetch that misreported, and turning the
+    # offline mode red for it would only teach people to stop using the flag.
+    # In the round that publishes numbers, `run_0530.sh` fetches, so a stale ref
+    # there still reaches the confirmation below.
+    if not do_fetch:
+        return True, ""
+
+    branch = up_ref.split("/", 1)[1] if "/" in up_ref else up_ref
+    before = _git(clone, "rev-parse", "-q", "--verify", up_ref)
+
+    fr = _run(clone, "fetch", "-q", "--all", timeout=FETCH_TIMEOUT_S)
+    if fr.returncode != 0:
+        what = ("no answer from" if fr.returncode == RC_NO_ANSWER
+                else f"FETCH FAILED (rc={fr.returncode}) —")
+        return False, (f"{what} upstream: tracking state is UNKNOWN, not "
+                       f"current: {_first_error_line(fr)}")
+
+    after = _git(clone, "rev-parse", "-q", "--verify", up_ref)
+    if after is None:
+        return False, f"{up_ref} does not resolve after fetch — NOT MEASURED"
+    if before is not None and after != before:
+        return True, ""          # it moved: the fetch reached the remote
+
+    url = _git(clone, "remote", "get-url", "upstream")
+    if not url:
+        return False, ("the fetch moved nothing and this clone has no `upstream` "
+                       "remote to ask — NOT MEASURED, not zero")
+    live = discover_forks._ls_remote_head(url, branch)
+    if live is None:
+        return False, (f"UNVERIFIED — the fetch moved nothing and {url} could not "
+                       f"be asked whether {branch} is still {after[:12]}; a stale "
+                       f"ref counts FEWER commits behind than there are")
+    if live != after:
+        return False, (f"STALE — {up_ref} is {after[:12]} but the remote reports "
+                       f"{branch} at {live[:12]}; the fetch did not refresh it")
+    return True, ""
 
 
 def count(repo: Path, a: str, b: str) -> Optional[int]:
@@ -334,11 +473,17 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         if not clone.is_dir():
             row["note"] = "no clone — NOT MEASURED"
             rows.append(row); continue
-        if fetch:
-            _git(clone, "fetch", "-q", "--all", timeout=180)
         up = upstream_head(clone)
         if up is None:
             row["note"] = "no upstream remote — NOT MEASURED"
+            rows.append(row); continue
+        # RESOLVED BEFORE THE FETCH, so the guard can snapshot the ref it is about
+        # to refresh. The fetch used to run first and its result was thrown away;
+        # every count below reads `up`, so a fetch that did not do its job left
+        # them counting against a stale ref and reporting a confident integer.
+        ok, why = fetch_confirms_current(clone, up, do_fetch=fetch)
+        if not ok:
+            row["note"] = why
             rows.append(row); continue
 
         tip = published_tip(clone, led)
