@@ -476,10 +476,55 @@ function enhBlock(tool){
   // resolvable upstream branch, or one past GitHub's compare cap). That is not zero, and
   // folding it into zero would report a clean gap we never measured — so it is carried as
   // its own number and rendered beside the gap, never summed into it.
-  const behindKnown   = LEDGERS.filter(d=>typeof d.behind_commits === "number");
-  const behindUnknown = LEDGERS.length - behindKnown.length;
+  //
+  // …AND `behind_commits` IS NOT A GAP FOR EVERY ROW (vibeic-eda#79 / #81). It is a
+  // true statement about two git histories on ALL of them; whether it names something
+  // this image can CLOSE depends on what the Dockerfile value is. `pin_kind` is the
+  // ledger's record of that:
+  //
+  //     "pin"                 a build INPUT — the build clones/checks out at it, so
+  //                           being behind IS a gap and must be counted.
+  //     "contents_assertion"  a CLAIM about a PREBUILT artefact nothing fetches
+  //                           (`ARG <TOOL>_VOLUME_CONTENTS_SHA`). Advancing it rebuilds
+  //                           nothing and turns a true statement false. There is no ref
+  //                           for it to be behind, so it is not a gap.
+  //
+  // MEASURED 2026-08-04, and this card was the wrong side of it: it read
+  // "39 across 7" while `fork_gap_report`, reading the same ledger at the same moment,
+  // read "21 across 6". The entire difference was `open_pdks`' 18 — 86% of this
+  // headline — and that number had already been cited as the reason to advance the ARG
+  // in #74 and #78, both refused by the build guard for the same reason. The page is
+  // the number people act on, so the page was the one doing the damage.
+  //
+  // READ, NOT RE-DERIVED. `pin_kinds.classify` is the single authority; `discover_forks`
+  // puts its answer on the row. Re-deriving it here from the ARG NAME would be a second
+  // copy of one rule, which is exactly how two programs came to say opposite things
+  // about the same four pins (#29) — and it would get the corroboration wrong: an
+  // assertion-named ARG that a fetch step reads is a MISNAMED PIN, comes back as `pin`,
+  // and must keep being counted. This is a FIELD, not a list of tool names: the next
+  // prebuilt artefact wired in is classified on the morning it appears, with no edit here.
+  const isAssertion   = d => d.pin_kind === "contents_assertion";
+  // EXCLUDED FROM BOTH the gap and the could-not-measure count, and the second half is
+  // the one that takes thought — `fork_gap_report` records the same reasoning. Dropping
+  // an assertion from the gap is obvious. Leaving it in "could not be measured" would
+  // replace a false gap with a false open question that never closes. "Not measured"
+  // means the question is still open; this question is answered.
+  const gapRows       = LEDGERS.filter(d=>!isAssertion(d));
+  // A row that carries no `pin_kind` AT ALL is a third state — a ledger written before
+  // the field existed. It is COUNTED, deliberately: not having classified a row is not
+  // evidence that it has no gap, and a page that dropped it would under-report the one
+  // direction that must never read as healthy. It is counted AND named, so the silent
+  // case that produced this defect cannot recur unseen.
+  const kindUnrecorded = gapRows.filter(d=>!("pin_kind" in d)
+                                        && (d.behind_commits||0) > 0);
+  const behindKnown   = gapRows.filter(d=>typeof d.behind_commits === "number");
+  const behindUnknown = gapRows.length - behindKnown.length;
   const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
+  // Kept for rendering, never summed into the number above: a row that vanishes is a
+  // row nobody can audit, and WHICH upstream commit the shipped artefact carries is
+  // the whole reason its ARG exists.
+  const assertRows    = LEDGERS.filter(d=>isAssertion(d));
   const patchForks    = LEDGERS.filter(d=>(d.ahead||0)>0).length;
   // THE SECOND DAILY QUESTION: are our own commits actually IN the shipped image?
   // `totalPatches` answers "how many patches do we HOLD", which is not the same
@@ -518,7 +563,12 @@ function enhBlock(tool){
   // Measured on the PINNED ref each Dockerfile builds, NOT the fork default branch:
   // a fork whose default branch drifts while its pinned work branch is current is
   // fine by design, because the default branch takes part in no build.
-  const gapTools = LEDGERS.filter(d=>(d.ahead||0)===0 && (d.behind_commits||0)>0)
+  // `gapRows`, so a CONTENTS ASSERTION can never be listed here as a tracking gap
+  // either. It does not qualify today only because it happens to carry patches of
+  // ours (ahead=12); the day it does not, this list would name it under a heading
+  // that says "behind upstream by N commits, carrying none of ours" — the same
+  // wrong sentence the KPI above was printing, one block down.
+  const gapTools = gapRows.filter(d=>(d.ahead||0)===0 && (d.behind_commits||0)>0)
                           .sort((a,b)=>(b.behind_commits||0)-(a.behind_commits||0));
   // Counted and stated SEPARATELY, never folded into the number beside it: a tool
   // whose release containment could not be decided is neither "has a new release"
@@ -571,9 +621,15 @@ function enhBlock(tool){
   const kpis = [
     [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
+    // The label states the SCOPE of the number, because the number's scope is what
+    // was wrong (#81): a reader who takes it as "every commit any fork is behind"
+    // will act on it, and two proposals already did. The assertion clause appears
+    // only when there is one, and it names the block further down that carries them.
     [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``),
-     {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured)`,
-      zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零）`}],
+     {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured`
+         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``) + `)`,
+      zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零`
+         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``) + `）`}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is
@@ -614,13 +670,39 @@ function enhBlock(tool){
     staleEl.innerHTML = `<span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>`;
     staleEl.hidden = false;
   }
+  // CONTENTS ASSERTIONS — STATED, NOT SUBTRACTED (vibeic-eda#81). These rows leave
+  // the gap count above because there is no ref for the artefact to be behind. They
+  // are printed here, WITH their number, for the reason `fork_gap_report` prints its
+  // own "CONTENTS ASSERTIONS (not pins, no gap to close)" line: a row that vanishes
+  // is a row nobody can audit, and silently dropping it is #60's unverified pin
+  // wearing the opposite mask. Everything rendered comes off the row itself —
+  // `dockerfile_arg`, `pinned_ref`, `behind_commits` — so no tool is named in code.
+  const assertBlock = !assertRows.length ? "" : (
+    `<h4 data-en="Contents assertions — not a gap (${assertRows.length})" data-zh="內容宣告 —— 不是缺口（${assertRows.length}）">Contents assertions — not a gap (${assertRows.length})</h4>`
+    + `<ul class="fork-gap-list">`
+    + assertRows.map(d=>{
+        const n = (typeof d.behind_commits === "number") ? d.behind_commits : null;
+        const en = n === null
+          ? `the image ships a PREBUILT artefact and <code>${esc(d.dockerfile_arg||"the ARG")}</code> records which upstream commit it carries`
+          : `<b>${n}</b> upstream commit(s) exist beyond the PREBUILT artefact this image ships, and none of them is a gap this image can close`;
+        const zh = n === null
+          ? `image 出貨的是 PREBUILT 產物，<code>${esc(d.dockerfile_arg||"該 ARG")}</code> 記錄的是它帶著哪一個上游 commit`
+          : `PREBUILT 產物之後還有 <b>${n}</b> 個上游 commit，但沒有任何一個是這個 image 補得掉的缺口`;
+        return `<li><code>${esc(d.tool||d.repo||"?")}</code> <span class="fork-mono">${esc(d.pinned_ref||"")}</span> — <span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span></li>`;
+      }).join("")
+    + `</ul>`
+    + `<p class="fork-gap-note" data-en="Nothing fetches at these values. The artefact is built elsewhere and the image only ASSERTS what it carries, refusing to ship if the two disagree — so advancing the ARG would rebuild nothing and turn a true statement into a false one. Adopting newer upstream work here means CUTTING A NEW ARTEFACT, which is a decision rather than a sync. Classified from the ledger&#39;s own pin_kind, which comes from the Dockerfile text: an assertion-named value that a fetch step reads is a misnamed PIN and is counted as a gap above." data-zh="沒有任何步驟會去這些值抓東西。產物是別處建好的，image 只是 ASSERT 它帶著什麼，兩邊不一致就拒絕出貨 —— 所以把這個 ARG 往前推不會重建任何東西，只會把一句真話變成假話。要採用更新的上游工作，意思是重新切一份產物，那是一個決定而不是一次同步。分類來自 ledger 自己的 pin_kind，而它來自 Dockerfile 的內容：名字長得像宣告、卻被抓取步驟讀到的值，是命名錯誤的 PIN，會被算進上面的缺口。">Nothing fetches at these values — advancing the ARG would rebuild nothing and make a true statement false.</p>`);
+  // A row nobody classified is counted above; here it is NAMED, so the state that
+  // produced this defect can never again be invisible.
+  const unrecBlock = !kindUnrecorded.length ? "" : (
+    `<p class="fork-gap-note" data-en="${kindUnrecorded.length} row(s) above carry a commit gap but no recorded pin_kind, so it is not known whether their gap is closable. They are COUNTED — an unclassified row is not evidence of no gap — and named here: ${esc(kindUnrecorded.map(d=>d.tool||d.repo||"?").join(", "))}. Re-run the discovery pass to classify them." data-zh="上面有 ${kindUnrecorded.length} 列有 commit 缺口但沒有記錄 pin_kind，因此無法判斷那個缺口補不補得掉。它們有被計入（沒分類不等於沒缺口），並在這裡點名：${esc(kindUnrecorded.map(d=>d.tool||d.repo||"?").join(", "))}。重跑一次 discovery 就會分類。">${kindUnrecorded.length} row(s) carry a commit gap but no recorded pin_kind; they are counted, not assumed clean.</p>`);
   const gapEl = document.getElementById("forkGap");
   if (gapEl) {
     if (!gapTools.length) {
-      gapEl.innerHTML = '<p data-en="Every fork is either carrying patches of ours or level with upstream." data-zh="每一個 fork 都不是揹著我們的補丁、就是跟上游齊平。">Every fork is either carrying patches of ours or level with upstream.</p>';
+      gapEl.innerHTML = '<p data-en="Every fork is either carrying patches of ours or level with upstream." data-zh="每一個 fork 都不是揹著我們的補丁、就是跟上游齊平。">Every fork is either carrying patches of ours or level with upstream.</p>' + assertBlock + unrecBlock;
     } else {
       const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span></li>`).join("");
-      gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>`;
+      gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>` + assertBlock + unrecBlock;
     }
   }
 

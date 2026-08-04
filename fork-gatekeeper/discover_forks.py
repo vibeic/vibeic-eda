@@ -318,6 +318,47 @@ def parse_dockerfile_pins(text: str) -> dict:
     return pins
 
 
+def _pin_for_tool(pins: dict, tool: str) -> dict:
+    """The pin entry for a ledger TOOL, matched the way `fork_gap_report` matches it.
+
+    TWO KEY SPELLINGS REACH `pins` and they are not the same alphabet. The
+    URL-driven loop keys on the REPOSITORY NAME out of the clone URL
+    (`sv-elab`, `IHP-Open-PDK`), and the ARG-only loop keys on the ARG STEM
+    (`SV_ELAB` -> `sv_elab`), because an ARG name cannot contain a dash. A tool
+    that arrives by BOTH routes has both keys and `tool.lower()` finds the right
+    one; a tool that arrives ONLY by the ARG-only route — which is exactly the
+    prebuilt-artefact case vibeic-eda#79 introduced — has only the underscore
+    spelling, so a dashed repository name misses entirely.
+
+    MEASURED, on this tree: `parse_dockerfile_pins` on a Dockerfile carrying
+    `ARG IHP_OPEN_PDK_VOLUME_CONTENTS_SHA` returns the key `ihp_open_pdk` and
+    `pins.get("ihp-open-pdk")` is None. The row would then read
+    `integrated=false, pin_kind=null` about a fork that determines what ships —
+    vibeic-eda#60 returning — and, because the page keys its gap exclusion on
+    `pin_kind`, it would ALSO start counting that artefact's commits as a gap
+    again while `fork_gap_report`, whose lookup is already separator-insensitive,
+    excluded it. That is vibeic-eda#81 reappearing one artefact later, which is
+    why the two lookups have to normalise the same way.
+
+    NOTHING ON THIS TREE MOVES. Verified over the real Dockerfiles against all
+    36 ledger tool names: every tool that resolves today resolves through the
+    EXACT branch first, none gains a pin it did not have, and the only unmatched
+    row (OpenSTA) is the vendored one `expand_vendored_pins` answers separately.
+    """
+    exact = pins.get(tool.lower())
+    if exact is not None:
+        return exact
+
+    def _flat(s: str) -> str:
+        return s.lower().replace("-", "").replace("_", "")
+
+    flat = _flat(tool)
+    for k, v in pins.items():
+        if _flat(k) == flat:
+            return v
+    return {}
+
+
 def parse_gitmodules(text: str) -> list[dict]:
     """[{'path', 'url'}] — one entry per submodule declared in a `.gitmodules`.
 
@@ -2487,7 +2528,7 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     led.update({"forked_at": (meta.get("created_at") or "")[:10],
                 "upstream_default_branch": up_branch})
 
-    pin = pins.get(tool.lower()) or {}
+    pin = _pin_for_tool(pins, tool)
     ref = pin.get("ref")
     led["pinned_ref"] = (ref or "")[:12] if ref else None
     led["pinned_ref_full"] = ref
