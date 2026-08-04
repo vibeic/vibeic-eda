@@ -158,6 +158,31 @@ Use these words; they are the distinctions the work actually needed.
 | `UNTESTED` | no signal, and no proof available to re-run. |
 | `NOT-RUN` | not attempted. Say so; never let it read as a pass. |
 
+### 3.1 — When is a missing test worth writing? A precondition, not a judgment call
+
+`ALIVE BUT UNCOVERED` is only actionable if you can tell it apart from
+`EMPTY-SLICE` and `UNUSED-API`, and the discriminator is a **precondition you
+can check before writing anything**:
+
+> **"A test must be proven to go red" has to be *satisfiable*.**
+> You need a concrete mutation that the existing oracles fail to detect. If you
+> have one, the new test has a proven red to be written against. If you cannot
+> construct one, there is nothing to cover and a test written anyway will pass
+> for reasons unrelated to the patch — which is worse than no test, because it
+> looks like coverage.
+
+Worked through, from the OpenROAD audit:
+
+| Patch | Mutation exists? | Verdict |
+|---|---|---|
+| `971a86176`/`c135448d5` psm transient | **yes** — freeze worst-step tracking at step 1; all 7 `TestTransientRC` cases stay green | write it. Done: the new case is red against that mutation and green at HEAD. |
+| `5b623c3dc` fin MIN bound | no — the commit has **no source at all** (README + tests only) | `EMPTY-SLICE`. Nothing to mutate, nothing to test. |
+| `d30feb3ab` fin 2-arg overload | no — real source, but **no in-tree caller**; reverting it builds clean | `UNUSED-API`. A test here would exercise a function nobody calls. |
+
+The first was worth writing and the other two were not, and the difference is
+decidable in advance. Run the mutation first; let it tell you whether the test
+is writable.
+
 ---
 
 ## 4. Harness traps
