@@ -160,6 +160,20 @@ Use these words; they are the distinctions the work actually needed.
 
 ### 3.1 — When is a missing test worth writing? A precondition, not a judgment call
 
+> **Provenance.** This rule was written after two tests were nearly written on
+> instruction for patches that had nothing to test — one an EMPTY-SLICE (README
+> plus tests, no source), one an UNUSED-API (a convenience overload with no
+> in-tree caller). Then, in the same hour, it caught a **third**: the obvious
+> assertion for the psm transient gap (`worst_step == 2` on a two-step stimulus)
+> would have **passed against the very mutation it was written for**, because that
+> mutation froze the value line and left `worst_step` live. The test that shipped
+> asserts a cross-check between two independently accumulated quantities instead,
+> which no single-step freeze can satisfy.
+>
+> So the rule caught a bad test written by the person who had just written the
+> rule. That is why it is stated as a **precondition** — run the red first — and
+> not as advice.
+
 `ALIVE BUT UNCOVERED` is only actionable if you can tell it apart from
 `EMPTY-SLICE` and `UNUSED-API`, and the discriminator is a **precondition you
 can check before writing anything**:
