@@ -386,7 +386,12 @@ def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
     and never raises — a release that published successfully must not be
     reported as failed because a commit could not be made.
     """
-    files = ["VERSION", "RELEASED.json"]
+    # README.md carries this repo's OWN install pointers, rewritten by
+    # `sync_image_version --set` immediately before this call. It is listed here so
+    # the docs land in the same commit as the VERSION they describe; left out, the
+    # sync would run every release and be discarded every release. Still explicit,
+    # still never `-A`.
+    files = ["VERSION", "RELEASED.json", "README.md"]
     present = [f for f in files if (eda_root / f).is_file()]
     if not present:
         return False, "neither VERSION nor RELEASED.json exists"
@@ -1014,6 +1019,20 @@ def main(argv=None) -> int:
                 # a LOCAL ONLY build has published nothing, so recording it as
                 # released would assert a release nobody can pull.
                 if pushed:
+                    # THIS REPO'S OWN DOCS, BEFORE THE RECORD COMMIT. VERSION is
+                    # written directly above, which is why README.md's five
+                    # `docker pull` / `docker run` commands sat at 0.2.56 while
+                    # VERSION said 0.2.63 — seven releases telling a reader to pull
+                    # an image the release had superseded.
+                    # `sync_image_version.py` is the tool that knows where those
+                    # pointers are, and writing VERSION without it is what let them
+                    # drift. It runs AFTER the push because it refuses to point at a
+                    # tag `docker pull` cannot resolve, and BEFORE the record commit
+                    # so README.md lands in the same commit as VERSION rather than
+                    # as a stray edit nobody stages.
+                    _rc, _dout = _sh(["python3", str(root / "sync_image_version.py"),
+                                      "--set", new], cwd=str(root))
+                    print(f"  docs: {'synced to ' + new if _rc == 0 else 'SYNC FAILED — ' + (_dout or '').strip()[-160:]}")
                     _ok, _note = commit_release_record(root, new)
                     print(f"  record: {_note}")
             print(f"  VERSION {old} -> {new}  "

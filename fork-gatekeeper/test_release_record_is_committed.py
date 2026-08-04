@@ -137,11 +137,35 @@ def test_it_never_uses_add_dash_A():
 def test_the_publish_path_calls_it_only_when_something_was_pushed():
     """WIRING, and the condition that makes it honest: a LOCAL ONLY build has
     published nothing, so recording it as released would assert a release
-    nobody can pull — the same class of false record, pointed the other way."""
+    nobody can pull — the same class of false record, pointed the other way.
+
+    ASSERTED STRUCTURALLY, not by distance. This read a 400-CHARACTER window
+    after `write_released_record` and required both strings inside it, so
+    inserting any statement between them broke a test about guarding — and the
+    obvious repair is to widen the window, which weakens it toward "somewhere in
+    the file". What matters is that the call sits INSIDE an `if pushed:` block,
+    however far it sits from its neighbour.
+    """
+    import ast
     src = (_HERE / "daily_release.py").read_text(encoding="utf-8")
-    body = "\n".join(l for l in src.splitlines()
-                     if not l.lstrip().startswith("#"))
-    i = body.index("write_released_record(root, new, targets)")
-    seg = body[i:i + 400]
-    assert "if pushed:" in seg
-    assert "commit_release_record(root, new)" in seg
+    tree = ast.parse(src)
+
+    def _calls(node, name):
+        return any(isinstance(n, ast.Call) and (
+                       (isinstance(n.func, ast.Name) and n.func.id == name)
+                       or (isinstance(n.func, ast.Attribute) and n.func.attr == name))
+                   for n in ast.walk(node))
+
+    guarded = [n for n in ast.walk(tree)
+               if isinstance(n, ast.If)
+               and isinstance(n.test, ast.Name) and n.test.id == "pushed"
+               and _calls(n, "commit_release_record")]
+    assert guarded, (
+        "commit_release_record is not inside an `if pushed:` block — a LOCAL "
+        "ONLY build would be recorded as a release nobody can pull")
+    # ...and nowhere else: one guarded call site, not a guarded one plus a loose one.
+    total = sum(1 for n in ast.walk(tree)
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "commit_release_record")
+    assert total == 1, f"expected exactly one call site, found {total}"
