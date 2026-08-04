@@ -19,7 +19,14 @@
 
 FROM ubuntu:24.04 AS build
 ARG IVERILOG_REPO=https://github.com/vibeic/iverilog.git
-ARG IVERILOG_REF=0d75e8d22288d4ac9a703c08f1efa5f3fb89292f  # pinned; branch vibeic/sv-tb-coverage (0.2.27: ff-verified descendant of 110cadd5 — no fix dropped; adds vibe-ic#125 $dumpvars/$dumpports forward-ref bind-against-completed-scope + graft guard test, plus SDF INCREMENT/COND/scale/mtm honouring + forward-ref elab)
+# branch master. The comment here used to name vibeic/sv-tb-coverage, which no
+# longer exists on the fork (measured: git ls-remote --heads lists no such ref) —
+# the fork consolidated onto one line, "no long-lived branches", and the pin has
+# been on master since. Carries: vibe-ic#125 $dumpvars/$dumpports forward-ref
+# bind-against-completed-scope, SDF INCREMENT/COND/scale/mtm and INSTANCE *
+# wildcard honouring, ->> non-blocking event trigger, comp-unit package ordering,
+# and the 2026-08-04 convergence to upstream 591d2c247 (0 behind).
+ARG IVERILOG_REF=26933e004e8315a67d291515c11a76857445ea3f
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf gperf flex bison ca-certificates \
  && rm -rf /var/lib/apt/lists/*

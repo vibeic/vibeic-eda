@@ -29,17 +29,17 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:2f9fbcd-1aa739
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:724a389-7f0732
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:5b942cb-6e4564
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:eccb8e6-3854ab
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:1b70fc1-622112
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:0da4c3b-0334b7d-46a666
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:0d75e8d-727186
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:26933e0-2e377b
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:63eb94a-770628
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e1e7aa4-75ea59
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:df21c1e-129c0b
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:1ffd741-5d449c
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 FROM alpine/git AS tb-src
 ARG COCOTB_REF=562d2400d70d3b77d87136e36eeda9d48c2de55c  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
-ARG PYUVM_REF=f7e85478fba744426a6604f89c096dbfe2b724c7  # master tip. Advanced from
+ARG PYUVM_REF=a66408ed4b3b0875be049b42c711d4eb8a0b9c82  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
@@ -161,7 +161,7 @@ ARG PYUVM_REF=f7e85478fba744426a6604f89c096dbfe2b724c7  # master tip. Advanced f
 #   patch is 57bdc4a "RAL: restore the back-door access tests that never reached
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
-ARG SBY_REF=742213689ee1bff65bc34e27011438edf8ce09f2  # branch vibeic/integration: V23/V24/V26/V30 (main) + V42/V27/V19/V18/V28 (w3) + V39/V49/V46/V50/V38/V40 (w2/w4), package layout, 11 version-drift reds fixed at root
+ARG SBY_REF=8a3cfb4132f7c51d5f8c5d7dc39fcc6f025c56aa  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone https://github.com/vibeic/pyuvm.git            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \

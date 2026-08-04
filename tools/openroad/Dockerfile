@@ -22,7 +22,7 @@ FROM openroad/ubuntu24.04-dev:latest AS build
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_REF=2f9fbcd47e01f785cf21bafa521e33f9cf7491be  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66.
+ARG OPENROAD_REF=724a389026e6674b693fbe5279ffb8628d76350a  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66.
 # `build --stamp` in the USER rc, because `etc/Build.sh` builds its bazel
 # argument list from a closed set (`--jobs`, `--config=opt` from -lto,
 # `--//:platform=`) with no pass-through, so `--config=release` cannot be handed
