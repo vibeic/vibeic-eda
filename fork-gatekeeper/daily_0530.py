@@ -86,12 +86,74 @@ EDA = Path("/home/reyerchu/vibeic-eda")
 OURS = ("reyer", "vibeic")
 
 
-def sh(*a, cwd=None):
-    return subprocess.run(a, capture_output=True, text=True, cwd=cwd)
+#: `sh` never got an answer — the command was killed on the clock, or could not
+#: be launched. DISTINCT from any exit code the tool itself chose, so a caller
+#: can tell "we never got an answer" apart from "the tool answered non-zero".
+RC_NO_ANSWER = 124
+#: Ordinary git/gh calls here are local or single-request. Generous, because a
+#: bound that fires on a healthy call is worse than no bound at all.
+DEFAULT_TIMEOUT_S = 900
+#: A fetch pulls objects and is the one call here that legitimately runs long.
+#: `daily_merge` bounds its own fetches at 1800; matched deliberately, so the
+#: two halves of the same morning cannot disagree about how long is too long.
+FETCH_TIMEOUT_S = 1800
+#: A single-ref `ls-remote` is one request and no object transfer.
+LS_REMOTE_TIMEOUT_S = 120
+
+
+def sh(*a, cwd=None, timeout=DEFAULT_TIMEOUT_S):
+    """Run a command and return its CompletedProcess.
+
+    BOUNDED. This used to be unbounded, so one unreachable host held the whole
+    round — 35+ forks queued behind a single socket — for as long as the kernel
+    kept the connection alive. Measured against a black-holed address: still
+    running at 25 s, with nothing to stop it. `daily_merge` has always bounded
+    its own subprocesses; this file did not, so the two halves of the same
+    morning disagreed about whether a tool may hang forever.
+
+    A timeout RETURNS rc=RC_NO_ANSWER rather than raising. Every caller here
+    already branches on the return code, and an exception would take the round
+    out for every fork after this one — turning one hung fetch into a fleet-wide
+    outage. "We could not get an answer" is a state, and it belongs in the same
+    channel as every other answer.
+    """
+    try:
+        return subprocess.run(a, capture_output=True, text=True, cwd=cwd,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            a, RC_NO_ANSWER, "",
+            f"no answer: timed out after {timeout}s")
+    except OSError as exc:                                  # noqa: BLE001
+        return subprocess.CompletedProcess(
+            a, RC_NO_ANSWER, "", f"no answer: {type(exc).__name__}: {exc}")
 
 
 def out(*a, cwd=None):
     return sh(*a, cwd=cwd).stdout.strip()
+
+
+def _first_error_line(cp) -> str:
+    """The line of a failed command's output that NAMES the cause.
+
+    git puts the diagnosis FIRST and the advice last. On an unreachable remote
+    it emits, in order::
+
+        fatal: '/path/gone' does not appear to be a git repository
+        fatal: Could not read from remote repository.
+        (blank)
+        Please make sure you have the correct access rights
+        and the repository exists.
+
+    so the LAST line is `and the repository exists.` — a sentence fragment that
+    identifies nothing. Reporting it publishes the least informative line git
+    wrote. Take the first non-empty one.
+    """
+    for ln in ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines():
+        ln = ln.strip()
+        if ln:
+            return ln[:160]
+    return "no error text"
 
 
 def mainline(g):
@@ -101,17 +163,113 @@ def mainline(g):
     return None
 
 
+# ── A COMPARISON IS ONLY AS GOOD AS THE REF IT IS MADE AGAINST ───────────────
+#
+# Every question this round asks about a fork — "are we behind upstream", "which
+# branches does the fork have" — is answered by reading a REMOTE-TRACKING REF
+# and comparing. Those refs are only meaningful if the fetch that was supposed
+# to refresh them actually did. Both fetches in this file discarded the
+# `CompletedProcess` entirely, so a fetch that failed left the comparison to run
+# against whatever the clone last managed to fetch, and a stale ref reports
+# `behind == 0` — "we could not reach upstream" rendered as "we are up to date".
+#
+# WHY THIS GUARDS THE CLASS AND NOT ONE STORY. The obvious fix is to read the
+# exit status, and that is necessary but NOT sufficient: it only covers failures
+# git chooses to report as failures. It was proposed on the strength of a clone
+# whose auto-gc had failed (`gc.log`: "There are too many unreachable loose
+# objects", 6935 of them), on the theory that a fetch in that state does not
+# update the ref. That theory is UNSUBSTANTIATED. Re-run against a copy of that
+# exact clone — same 6935 unreachable loose objects, same gc.log, the tracking
+# ref rewound to the value it held that morning — `git fetch upstream --quiet`
+# returned **0** and moved the ref correctly, emitting the gc complaint as a
+# warning on stderr. A declined auto-gc warns; it does not fail the fetch and it
+# does not suppress the ref update. (Not "refuted": the original clone's state
+# could not be reproduced exactly, only its object count and its gc.log.)
+#
+# So an rc-only guard would have been written FROM a case it does not cover, and
+# would report success for every fetch that exits 0 without refreshing anything.
+# What the comparison actually needs is not "the fetch reported success" but
+# "the ref is confirmed to be the remote's current tip", and only the REMOTE can
+# confirm that. Hence: read the status, and when the fetch moved nothing — the
+# one case where success and silent no-op look identical — ask the remote.
+#
+# COST, stated because it is a network call per fork per round: one single-ref
+# `ls-remote` on the ~35 forks that are already current, ~0.3-1 s each against a
+# round that runs for minutes. It is skipped entirely whenever the fetch moved
+# the ref, because a ref that moved is proof the fetch reached the remote.
+
+
+def _fetch(g, remote, *extra):
+    """`git fetch`, with its exit status READ. Returns `(ok, why)`.
+
+    `ok=False` means the tracking state for `remote` is UNKNOWN — which is
+    neither "current" nor "behind", and must not be rendered as either.
+    """
+    fr = sh(*g, "fetch", remote, *extra, "--quiet", timeout=FETCH_TIMEOUT_S)
+    if fr.returncode == 0:
+        return True, ""
+    what = ("no answer from" if fr.returncode == RC_NO_ANSWER
+            else f"FETCH FAILED (rc={fr.returncode}) —")
+    return False, (f"{what} {remote}: state is UNKNOWN, not current: "
+                   f"{_first_error_line(fr)}")
+
+
+def _remote_confirms(g, remote, branch, local_sha):
+    """Does `remote` itself report `branch` at `local_sha`? Returns `(ok, why)`.
+
+    Asked ONLY when the fetch exited 0 and moved nothing — the single case in
+    which "the remote had nothing new" and "the fetch did not refresh the ref"
+    produce identical observable state locally. Nothing local can separate them,
+    so the question goes to the only party that can answer it.
+    """
+    r = sh(*g, "ls-remote", remote, f"refs/heads/{branch}",
+           timeout=LS_REMOTE_TIMEOUT_S)
+    if r.returncode != 0 or not r.stdout.split():
+        return False, (
+            f"UNVERIFIED — the fetch of {remote} exited 0 and moved nothing, and "
+            f"{remote} could not then be asked to confirm {branch} is current "
+            f"(ls-remote rc={r.returncode}: {_first_error_line(r)}). "
+            f"UNKNOWN, not current.")
+    remote_sha = r.stdout.split()[0]
+    if remote_sha != local_sha:
+        return False, (
+            f"REF NOT CONFIRMED CURRENT — the fetch of {remote} exited 0 and "
+            f"moved nothing, but {remote} reports {branch} at {remote_sha[:12]} "
+            f"while this clone holds {local_sha[:12]}. Either the fetch did not "
+            f"refresh the ref or the remote moved between the two calls; both "
+            f"mean a comparison made here is not against {remote}'s current "
+            f"tip. UNKNOWN, not current.")
+    return True, ""
+
+
 def step1_upstream(g, main, rep):
     """Upstream -> master. FIRST, so branch merges land on the final base."""
     if not out(*g, "remote", "get-url", "upstream"):
         rep["upstream"] = "no upstream remote"
         return
-    sh(*g, "fetch", "upstream", "--quiet")
-    ub = (out(*g, "rev-parse", "--verify", "-q", "upstream/main")
-          or out(*g, "rev-parse", "--verify", "-q", "upstream/master"))
+    # Snapshot BOTH candidate names before the fetch: which one this clone
+    # tracks is not known until after, and on a first-ever fetch neither exists.
+    # An absent `before` compares unequal to a present `after`, which is the
+    # right answer — a ref that appeared was demonstrably fetched.
+    pre = {c: out(*g, "rev-parse", "--verify", "-q", c)
+           for c in ("upstream/main", "upstream/master")}
+    ok, why = _fetch(g, "upstream")
+    if not ok:
+        rep["upstream"] = why
+        return
+    ref = ("upstream/main" if out(*g, "rev-parse", "--verify", "-q", "upstream/main")
+           else "upstream/master")
+    ub = out(*g, "rev-parse", "--verify", "-q", ref)
     if not ub:
         rep["upstream"] = "no upstream branch"
         return
+    if ub == pre.get(ref):
+        # The fetch changed nothing. Legitimate the great majority of mornings —
+        # and indistinguishable, locally, from a fetch that refreshed nothing.
+        ok, why = _remote_confirms(g, "upstream", ref.split("/", 1)[1], ub)
+        if not ok:
+            rep["upstream"] = why
+            return
     behind = out(*g, "rev-list", "--count", f"{main}..{ub}")
     if behind == "0":
         rep["upstream"] = "already current"
@@ -171,8 +329,23 @@ def _fork_branches(g, main):
     "Which branches does this fork have" is a question about the fork, so it is
     asked of `refs/remotes/origin` after a fetch, not of whatever refs a clone
     was left holding.
+
+    RETURNS None WHEN THE FETCH DID NOT SUCCEED — the same shape `step1_upstream`
+    now uses, and for the same reason. This fetch's exit status was discarded
+    too, 71 lines below the one that was reported, in the function whose own
+    docstring above says the question is asked "after a fetch". If that fetch
+    fails the walk runs over whatever `refs/remotes/origin` the clone was left
+    holding — exactly the state this function was written to stop reading — and
+    a fork whose branches could not be listed comes back as a fork with no
+    branches. Every caller then reads that as "nothing to consolidate", which is
+    the identical failure-rendered-as-reassurance, one question over.
+
+    An empty LIST still means "this fork has no branches beyond its mainline".
+    None means "we could not ask". The callers must not collapse them.
     """
-    sh(*g, "fetch", "origin", "--prune", "--quiet")
+    ok, _why = _fetch(g, "origin", "--prune")
+    if not ok:
+        return None
     # Exclude BOTH conventional mainline names, not just the one this clone
     # happens to have checked out. A dry run caught `asap7sc7p5t_28` offering
     # `origin/master` for deletion because the local mainline is `main` while the
@@ -221,7 +394,11 @@ def _branches_an_image_pin_depends_on(g, eda_root=EDA):
     if not pins:
         return set()
     keep = set()
-    for b in _fork_branches(g, mainline(g) or "master"):
+    brs = _fork_branches(g, mainline(g) or "master")
+    if brs is None:
+        return None          # could not list the branches -> cannot tell which
+                             # ones a pin needs -> caller must not delete any
+    for b in brs:
         for p in pins:
             if sh(*g, "merge-base", "--is-ancestor", p, b).returncode == 0:
                 keep.add(b)
@@ -232,6 +409,28 @@ def _branches_an_image_pin_depends_on(g, eda_root=EDA):
 def step2_ours(g, main, rep):
     """Our branches -> master, by patch equivalence."""
     brs = _fork_branches(g, main)
+    if brs is None:
+        # NOT `[]`. An unanswerable question rendered as "this fork has no
+        # branches" is how work on a fork the round could not read gets reported
+        # as a fork with nothing to consolidate.
+        #
+        # `ours_skipped` is named for `prune_skipped` below, which is the shape
+        # this file already uses for "the step declined and here is why", and it
+        # rides with `needs_human` — the flag `main_` turns into the round's exit
+        # code. `merged` is stated as empty because that is TRUE and consumers
+        # read it; `carried_nothing_new` is deliberately NOT set, because how
+        # many branches carried nothing new is exactly the number this step could
+        # not compute, and writing 0 there would publish a measurement that was
+        # never taken. `conflicted` uses setdefault for the same reason it does
+        # below: step1 runs first and may already have put one there.
+        rep["ours_skipped"] = ("BRANCH LIST UNKNOWN — the fetch of origin did "
+                               "not succeed, so which branches this fork has "
+                               "could not be read. Nothing was merged, and that "
+                               "is NOT the same as nothing to merge.")
+        rep["merged"] = []
+        rep.setdefault("conflicted", [])
+        rep["needs_human"] = True
+        return
     merged, conflicted, empty = [], [], []
     for b in brs:
         cherry = out(*g, "cherry", main, b)
@@ -356,7 +555,18 @@ def _is_ours_to_delete(g, b):
 def step4_prune(g, main, rep, apply):
     """Delete only what git itself says holds nothing unique -- AND what is not
     serving an open upstream PR -- AND what we created in the first place."""
-    brs = [b for b in _fork_branches(g, main) if _is_ours_to_delete(g, b)]
+    listed = _fork_branches(g, main)
+    if listed is None:
+        # Same fail-safe the two guards below already use, for the same class of
+        # reason: a DELETE decided from a branch list we could not read is the
+        # most expensive thing this step can get wrong.
+        rep["pruned"] = []
+        rep["prune_skipped"] = ("could not list the fork's branches (the fetch "
+                                "of origin did not succeed); pruned nothing "
+                                "rather than delete against a stale listing")
+        rep["needs_human"] = True
+        return
+    brs = [b for b in listed if _is_ours_to_delete(g, b)]
     pinned = _branches_an_image_pin_depends_on(g)
     if pinned is None:
         rep["pruned"] = []
