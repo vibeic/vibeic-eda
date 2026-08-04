@@ -1018,6 +1018,29 @@ def main(argv=None) -> int:
                     print(f"  record: {_note}")
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
+            # vibe-ic#754 — PUBLISHING AND ANCHORING ARE ONE ACTION.
+            #
+            # They were two, with nothing linking them, so `:latest` moved off the
+            # version vibe-ic pins on every single release and the two were reunited
+            # only when a landing gate happened to look. Applied by hand four times
+            # before this. Only on a real publish: a LOCAL ONLY build has nothing to
+            # anchor TO, and pointing the repo at an unpullable tag is worse than
+            # leaving it behind a real one.
+            #
+            # Advisory by construction — it opens a PR, it does not push to main, and
+            # a failure here must not fail a release that already succeeded. The
+            # landing gate that used to be the only line of defence is still there and
+            # is still authoritative; this just stops it being the FIRST time anyone
+            # notices.
+            if pushed:
+                try:
+                    import pr_notify as _prn
+                    _aok, _anote = _prn.open_anchor_pr(new)
+                except Exception as _e:      # noqa: BLE001
+                    _aok, _anote = False, f"{_e.__class__.__name__}: {_e}"
+                print(f"  anchor: {_anote}")
+                result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
+                result["anchor_pr"]["note"] = _anote
 
     if a.json:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)

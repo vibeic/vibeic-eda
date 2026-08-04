@@ -46,6 +46,11 @@ REPO = Path(os.environ.get("GK_VIBEIC_REPO", "/home/reyerchu/vibe-ic"))
 GH_REPO = "vibeic/vibe-ic"
 DOC_FILES = ["README.md", "docs/INSTALL.md"]           # where vibe-ic pins the image tag
 LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-only record
+#: vibe-ic's OWN anchor tool. It owns the pointer list (15 ghcr pointers across 9
+#: files, plus 24 install-doc refs); `DOC_FILES` above is a second, shorter list
+#: that covers 2 of them. Anything bumping the anchor must call this rather than
+#: re-derive where the version is written — see `open_anchor_pr`.
+ANCHOR_TOOL = "tools/vibeic-eda/sync_image_version.py"
 ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
 _PIN_RE = re.compile(r"(vibeic-eda:)\d+\.\d+\.\d+")
 
@@ -223,6 +228,103 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
         shutil.rmtree(wt, ignore_errors=True)
         _run(["git", "-C", str(REPO), "branch", "-D", branch])   # local branch not needed (origin has it)
+
+
+def open_anchor_pr(version: str) -> tuple[bool, str]:
+    """Open a vibe-ic PR advancing the eda image anchor to `version`.
+
+    WHY THIS EXISTS (vibe-ic#754). Publishing an image and advancing vibe-ic's
+    anchor were two manual actions with nothing linking them, so every release
+    moved `:latest` off the pinned version BY CONSTRUCTION and the two were
+    reunited only because a landing gate happened to look. That repair was
+    applied by hand four times — 0.2.62 ("the gate caught it for the third
+    time") and 0.2.63 among them. A repair that keeps being applied by hand is a
+    missing step, not a recurring accident.
+
+    Between the publish and the next landing, anyone pulling the tag that means
+    "newest" gets a different toolchain from the one vibe-ic pins, and their
+    results are not comparable (vibe-ic#423).
+
+    IT DELEGATES TO VIBE-IC'S OWN TOOL. `open_pr` bumps `DOC_FILES` with a
+    regex — 2 files of the 9 that carry a pointer — which is why a tick that DID
+    fire still left the anchor failing its own gate. Re-deriving "where the
+    version is written" in this repo is how the second list drifts from the
+    first; `sync_image_version.py --set` is the one place that knows, and it
+    verifies itself afterwards.
+    """
+    version = (version or "").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        return (False, f"refusing to anchor a malformed version: {version!r}")
+    if not REPO.is_dir():
+        return (False, f"vibe-ic clone not found at {REPO}")
+
+    branch = f"eda-anchor-{version}"
+    dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
+
+    rc, out = _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
+    if rc != 0:
+        return (False, f"git fetch origin failed: {out.strip()[:200]}")
+    rc, out = _run(["git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch])
+    if rc == 0 and out.strip() and not dry:
+        return (False, f"branch {branch} already on origin — anchor PR already open")
+
+    wt = Path(tempfile.gettempdir()) / f"gk-vibeic-anchor-{version}"
+    _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+    shutil.rmtree(wt, ignore_errors=True)
+    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
+                    str(wt), "origin/main"])
+    if rc != 0:
+        _run(["git", "-C", str(REPO), "branch", "-D", branch])
+        rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
+                        str(wt), "origin/main"])
+        if rc != 0:
+            return (False, f"worktree add failed: {out.strip()[:200]}")
+    try:
+        tool = wt / ANCHOR_TOOL
+        if not tool.is_file():
+            return (False, f"{ANCHOR_TOOL} not present in vibe-ic — cannot anchor")
+        rc, out = _run(["python3", str(tool), "--set", version], cwd=str(wt))
+        if rc != 0:
+            return (False, f"anchor tool refused {version}: {out.strip()[-300:]}")
+        rc, dirty = _run(["git", "-C", str(wt), "status", "--porcelain"])
+        if not [l for l in dirty.splitlines() if l and not l.startswith("??")]:
+            return (False, f"anchor already at {version} — nothing to open")
+
+        _run(["git", "-C", str(wt), "add", "-u"])
+        title = f"chore(image-anchor): adopt vibeic-eda {version}"
+        rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])
+        if rc != 0:
+            return (False, f"commit failed: {out.strip()[:200]}")
+
+        body = (
+            f"`vibeic-eda:{version}` is published, so `:latest` no longer resolves to "
+            f"the version this repo anchors. Opened by the release itself rather than "
+            f"waiting for a landing gate to notice.\n\n"
+            f"Produced by running vibe-ic's own `{ANCHOR_TOOL} --set {version}` — the "
+            f"tool that owns the pointer list — not by re-deriving where the version is "
+            f"written.\n\n"
+            f"Closes the hand step described in vibe-ic#754.\n")
+        if dry:
+            rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
+            return (True, f"DRY-RUN — would open '{title}'\n{diff.strip()[:800]}")
+
+        stop = _nda_block_push(wt)
+        if stop:
+            return (False, stop)
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
+        if rc != 0:
+            return (False, f"branch push failed: {out.strip()[:200]}")
+        bf = Path(tempfile.gettempdir()) / f"gk-anchor-body-{version}.md"
+        bf.write_text(body)
+        rc, out = _run(["gh", "pr", "create", "-R", GH_REPO, "--base", "main",
+                        "--head", branch, "--title", title, "--body-file", str(bf)])
+        if rc != 0:
+            return (False, f"gh pr create failed: {out.strip()[:200]}")
+        return (True, f"opened anchor PR: {out.strip().splitlines()[-1] if out.strip() else '(created)'}")
+    finally:
+        _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+        shutil.rmtree(wt, ignore_errors=True)
+        _run(["git", "-C", str(REPO), "branch", "-D", branch])
 
 
 def tally_line(tool: str, a: dict) -> str | None:
