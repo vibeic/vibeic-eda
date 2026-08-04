@@ -51,7 +51,7 @@ run() {                                   # run <label> <cmd…>
     printf '  FAIL  %-34s %5d ms\n' "$label" $(( (t1-t0)/1000000 ))
     # FAILING lines first. An aggregating check puts its failure in the middle
     # and its summary at the end, so `tail` alone shows the wrong thing.
-    printf '%s\n' "$out" | grep -E '^\[FAIL\]|disagree|does not have|do not reproduce' \
+    printf '%s\n' "$out" | grep -E '^\[FAIL\]|disagree|does not have|do not reproduce|SIDEWAYS|commit\(s\) dropped|actually dropped' \
       | head -8 | sed 's/^/          /'
     printf '%s\n' "$out" | tail -3 | sed 's/^/          /'
     FAILED=1
@@ -90,6 +90,20 @@ elif [ "$PIN_FILES_TOUCHED" = "0" ]; then
   echo "  n/a   pinned images exist              (no pin file in $BASE..HEAD)"
 else
   run "pinned images exist in registry" python3 "$ROOT/tools/check_pinned_images_exist.py"
+fi
+
+# vibeic-eda#86. The registry check above asks whether the tag EXISTS. It cannot
+# ask whether the commit it names still CONTAINS what the previous one did — and
+# a pin that moves sideways passes every other gate in this file, which is how
+# `393a75f` dropped three ngspice capabilities on 2026-07-19 with all pins
+# agreeing, current, and published. Same tier and same gating as above: it is one
+# compare per moved pin, and a push that moves no pin cannot introduce the fault.
+if [ "$OFFLINE" = "1" ]; then
+  echo "  SKIP  moved pins keep what they had    (--offline: NOT a clean result)"
+elif [ "$PIN_FILES_TOUCHED" = "0" ]; then
+  echo "  n/a   moved pins keep what they had    (no pin file in $BASE..HEAD)"
+else
+  run "moved pins keep what they had" python3 "$ROOT/tools/check_pin_descendants.py" --base "$BASE"
 fi
 
 if [ "$FAILED" -eq 0 ]; then
