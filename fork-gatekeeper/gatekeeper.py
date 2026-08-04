@@ -382,6 +382,26 @@ def tick() -> dict:
         behind = ((_gap is not None and _gap > 0)
                   or (led.get("behind_commits") or 0) > 0
                   or release_gap_unknown(led))
+        # …and "behind" has to MEAN something for this tool. A CONTENTS ASSERTION
+        # is not a build input: the artefact is prebuilt, nothing fetches at the
+        # sha, and the build only refuses to ship if the artefact disagrees with
+        # it. `behind_commits` is still computed for such a row and is still a
+        # true statement about the two git histories — it is simply not a
+        # statement about anything this round can act on. Entering it as a merge
+        # candidate is what produced vibeic-eda#74 and #78: two proposals to
+        # advance `open_pdks`, both refused by the build guard, because advancing
+        # it rebuilds nothing and turns a true statement false. #79 made the
+        # distinction machine-visible; this is the reader that acts on it.
+        if led.get("pin_kind") == "contents_assertion":
+            if behind:
+                print(f"  [not a candidate] {led.get('tool')}: pinned by "
+                      f"`{led.get('dockerfile_arg')}`, a CONTENTS ASSERTION "
+                      f"about a prebuilt artefact. Its {led.get('behind_commits')} "
+                      f"commit(s) behind upstream are real and unactionable here "
+                      f"— advancing the ARG rebuilds nothing (vibeic-eda#79). "
+                      f"Adopting a newer upstream means CUTTING A NEW ARTEFACT, "
+                      f"which is a decision, not a merge round.")
+            continue
         if led.get("integrated") and behind:
             candidates.append(led)
 

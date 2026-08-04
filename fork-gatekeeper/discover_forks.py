@@ -50,6 +50,10 @@ from typing import NamedTuple
 HERE = Path(__file__).parent          # version-controlled source
 sys.path.insert(0, str(HERE))
 import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
+# IMPORTED, never re-derived: `fork_gap_report` needs the same answer, and two
+# programs carrying two copies of one rule is how they came to say opposite
+# things about the same four pins (vibeic-eda#29).
+import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79)
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
@@ -268,29 +272,49 @@ def parse_dockerfile_pins(text: str) -> dict:
     # `open_pdks` is the case (vibeic-eda#60). The image's sky130A and gf180mcuD are
     # prebuilt PDK volumes ciel materialises, and /foss/pdks/sky130A is a symlink
     # into .../versions/<open_pdks-sha>/ — so the PDK version IS an open_pdks commit,
-    # and the composing Dockerfile now declares `ARG OPEN_PDKS_REF` and ASSERTS at
-    # build time that the shipped symlink carries it. There is no clone, so the loop
-    # above saw nothing and the ledger read `integrated=false` about a fork that
-    # decides what every DRC and LVS run reads.
+    # and the composing Dockerfile declares it and ASSERTS at build time that the
+    # shipped symlink carries it. There is no clone, so the loop above saw nothing
+    # and the ledger read `integrated=false` about a fork that decides what every
+    # DRC and LVS run reads.
     #
-    # `integrated` means "our fork determines what the image ships". A pin the build
-    # ENFORCES does that whether or not a `git clone` appears. Recorded with
+    # `integrated` means "our fork determines what the image ships". A value the
+    # build ENFORCES does that whether or not a `git clone` appears. Recorded with
     # `pinned_via` so the row says HOW, rather than quietly looking like a clone.
-    for _arg, _ref in re.findall(r"^ARG\s+(\w+)_REF\s*=\s*([0-9a-f]{40})\s*$",
-                                 orig_text, re.M):
-        _tool = _arg.lower()
+    #
+    # TWO SPELLINGS, AND THE DIFFERENCE IS OPERATIONAL (vibeic-eda#79). `_REF` is a
+    # build input: it moves when the fork moves, and a sweep asking "is it behind
+    # upstream?" is asking the right question. `_VOLUME_CONTENTS_SHA` is a CLAIM
+    # about a prebuilt artefact: it moves only when someone re-cuts the artefact,
+    # and that same question is a category error — advancing it rebuilds nothing
+    # and turns a true statement false, which is what #74 and #78 each tried and
+    # the build guard each time refused. `pin_kind` carries the distinction onto
+    # the row so the programs downstream do not have to re-derive it, and
+    # `pin_kinds` is the single authority for it.
+    for _arg, _meta in pin_kinds.classify(orig_text).items():
+        _tool = str(_meta["stem"]).lower()
         if _tool in pins:
             continue                      # the URL-driven loop already has it
         # Only when the SAME file enforces it. A bare ARG nobody checks is a
         # comment with a colour, and treating it as integration would be the
-        # unverified-pin defect #60 is about, one level up.
-        if f"${{{_arg}_REF}}" not in orig_text.split(f"ARG {_arg}_REF", 1)[-1]:
+        # unverified-pin defect #60 is about, one level up. `classify` already
+        # applies that rule — an unenforced declaration comes back as
+        # `KIND_UNENFORCED` and is dropped here.
+        if _meta["kind"] == pin_kinds.KIND_PIN:
+            if f"${{{_arg}}}" not in orig_text.split(f"ARG {_arg}", 1)[-1]:
+                continue
+            _via = (f"{_arg}, asserted at build time "
+                    f"(no clone — the artefact is prebuilt)")
+        elif _meta["kind"] == pin_kinds.KIND_CONTENTS_ASSERTION:
+            _via = (f"{_arg} — a CONTENTS ASSERTION about a prebuilt artefact, "
+                    f"not a build input: nothing fetches at it, the build "
+                    f"REFUSES if the shipped artefact disagrees, and advancing "
+                    f"it rebuilds nothing (vibeic-eda#79)")
+        else:
             continue
-        pins[_tool] = {"ref": _ref, "arg": f"{_arg}_REF",
-                       "branch": branches.get(f"{_arg}_REF"), "repo": _tool,
+        pins[_tool] = {"ref": str(_meta["sha"]), "arg": _arg,
+                       "branch": branches.get(_arg), "repo": _tool,
                        "submodules": False, "recursive": False,
-                       "pinned_via": f"{_arg}_REF, asserted at build time "
-                                     f"(no clone — the artefact is prebuilt)"}
+                       "pin_kind": _meta["kind"], "pinned_via": _via}
     return pins
 
 
@@ -2479,6 +2503,20 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     if _git_branch and _cmt_branch and _git_branch != _cmt_branch:
         led["vibeic_branch_comment_disagrees"] = _cmt_branch
     led["dockerfile_arg"] = pin.get("arg")
+    # WHAT KIND of ARG that is, on the row rather than inferred from its spelling by
+    # every reader (vibeic-eda#79). `pin` — a build input, sweep it. `contents_assertion`
+    # — a claim about a PREBUILT artefact the build never fetches, so "is it behind
+    # upstream?" has no answer that means anything and advancing it makes a true
+    # statement false. `gatekeeper` reads this to decide candidacy; without it, the
+    # merge round proposed advancing `open_pdks` on two consecutive mornings.
+    led["pin_kind"] = pin.get("pin_kind") or ("pin" if ref else None)
+    # HOW it is pinned, on the row for the same reason. The ARG-only route has always
+    # produced this string and it was dropped on the floor here — set only inside the
+    # `vendored_in` branch below — so the monitor page rendered `Dockerfile
+    # OPEN_PDKS_REF` and the one fact that would have stopped #74 was computed and
+    # discarded.
+    if pin.get("pinned_via"):
+        led["pinned_via"] = pin["pinned_via"]
     # A fork the image never fetches is forked but NOT layered in. Track it honestly:
     # such a tool uses upstream directly, so there is nothing to sync into the image.
     # `integrated` = REACHES THE SHIPPED IMAGE, by either route — its own ARG pin, or

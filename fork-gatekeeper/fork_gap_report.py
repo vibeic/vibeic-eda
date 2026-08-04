@@ -37,6 +37,15 @@ RULES THIS ENCODES
 - `integrated=false` (the image does not build from our fork at all) is reported
   as its own state, because a fork that ships nothing has no meaningful pin gap
   and must not be silently counted as "0 behind".
+- A CONTENTS ASSERTION is not a pin and gets its own state too (vibeic-eda#79).
+  `ARG OPEN_PDKS_VOLUME_CONTENTS_SHA` records which upstream commit a PREBUILT
+  ciel volume carries; nothing fetches at it. THIS REPORT IS WHERE THE MISTAKE
+  CAME FROM: it read `open_pdks 18 commits image-behind-upstream`, both #74 and
+  #78 cited that line as the reason to advance the ARG, and the build guard
+  refused both — because advancing it rebuilds nothing and makes a true
+  statement false. Such a row is reported as a fact, never as a gap, and never
+  as NOT MEASURED either: "not measured" is a question still open, and this one
+  is answered.
 
 EXIT
     0  both headline numbers are zero
@@ -52,6 +61,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# IMPORTED, never re-derived — see its docstring, and vibeic-eda#29 for what two
+# copies of one rule cost.
+import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79)
 
 ARG_RE = re.compile(r"ARG\s+([A-Z0-9_]*?)_REF\s*=\s*([0-9a-f]{7,40})")
 
@@ -80,6 +94,28 @@ def pins_from_dockerfiles(repo: Path, ref: str = "origin/main") -> Dict[str, str
         if not body:
             continue
         for stem, sha in ARG_RE.findall(body):
+            out.setdefault(stem, sha)
+    return out
+
+
+def assertions_from_dockerfiles(repo: Path, ref: str = "origin/main") -> Dict[str, str]:
+    """Every enforced `ARG <X>_VOLUME_CONTENTS_SHA=<sha>`, keyed by the ARG stem.
+
+    Same tree and same reason as `pins_from_dockerfiles` — and a SEPARATE dict,
+    because the two answer different questions and merging them is precisely the
+    conflation vibeic-eda#79 is about. Classification is `pin_kinds`', not this
+    module's: an assertion-named ARG that a fetch step reads is a misnamed PIN
+    and comes back as one, so the name can never be used to escape the sweep.
+    """
+    out: Dict[str, str] = {}
+    listing = _git(repo, "ls-tree", "-r", "--name-only", ref) or ""
+    for path in listing.splitlines():
+        if not path.endswith("Dockerfile") and not path.endswith(".hcl"):
+            continue
+        body = _git(repo, "show", f"{ref}:{path}")
+        if not body:
+            continue
+        for stem, sha in pin_kinds.contents_assertions(body).items():
             out.setdefault(stem, sha)
     return out
 
@@ -214,6 +250,7 @@ def published_tip(clone: Path, led: dict) -> Optional[str]:
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
     pins = pins_from_dockerfiles(repo)
+    assertions = assertions_from_dockerfiles(repo)
     rows: List[dict] = []
     for lf in sorted(ledger.glob("*.json")):
         if lf.name == "index.json":
@@ -226,12 +263,38 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         clone = forks_root / tool
         row = {"tool": tool, "integrated": bool(led.get("integrated")),
                "pin_source": "ARG", "pin_disagreement": None,
-               "ahead": led.get("ahead"), "pin": None,
+               "ahead": led.get("ahead"), "pin": None, "kind": "pin",
+               "asserted_contents": None,
                "sync_lag": None, "release_lag": None, "image_behind": None,
                "note": None}
 
         # the pin, by the ARG stem that matches this tool (case/dash-insensitive)
         key = tool.upper().replace("-", "_")
+
+        # …and FIRST: is this tool pinned at all, or merely DESCRIBED?
+        #
+        # BEFORE THE PIN LOOKUP AND BEFORE ITS LEDGER FALLBACK, and both halves
+        # of that are load-bearing. Renaming the ARG off `_REF` is enough to stop
+        # `pins_from_dockerfiles` seeing it — and MEASURED, that alone changes
+        # nothing here: `row["pin"]` falls through to the ledger's
+        # `pinned_ref_full`, which still resolves in the clone, and the row comes
+        # back reading `open_pdks 18 0 18 release` exactly as before. A rename
+        # with no reader is a rename that hid the evidence and kept the bug.
+        _asserted = (assertions.get(key)
+                     or assertions.get(key.replace("_", ""))
+                     or next((v for k, v in assertions.items()
+                              if k.replace("_", "") == key.replace("_", "")),
+                             None))
+        if _asserted:
+            row.update({
+                "kind": "contents_assertion", "asserted_contents": _asserted,
+                "note": (f"CONTENTS ASSERTION {_asserted[:12]} — not a pin. The "
+                         f"artefact is prebuilt and the build only ASSERTS what "
+                         f"it carries, so there is no ref to be behind: "
+                         f"advancing it would rebuild nothing and make a true "
+                         f"statement false (vibeic-eda#74, #78, #79)")})
+            rows.append(row)
+            continue
         row["pin"] = pins.get(key) or pins.get(key.replace("_", "")) or None
         if row["pin"] is None:
             for k, v in pins.items():
@@ -304,12 +367,24 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         r.setdefault("ours_unshipped_substantive", None)
         r.setdefault("unshipped_commits", [])
     measurable = [r for r in rows if r["image_behind"] is not None]
+    # A contents assertion is EXCLUDED FROM BOTH, and the second exclusion is the
+    # one that takes thought. Dropping it from `measurable` is obvious. Dropping
+    # it from `unmeasured` is not, and getting that wrong replaces a false gap
+    # with a false NOT-MEASURED that exits 2 every morning — a permanently red
+    # report is one people route around, which is how `fork_reaches_flow_check`
+    # lost its credibility (#17). "Not measured" means the question is open. This
+    # question is closed: there is no ref for the artefact to be behind.
+    asserted = [r for r in rows if r["kind"] == "contents_assertion"]
     unmeasured = [r for r in rows
-                  if r["image_behind"] is None and r["integrated"]]
-    not_built = [r for r in rows if not r["integrated"]]
+                  if r["image_behind"] is None and r["integrated"]
+                  and r["kind"] != "contents_assertion"]
+    not_built = [r for r in rows
+                 if not r["integrated"] and r["kind"] != "contents_assertion"]
     stranded = [r for r in not_built if (r.get("ahead") or 0) > 0]
 
     return {
+        "assertions": [{"tool": r["tool"], "contents": r["asserted_contents"]}
+                       for r in asserted],
         "q1_image_behind_upstream": sum(r["image_behind"] for r in measurable),
         "q1_forks_behind": len([r for r in measurable if r["image_behind"]]),
         "q1_sync_lag": sum(r["sync_lag"] or 0 for r in measurable),
@@ -348,8 +423,14 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
 # real pin, verified in the Dockerfiles rather than taken from this report's own
 # "baseline shrank" note:
 #
-#     ARG OPEN_PDKS_REF=b344c97e...      ARG CIEL_REF=714d1bbb...
-#     ARG SV2V_REF=6662fa5d...           ARG IHP_OPEN_PDK_REF=22f2a25f...
+#     ARG CIEL_REF=714d1bbb...           ARG SV2V_REF=6662fa5d...
+#     ARG IHP_OPEN_PDK_REF=22f2a25f...
+#
+# open_pdks was the fourth and is NOT a pin — it is
+# `ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97e...`, a claim about the prebuilt
+# ciel volume. It leaves the baseline for the same reason the other three do
+# (the image's copy is determined here and the ledger can see it), by a
+# different mechanism (vibeic-eda#79).
 #
 # The report had been telling us this and exiting 1 for it, which is the design
 # working; what it could not do was update itself. Left non-empty, the shrink
@@ -416,6 +497,13 @@ def main(argv=None) -> int:
     for c in rep["q2_unshipped_commits"]:
         print(f"          {c['tool']}/{c['sha']}  {c['date']}  {c['author']}")
         print(f"              {c['subject']}")
+    # Named as its own category, not merely skipped. A row that vanishes is a row
+    # nobody can audit, and the fact these carry — WHICH upstream commit the
+    # shipped artefact contains — is the whole reason the ARG exists.
+    if rep["assertions"]:
+        print(f"      CONTENTS ASSERTIONS (not pins, no gap to close): "
+              + ", ".join(f"{a['tool']}={(a['contents'] or '')[:12]}"
+                          for a in rep["assertions"]))
     disagreed = [r for r in rep["rows"] if r.get("pin_disagreement")]
     for r in disagreed:
         print(f"  PIN DISAGREEMENT {r['tool']}: {r['pin_disagreement']}")

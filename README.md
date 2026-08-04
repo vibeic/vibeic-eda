@@ -66,9 +66,10 @@ and fails on drift.
 | upstream projects the fork-gatekeeper tracks | **36** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
 | `vibeic/*` sources the build clones | **34** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
 | per-tool build artefacts (`tools/<name>/`) | **19** | `ls tools/*/Dockerfile \| wc -l` |
-| `ARG *_REF` in the composing `Dockerfile` alone | **11** | `grep -c '^ARG .*_REF=' Dockerfile` |
-| source refs pinned across all Dockerfiles | **36** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
-| …of those, pinned to a full commit SHA | **33** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
+| source refs pinned across all Dockerfiles | **35** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **32** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| `ARG *_VOLUME_CONTENTS_SHA` — assertions, **not** pins | **1** | `grep -rhoE '^ARG [A-Z0-9_]+_VOLUME_CONTENTS_SHA=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 
 <!-- /counts:local -->
 
@@ -234,6 +235,29 @@ are upstream refs staged as *data*, not as tools —
   (`asap7sc7p5t_28`, `asap7_pdk_r1p7`, `laurentc2/ASAP7_for_KLayout`) staged for the
   ASAP7 device-LVS source-of-truth. These three track `main`, not a SHA — see
   [Build from source](#build-from-source) on what that means for reproducibility.
+
+**`_REF` means a build input. `_VOLUME_CONTENTS_SHA` means a claim about one.**
+The single instance today is `OPEN_PDKS_VOLUME_CONTENTS_SHA` (`b344c97e`). The
+image's `sky130A` and `gf180mcuD` are **prebuilt ciel volumes** — nothing in this
+build clones open_pdks, `/foss/pdks/sky130A` is a symlink into
+`ciel/sky130/versions/<open_pdks-sha>/`, and the ARG records which upstream
+commit that volume carries so the image can describe itself truthfully. The build
+**asserts** it and refuses to ship a PDK it does not name.
+
+That distinction is in the NAME because it has to be readable by a program.
+Advancing a pin is routine; advancing this rebuilds nothing, changes no installed
+byte, and turns a true statement false — which is what
+[#74](https://github.com/vibeic/vibeic-eda/pull/74) and
+[#78](https://github.com/vibeic/vibeic-eda/pull/78) each proposed and the build
+guard each time refused. Both came out of a sweep that reads the ARG list and
+asks "is this ref behind upstream?", the right question for the other 28 and a
+category error for this one. Every sweep here keys on `_REF`, so a name off that
+suffix is skipped by their own heuristic rather than by an exclusion list someone
+has to maintain. [`fork-gatekeeper/pin_kinds.py`](./fork-gatekeeper/pin_kinds.py)
+is the single authority, and it corroborates the name against the Dockerfile's
+own text: an assertion-named ARG that a `git clone`/`checkout` step reads is a
+**misnamed pin**, classified as a pin and reported, so the convention cannot be
+used to smuggle a real pin out of the sweep.
 
 **Tracked but not built by us: `sv2v`.** The fork-gatekeeper mirrors
 [`zachjs/sv2v`](https://github.com/zachjs/sv2v) (clone+push, 2026-07-31) so an

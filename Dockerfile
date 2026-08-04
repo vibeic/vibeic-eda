@@ -48,7 +48,7 @@ ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:6662fa5-a942c0
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:714d1bb-adea1b
 ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
 
-# open_pdks — PINNED AND VERIFIED, not rebuilt. vibeic-eda#60.
+# open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
 # The sky130A and gf180mcuD the image ships are NOT built here: they are
 # prebuilt PDK volumes that `ciel` materialises, and /foss/pdks/sky130A is a
@@ -56,28 +56,34 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
 # PDK version IS an open_pdks commit — it was simply never declared, which is
 # what made #60 read as "no pin at all".
 #
-# MEASURED: b344c97e IS a commit in vibeic/open_pdks. It is NOT reachable from
-# our default branch (18 commits ours-not-shipped, 12 shipped-not-ours) — it
-# sits on upstream's open_pdks-1.0 line, which is the line the prebuilt volumes
-# are cut from.
+# MEASURED on the published 0.2.63 image:
+#   /foss/pdks/sky130A   -> ciel/sky130/versions/b344c97e…/sky130A
+#   /foss/pdks/gf180mcuD -> ciel/gf180mcu/versions/b344c97e…/gf180mcuD
+#   /foss/pdks/sky130A/SOURCES: `open_pdks b344c97e…`
+# and there is no open_pdks source tree anywhere in the image.
 #
-# So this declares the pin and ASSERTS it at build time. It deliberately does
-# NOT `ciel build` from our default tip: that would ship a DIFFERENT sky130A
-# from the one every published benchmark result was measured against, and a
-# change of that size does not belong smuggled into a wiring commit. Advancing
-# it is its own reviewable decision, and now it is one that has a pin to move.
-# vibeic-eda#74 tried to advance this to 3d3fa0b4 and the build guard above
-# refused it, correctly. This ARG is not a build input — it ASSERTS which
-# open_pdks commit the PREBUILT ciel volume carries, and that volume is cut from
-# upstream's open_pdks-1.0 line. 3d3fa0b4 is on master, so the assertion became
-# false and the image would have shipped a PDK the Dockerfile does not name.
-# MEASURED: the build failed at exactly this check.
+# b344c97e sits on upstream's open_pdks-1.0 line, which is the line the prebuilt
+# volumes are cut from — NOT on our default branch. Nothing in this build clones
+# open_pdks; the value below is ASSERTED at build time, twenty lines above the
+# runtime stage's `readlink`, and the build refuses to ship a PDK it does not
+# name.
 #
-# Advancing it for real means cutting a new PDK volume, which the note above
-# rules out of a wiring change on purpose: it would ship a DIFFERENT sky130A
-# from the one every published benchmark result was measured against. That is
-# its own reviewable decision and it has not been made.
-ARG OPEN_PDKS_REF=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
+# #74 AND #78 EACH PROPOSED ADVANCING THIS TO 3d3fa0b4 AND THE GUARD REFUSED
+# BOTH, correctly: 3d3fa0b4 is on master, so the assertion would have become
+# false while not one installed byte changed. Advancing it FOR REAL means
+# cutting a new PDK volume — a different sky130A from the one every published
+# benchmark result was measured against. That is its own reviewable decision and
+# it has not been made.
+#
+# THE NAME IS THE FIX (#79). Both proposals came out of a sweep that reads the
+# ARG list and asks "is this ref behind upstream?" — the right question for the
+# other 28 ARGs and a category error for this one, with nothing in the name to
+# tell them apart. `_REF` now means BUILD INPUT and `_VOLUME_CONTENTS_SHA` means
+# CLAIM ABOUT A PREBUILT ARTEFACT, so every sweep that keys on `_REF` — which is
+# all of them — skips this by its own heuristic rather than by someone
+# remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
+# for that distinction and corroborates the name against the file's own text.
+ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:d72b584-0e8664
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
@@ -531,9 +537,16 @@ COPY --from=img-ciel /opt/ciel /opt/ciel
 COPY --from=img-ihp-open-pdk /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13g2
 # ciel ships as a venv; the base image put it on PATH at /usr/local/bin.
 RUN ln -sf /opt/ciel/bin/ciel /usr/local/bin/ciel
-# #60 — the open_pdks pin is a CLAIM about what shipped, so check it. A pin that
-# nobody verifies is the state this issue was filed about, one level up: the
-# number would be declared and the image could still carry something else.
+# #60 — the open_pdks statement is a CLAIM about what shipped, so check it. A
+# claim that nobody verifies is the state this issue was filed about, one level
+# up: the number would be declared and the image could still carry something
+# else.
+#
+# THIS IS WHAT MAKES IT AN ASSERTION RATHER THAN A PIN, and #79 renamed the ARG
+# so the name says so too. A pin is consumed by a fetch; this is consumed by a
+# refusal. It is also the reason the rename may not quietly become a deletion:
+# the assertion is the only thing keeping the image's self-description honest,
+# and #74 and #78 are both on record as having been stopped right here.
 #
 # RE-DECLARED HERE, and that line is the whole check. An `ARG` before the first
 # `FROM` is in scope for the `FROM` lines ONLY; inside a stage it expands to the
@@ -541,16 +554,108 @@ RUN ln -sf /opt/ciel/bin/ciel /usr/local/bin/ciel
 # assertion printed `open_pdks pin OK: sky130A <- ` with nothing after the
 # arrow, because `case "$tgt" in *""*)` matches every string. The guard passed
 # by checking nothing — the exact shape #60 is about, inside #60's own fix.
-ARG OPEN_PDKS_REF
+ARG OPEN_PDKS_VOLUME_CONTENTS_SHA
 RUN set -e; \
-    test -n "${OPEN_PDKS_REF}" || { echo "FAIL: OPEN_PDKS_REF is empty in this stage — an ARG declared before FROM must be redeclared inside it, or this check compares against nothing." >&2; exit 1; }; \
+    test -n "${OPEN_PDKS_VOLUME_CONTENTS_SHA}" || { echo "FAIL: OPEN_PDKS_VOLUME_CONTENTS_SHA is empty in this stage — an ARG declared before FROM must be redeclared inside it, or this check compares against nothing." >&2; exit 1; }; \
     for fam in sky130A gf180mcuD; do \
       tgt=$(readlink -f "/foss/pdks/$fam" || true); \
       case "$tgt" in \
-        *"${OPEN_PDKS_REF}"*) echo "open_pdks pin OK: $fam <- ${OPEN_PDKS_REF}" ;; \
-        *) echo "FAIL: /foss/pdks/$fam resolves to '$tgt', which does not carry the declared OPEN_PDKS_REF=${OPEN_PDKS_REF}. The image ships a PDK this Dockerfile does not name." >&2; exit 1 ;; \
+        *"${OPEN_PDKS_VOLUME_CONTENTS_SHA}"*) echo "open_pdks volume contents OK: $fam <- ${OPEN_PDKS_VOLUME_CONTENTS_SHA}" ;; \
+        *) echo "FAIL: /foss/pdks/$fam resolves to '$tgt', which does not carry the declared OPEN_PDKS_VOLUME_CONTENTS_SHA=${OPEN_PDKS_VOLUME_CONTENTS_SHA}. The image ships a PDK this Dockerfile does not name. This ARG is an ASSERTION about a prebuilt ciel volume, not a build input: if you got here by ADVANCING it, the advance is the defect — nothing was rebuilt and a true statement was made false (vibeic-eda#74, #78, #79)." >&2; exit 1 ;; \
       esac; \
     done
+
+# ...and the assertion above is a PATH check, which is the whole of what it can
+# be and less than the image needs.
+#
+# `readlink -f /foss/pdks/sky130A` answers WHERE the volume came from. It cannot
+# answer WHAT IS IN IT, and the next step in this file rewrites 12 files INSIDE
+# the tree that path resolves to. The symlink does not move, so the assertion
+# still passes — while the sentence it stands for, "this is what open_pdks
+# <sha> produced", has stopped being true. The volume is that, PLUS 120 local
+# edits, and until this step existed nothing in the image said so.
+#
+# That is #79's own defect class arriving from the other side. #74 and #78 tried
+# to advance a claim past its evidence and were refused; this is evidence moving
+# out from under a claim nobody advanced, which no refusal was watching for.
+#
+# So: digest every file the base image DELIVERED, here, before the first local
+# step touches the volume. The last step in this stage re-digests and requires
+# every difference to be covered by a declared entry in
+# tools/pdk/local_mods.json. A future patch step that nobody declares changes
+# files no entry covers and the build FAILS naming them — declaring is not
+# something a maintainer has to remember, it is the only way to get a green
+# build.
+#
+# MEASURED on the base image this Dockerfile pins: 13324 files, 1.8 GB, 0.5 s.
+COPY tools/pdk/pdk_local_mods.py /vibeic/pdk/pdk_local_mods.py
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_local_mods.py baseline \
+        --root /foss/pdks/ciel \
+        --out /vibeic/pdk/volume-as-delivered.sha256
+
+# vibe-ic#768 — a via patch narrower than its own layer's minimum width.
+#
+# The sky130 HD and HVL tech LEFs declare `LAYER met5 ... WIDTH 1.6 ;` and, 430
+# lines later, give all five M4M5 vias a met5 patch of
+# `RECT -0.71 -0.71 0.71 0.71` = 1.42um, with the matching `VIARULE ... GENERATE`
+# blocks at `ENCLOSURE 0.31 0.31` (0.8 + 2*0.31 = the same 1.42um).
+#
+# It is not ours and it is not ciel's: the bytes are IDENTICAL to upstream
+# google/skywater-pdk-libs-sky130_fd_sc_hd:tech/sky130_fd_sc_hd.tlef. Moving the
+# open_pdks pin cannot reach it.
+#
+# It only bites at a route TERMINUS. While the via sits inside a met5 wire the
+# union is the wire and the width check passes; where a wire ENDS on the via, the
+# patch protrudes past the wire end and the protrusion is 1.42um on a layer whose
+# own minimum is 1.6um. MEASURED with the deck THIS image ships
+# (libs.tech/klayout/drc/sky130A.lydrc), on synthetic met4/via4/met5 geometry
+# reproducing one reported site:
+#
+#     via at a wire END,       met5 patch 1.42  ->  3x m5.1
+#     via at a wire END,       met5 patch 1.60  ->  clean
+#     via MID-wire,            met5 patch 1.42  ->  clean   (not vias in general)
+#     wire EXTENDED over it,   met5 patch 1.42  ->  clean   (not the patch alone)
+#     2-cut array at an end,   enclosure 0.31   ->  3x m5.1 ; 0.40 -> clean
+#     vertical met5 wire,      met5 patch 1.42  ->  3x m5.1 ; 1.60 -> clean
+#
+# and, for the grown patch, no new violation at the tightest legal spacing, on
+# adjacent met5 tracks, across a same-net notch, or inside a wide PDN strap.
+#
+# 0.40 still clears the rule the 0.31 was presumably minimised against: the same
+# file's `LAYER via4 ... ENCLOSURE ABOVE 0.31 0.31 ;` states a MINIMUM.
+#
+# WHY THIS LAYER OWNS IT: the sky130A this image ships is not built from
+# open_pdks source. It is a prebuilt ciel volume the base image bakes in at
+# /foss/pdks/ciel/sky130/versions/<sha>/, and the tech LEF is copied there from
+# the SkyWater library repo, which open_pdks does not itself carry. A commit in
+# vibeic/open_pdks would ship nothing. This RUN is the only place that owns the
+# bytes a user gets.
+#
+# The assertion above still describes the volume's PROVENANCE. This step is a
+# divergence from it, declared in tools/pdk/local_mods.json as
+# `met5-via-patch-min-width` and RECONCILED against a measured diff by the last
+# step in this stage — a prose promise that this is "declared" is what the
+# baseline/verify pair replaced. It also prints every line it changes.
+#
+# Scope is deliberately `--layers met5`. The same shape exists on gf180's
+# Metal2/Metal3/Metal5 (8 vias) — far denser layers whose DRC consequences have
+# NOT been measured, so they are left alone rather than swept along. That scope
+# is now enforced from both ends: `--layers met5` here, and a manifest entry
+# whose `paths` name only the sky130 HD/HVL tech LEFs, so a later sweep that
+# reached the gf180 files would fail as an undeclared modification.
+COPY tools/pdk/pdk_via_min_width_patch.py /tmp/pdk_via_min_width_patch.py
+RUN set -e; \
+    HD=/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/techlef; \
+    HVL=/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hvl/techlef; \
+    python3 /tmp/pdk_via_min_width_patch.py --layers met5 --expect 120 \
+        $HD/*.tlef $HVL/*.tlef; \
+    n=$(grep -l 'RECT -0.71 -0.71 0.71 0.71' $HD/*.tlef $HVL/*.tlef | wc -l); \
+    [ "$n" = "0" ] || { echo "FAIL: $n tech LEF(s) still carry the 1.42um met5 via patch" >&2; exit 1; }; \
+    g=$(grep -c 'RECT -0.8 -0.8 0.8 0.8' $HD/sky130_fd_sc_hd__nom.tlef); \
+    [ "$g" = "5" ] || { echo "FAIL: expected 5 grown M4M5 met5 patches in __nom.tlef, found $g" >&2; exit 1; }; \
+    rm -f /tmp/pdk_via_min_width_patch.py; \
+    echo "sky130A: met5 via patches raised to the layer's own 1.6um minimum (12 tech LEFs, 120 edits)"
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future
 # recipe change that stops producing a file cannot silently leave the base's
@@ -1078,3 +1183,46 @@ RUN set -e; \
       tail -25 build.log; exit 1; \
     fi; \
     cd /; rm -rf "$d"
+
+# LAST, and last on purpose: what does this image's PDK volume actually contain?
+#
+# The baseline was taken ~600 lines up, before anything local touched it. This
+# re-digests the same tree and requires every difference to be covered by a
+# declared entry, then writes the answer the image ships. Being the final step
+# of the final stage is what makes "every local modification" mean every one:
+# a step added anywhere above lands inside the measured window.
+#
+# It also RE-RUNS the #79 path assertion, at the other end of the build. The
+# original runs before the local steps and so cannot see a step that re-points
+# the symlink afterwards; this one can. Two checks, two failure modes, neither
+# a substitute for the other — the path says where the bytes came from, the
+# digest says whether they are still those bytes.
+#
+# `--upstream-sha` is fed from the ARG redeclared inside this stage at the
+# assertion above. An `ARG` before the first `FROM` expands to the EMPTY STRING
+# in a stage that does not redeclare it (#60), so verify REFUSES an empty value
+# rather than recording a PDK it cannot name.
+#
+# /foss/pdks/LOCAL_MODIFICATIONS.json is deliberately OUTSIDE /foss/pdks/ciel:
+# a record written into the tree it describes would be a modification made after
+# the check that is supposed to see every modification.
+#
+# `USER root` for the write and straight back: /foss/pdks is root-owned and the
+# runtime user is 1000. MEASURED — the first probe build of this step failed
+# with `PermissionError: '/vibeic/pdk/volume-as-delivered.sha256'`, which is the
+# same shape as the ALIGN Viewer defect 130 lines up: a step verified in an
+# identity no user has. Restoring USER 1000 on the next line is what keeps this
+# step from changing the identity the image ships with.
+COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
+USER root
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_local_mods.py verify \
+        --root /foss/pdks/ciel \
+        --baseline /vibeic/pdk/volume-as-delivered.sha256 \
+        --manifest /vibeic/pdk/local_mods.json \
+        --upstream-sha "${OPEN_PDKS_VOLUME_CONTENTS_SHA}" \
+        --pdk-symlink /foss/pdks/sky130A \
+        --pdk-symlink /foss/pdks/gf180mcuD \
+        --record /foss/pdks/LOCAL_MODIFICATIONS.json
+# restore the base's non-root runtime user
+USER 1000

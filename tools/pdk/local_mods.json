@@ -1,0 +1,39 @@
+{
+  "_why": [
+    "Every modification this build makes to the PREBUILT ciel PDK volume, declared.",
+    "",
+    "The Dockerfile asserts which open_pdks commit the volume was cut from by",
+    "resolving /foss/pdks/<fam> and requiring the sha in the resolved PATH. That",
+    "assertion is about PROVENANCE and is blind to CONTENT: a step that rewrites a",
+    "file inside the resolved tree leaves the path alone, so the assertion keeps",
+    "passing while the sentence it stands for stops being true.",
+    "",
+    "tools/pdk/pdk_local_mods.py digests the volume before the first local step and",
+    "again after the last, and requires every measured difference to be covered by",
+    "an entry below. Adding a patch step without adding an entry FAILS THE BUILD",
+    "naming the undeclared files -- declaring is not something anyone has to",
+    "remember, it is the only way to get a green build. The expect_* counts fail in",
+    "both directions, so an entry cannot outlive the step it describes either.",
+    "",
+    "Paths are relative to 'root'. `*` matches one path segment, `**` any depth --",
+    "the version segment is a `*` on purpose, so the sha lives in exactly one place",
+    "(the Dockerfile ARG) and this file does not have to be advanced with it."
+  ],
+  "root": "/foss/pdks/ciel",
+  "modifications": [
+    {
+      "id": "met5-via-patch-min-width",
+      "issue": "vibe-ic#768",
+      "what": "sky130 HD and HVL tech LEFs: the five M4M5 vias carried a met5 patch of 1.42um on a layer whose own declared WIDTH is 1.6um, so a route terminating on one reports m5.1. The patch is grown to the layer's own minimum and the matching VIARULE GENERATE enclosure from 0.31 to 0.40. Upstream bytes, not ciel's; the volume is the only place that owns them.",
+      "step": "tools/pdk/pdk_via_min_width_patch.py --layers met5 --expect 120",
+      "scope_note": "met5 only. The same contradiction exists on gf180's Metal2/Metal3/Metal5 (8 vias) on far denser layers whose DRC consequences have NOT been measured. Those files are deliberately absent from 'paths', so sweeping them in would fail this check rather than ride along.",
+      "paths": [
+        "sky130/versions/*/sky130A/libs.ref/sky130_fd_sc_hd/techlef/*.tlef",
+        "sky130/versions/*/sky130A/libs.ref/sky130_fd_sc_hvl/techlef/*.tlef"
+      ],
+      "expect_modified": 12,
+      "expect_added": 0,
+      "expect_removed": 0
+    }
+  ]
+}

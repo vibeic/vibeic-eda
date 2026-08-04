@@ -1,4 +1,13 @@
 # The Dockerfile builds everything via `git clone` — the build context needs nothing
 # but the Dockerfile itself. Exclude docs/CI so the context stays tiny.
+#
+# ONE EXCEPTION (vibe-ic#768): tools/pdk/ holds the PDK post-install patch the
+# build applies to the prebuilt ciel volume. It cannot come from `git clone` —
+# it patches THIS repo's own shipped artefact — and inlining it in a RUN heredoc
+# would put the logic somewhere no test can import. Excluding everything under
+# tools/ except that one directory keeps the context tiny.
 *
 !Dockerfile
+!tools
+tools/*
+!tools/pdk
