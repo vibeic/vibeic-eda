@@ -562,11 +562,33 @@ RUN mkdir -p /foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi \
         -o "/foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi/$(basename ${m}).osdi" || exit 1; \
     done \
  && test "$(ls /foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi/*.osdi | wc -l)" = 4 \
- && printf 'r1 1 0 1k\nr2 1 0 1k\nv1 1 0 1\n.op\n.end\n' > /tmp/osditest.sp \
- && ngspice -b /tmp/osditest.sp > /tmp/osditest.log 2>&1 \
- && ! grep -qi osdi /tmp/osditest.log \
- && rm -f /tmp/osditest.sp /tmp/osditest.log \
- && echo "ihp-sg13g2: 4 .osdi compiled; ngspice loads the PDK with no OSDI error"
+ && for o in /foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi/*.osdi; do \
+      head -c4 "$o" | grep -q ELF || { echo "FATAL: $o is not an ELF shared object"; exit 1; }; \
+      test "$(stat -c%s "$o")" -gt 50000 || { echo "FATAL: $o is implausibly small"; exit 1; }; \
+    done \
+ && echo "ihp-sg13g2: 4 .osdi compiled, all ELF and non-trivial"
+# WHAT THIS CHECKS, AND WHAT IT DELIBERATELY DOES NOT.
+#
+# It asserts what a BUILD can actually know: four .osdi exist, each is a real ELF
+# shared object, each is non-trivially sized. It does NOT run ngspice here, for
+# two reasons, and the second is the one that matters:
+#
+#   1. `ngspice` is not on PATH at this point. /foss/tools/bin is only added to
+#      ENV PATH much further down, and the /foss/tools/bin/ngspice symlink is
+#      created later still -- the binary lives at /foss/tools/ngspice/bin/ngspice.
+#      My first version called bare `ngspice` here and the build died rc=127
+#      after compiling all four models correctly.
+#   2. Fixing that with an absolute path would have produced a WORSE check. The
+#      assertion was `! grep -qi osdi <ngspice output>`, and ngspice only tries to
+#      load the .osdi because the PDK's .spiceinit tells it to -- which depends on
+#      runtime PDK environment this stage does not have. So it would very likely
+#      have passed by never attempting the load at all: a probe that cannot fail.
+#
+# The end-to-end question -- does ngspice actually load these and simulate a
+# transistor on the default PDK -- is answered where it is real, by
+# fork-gatekeeper/capability_smoke.py's ngspice/default-pdk-transistor probe,
+# which drives the shipped runtime. Build-time asserts what the build can see;
+# the capability gate asserts what the user gets.
 
 # ciel ships as a venv; the base image put it on PATH at /usr/local/bin.
 RUN ln -sf /opt/ciel/bin/ciel /usr/local/bin/ciel
@@ -1098,6 +1120,32 @@ RUN A7T=/foss/pdks/asap7/libs.tech \
 COPY --from=align-build /foss/tools/align /foss/tools/align
 COPY --from=align-build /opt/align-src /opt/align-src
 COPY --from=align-build /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python /foss/tools/bin/
+# Placed HERE, immediately after the COPY and BEFORE `USER 1000`, because
+# /foss/tools/bin is root-owned: the first attempt sat below the USER switch
+# and died `ln: Permission denied`. Same shape as the other two placement
+# mistakes in this change -- the command was right, the layer was not.
+RUN ln -sf /foss/tools/bin/align-schematic2layout /foss/tools/bin/schematic2layout \
+ && /foss/tools/bin/schematic2layout --help > /tmp/s2l.log 2>&1; rc=$?; \
+    test $rc -eq 0 || { echo "FATAL: schematic2layout --help rc=$rc"; tail -3 /tmp/s2l.log; exit 1; }; \
+    grep -q 'usage: schematic2layout' /tmp/s2l.log \
+      || { echo "FATAL: no usage banner"; tail -3 /tmp/s2l.log; exit 1; }; \
+    rm -f /tmp/s2l.log; \
+    echo "ALIGN reachable as bare 'schematic2layout' on a non-login shell"
+# A SYMLINK TO THE WRAPPER THAT ALREADY EXISTS, not a second wrapper.
+#
+# The align-build stage above already authors /foss/tools/bin/align-schematic2layout
+# with the same `env -u PYTHONPATH` insight, and proves it by running a real
+# placement to GDS as uid 1000. The only gap was the NAME: capability_smoke's
+# align/schematic2layout probe does `command -v schematic2layout`, which is what a
+# user types, and that bare name resolved nowhere.
+#
+# My first version wrote a SECOND wrapper here with its own printf. It built and
+# then failed `--help` with rc=2, and the reason is worth recording: the
+# line-continuation backslash inside the printf came through the Dockerfile parser
+# as `\\`, so the emitted script was malformed. Reproducing the same three lines by
+# hand in the shipped image gives rc=0 -- the wrapper logic was never wrong, the
+# ESCAPING through Dockerfile -> sh -> file was. A symlink has no such layer.
+# It also means one wrapper to maintain instead of two that can drift.
 ENV ALIGN_HOME=/foss/tools/align \
     ALIGN_PDK_SKY130=/opt/align-src/ALIGN-pdk-sky130/SKY130_PDK
 # ALIGN configures logging AT IMPORT and writes /foss/designs/LOG/align.log, so
@@ -1234,13 +1282,6 @@ ENV VERILATOR_SOLVER="yices-smt2 --incremental"
 #       (import align: OK)
 # and `schematic2layout` was not on PATH at all -- six venvs ship in this image and
 # only ciel was reachable, via exactly the kind of shim added here.
-RUN printf '%s\n' '#!/bin/sh' \
-      'exec env -u PYTHONPATH /foss/tools/align/bin/python3 \' \
-      '  /foss/tools/align/bin/schematic2layout.py "$@"' \
-    > /foss/tools/bin/schematic2layout \
- && chmod +x /foss/tools/bin/schematic2layout \
- && /foss/tools/bin/schematic2layout --help >/dev/null \
- && echo "ALIGN runs from /foss/tools/bin without a login shell"
 
 # eqy and mcy through the LINK in /foss/tools/bin, which is how anyone invokes
 # them, and in a NON-LOGIN shell, which is what `docker exec` gives. Verifying
