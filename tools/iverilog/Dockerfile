@@ -36,7 +36,7 @@ RUN git clone "${IVERILOG_REPO}" /iverilog \
  && cd /iverilog && git checkout ${IVERILOG_REF} \
  && sh autoconf.sh && ./configure --prefix=/foss/tools/iverilog \
  && make -j"$(nproc)" && make install \
- && { grep -q '^#define HAVE_LIBZ' config.h \
+ && { grep -qE '^# *define HAVE_LIBZ' config.h \
       || { echo "FATAL: iverilog configured WITHOUT zlib -> FST/LXT2 dumping is compiled out"; exit 1; }; }
 # ./configure silently drops FST/LXT/LXT2 when zlib is absent, and the build still
 # succeeds -- which is why this shipped. Measured on 0.2.63: `vvp a.vvp -fst` and
