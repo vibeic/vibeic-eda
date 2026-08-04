@@ -43,6 +43,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       build-essential git autoconf flex bison ca-certificates help2man perl python3 \
       libfl2 libfl-dev zlib1g zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
+# DO NOT "fix" the FST/lz4 defect by adding liblz4-dev to THIS list. It would
+# change nothing and would look like the fix, which is worse than leaving it
+# broken. Two facts make this stage the wrong place:
+#   * verilator's own build never touches lz4 -- configure.ac has zero lz4
+#     references; lz4 appears only in include/verilated.mk.in (LDLIBS += -llz4)
+#     and include/fstcpp/fstcpp_writer.cpp (#include <lz4.h>), both of which are
+#     shipped as SOURCE and compiled in the USER's build.
+#   * this image publishes `FROM scratch` + COPY of /foss/tools/verilator only,
+#     so anything apt installs here never reaches the runtime at all.
+# The header and the -llz4 link both have to exist in the COMPOSITE runtime.
+# That is where the fix lives; see the liblz4-dev entry in ../../Dockerfile.
 RUN git clone "${VERILATOR_REPO}" /verilator \
  && git config --global --add safe.directory /verilator \
  && cd /verilator && git checkout ${VERILATOR_REF} \

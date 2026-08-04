@@ -1,0 +1,22 @@
+# Capabilities that capability_smoke.py measures as BROKEN and that we are
+# knowingly shipping broken, each with the decision that made it acceptable.
+#
+# THIS FILE IS A LIABILITY, NOT A SCOREBOARD.  Two rules keep it from outliving
+# its truth, both enforced by capability_gate.py rather than by discipline:
+#
+#   1. A name here that capability_smoke now reports as WORKS is a STALE WAIVER
+#      and FAILS the gate.  You cannot leave an entry behind after fixing the
+#      thing; the gate makes you delete it.
+#   2. A name here that capability_smoke does not know is a FAIL too, so a typo
+#      cannot silently waive nothing while looking like it waived something.
+#
+# There is deliberately no count and no "expected failures: N".  A number is
+# what lets a second regression hide behind the first.  Waive by NAME or not at
+# all.
+#
+# Format:  <capability-name>  # <why, and who owns the decision>
+
+cocotb/icarus-waves        # vibeic-eda#84 item not yet triaged; no patch proposed by the audit. Owner: team-lead.
+sby/smtbmc-z3              # smtbmc's z3 engine line errors rc=16; image ships yices, not z3. Same root as the verilator solver finding, but sby's engine list is a config decision. Owner: team-lead.
+yosys/vhdl-synth           # ghdl-yosys-plugin is ABI-broken vs the shipped yosys (Dockerfile:419 already says so). Policy call, explicitly deferred: rebuild the plugin vs delete it and document VHDL as simulate-only. Owner: team-lead.
+openroad/python-api        # OpenROAD built without -DBUILD_PYTHON=ON. Deliberate yes/no pending: the vibe-ic flow drives Tcl and no plugin code imports openroad/odb. Owner: team-lead.

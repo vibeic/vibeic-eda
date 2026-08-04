@@ -535,6 +535,39 @@ COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
 COPY --from=img-sv2v /foss/tools/bin/sv2v /foss/tools/bin/sv2v
 COPY --from=img-ciel /opt/ciel /opt/ciel
 COPY --from=img-ihp-open-pdk /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13g2
+
+# COMPILE THE VERILOG-A MODELS THE PDK'S OWN .spiceinit REQUIRES.
+#
+# ihp-sg13g2 is this image's DEFAULT PDK ($PDK=ihp-sg13g2). It ships psp103 /
+# psp103_nqs / r3_cmc / mosvar as Verilog-A SOURCE under libs.tech/verilog-a/,
+# ships a .spiceinit that `osdi`-loads four .osdi binaries, and ships NO .osdi.
+# Nothing compiled them, so libs.tech/ngspice/osdi/ did not exist and EVERY
+# ngspice invocation -- measured on 0.2.63, even a bare two-resistor divider --
+# printed 9 lines of "Error opening osdi lib ...: No such file or directory!
+# Warning: OSDI libs have not been loaded successfully."
+#
+# DELIBERATELY IN THE COMPOSITE, NOT IN tools/ihp-open-pdk/Dockerfile: that tool
+# image's build stage is `FROM ubuntu:24.04` and installs only `git
+# ca-certificates`, so `openvaf` does not exist there and a RUN placed in it fails
+# with command-not-found. openvaf arrives from the BASE image at
+# /foss/tools/bin/openvaf, which is this stage. Building it here also guarantees
+# the .osdi ABI matches the ngspice that actually ships beside it.
+#
+# Verified in the 0.2.63 container before being written here: all four compile
+# with OpenVAF-reloaded 20260616 (748744 / 1098368 / 139656 / 111792 bytes) and
+# the ngspice osdi error count on the same divider goes 9 -> 0.
+RUN mkdir -p /foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi \
+ && for m in psp103/psp103 psp103/psp103_nqs r3_cmc/r3_cmc mosvar/mosvar; do \
+      /foss/tools/bin/openvaf "/foss/pdks/ihp-sg13g2/libs.tech/verilog-a/${m}.va" \
+        -o "/foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi/$(basename ${m}).osdi" || exit 1; \
+    done \
+ && test "$(ls /foss/pdks/ihp-sg13g2/libs.tech/ngspice/osdi/*.osdi | wc -l)" = 4 \
+ && printf 'r1 1 0 1k\nr2 1 0 1k\nv1 1 0 1\n.op\n.end\n' > /tmp/osditest.sp \
+ && ngspice -b /tmp/osditest.sp > /tmp/osditest.log 2>&1 \
+ && ! grep -qi osdi /tmp/osditest.log \
+ && rm -f /tmp/osditest.sp /tmp/osditest.log \
+ && echo "ihp-sg13g2: 4 .osdi compiled; ngspice loads the PDK with no OSDI error"
+
 # ciel ships as a venv; the base image put it on PATH at /usr/local/bin.
 RUN ln -sf /opt/ciel/bin/ciel /usr/local/bin/ciel
 # #60 — the open_pdks statement is a CLAIM about what shipped, so check it. A
@@ -828,10 +861,27 @@ COPY --from=tb-src /tb /opt/vibeic-forks
 # plugin -- exactly the gap between "the file is there" and "the capability is
 # there" that the build-time assertion in tools/xyce/Dockerfile was added for.
 # That assertion checks the builder EXISTS; nothing checked it WORKS.
+#
+# liblz4-dev is the SAME SHAPE as the -lmpi_cxx case above, which is why it is in
+# the same list. verilator ships its FST writer as SOURCE
+# (share/verilator/include/fstcpp/fstcpp_writer.cpp, `#include <lz4.h>`) plus
+# `LDLIBS += -llz4` in verilated.mk, and both are consumed by the USER's g++ in
+# THIS image -- never at image-build time, which is why every build-time check
+# passed on an image where FST tracing could not compile.
+# Measured on 0.2.63: /usr/lib/x86_64-linux-gnu/liblz4.so.1 present, but
+# /usr/include/lz4.h absent and no `liblz4.so` link name, so
+#   verilator --binary --timing --trace-fst  -> rc=2
+#     fstcpp_writer.cpp:18:10: fatal error: lz4.h: No such file or directory
+# while --trace-vcd on the identical design returns 0 (the control).
+# The -dev package supplies both the header and the .so link name `-llz4` needs.
+# It deliberately does NOT go in tools/verilator/Dockerfile: that image publishes
+# `FROM scratch` + /foss/tools/verilator only, so nothing apt installs there ever
+# reaches this runtime. See the note in that file.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
       libxcb-cursor0 \
       libopenmpi-dev \
+      liblz4-dev \
  && rm -rf /var/lib/apt/lists/* \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
@@ -1146,6 +1196,51 @@ ENV PATH=/headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/foss/tools/kactus
 # Login shells still prepend the full list via profile.d; this is the additive
 # entry that makes `docker exec` work.
 ENV PYTHONPATH=/foss/tools/yosys/share/yosys/python3
+
+# VERILATOR_SOLVER -- constrained randomize() had no solver, and said so only in a
+# warning nobody's exit code reads.
+#
+# verilator's ./configure probes z3/cvc5/cvc4 and bakes the winner into the binary
+# as DEFENV_VERILATOR_SOLVER. This image ships NONE of those three; it ships
+# yices-smt2, which configure does not probe. So the compiled-in default was EMPTY
+# and the runtime fell back to `z3 --in`, which does not exist here. The image
+# already HAD a working solver -- it was simply never named.
+#
+# Measured on 0.2.63 with `class C; rand bit[7:0] x; constraint {x>100; x<110;}`,
+# reading the VALUE and not the exit code:
+#   as shipped                  -> 5 of 5 samples VIOLATE (ret=0, x=0)
+#   VERILATOR_SOLVER=this line  -> 0 of 5 VIOLATE (ret=1, x=101/102/103)
+# CONTROL: an UNCONSTRAINED rand bit[7:0] returns ret=1 with varied values
+# (12,157,154) identically in both, so the harness is sound and only the
+# constrained path was dead.
+#
+# `--incremental` is load-bearing, also measured: bare `yices-smt2` fails EVERY
+# call with "assertions are not allowed after (check-sat) in non-incremental
+# mode" -- verilator drives the solver incrementally over stdin.
+ENV VERILATOR_SOLVER="yices-smt2 --incremental"
+
+# ALIGN LAUNCHER -- the image-wide PYTHONPATH above defeats the venv it lives in.
+#
+# ALIGN is installed in its own venv at /foss/tools/align with
+# include-system-site-packages=false and its own correctly-pinned pydantic 1.10.26
+# (ALIGN's setup.py asks for >=1.9.2,<2.0). But PYTHONPATH is placed on sys.path
+# AHEAD of a venv's own site-packages, so the venv resolved the SYSTEM pydantic
+# 2.12.5 and ALIGN died on import. The venv is correct; the environment overrode it.
+#
+# Measured on 0.2.63:
+#   /foss/tools/align/bin/python3 -c 'import pydantic' -> 2.12.5 from
+#       /usr/local/lib/python3.12/dist-packages   (import align: TypeError on __root__)
+#   env -u PYTHONPATH  same interpreter           -> 1.10.26 from the venv
+#       (import align: OK)
+# and `schematic2layout` was not on PATH at all -- six venvs ship in this image and
+# only ciel was reachable, via exactly the kind of shim added here.
+RUN printf '%s\n' '#!/bin/sh' \
+      'exec env -u PYTHONPATH /foss/tools/align/bin/python3 \' \
+      '  /foss/tools/align/bin/schematic2layout.py "$@"' \
+    > /foss/tools/bin/schematic2layout \
+ && chmod +x /foss/tools/bin/schematic2layout \
+ && /foss/tools/bin/schematic2layout --help >/dev/null \
+ && echo "ALIGN runs from /foss/tools/bin without a login shell"
 
 # eqy and mcy through the LINK in /foss/tools/bin, which is how anyone invokes
 # them, and in a NON-LOGIN shell, which is what `docker exec` gives. Verifying

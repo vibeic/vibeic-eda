@@ -114,6 +114,15 @@ _tool_smoke() {
         magic)           echo "magic --version || command -v magic" ;;
         netgen)          echo "command -v netgen" ;;
         iverilog)        echo "iverilog -V >/dev/null" ;;
+        # verilator is NOT `verilator --version`, deliberately. vibeic-eda#87: a
+        # version banner passes on an image where --trace-fst, --sc and constrained
+        # randomize() are all dead -- measured, that was 0.2.63. This drives the real
+        # entry point end to end (verilate -> g++ -> run -> SMT solver) and asserts a
+        # VALUE: the design prints VLSMOKE_OK only when randomize() returns a number
+        # that actually satisfies `x>100 && x<110`. Verified to DISCRIMINATE: rc=1 on
+        # 0.2.63 as shipped, rc=0 on the same image once VERILATOR_SOLVER is set.
+        # The SystemVerilog is base64 so no quoting of it can survive into this chain.
+        verilator)       echo "cd /tmp && echo 'Y2xhc3MgQzsgcmFuZCBiaXQgWzc6MF0geDsgY29uc3RyYWludCBjMSB7IHggPiAxMDA7IHggPCAxMTA7IH0gZW5kY2xhc3MKbW9kdWxlIHQ7CiAgaW5pdGlhbCBiZWdpbgogICAgQyBjID0gbmV3OwogICAgaWYgKGMucmFuZG9taXplKCkgJiYgYy54ID4gMTAwICYmIGMueCA8IDExMCkgJGRpc3BsYXkoIlZMU01PS0VfT0sgeD0lMGQiLCBjLngpOwogICAgZWxzZSAkZGlzcGxheSgiVkxTTU9LRV9CQUQgeD0lMGQiLCBjLngpOwogICAgJGZpbmlzaDsKICBlbmQKZW5kbW9kdWxlCg==' | base64 -d > vsm.sv && verilator --binary --timing -Wno-fatal --Mdir /tmp/vsmd vsm.sv -o vsm >/dev/null 2>&1 && /tmp/vsmd/vsm 2>/dev/null | grep -q VLSMOKE_OK" ;;
         ngspice)         echo "ngspice --version >/dev/null 2>&1 || command -v ngspice" ;;
         sby)             echo "sby --help >/dev/null 2>&1 || command -v sby" ;;
         cocotb)          echo "python3 -c 'import cocotb'" ;;
@@ -350,11 +359,44 @@ if [ "${CLEAN_COUNT}" -gt 0 ]; then
         for tool in "${!CLEAN_SHA[@]}"; do SMOKE="${SMOKE} && { $(_tool_smoke "$tool") ; }"; done
         SMOKE="${SMOKE} && echo SMOKE_OK"
         if docker run --rm --entrypoint bash "${IMG}" -lc "${SMOKE}" >/tmp/gksmoke 2>&1; then
-            for tool in "${!CLEAN_SHA[@]}"; do
-                RESULTS="$(emit "$tool" "built_green" "image ${IMG} built + smoke-passed" "${CLEAN_SHA[$tool]}")"
-            done
-            if [ "${GK_MODE}" = "promote" ]; then
-                promote_all || echo "[promote] not completed — candidates stay DEFERRED (verified green, not shipped)"
+            # CAPABILITY GATE (vibeic-eda#84/#87) — BLOCKING, and it must run before
+            # promote_all, not after and not merely printed.
+            #
+            # Everything above this line asks whether a binary STARTS. On 0.2.63 all
+            # twelve of those probes passed while nine capabilities were measurably
+            # dead: --trace-fst rc=2, constrained randomize() returning values that
+            # violate the constraint, iverilog writing an ASCII VCD named .fst, the
+            # DEFAULT PDK unable to simulate a transistor. A release that ships that
+            # is a release this script called green.
+            #
+            # capability_gate drives each capability's REAL entry point and asserts a
+            # VALUE; it blocks on BROKEN *and* on INCONCLUSIVE (a probe whose control
+            # is also red proves nothing, and "we could not tell" must not promote);
+            # and it fails on a STALE waiver, so fixing something forces the waiver
+            # line to be deleted rather than left behind as folklore.
+            CAPLOG="/tmp/gk-capability-${STAMP}.log"
+            # Capture the status into a variable on the SAME line, before any other
+            # command can overwrite $?. Writing `else CAP_OK=0; CAP_RC=$?` reads the
+            # ASSIGNMENT's status (always 0), which is the same family of mistake as
+            # reading an exit code through a pipe — the one capability_smoke's own
+            # docstring rule 4 exists for, and which its first draft shipped.
+            python3 "$(dirname "${BASH_SOURCE[0]}")/capability_gate.py" "${IMG}" \
+                   --json "/tmp/gk-capability-${STAMP}.json" >"${CAPLOG}" 2>&1; CAP_RC=$?
+            tail -25 "${CAPLOG}" || true
+            if [ "${CAP_RC}" -ne 0 ]; then
+                # rc=2 means the image could not be probed at all. That is NOT a pass:
+                # measuring nothing proves nothing, so it blocks exactly like rc=1.
+                for tool in "${!CLEAN_SHA[@]}"; do
+                    RESULTS="$(emit "$tool" "built_red" "capability gate FAILED rc=${CAP_RC} (see ${CAPLOG}): $(grep -m1 -A1 'BLOCKING' "${CAPLOG}" | tail -1 | tr -d '\n')" "")"
+                done
+                echo "[capability] BLOCKED rc=${CAP_RC} — a capability the image advertises does not run; nothing promoted"
+            else
+                for tool in "${!CLEAN_SHA[@]}"; do
+                    RESULTS="$(emit "$tool" "built_green" "image ${IMG} built + smoke-passed + capability-gate green" "${CLEAN_SHA[$tool]}")"
+                done
+                if [ "${GK_MODE}" = "promote" ]; then
+                    promote_all || echo "[promote] not completed — candidates stay DEFERRED (verified green, not shipped)"
+                fi
             fi
         else
             for tool in "${!CLEAN_SHA[@]}"; do RESULTS="$(emit "$tool" "built_red" "smoke regression failed: $(tail -1 /tmp/gksmoke)" "")"; done

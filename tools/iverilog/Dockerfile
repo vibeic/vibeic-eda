@@ -29,12 +29,24 @@ ARG IVERILOG_REPO=https://github.com/vibeic/iverilog.git
 ARG IVERILOG_REF=26933e004e8315a67d291515c11a76857445ea3f
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf gperf flex bison ca-certificates \
+      zlib1g zlib1g-dev libbz2-dev \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone "${IVERILOG_REPO}" /iverilog \
  && git config --global --add safe.directory /iverilog \
  && cd /iverilog && git checkout ${IVERILOG_REF} \
  && sh autoconf.sh && ./configure --prefix=/foss/tools/iverilog \
- && make -j"$(nproc)" && make install
+ && make -j"$(nproc)" && make install \
+ && { grep -q '^#define HAVE_LIBZ' config.h \
+      || { echo "FATAL: iverilog configured WITHOUT zlib -> FST/LXT2 dumping is compiled out"; exit 1; }; }
+# ./configure silently drops FST/LXT/LXT2 when zlib is absent, and the build still
+# succeeds -- which is why this shipped. Measured on 0.2.63: `vvp a.vvp -fst` and
+# `-lxt2` both exit 1 with "FST support disabled since zlib not available".
+# The SILENT case is worse: $dumpfile("out.fst") with no runtime flag exits 0 and
+# writes 453 bytes of ASCII *VCD* under the .fst name, and fst2vcd then fails 255
+# on it. Same design with $dumpfile("out.vcd") yields a valid VCD, so the dumper
+# is fine and only the format support is gone. The `grep HAVE_LIBZ` turns that
+# silent downgrade into a build failure. tools/verilator/Dockerfile already
+# carried zlib1g-dev in the very same apt idiom -- the omission was accidental.
 
 # ---------------------------------------------------------------------------
 # Stage 6 — vibeic/klayout (streamout MANUFACTURINGGRID snap + merge-abutting + foundry
