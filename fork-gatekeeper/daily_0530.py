@@ -106,7 +106,21 @@ def step1_upstream(g, main, rep):
     if not out(*g, "remote", "get-url", "upstream"):
         rep["upstream"] = "no upstream remote"
         return
-    sh(*g, "fetch", "upstream", "--quiet")
+    # The fetch's exit status decides whether the comparison below means anything.
+    # Discarding it turns "we could not reach upstream" into "we are up to date":
+    # rev-list then measures against whatever ref this clone last managed to fetch,
+    # and a stale ref reports behind == 0. Measured 2026-08-04: one fork sat 12
+    # commits behind for a full day while the round logged "already current" each
+    # morning. Its clone had a failed gc 88 minutes before the round (gc.log:
+    # "There are too many unreachable loose objects"), 7019 unreachable objects,
+    # and the fetch in that state did not update the ref. Nothing noticed, because
+    # nothing was looking.
+    fr = sh(*g, "fetch", "upstream", "--quiet")
+    if fr.returncode != 0:
+        detail = (fr.stderr or fr.stdout or "").strip().splitlines()
+        rep["upstream"] = ("FETCH FAILED (rc=%d) — upstream state is UNKNOWN, not current: %s"
+                           % (fr.returncode, detail[-1][:160] if detail else "no error text"))
+        return
     ub = (out(*g, "rev-parse", "--verify", "-q", "upstream/main")
           or out(*g, "rev-parse", "--verify", "-q", "upstream/master"))
     if not ub:
