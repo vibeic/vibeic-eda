@@ -73,10 +73,12 @@ Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
 from __future__ import annotations
 import argparse, json, os, re, subprocess, sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gk_state
+import round_record
 
 # Overridable so the AI-handoff path can be exercised against a synthetic fork.
 # The step it guards only fires on a real merge conflict, and a conflict that
@@ -163,6 +165,44 @@ def mainline(g):
     return None
 
 
+def image_pins(eda_root=None):
+    """`{lowercased tool name: pinned sha}` for every fork an image Dockerfile
+    pins, or `{}` when they could not be read.
+
+    Retained per round (vibeic-eda#85) because "what did the round decide" is
+    only half a record — WHICH COMMIT the shipping image was pinned at that
+    morning is what makes a past row actionable, and it is the one field that
+    cannot be recovered later from the fork clone alone.
+
+    Read through `discover_forks.parse_dockerfile_pins`, which is the module
+    that already owns this grammar; a second parser here is how two programs
+    come to disagree about the same four pins. Import failure is not fatal —
+    the pin field goes null and the round continues, because retention must
+    never be the reason a morning does not run.
+
+    `eda_root` defaults to `None`, not to `EDA`: a default bound at def time
+    freezes the module global as it was AT IMPORT, so every other reader of
+    `EDA` in this file could be redirected and this one alone could not. That
+    asymmetry is invisible until something depends on it.
+    """
+    try:
+        import discover_forks                                # noqa: PLC0415
+        eda_root = Path(eda_root if eda_root is not None else EDA)
+        files = list((Path(eda_root) / "tools").glob("*/Dockerfile"))
+        if (Path(eda_root) / "Dockerfile").is_file():
+            files.append(Path(eda_root) / "Dockerfile")
+        pins = {}
+        for f in files:
+            for tool, rec in discover_forks.parse_dockerfile_pins(
+                    f.read_text(errors="replace")).items():
+                ref = rec.get("ref") if isinstance(rec, dict) else rec
+                if ref:
+                    pins[str(tool).lower()] = ref
+        return pins
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
 # ── A COMPARISON IS ONLY AS GOOD AS THE REF IT IS MADE AGAINST ───────────────
 #
 # Every question this round asks about a fork — "are we behind upstream", "which
@@ -215,7 +255,14 @@ def _fetch(g, remote, *extra):
 
 
 def _remote_confirms(g, remote, branch, local_sha):
-    """Does `remote` itself report `branch` at `local_sha`? Returns `(ok, why)`.
+    """Does `remote` itself report `branch` at `local_sha`?
+
+    Returns `(ok, why, remote_sha)`. `remote_sha` is None when the remote could
+    not be asked, and is RETURNED rather than only compared because it is the
+    round's own independent observation of upstream's tip. Answering "was this
+    fork really current that morning?" from the retained record needs that
+    number in the record; without it the record can only repeat the round's
+    conclusion, which is the thing being checked (vibeic-eda#85).
 
     Asked ONLY when the fetch exited 0 and moved nothing — the single case in
     which "the remote had nothing new" and "the fetch did not refresh the ref"
@@ -229,7 +276,7 @@ def _remote_confirms(g, remote, branch, local_sha):
             f"UNVERIFIED — the fetch of {remote} exited 0 and moved nothing, and "
             f"{remote} could not then be asked to confirm {branch} is current "
             f"(ls-remote rc={r.returncode}: {_first_error_line(r)}). "
-            f"UNKNOWN, not current.")
+            f"UNKNOWN, not current."), None
     remote_sha = r.stdout.split()[0]
     if remote_sha != local_sha:
         return False, (
@@ -238,14 +285,28 @@ def _remote_confirms(g, remote, branch, local_sha):
             f"while this clone holds {local_sha[:12]}. Either the fetch did not "
             f"refresh the ref or the remote moved between the two calls; both "
             f"mean a comparison made here is not against {remote}'s current "
-            f"tip. UNKNOWN, not current.")
-    return True, ""
+            f"tip. UNKNOWN, not current."), remote_sha
+    return True, "", remote_sha
 
 
 def step1_upstream(g, main, rep):
-    """Upstream -> master. FIRST, so branch merges land on the final base."""
+    """Upstream -> master. FIRST, so branch merges land on the final base.
+
+    Writes `rep["upstream_evidence"]` alongside `rep["upstream"]`. The prose
+    verdict says what the round CONCLUDED; the evidence block says what it
+    OBSERVED, so a later reader can check the one against the other instead of
+    taking it. That distinction is the whole of vibeic-eda#85: the retained
+    record of a round that said `already current` has to carry enough for
+    someone to tell a fork that WAS current from a fork the round could not
+    measure, and a verdict string alone never could.
+    """
+    ev = {"ref": None, "tip_before_fetch": None, "tip_seen": None,
+          "fetch": None, "confirmed_by": None, "remote_tip": None,
+          "behind": None}
+    rep["upstream_evidence"] = ev
     if not out(*g, "remote", "get-url", "upstream"):
         rep["upstream"] = "no upstream remote"
+        ev["fetch"] = "no_upstream_remote"
         return
     # Snapshot BOTH candidate names before the fetch: which one this clone
     # tracks is not known until after, and on a first-ever fetch neither exists.
@@ -256,21 +317,36 @@ def step1_upstream(g, main, rep):
     ok, why = _fetch(g, "upstream")
     if not ok:
         rep["upstream"] = why
+        ev["fetch"] = "no_answer" if "no answer" in why else "failed"
         return
+    ev["fetch"] = "ok"
     ref = ("upstream/main" if out(*g, "rev-parse", "--verify", "-q", "upstream/main")
            else "upstream/master")
     ub = out(*g, "rev-parse", "--verify", "-q", ref)
+    ev["ref"] = ref
+    ev["tip_before_fetch"] = pre.get(ref) or None
+    ev["tip_seen"] = ub or None
     if not ub:
         rep["upstream"] = "no upstream branch"
         return
-    if ub == pre.get(ref):
+    if ub != pre.get(ref):
+        # The ref MOVED. That is proof the fetch reached the remote, and it is
+        # recorded as such — the confirmation is as strong as the ls-remote one
+        # below, and a record that left it blank here would make every ordinary
+        # merge morning look unverified.
+        ev["confirmed_by"] = "fetch_moved_ref"
+    else:
         # The fetch changed nothing. Legitimate the great majority of mornings —
         # and indistinguishable, locally, from a fetch that refreshed nothing.
-        ok, why = _remote_confirms(g, "upstream", ref.split("/", 1)[1], ub)
+        ok, why, remote_sha = _remote_confirms(
+            g, "upstream", ref.split("/", 1)[1], ub)
+        ev["remote_tip"] = remote_sha
         if not ok:
             rep["upstream"] = why
             return
+        ev["confirmed_by"] = "ls_remote"
     behind = out(*g, "rev-list", "--count", f"{main}..{ub}")
+    ev["behind"] = int(behind) if behind.isdigit() else None
     if behind == "0":
         rep["upstream"] = "already current"
         return
@@ -776,6 +852,8 @@ def main_(argv=None) -> int:
         print("daily_0530: no forks root", file=sys.stderr)
         return 2
 
+    started_at = datetime.now().astimezone()
+    pins = image_pins()
     report, needs_human = {}, False
     for d in sorted(FORKS.iterdir()):
         if not (d / ".git").is_dir():
@@ -783,13 +861,15 @@ def main_(argv=None) -> int:
         g = ["git", "-C", str(d)]
         main = mainline(g)
         if not main:
-            report[d.name] = {"error": "no main/master"}
+            report[d.name] = {"error": "no main/master", "pin": pins.get(d.name.lower())}
             continue
         if out(*g, "status", "--porcelain", "-uno", "--ignore-submodules=all"):
-            report[d.name] = {"error": "dirty worktree — skipped, nothing discarded"}
+            report[d.name] = {"error": "dirty worktree — skipped, nothing discarded",
+                              "pin": pins.get(d.name.lower())}
             needs_human = True
             continue
-        rep = {"main": main, "needs_human": False}
+        rep = {"main": main, "needs_human": False,
+               "pin": pins.get(d.name.lower())}
         if args.apply:
             sh(*g, "checkout", "-q", main)
             step1_upstream(g, main, rep)
@@ -882,8 +962,33 @@ def main_(argv=None) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
 
+    # RETAIN THE ROUND (vibeic-eda#85). The `--json` write above is a SINGLE
+    # path that every morning overwrites, so the only record of what a round
+    # decided was the record of the most recent one. This keeps a dated copy
+    # beside it and appends the narrow per-fork rows that answer "has this ever
+    # fired" to an append-only index. Best-effort by construction: retention
+    # that could take the round down would be a worse defect than the one it
+    # closes, so `round_record.write` returns its errors and they are printed,
+    # never raised.
+    report["_round"] = {"started_at": started_at.isoformat(),
+                        "finished_at": datetime.now().astimezone().isoformat(),
+                        "applied": bool(args.apply)}
+    _ret = round_record.write(report, gk_state.state_dir(), when=started_at)
+    if _ret.get("error"):
+        print(f"  round record NOT retained: {_ret['error']}", file=sys.stderr)
+    else:
+        print(f"  round retained: {_ret['stamp']}  "
+              f"{_ret.get('rows', 0)} fork row(s)"
+              + (f", pruned {len(_ret['pruned'])} expired"
+                 if _ret.get("pruned") else ""))
+
     for name, r in sorted(report.items()):
-        if name == "_ai_decisions":
+        # `_`-prefixed keys are ROUND-level, not forks — the same convention
+        # `round_record._fork_rows` reads by. This used to name `_ai_decisions`
+        # alone, so `_round` (added just above) would have been walked as if it
+        # were a fork clone. It prints nothing today only because none of the
+        # keys below happen to be in it.
+        if name.startswith("_"):
             continue
         if r.get("error"):
             print(f"  {name:<20} ⚠️ {r['error']}")

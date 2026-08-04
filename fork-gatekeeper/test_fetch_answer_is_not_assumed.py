@@ -259,3 +259,163 @@ def test_a_hung_fetch_is_unknown_not_current(fleet, monkeypatch):
     D.step1_upstream(fleet["g"], "master", rep)
     assert "UNKNOWN" in rep["upstream"], rep
     assert "no answer" in rep["upstream"], rep
+
+
+# ── 6. the verdict is kept, and so is the OBSERVATION it was made from ───────
+#
+# vibeic-eda#85. Everything above pins what the round CONCLUDES. None of it is
+# retained past the next morning, so "did this fire in the field?" was answered
+# for #82 from GitHub's Events API and a reflog rather than from any record of
+# ours. `rep["upstream_evidence"]` is the round's own observation, written
+# beside its verdict so a retained row can be checked instead of taken.
+#
+# `confirmed_by` is the load-bearing field. A row saying `already current` with
+# `confirmed_by: null` is "the round could not tell", published as a round that
+# could — which is exactly the rendering-of-unknowns this file exists to remove.
+# Recording only the verdict string would rebuild the defect one layer up.
+def _evidence(rep):
+    """The block, or a message that says the round published a verdict without
+    recording what it saw — an assertion about BEHAVIOUR rather than a KeyError
+    about a name."""
+    ev = rep.get("upstream_evidence")
+    assert isinstance(ev, dict), (
+        "the round published a verdict with no record of the observation it "
+        f"was made from: {rep}")
+    return ev
+
+
+def test_the_evidence_block_has_exactly_the_fields_a_reader_needs(fleet):
+    """Pinned as literals. The set is the contract a retained row is read by;
+    deriving it from the module under test would assert only that the module
+    equals itself."""
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    assert set(_evidence(rep)) == {
+        "ref", "tip_before_fetch", "tip_seen", "fetch", "confirmed_by",
+        "remote_tip", "behind"}
+
+
+def test_a_ref_that_moved_is_confirmed_by_the_fetch_itself(fleet):
+    """The ordinary merge morning. The ref MOVING is proof the fetch reached the
+    remote — as strong as the ls-remote below — and a record that left this
+    blank would make every normal morning read as unverified."""
+    for n in ("b", "c", "d"):
+        _commit(fleet["up"], n)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert rep["upstream"] == "merged 3 upstream commit(s)", rep
+    assert ev["fetch"] == "ok"
+    assert ev["confirmed_by"] == "fetch_moved_ref", ev
+    assert ev["behind"] == 3, ev
+    assert ev["tip_seen"] != ev["tip_before_fetch"], ev
+
+
+def test_a_ref_that_did_not_move_is_confirmed_by_the_remote_it_asked(fleet):
+    """The quiet morning, and the one #82 was about. The round DID make an
+    independent observation of upstream's tip; `remote_tip` is that number, and
+    without it in the record a later reader can only re-read the conclusion."""
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert rep["upstream"] == "already current", rep
+    assert ev["confirmed_by"] == "ls_remote", ev
+    assert ev["remote_tip"] == ev["tip_seen"], ev
+    assert len(ev["remote_tip"] or "") == 40, ev
+
+
+def test_no_upstream_remote_is_recorded_as_unconfirmed(fleet):
+    _run("git", "-C", str(fleet["clone"]), "remote", "remove", "upstream")
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert rep["upstream"] == "no upstream remote", rep
+    assert ev["fetch"] == "no_upstream_remote", ev
+    assert ev["confirmed_by"] is None, ev
+
+
+def test_a_failed_fetch_is_recorded_as_unconfirmed(fleet):
+    for n in ("b", "c"):
+        _commit(fleet["up"], n)
+    _break_remote(fleet["clone"], "upstream", fleet["tmp"])
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert ev["fetch"] == "failed", ev
+    assert ev["confirmed_by"] is None, ev
+    assert ev["behind"] is None, ev            # never 0: it was not measured
+
+
+def test_a_hung_fetch_is_recorded_as_unconfirmed(fleet, monkeypatch):
+    """rc written as the literal 124 for the reason given at
+    `test_a_hung_fetch_is_unknown_not_current`."""
+    real = D.sh
+
+    def _fetch_hangs(*a, **k):
+        if "fetch" in a:
+            return subprocess.CompletedProcess(a, 124, "",
+                                               "no answer: timed out after 1800s")
+        return real(*a, **k)
+    monkeypatch.setattr(D, "sh", _fetch_hangs)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert ev["fetch"] == "no_answer", ev
+    assert ev["confirmed_by"] is None, ev
+
+
+def test_an_rc_zero_fetch_over_a_stale_ref_is_recorded_as_unconfirmed(fleet,
+                                                                      monkeypatch):
+    """THE #82 SHAPE. rc 0, ref unmoved, and upstream really has moved. The
+    verdict is already UNKNOWN; what is added here is that the RECORD of it
+    cannot be mistaken for the quiet morning above."""
+    for n in ("b", "c", "d"):
+        _commit(fleet["up"], n)
+    real = D.sh
+
+    def _fetch_is_a_silent_noop(*a, **k):
+        if "fetch" in a:
+            return subprocess.CompletedProcess(a, 0, "", "")
+        return real(*a, **k)
+    monkeypatch.setattr(D, "sh", _fetch_is_a_silent_noop)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert ev["fetch"] == "ok", ev             # the fetch itself said nothing wrong
+    assert ev["confirmed_by"] is None, ev      # and it still did not confirm
+    assert ev["remote_tip"] != ev["tip_seen"], ev
+    assert ev["behind"] is None, ev
+
+
+def test_a_remote_that_cannot_be_asked_is_recorded_as_unconfirmed(fleet, monkeypatch):
+    real = D.sh
+
+    def _ls_remote_is_dead(*a, **k):
+        if "ls-remote" in a:
+            return subprocess.CompletedProcess(a, 128, "", "fatal: unreachable")
+        return real(*a, **k)
+    monkeypatch.setattr(D, "sh", _ls_remote_is_dead)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert ev["confirmed_by"] is None, ev
+    assert ev["remote_tip"] is None, ev        # it could not be asked, so no number
+
+
+def test_a_working_fetch_with_no_upstream_branch_is_recorded_as_unconfirmed(fleet):
+    """`fetch: ok` is NOT the confirmation. Here the fetch works perfectly and
+    there is still nothing to compare against, because the remote's mainline is
+    called neither `main` nor `master`."""
+    other = fleet["tmp"] / "trunk-only"
+    other.mkdir()
+    _run("git", "init", "-q", "-b", "trunk", str(other))
+    _commit(other, "a")
+    _run("git", "-C", str(fleet["clone"]), "remote", "set-url", "upstream", str(other))
+    _run("git", "-C", str(fleet["clone"]), "update-ref", "-d",
+         "refs/remotes/upstream/master")
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert rep["upstream"] == "no upstream branch", rep
+    assert ev["fetch"] == "ok", ev
+    assert ev["confirmed_by"] is None, ev

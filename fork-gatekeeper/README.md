@@ -90,6 +90,7 @@ green. Wired via `regression.json`.
 | `GK_EDA_CLONE` | `/home/reyerchu/vibeic-eda` | this repo's working checkout |
 | `GK_MODE` | `verify` | `verify` (staged) or `promote` (push on green) |
 | `GK_RESULT` | `<host>/last_build_result.json` | last tick's result |
+| `GK_ROUND_KEEP_DAYS` | `400` | how long a FULL retained round report is kept. The narrow per-round index is never pruned — see below |
 
 ## Deployment
 
@@ -149,3 +150,39 @@ real conflict is not tested by a morning that had none). Measured: the merge
 landed on master naming the choice it made, our fix won the conflict, the source
 branch was untouched, no branch was deleted, and when the push failed the turn
 reported it rather than inventing a remote or forcing.
+
+### "Has this ever fired?" — the retained round record (`round_record.py`)
+
+`daily_0530.json` was written to ONE path and overwritten every morning, so the
+only record of what a round decided was the record of what the **most recent**
+round decided. Answering that question for #82 instead cost a reconstruction
+from GitHub's Events API (~300 events/repo, so the busiest forks were already
+down to a ~1-day window) and each clone's reflog (expires; a `git gc` can take
+it) — and 14 of 36 forks were not measurable that way at all (#85).
+
+Every round now also writes, under `$GK_STATE_DIR/rounds/`:
+
+* `<stamp>/daily_0530.json` — the full report, kept `GK_ROUND_KEEP_DAYS` days;
+* `index.jsonl` — one line per (round, fork), append-only and **never pruned**.
+  A bounded store cannot answer "has this ever fired" beyond its bound, which
+  is the failure being fixed. Measured 436 bytes/row over the real 36 forks:
+  5.7 MB/year, 57 MB/decade.
+
+A row carries the round's **observations**, not just its verdict — in
+particular `confirmed_by` (`fetch_moved_ref` | `ls_remote` | `null`). A row
+claiming `already current` with `confirmed_by: null` is a round that could not
+tell, published as a round that could, and it is one `grep` away:
+
+```
+round_record.py --fired [--on YYYY-MM-DD]   # 0 none, 1 found, 2 no record kept
+round_record.py --coverage                  # what window the record covers
+```
+
+Exit code 2 is not a spare: a window the record does not cover must not print
+the same answer as a window it covers and found nothing in. Retention begins at
+the first round after this landed; earlier mornings are **NO RECORD KEPT**,
+which the first line of the index says in as many words.
+
+Retention is best-effort by construction — `round_record.write` returns its
+errors instead of raising, because retention that could take a round down would
+be a worse defect than the one it closes.
