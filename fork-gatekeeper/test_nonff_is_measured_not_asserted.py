@@ -74,6 +74,18 @@ def test_measured_against_the_real_clone_if_present():
                 "one this test proves nothing")
     ahead = _git(clone, "rev-list", "--count", "origin/master..master").stdout.strip()
     behind = _git(clone, "rev-list", "--count", "master..origin/master").stdout.strip()
-    assert int(ahead) > 0 and int(behind) > 0, (
-        f"expected an ordinary two-way divergence, got {ahead} ahead / "
-        f"{behind} behind")
+    assert ahead.isdigit() and behind.isdigit(), (
+        f"ahead/behind are not measurable here: {ahead!r} / {behind!r}")
+    # THE PREMISE, NOT A PARTICULAR STATE. This required `ahead > 0 and behind >
+    # 0` — the exact 12-ahead / 3-behind the issue was raised on. That is a LIVE
+    # clone: the divergence was later resolved (our RCX message-id fix was pushed,
+    # taking it to 0/0) and the test began failing because the situation had been
+    # FIXED. A fixture that reports its own repair as a regression gets ignored,
+    # and this one had been red long enough to be filed as a mystery.
+    #
+    # What the issue is about survives any of those states: a merge-base EXISTS,
+    # so the fixed string "share no ancestor ... retrying will not resolve it"
+    # was false about this clone whatever the counts are. That is asserted above
+    # and is what must not regress.
+    assert int(ahead) or int(behind) or mb, (
+        "with no divergence and no merge-base there is nothing here to measure")

@@ -343,7 +343,25 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
 # this report is permanently rc=1 for a reason nobody is acting on, and a report
 # that is always red is one people route around — which would hide the condition
 # below on the day it first becomes true.
-_UNPINNED_BASELINE = frozenset({"open_pdks", "ciel", "sv2v", "IHP-Open-PDK"})
+#
+# EMPTY AS OF 2026-08-04 — the debt is paid, not waived. All four now carry a
+# real pin, verified in the Dockerfiles rather than taken from this report's own
+# "baseline shrank" note:
+#
+#     ARG OPEN_PDKS_REF=b344c97e...      ARG CIEL_REF=714d1bbb...
+#     ARG SV2V_REF=6662fa5d...           ARG IHP_OPEN_PDK_REF=22f2a25f...
+#
+# The report had been telling us this and exiting 1 for it, which is the design
+# working; what it could not do was update itself. Left non-empty, the shrink
+# note fires on every run forever and the report is permanently red — the exact
+# condition this comment warns about two paragraphs up.
+#
+# The MECHANISM is not deleted along with the contents. Its tests now build a
+# synthetic baseline instead of reading this set, because tests that draw their
+# fixture from the live register stop testing anything the moment the register
+# empties — the debt being paid would silently remove the guard that catches the
+# next unpinned fork.
+_UNPINNED_BASELINE: frozenset = frozenset()
 
 # ── the contradiction, which NO baseline excuses ─────────────────────────────
 #

@@ -134,19 +134,35 @@ def test_each_historical_reference_is_excused_at_the_right_level():
             "input, and editing it to add a marker breaks the release record")
 
 
-def test_the_root_Dockerfile_is_byte_identical_to_the_released_build():
+def test_no_bookkeeping_marker_was_written_into_the_root_Dockerfile():
     """THE REGRESSION THIS FILE CAUSED, pinned so it cannot recur. A bookkeeping
-    edit to an image input is not a bookkeeping edit."""
-    import subprocess as _sp
-    import hashlib as _h
+    edit to an image input is not a bookkeeping edit.
+
+    IT ASSERTS THE RULE, NOT A SNAPSHOT. This froze `sha256(Dockerfile)` against
+    a hardcoded commit, `83b8eff`. That holds only until the Dockerfile changes
+    for a REAL reason — a pin advance, or the provenance collector added for #77
+    (127 -> 111 layers) — which is to say, until the next release. It had been
+    failing for exactly that reason, and a red test is a test nobody reads.
+
+    The rule it means is narrower than "this file must never change": do not
+    excuse the Dockerfile from the drift-net by writing a marker INTO it, because
+    the file is an image input and the edit changes what ships. The correct
+    excuse is the PATH-level entry in `.image-version-ignore`, which the test
+    above already requires. So the invariant is: that marker must not appear
+    here.
+
+    Reproducibility is a different question and already has an owner —
+    `check_release_recorded` compares the tree's fingerprint against
+    RELEASED.json, which is where a moved input legitimately shows up (as
+    PINS_AHEAD or as UNREPRODUCIBLE). Nothing is lost by dropping the snapshot;
+    a frozen byte-comparison was answering that question by proxy, and stopped.
+    """
     p = _ROOT / "Dockerfile"
     if not p.is_file():
         return
-    r = _sp.run(["git", "-C", str(_ROOT), "show", "83b8eff:Dockerfile"],
-                capture_output=True, timeout=30)
-    if r.returncode != 0:
-        return
-    assert _h.sha256(p.read_bytes()).hexdigest() == \
-        _h.sha256(r.stdout).hexdigest(), (
-            "the root Dockerfile has moved since the build the release record "
-            "describes — RELEASED.json will stop reproducing")
+    text = p.read_text(encoding="utf-8", errors="replace")
+    assert S.HISTORY_LINE_MARK not in text, (
+        f"the root Dockerfile carries the {S.HISTORY_LINE_MARK!r} marker. That "
+        f"is a bookkeeping edit to an image input: it changes what the build "
+        f"consumes so RELEASED.json stops reproducing. Excuse it at PATH level "
+        f"in .image-version-ignore instead — the entry is already there.")

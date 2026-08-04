@@ -51,7 +51,7 @@ _FIELDS = dict(integrated=False, ahead=0, image_behind=None, sync_lag=None,
                note="", pin_disagreement=None)
 
 
-def _run(rows, monkeypatch):
+def _run(rows, monkeypatch, baseline=None):
     rep = {
         "q1_image_behind_upstream": 0, "q1_forks_behind": 0, "q1_sync_lag": 0,
         "q1_release_lag": 0, "q1_unmeasured": [], "q2_unmeasured_ship": [],
@@ -62,6 +62,8 @@ def _run(rows, monkeypatch):
         "q2_ours_past_the_pin": 0, "q2_ours_past_the_pin_substantive": 0,
         "q2_unshipped_commits": [], "rows": rows,
     }
+    monkeypatch.setattr(F, "_UNPINNED_BASELINE",
+                        _SYNTHETIC_BASELINE if baseline is None else baseline)
     monkeypatch.setattr(F, "analyse", lambda *a, **k: rep)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -69,8 +71,17 @@ def _run(rows, monkeypatch):
     return rc, buf.getvalue()
 
 
+#: A SYNTHETIC baseline. These tests used to build their rows from the live
+#: `F._UNPINNED_BASELINE`, so the day that register emptied — the day the debt was
+#: PAID — `_baseline_rows()` returned [] and the mechanism tests became vacuous or
+#: raised IndexError. Paying off debt must not delete the guard that catches the
+#: next case. The mechanism is what is under test here; the live contents are
+#: pinned separately, once, below.
+_SYNTHETIC_BASELINE = frozenset({"tool_a", "tool_b", "tool_c"})
+
+
 def _baseline_rows():
-    return [dict(_FIELDS, tool=t) for t in sorted(F._UNPINNED_BASELINE)]
+    return [dict(_FIELDS, tool=t) for t in sorted(_SYNTHETIC_BASELINE)]
 
 
 # ── the standing state is not a finding ───────────────────────────────────
@@ -81,9 +92,16 @@ def test_the_recorded_four_with_no_patches_are_not_a_finding(monkeypatch):
     assert rc == 0
 
 
-def test_the_baseline_is_exactly_the_four_the_issue_names():
-    assert F._UNPINNED_BASELINE == frozenset(
-        {"open_pdks", "ciel", "sv2v", "IHP-Open-PDK"})
+def test_the_baseline_is_empty_because_all_four_are_now_pinned():
+    """The register MAY ONLY SHRINK, and it has shrunk to nothing.
+
+    open_pdks, ciel, sv2v and IHP-Open-PDK each carry a real `ARG <TOOL>_REF`
+    now. Asserted here so re-adding a name is a deliberate, visible act rather
+    than a quiet re-accrual — a debt register that can grow again silently is
+    a waiver list."""
+    assert F._UNPINNED_BASELINE == frozenset(), (
+        f"the unpinned baseline gained entries: {sorted(F._UNPINNED_BASELINE)}. "
+        f"A fork that is not built from is a finding, not a new baseline row.")
 
 
 # ── the contradiction, which no baseline excuses ──────────────────────────
@@ -123,10 +141,33 @@ def test_a_SHRUNK_baseline_is_reported_and_passes(monkeypatch):
     assert rc == 0 and "baseline shrank" in out
 
 
-def test_the_repo_as_committed_passes():
-    """The regression: whatever the real state is, it must be the recorded one."""
+def test_the_repo_as_committed_has_no_RECORDING_inconsistency():
+    """The regression: whatever the real state is, it must be the recorded one.
+
+    ASSERTS THE DOCSTRING, NOT rc==0. This required exit 0, and the report's
+    final line is `rc 0 iff q1_image_behind_upstream == 0`. Being behind upstream
+    is the ORDINARY state between releases, so exit 0 means "green only in the
+    instant after a release that took every upstream commit" — and it is not
+    reachable at all while open_pdks is deliberately not advanced (vibeic-eda#79
+    — that ARG is an assertion about a prebuilt volume, not a pin, so "behind" is
+    not a question it can answer). The test asserted a condition the repo cannot
+    satisfy by design, and had been red long enough to be filed as a mystery.
+
+    What "recorded == real" actually means here is the three INCONSISTENCY
+    conditions, each of which is a genuine defect rather than a passage of time:
+
+        CANNOT SHIP        a fork carries a patch with no pin to ship it through
+        newly not built    a fork stopped being built from, unrecorded
+        baseline shrank    the register lists forks that are now pinned
+
+    Ordinary lag is reported by the run and is not one of them.
+    """
     import subprocess
     r = subprocess.run([sys.executable, str(_HERE / "fork_gap_report.py"),
                         "--no-fetch"], capture_output=True, text=True,
                        timeout=180, cwd=str(_HERE.parent))
-    assert r.returncode == 0, (r.stdout + r.stderr)[-600:]
+    out = r.stdout + r.stderr
+    assert r.returncode != 2, f"the report could not measure:\n{out[-600:]}"
+    for marker in ("CANNOT SHIP", "newly not built", "baseline shrank"):
+        assert marker not in out, (
+            f"recorded state disagrees with real state — {marker!r}:\n{out[-800:]}")
