@@ -517,8 +517,17 @@ function enhBlock(tool){
   // case that produced this defect cannot recur unseen.
   const kindUnrecorded = gapRows.filter(d=>!("pin_kind" in d)
                                         && (d.behind_commits||0) > 0);
-  const behindKnown   = gapRows.filter(d=>typeof d.behind_commits === "number");
-  const behindUnknown = gapRows.length - behindKnown.length;
+  // A CONTENTS ASSERTION is not a pin. Nothing clones at it, the build refuses if the
+  // shipped artefact disagrees, and advancing it rebuilds nothing — so its distance from
+  // upstream is not a gap and must not be summed into one. discover_forks already
+  // classifies this and records `pin_kind` on the row; this page simply never read it,
+  // and reported 18 commits of "lag" that no merge could close. Two advancement
+  // proposals were raised and refused on that number before anyone noticed
+  // (vibeic-eda#79, #81).
+  const assertionRows = gapRows.filter(d=>d.pin_kind === "contents_assertion");
+  const gapCandidates = gapRows.filter(d=>d.pin_kind !== "contents_assertion");
+  const behindKnown   = gapCandidates.filter(d=>typeof d.behind_commits === "number");
+  const behindUnknown = gapCandidates.length - behindKnown.length;
   const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
   // Kept for rendering, never summed into the number above: a row that vanishes is a
