@@ -2488,7 +2488,68 @@ def _local_compare(tool: str, up_full: str, up_branch: str, head: str):
                  "commit": {"message": mf[2] if len(mf) == 3 else "",
                             "author": {"date": mf[1] if len(mf) == 3 else ""}}}
     return {"merge_base_commit": mb_commit, "ahead_by": ahead, "behind_by": behind,
-            "commits": commits}
+            "commits": commits,
+            # THE UPSTREAM REFERENCE THIS ROW WAS MEASURED AGAINST, returned so the
+            # lag split below can use the SAME one. `behind_by` is counted against
+            # the live `ls-remote` head; the clone's `upstream/<branch>` may be an
+            # older commit. Splitting one number against a different reference than
+            # it was measured against is how two halves stop adding up to their own
+            # whole, and the reader has no way to tell which half moved.
+            "up_sha": up_sha}
+
+
+def lag_split(clone, pin: str, tip: str, up_ref: str) -> dict:
+    """The TWO HALVES of `behind_commits`, which need OPPOSITE fixes.
+
+        SYNC LAG     tip -> upstream    our fork trails upstream   -> merge upstream in
+        RELEASE LAG  pin -> tip         the image's pin trails us  -> bump the pin, rebuild
+
+    `fork_gap_report` has treated these as two numbers since its second docstring
+    paragraph. The LEDGER carried only the combined `behind_commits`, so the page
+    could not show the split even in principle - the data was not there to render.
+    That is why this lives here and not in the page's JavaScript: a partition
+    computed in the browser would be a second implementation of a rule this file
+    already owns, and the browser has no clone to count in.
+
+    MEASURED 2026-08-04, and it is not a presentation nicety. slang was
+    `sync 0 . release 1`: its fork was EXACTLY LEVEL with upstream, and the page
+    said "behind upstream by 1 commit". That reads as "go merge upstream", and
+    merging upstream into slang would have changed nothing at all - the one action
+    that closes it is advancing `SLANG_REF` and rebuilding, which the page did not
+    mention because it could not distinguish the two cases.
+
+    NOT DERIVED FROM `behind_commits`, and not from each other. Each is its own
+    `rev-list --count`, because `behind == sync + release` is NOT an identity: when
+    our line has merged upstream commits between the pin and the tip, those commits
+    are inside `pin..tip` AND inside upstream, so the sum double-counts them.
+    `split_exact` RECORDS whether the decomposition came out exact on this row
+    instead of asserting that it must - an invariant that is true for six of
+    today's seven lagging forks and false in general is exactly the kind that gets
+    written into a check and then fires at 05:30 on a morning nobody is watching.
+
+    Every field is None (never 0) when it cannot be answered. A missing pin, a
+    missing tip, an unresolvable upstream ref and a failed `rev-list` are all "we
+    did not measure", and the whole campaign this file belongs to exists because
+    that was once rendered as the reassuring answer.
+    """
+    out = {"sync_lag": None, "release_lag": None, "split_exact": None}
+    if clone is None or not up_ref:
+        return out
+
+    def _count(a: str, b: str):
+        if not a or not b:
+            return None
+        r = _git(clone, "rev-list", "--count", f"{a}..{b}", timeout=60)
+        if r.rc != 0 or not (r.out or "").strip().isdigit():
+            return None
+        return int(r.out.strip())
+
+    out["sync_lag"] = _count(tip, up_ref)
+    out["release_lag"] = _count(pin, tip)
+    behind = _count(pin, up_ref)
+    if None not in (out["sync_lag"], out["release_lag"], behind):
+        out["split_exact"] = (out["sync_lag"] + out["release_lag"] == behind)
+    return out
 
 
 def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
@@ -2697,6 +2758,15 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                     _tip = _c
                     break
         led["ours_unshipped_measured_against"] = _tip
+        # THE SPLIT, carried on the row so the page can render it. Measured against
+        # `cmp["up_sha"]` - the same upstream commit `behind_commits` was counted
+        # against - falling back to the clone's remote-tracking ref only when the
+        # compare route that answered did not name one.
+        _up_ref = cmp.get("up_sha") or (f"upstream/{up_branch}" if up_branch else None)
+        _ls = lag_split(_cl, _pinref, _tip, _up_ref)
+        led["sync_lag"] = _ls["sync_lag"]
+        led["release_lag"] = _ls["release_lag"]
+        led["lag_split_exact"] = _ls["split_exact"]
         if _cl is not None and _pinref and up_branch and _tip:
             _r = _git(_cl, "rev-list", f"{_pinref}..{_tip}", "--not",
                       f"upstream/{up_branch}")

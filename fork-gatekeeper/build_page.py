@@ -521,6 +521,44 @@ function enhBlock(tool){
   const behindUnknown = gapRows.length - behindKnown.length;
   const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
+  // ONE NUMBER FOR TWO CONDITIONS WITH OPPOSITE FIXES was this card's remaining
+  // defect after the contents-assertion one. `behind_commits` is pin->upstream,
+  // which is SYNC LAG plus RELEASE LAG:
+  //
+  //     SYNC LAG     our fork trails upstream    -> merge upstream in
+  //     RELEASE LAG  the image's pin trails us   -> bump the pin, rebuild
+  //
+  // MEASURED 2026-08-04: slang was `sync 0 · release 1`. Its fork was EXACTLY
+  // LEVEL with upstream, and this card said "behind upstream by 1 commit" — which
+  // reads as "go merge upstream", and merging would have changed nothing. The one
+  // action that closes it, advancing `SLANG_REF` and rebuilding, was not on the
+  // page. A number that sends the reader at the wrong lever is worse than no
+  // number, because they act on it.
+  //
+  // READ FROM THE LEDGER, NOT PARTITIONED HERE. `discover_forks.lag_split` counts
+  // both halves in the clone, against the same upstream commit `behind_commits`
+  // was counted against. The browser has no clone; any split computed here would
+  // be a guess dressed as a measurement, and a second implementation of a rule
+  // `discover_forks` already owns (#29 is what two copies of one rule cost).
+  //
+  // SUMMED OVER THE ROWS THAT CARRY THEM, and counted separately when they do not:
+  // a ledger written before these fields existed has no split, and rendering that
+  // as `sync 0 · release 0` beside a non-zero gap would invent a clean answer for
+  // a question never asked.
+  const splitKnown    = behindKnown.filter(d=>typeof d.sync_lag === "number"
+                                           && typeof d.release_lag === "number");
+  const splitUnknown  = behindKnown.filter(d=>(d.behind_commits||0)>0
+                                           && !(typeof d.sync_lag === "number"
+                                             && typeof d.release_lag === "number")).length;
+  const syncLag       = splitKnown.reduce((a,d)=>a+(d.sync_lag||0),0);
+  const releaseLag    = splitKnown.reduce((a,d)=>a+(d.release_lag||0),0);
+  // Named, because they are the rows whose FIX the page cannot yet state. A fork
+  // that is behind only by release lag looks identical, in the combined number, to
+  // one that needs an upstream merge.
+  const releaseOnly   = splitKnown.filter(d=>(d.release_lag||0)>0 && !(d.sync_lag||0))
+                                  .map(d=>d.tool||d.repo||"?");
+  const syncOnly      = splitKnown.filter(d=>(d.sync_lag||0)>0 && !(d.release_lag||0))
+                                  .map(d=>d.tool||d.repo||"?");
   // Kept for rendering, never summed into the number above: a row that vanishes is a
   // row nobody can audit, and WHICH upstream commit the shipped artefact carries is
   // the whole reason its ARG exists.
@@ -625,11 +663,20 @@ function enhBlock(tool){
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
     // will act on it, and two proposals already did. The assertion clause appears
     // only when there is one, and it names the block further down that carries them.
-    [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``),
-     {en:`Commits behind upstream (${forksBehind} fork(s); +N? = could not be measured`
-         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``) + `)`,
-      zh:`落後上游的 commit 數（${forksBehind} 個 fork；+N? = 量不到，不等於零`
-         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``) + `）`}],
+    [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``)
+       + (splitKnown.length ? ` (sync ${syncLag} · release ${releaseLag})` : ``),
+     {en:`Commits behind upstream — sync ${syncLag} (fork trails upstream: merge upstream in) · release ${releaseLag} (image pin trails our fork: bump the pin, rebuild)`
+         + ` — ${forksBehind} fork(s); +N? = could not be measured`
+         + (releaseOnly.length ? `; RELEASE-ONLY, merging upstream would change nothing: ${esc(releaseOnly.join(", "))}` : ``)
+         + (syncOnly.length ? `; sync-only: ${esc(syncOnly.join(", "))}` : ``)
+         + (splitUnknown ? `; ${splitUnknown} fork(s) have a gap with NO recorded split — re-run discovery` : ``)
+         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``),
+      zh:`落後上游的 commit 數 — sync ${syncLag}（fork 落後上游：把上游 merge 進來）· release ${releaseLag}（image 的 pin 落後我們的 fork：bump pin 重建）`
+         + ` —— ${forksBehind} 個 fork；+N? = 量不到，不等於零`
+         + (releaseOnly.length ? `；純 RELEASE 落後，merge 上游不會有任何改變：${esc(releaseOnly.join(", "))}` : ``)
+         + (syncOnly.length ? `；純 sync 落後：${esc(syncOnly.join(", "))}` : ``)
+         + (splitUnknown ? `；有 ${splitUnknown} 個 fork 有缺口但沒有記錄拆分 —— 請重跑 discovery` : ``)
+         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``)}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is
