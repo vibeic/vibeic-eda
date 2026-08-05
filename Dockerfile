@@ -30,7 +30,7 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:b64a496-cdce0f
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:600df90-124fd6
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:2ae1ec0-160226
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:1b70fc1-622112
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:0da4c3b-0334b7d-46a666
