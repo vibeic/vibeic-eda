@@ -49,7 +49,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 RC_OK, RC_LOST, RC_NOTHING = 0, 1, 2
 
@@ -127,8 +127,35 @@ def command_names(image: str, prefixes: List[str]) -> List[str]:
                    if ln.strip() and not ln.startswith("[INFO]")})
 
 
-def unresolvable(image: str, names: List[str]) -> List[str]:
+def unresolvable(image: str, names: List[str]) -> Optional[List[str]]:
     """Names that do NOT resolve in `image`, under a LOGIN shell.
+
+    RETURNS None WHEN THE IMAGE COULD NOT BE PROBED AT ALL, and that distinction
+    is the whole reason this signature is not simply `List[str]`.
+
+    Measured 2026-08-05, while wiring vibeic-eda#88:
+
+        $ python3 check_no_capability_lost.py vibeic-nonexistent-image:doesnotexist
+        check_no_capability_lost: 78 command(s) ...; 0 no longer resolve in ...
+        [PASS] nothing the base provided under those prefixes was lost
+        $ echo $?
+        0
+
+    An image that does not exist reported a clean bill of health. `docker run`
+    failed, its exit status was discarded, `out` was empty, and an empty output
+    means "every name resolved" to a reader that only looks at the text. The
+    probe breaking and the answer being good produce the IDENTICAL result, and
+    the identical result is the reassuring one.
+
+    That mattered more than a cosmetic bug: #88 asked for this check to become
+    blocking in the tick, and a blocking gate whose dominant failure mode is a
+    silent PASS is exactly the "blocking-looking check that silently is not one"
+    the issue exists to remove. Making the call site fail-closed while the
+    program itself cannot fail would have moved the defect rather than fixed it.
+
+    The script is a `;`-joined chain ending in `command -v N || echo N`, which
+    exits 0 whichever branch runs — so a non-zero status here is the container
+    failing to start or bash failing to run, never a name that was absent.
 
     Login on BOTH sides, deliberately. My first version listed the base's files
     with `bash -lc` and then probed ours with `sh -c` — two different questions —
@@ -144,8 +171,13 @@ def unresolvable(image: str, names: List[str]) -> List[str]:
     """
     script = "; ".join(f'command -v {n} >/dev/null 2>&1 || echo {n}'
                        for n in names)
-    rc, out, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
-                      "-lc", script])
+    rc, out, err = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
+                        "-lc", script])
+    if rc != 0:
+        print(f"[probe] docker run on {image} exited {rc}: "
+              f"{(err or out).strip().splitlines()[-1][:200] if (err or out).strip() else 'no output'}",
+              file=sys.stderr)
+        return None
     return sorted({ln.strip() for ln in out.splitlines()
                    if ln.strip() and not ln.startswith("[INFO]")})
 
@@ -176,6 +208,24 @@ def main(argv=None) -> int:
         return RC_NOTHING
 
     lost = unresolvable(a.image, names)
+    if lost is None:
+        # WRITE THE JSON ANYWAY. Returning before the write leaves YESTERDAY's
+        # file in place, and a consumer reading a stale `"lost": []` sees a pass
+        # that nothing produced today — the same substitution of an old answer
+        # for a missing one that this branch exists to refuse.
+        if a.json:
+            Path(a.json).parent.mkdir(parents=True, exist_ok=True)
+            Path(a.json).write_text(json.dumps(
+                {"program": "check_no_capability_lost", "base": base,
+                 "image": a.image, "prefixes": prefixes,
+                 "commands": len(names), "lost": None,
+                 "error": f"could not probe {a.image}"}, indent=2) + "\n",
+                encoding="utf-8")
+        print(f"[NOT CHECKED] could not probe {a.image} — {len(names)} command(s) "
+              f"were listed from the base and NONE of them were compared. This is "
+              f"not a pass.", file=sys.stderr)
+        return RC_NOTHING
+
     print(f"check_no_capability_lost: {len(names)} command(s) the base provides "
           f"under {len(prefixes)} replaced prefix(es); {len(lost)} no longer "
           f"resolve in {a.image}")

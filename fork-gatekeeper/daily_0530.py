@@ -79,6 +79,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gk_state
 import round_record
+# ONE mechanism, both mergers (vibeic-eda#89). This module and `daily_merge.py`
+# are two automatic paths from upstream onto a published branch, and this is the
+# one the 05:30 wrapper runs FIRST. Wiring the post-merge checks into only the
+# other one would have produced a gate that is correct, tested, and absent from
+# the path that actually merges every morning — the defect the issue is about.
+from daily_merge import post_merge_checks, run_post_merge_checks
 
 # Overridable so the AI-handoff path can be exercised against a synthetic fork.
 # The step it guards only fires on a real merge conflict, and a conflict that
@@ -874,12 +880,43 @@ def main_(argv=None) -> int:
             sh(*g, "checkout", "-q", main)
             step1_upstream(g, main, rep)
             step2_ours(g, main, rep)
+
+            # POST-MERGE CHECKS (vibeic-eda#89), BEFORE the push.
+            #
+            # Both merges above can succeed with ZERO conflicting files and still
+            # produce a tree that must not ship. Measured on one OpenROAD warning
+            # three times in six days — 515->519, 519->524, 524->527 — each time
+            # a logger message id upstream had grown into, each time a textually
+            # clean merge, each time found afterwards by a person.
+            #
+            # HONEST ABOUT WHAT IS AND IS NOT UNDONE: unlike `daily_merge`, which
+            # merges in a throwaway worktree, this program merges into the shared
+            # checkout's own mainline. Refusing here leaves the REMOTE at its
+            # previous tip — nothing is published — but the LOCAL branch keeps the
+            # merge commit. That is deliberate: `reset --hard` on a shared
+            # checkout to tidy up after a failed check would risk discarding work
+            # this program did not create, and this repo's rule is that refusing
+            # is cheap and discarding is not. The report says so, so the next
+            # reader is not surprised by a local branch that is ahead.
+            checks = run_post_merge_checks(d, post_merge_checks(d.name))
+            failing = [c for c in checks if not c["ok"]]
+            if checks:
+                rep["post_merge_check"] = checks
+            adopt = None if failing else same_content_divergence(g, main)
+            if failing:
+                rep["push"] = (
+                    "BLOCKED by post-merge check: "
+                    + "; ".join(f"{c['name']} rc={c['rc']}: {c['detail']}"
+                                for c in failing)[:300]
+                    + f" — NOT pushed; origin/{main} stays at its previous tip, "
+                      f"the local {main} holds the unpublished merge")
+                rep["needs_human"] = True
+                needs_human = True
             # EQUAL TREES, DIFFERENT SHAS -> adopt the remote, do not push
             # (vibeic-eda#61). Checked BEFORE the push, because the push would
             # be rejected and that rejection is indistinguishable from a lost
             # race once it has happened.
-            adopt = same_content_divergence(g, main)
-            if adopt:
+            elif adopt:
                 # Re-prove losslessness immediately before acting: `reset --hard`
                 # on a tree that is no longer equal would discard content.
                 if out(*g, "rev-parse", f"{main}^{{tree}}") == \

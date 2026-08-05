@@ -33,6 +33,48 @@ resolves it, and the report says so rather than reporting success.
 It also never force-pushes, never touches a build branch it did not
 fast-forward, and never runs in the shared checkout's working tree.
 
+POST-MERGE CHECKS (vibeic-eda#89)
+=================================
+A CLEAN MERGE IS NOT A CORRECT MERGE. `git merge` refuses only on TEXTUAL
+conflict — two sides editing the same lines. A whole class of breakage arrives
+with no conflict at all, because the two sides edit different files and only
+disagree about something no diff can see.
+
+Measured, on one warning, three times in six days:
+
+  515 -> 519   2f9fbcd47e   upstream took RCX 515 in multiChipExtractor.cpp
+  519 -> 524   5bb6ca31ee   upstream took RCX 519 in OpenRCX.tcl
+  524 -> 527   724a389026   upstream took RCX 524 in ext.i
+
+Every one of those is our resistance-clamp warning in `extmain_v2.cpp` landing
+on a logger message id upstream had grown into. Every one merged with ZERO
+conflicting files, so git took it silently, and every one was found afterwards
+by hand. Upstream is growing the RCX id range from below; this is a recurring
+generator, not three incidents.
+
+So a fork may DECLARE, in `FORKS.json`, commands that must pass on the merged
+tree before it is published:
+
+    { "tool": "OpenROAD", "upstream": "...",
+      "post_merge_check": [
+        { "name": "dup-logger-ids",
+          "path": "etc/find_messages.py",
+          "cmd": ["python3", "etc/find_messages.py", "-d", "src"],
+          "why": "..." } ] }
+
+They run in the merge worktree, AFTER the merge succeeds and BEFORE the push.
+A non-zero exit is recorded as `POST_MERGE_CHECK_FAILED`, nothing is pushed, and
+the fork is left at its previous tip — the same outcome a textual conflict gets,
+because it is the same situation: an automatic merge this program is not
+entitled to publish.
+
+Three things that are deliberately NOT passes:
+  * a declared check whose `path` is absent from the merged tree,
+  * a check that could not be executed (timeout, OSError),
+  * an entry that is malformed.
+Each is a merge this program could not verify, and an unverified merge is not a
+verified one. They fail exactly like a check that ran and found something.
+
 Exit: 0 every fork current or already current, 1 at least one needs a human,
       2 nothing was attempted (which is not success).
 """
@@ -125,6 +167,78 @@ def _declared_upstreams() -> Dict[str, str]:
 
 def _declared_upstream(repo: str) -> str:
     return _declared_upstreams().get(repo, "")
+
+
+#: How long one post-merge check may take before it is reported as unrunnable.
+#: A check that hangs is not a check that passed.
+POST_MERGE_CHECK_TIMEOUT = int(os.environ.get("GK_POST_MERGE_TIMEOUT", "1800"))
+
+
+def _forks_json(path: Optional[Path] = None) -> dict:
+    f = path or (Path(__file__).resolve().parent / "FORKS.json")
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def post_merge_checks(repo: str, forks_json: Optional[Path] = None) -> List[dict]:
+    """The checks `repo` declares in FORKS.json, or [] if it declares none.
+
+    NO declaration is a real, allowed answer: most of these 36 sources have no
+    invariant a merge can silently break, and inventing a default check for them
+    would be noise. What is NOT allowed is a declaration that is present and
+    unreadable — that is handled where the checks run, not by dropping it here.
+    """
+    for entry in _forks_json(forks_json).get("forks", []):
+        if entry.get("tool") == repo:
+            decl = entry.get("post_merge_check") or []
+            return decl if isinstance(decl, list) else [{"_malformed": decl}]
+    return []
+
+
+def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
+    """Run each declared check in the merged worktree. Returns one row per check.
+
+    A row is {name, ok, rc, detail}. `ok` False means DO NOT PUBLISH — and it is
+    False for every way of not getting a clean answer, not only for a check that
+    ran and found something. The three that bit this fleet elsewhere:
+
+      * the script is not in the tree (upstream moved or deleted it) — that is a
+        check nobody ran, and "MISSING is not a pass" is this repo's oldest rule;
+      * the process could not be started or timed out — measuring nothing proves
+        nothing, the same reasoning `capability_gate` uses for its rc=2;
+      * the declaration is malformed — a typo in FORKS.json must not read as
+        "this fork declares no checks", because that is silently identical to
+        deleting the gate.
+    """
+    rows: List[dict] = []
+    for chk in checks:
+        name = str(chk.get("name") or chk.get("path") or "unnamed")
+        cmd = chk.get("cmd")
+        rel = chk.get("path")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd) \
+                or not isinstance(rel, str) or not rel:
+            rows.append({"name": name, "ok": False, "rc": -1,
+                         "detail": "MALFORMED declaration in FORKS.json — needs a "
+                                   "string `path` and a non-empty list-of-strings "
+                                   "`cmd`; a check that cannot be read is not a "
+                                   "check that passed"})
+            continue
+        target = wt / rel
+        if not target.exists():
+            rows.append({"name": name, "ok": False, "rc": -1,
+                         "detail": f"MISSING: {rel} is not in the merged tree — "
+                                   f"nothing was checked, which is not a clean result"})
+            continue
+        rc, out, err = _sh(cmd, wt, timeout=POST_MERGE_CHECK_TIMEOUT)
+        # 127 is this module's own "could not run it at all" (see `_sh`), and it
+        # is not distinguishable from a program that genuinely exits 127. Both
+        # block, so the ambiguity costs nothing; the detail says which we saw.
+        tail = (err.strip() or out.strip()).splitlines()
+        rows.append({"name": name, "ok": rc == 0, "rc": rc,
+                     "detail": " | ".join(tail[-4:])[:400] if rc != 0 else "clean"})
+    return rows
 
 
 def build_branches(eda_root: Path) -> Dict[str, str]:
@@ -227,11 +341,18 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
     return sorted(hits, key=durable)[0]
 
 
-def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
-    """Merge upstream's default branch into `branch`, in an isolated worktree."""
+def merge_one(repo: str, branch: str, dry: bool = False,
+              checks: Optional[List[dict]] = None) -> dict:
+    """Merge upstream's default branch into `branch`, in an isolated worktree.
+
+    `checks` are the post-merge checks to run on the merged tree before pushing;
+    None means "look up what this fork declares in FORKS.json".
+    """
     src = FORKS_ROOT / repo
+    if checks is None:
+        checks = post_merge_checks(repo)
     res = {"repo": repo, "branch": branch, "state": "?", "detail": "",
-           "conflicts": [], "took": 0}
+           "conflicts": [], "checks": [], "took": 0}
     if not (src / ".git").exists() and not (src / "HEAD").exists():
         # A fork with no local checkout is not a fork with nothing to merge.
         # Newly-created mirrors land here on their first tick; clone rather than
@@ -365,7 +486,9 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
             res.update(state="ALREADY_CURRENT", detail=f"level with upstream/{up}")
             return res
         if dry:
-            res.update(state="WOULD_MERGE", detail=f"{behind} commit(s) behind upstream/{up}")
+            res.update(state="WOULD_MERGE",
+                       detail=f"{behind} commit(s) behind upstream/{up}; "
+                              f"{len(checks)} post-merge check(s) declared")
             return res
 
         rc, _, err = _sh(["git", "-c", "user.name=vibeic-fork-gatekeeper",
@@ -390,6 +513,24 @@ def merge_one(repo: str, branch: str, dry: bool = False) -> dict:
         rc, out, _ = _sh(["git", "rev-list", "--count",
                           f"upstream/{up}..HEAD"], wt)
         ours = int(out.strip() or 0) if rc == 0 else -1
+
+        # POST-MERGE CHECKS (vibeic-eda#89) — BEFORE the push, deliberately.
+        #
+        # Running them after would mean the broken merge is already on the build
+        # branch and the report is an obituary. Running them here makes a failing
+        # check produce exactly the outcome a textual conflict produces: nothing
+        # published, fork left at its previous tip, named in the report, and the
+        # program exits 1 so the tick that calls it cannot report a clean day.
+        res["checks"] = run_post_merge_checks(wt, checks)
+        failed = [c for c in res["checks"] if not c["ok"]]
+        if failed:
+            res.update(state="POST_MERGE_CHECK_FAILED",
+                       detail=f"{len(failed)} of {len(res['checks'])} post-merge "
+                              f"check(s) failed on the merged tree; NOT pushed, "
+                              f"fork left at its previous tip — "
+                              + "; ".join(f"{c['name']} rc={c['rc']}: {c['detail']}"
+                                          for c in failed)[:400])
+            return res
 
         rc, _, err = _sh(["git", "push", "origin", f"HEAD:{branch}"], wt, timeout=1800)
         if rc != 0:
@@ -433,18 +574,40 @@ def main(argv=None) -> int:
               "nothing was attempted, which is not success", file=sys.stderr)
         return RC_NOTHING
 
+    # A declaration attached to a tool this run never merges is a gate that
+    # cannot fire, and it looks exactly like a gate that passed. FORKS.json's
+    # `tool` is a free-text key: one typo and the check is silently off. Say so.
+    # (`--only` narrows the run on purpose, so it is not a finding there.)
+    declared_for = {e.get("tool") for e in _forks_json().get("forks", [])
+                    if e.get("post_merge_check")}
+    orphaned = sorted(t for t in declared_for if t and t not in branches)
+    if orphaned and not a.only:
+        print(f"[warn] FORKS.json declares post_merge_check for "
+              f"{', '.join(orphaned)}, which this run does not merge — those "
+              f"checks cannot fire, which is not the same as passing",
+              file=sys.stderr)
+
     results = [merge_one(r, b, a.dry_run) for r, b in sorted(branches.items())]
     merged = [r for r in results if r["state"] == "MERGED"]
     human = [r for r in results if r["state"] not in ("MERGED", "ALREADY_CURRENT",
                                                       "WOULD_MERGE")]
 
+    blocked = [r for r in results if r["state"] == "POST_MERGE_CHECK_FAILED"]
+
     print(f"daily_merge: {len(results)} fork(s), {len(merged)} merged, "
           f"{sum(r['took'] for r in merged)} upstream commit(s) taken, "
-          f"{len(human)} need a human")
+          f"{len(human)} need a human"
+          + (f", {len(blocked)} blocked by a post-merge check" if blocked else ""))
     for r in results:
         print(f"  {r['repo']:<14} {r['state']:<22} {r['detail'][:80]}")
         for c in r["conflicts"][:10]:
             print(f"      conflict: {c}")
+        # Print the checks that RAN as well as the ones that failed. A gate is
+        # only believable if its green is visible too: "0 failures" out of zero
+        # checks executed is the state this whole issue is about.
+        for c in r.get("checks", []):
+            print(f"      check {'ok  ' if c['ok'] else 'FAIL'} "
+                  f"{c['name']}: {c['detail'][:120]}")
 
     if a.json:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
@@ -453,8 +616,16 @@ def main(argv=None) -> int:
             encoding="utf-8")
 
     if human:
-        print(f"[NEEDS HUMAN] {len(human)} fork(s) did not merge cleanly; each is "
+        print(f"[NEEDS HUMAN] {len(human)} fork(s) were not published; each is "
               f"left at its previous tip", file=sys.stderr)
+        if blocked:
+            # Named separately because the two failures need different actions.
+            # A conflict is "git could not merge this"; a post-merge check is
+            # "git merged it and the result is wrong" — a clean merge that must
+            # not ship, which is the harder one to believe without being told.
+            print(f"[POST-MERGE CHECK] {', '.join(r['repo'] for r in blocked)} "
+                  f"merged with NO textual conflict and still failed a declared "
+                  f"check on the merged tree (vibeic-eda#89)", file=sys.stderr)
         return RC_NEEDS_HUMAN
     return RC_OK
 

@@ -117,7 +117,16 @@
     {
       "tool": "OpenROAD",
       "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop",
-      "upstream": "The-OpenROAD-Project/OpenROAD"
+      "upstream": "The-OpenROAD-Project/OpenROAD",
+      "post_merge_check": [
+        {
+          "name": "dup-logger-ids",
+          "path": "etc/find_messages.py",
+          "cmd": ["python3", "etc/find_messages.py", "-d", "src"],
+          "why": "Our resistance-clamp warning in src/rcx/src/extmain_v2.cpp has been renumbered THREE times in six days because upstream grew a logger message id underneath it: 515->519 (2f9fbcd47e), 519->524 (5bb6ca31ee), 524->527 (724a389026). Every one of those merges was TEXTUALLY CLEAN — the two call sites are in different files — so git took it silently and a person found it afterwards. This is the detector that sees it, and until 2026-08-05 nothing ran it at merge time (vibeic-eda#89).",
+          "note": "etc/find_dup_ids.sh is the BAZEL wrapper around exactly this command and cannot run from a plain checkout: outside bazel it resolves find_messages.py to $(dirname $0)/_main/etc/find_messages.py — measured, `bash etc/find_dup_ids.sh` from the repo root exits 1 with 'Cannot find find_messages.py at .../etc/_main/etc/find_messages.py'. A merge worktree is a plain checkout, so registering the wrapper would have produced a check that is red every day for a reason that is not a collision. The command below is what the wrapper runs, and is the same command all three historical fix commits quote as their proof."
+        }
+      ]
     },
     {
       "tool": "OpenROAD-flow-scripts",

@@ -281,17 +281,40 @@ fi
 # times this week a replacement removed a co-tenant instead: eqy/mcy and sby with
 # the yosys prefix (#19), the yices solvers with the same rm -rf (#25), and the
 # slang plugin left behind by a yosys upgrade (#24). Nothing was looking.
+#
+# BLOCKING (vibeic-eda#88). This ran with a trailing `|| true` until 2026-08-05,
+# so it printed `LOST:` lines and the round carried on — a check that LOOKS like
+# a gate and is not one, which is worse than no gate because the log reads clean
+# to anyone scanning for a failure. The shape copied here is `capability_gate.py`,
+# which is wired correctly: regression.json -> image_build.cmd -> gatekeeper.py
+# -> build_and_regress.sh, where rc!=0 emits `built_red` and nothing is promoted.
+#
+# rc=2 BLOCKS EXACTLY LIKE rc=1, in both the program and this call site. rc=2 is
+# "the image could not be probed" — nothing was compared, and measuring nothing
+# proves nothing. The same rule already governs [ship] (rc 6) and the source
+# guards (rc 3) in this file; the `|| true` here was the outlier.
+#
+# The status is captured on the SAME line as the command, before `head`/`grep`
+# can overwrite $?. Writing `python3 ... ; cap_rc=$?` on the next line after a
+# pipe is how build_and_regress.sh's first draft read the status of the wrong
+# process, and this file's own `[ship]` block spells the rule out.
 CAP_OUT="${LOG_DIR}/capability-lost.txt"
+cap_rc=0
 if [ -f "${DIR}/check_no_capability_lost.py" ] && [ -n "${REACH_IMG}" ]; then
     log "[capability] ${REACH_IMG}"
     python3 "${DIR}/check_no_capability_lost.py" "${REACH_IMG}" \
-        --json "${LOG_DIR}/capability-lost.json" > "${CAP_OUT}" 2>&1 || true
+        --json "${LOG_DIR}/capability-lost.json" > "${CAP_OUT}" 2>&1; cap_rc=$?
     head -1 "${CAP_OUT}" | sed 's/^/[capability]   /' | tee -a "${LOG}"
     grep "LOST:" "${CAP_OUT}" | sed 's/^/[capability]   /' | tee -a "${LOG}" || true
+    [ "${cap_rc}" != "0" ] && log "[capability] rc=${cap_rc} — a command the base image provided no longer resolves in ours, or the image could not be probed at all (vibeic-eda#88)"
 else
     echo "MISSING: check_no_capability_lost.py or no released image — nothing was checked" \
         > "${CAP_OUT}"
     log "[capability] nothing was checked, which is not a clean result"
+    # Same rule as the branch above: a checker that is not there, or a release
+    # with no image to probe, compared nothing. That is rc=2's meaning, so it
+    # gets rc=2 rather than the silence it got before.
+    cap_rc=2
 fi
 
 PROV_OUT="${LOG_DIR}/image-provenance.txt"
@@ -473,5 +496,9 @@ rc=$?
 [ "${release_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=5
 # Nor by our own commits failing to reach the branches the image builds from.
 [ "${ship_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=6
+# Nor by a capability the base image gave us and ours no longer resolves
+# (vibeic-eda#88). rc=2 from that program means it could not probe the image at
+# all, and it lands here for the same reason rc=1 does: nothing was compared.
+[ "${cap_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=7
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}

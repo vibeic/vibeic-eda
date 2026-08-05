@@ -3654,7 +3654,27 @@ def test_the_cron_reaches_the_same_state_dir_it_did_before_and_declares_itself()
         r = subprocess.run(["bash", str(script)], capture_output=True, text=True,
                            timeout=120,
                            env={"HOME": str(home), "PATH": f"{binx}:/usr/bin:/bin"})
-        assert r.returncode == 0, (r.returncode, r.stdout[-800:], r.stderr[-800:])
+        # RAN TO COMPLETION, not "was green" (changed 2026-08-05, vibeic-eda#88).
+        #
+        # `python3` here is a stub that writes one file and exits 0, so EVERY check
+        # in the tick is a no-op and the round's verdict means nothing — including
+        # `REL_VER`, which the stub cannot print, so the tick correctly reports
+        # that it had no image to sweep for lost capabilities. Since #88 made that
+        # sweep blocking (`nothing was checked` is not a clean result), this run
+        # ends at 7 rather than 0.
+        #
+        # What the old `== 0` was really guarding is that the script did not die
+        # early — on the no-token path (exit 2) it would never reach the tick at
+        # all, and this test would then be asserting about an environment nobody
+        # was handed. So assert reaching the END, and that the exit code is the
+        # one the tick itself decided on. That keeps the teeth and drops the claim
+        # about a verdict these stubs are not able to produce.
+        assert "[done] gatekeeper tick exit" in r.stdout, \
+            ("the tick did not reach its own end", r.returncode,
+             r.stdout[-800:], r.stderr[-800:])
+        decided = int(r.stdout.rsplit("[done] gatekeeper tick exit ", 1)[1].split()[0])
+        assert r.returncode == decided, \
+            (r.returncode, decided, r.stdout[-800:])
         state, writer = seen.read_text().splitlines()
         # SAME directory as before #12 — the cron's own resolution, not a re-derivation
         assert state == str(home / ".cache" / "eda-fork-gatekeeper"), state
