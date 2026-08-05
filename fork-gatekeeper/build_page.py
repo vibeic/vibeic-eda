@@ -335,7 +335,6 @@ __NAV__
 <div class="fork-gap" id="forkGap"></div>
 
         <p class="fork-caption" id="forkUpdated"></p>
-        <p class="fork-caption" id="enhSummary"></p>
 
         <div class="fork-scroll">
         <table class="fork-table">
@@ -361,6 +360,11 @@ __FOOTER__
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
 const ENH = __ENH__;
+// How many tools the IMAGE ships, measured by listing /foss/tools inside it.
+// `null` when the image could not be inspected -- never 0, because "we could
+// not look" and "it has no tools" are different facts and only one of them is
+// ever true here.
+const NTOOLS = __NTOOLS__;
 const PINNOTES = __PINNOTES__;
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const pill = (n, kind) => `<span class="pilln ${n?kind:'zero'}">${n||0}</span>`;
@@ -758,7 +762,12 @@ function enhBlock(tool){
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
   const enhOpen = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.todo)||0)+((e.counts&&e.counts.deferred)||0)),0);
   const kpis = [
-    [LEDGERS.length, {en:"Tools tracked",zh:"追蹤工具"}],
+    // CARD ORDER, owner instruction 2026-08-05: when it was measured, what
+    // shipped, what we carry, then the two gap numbers. A reader wants the
+    // freshness of the whole page before any figure on it.
+
+    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
+     {en:"Last daily check", zh:"最後每日檢查"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     // The label states the SCOPE of the number, because the number's scope is what
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
@@ -767,30 +776,61 @@ function enhBlock(tool){
     // `behindMark` is on the NUMBER, not only in the label: ⚠ when a summed row is
     // stale, ? when one records no measurement time at all. Both say the same thing
     // in one glyph — this total is not known to describe today (vibeic-eda#91).
+    // TWO CARDS, TWO NUMBERS. The labels used to carry the full split, every
+    // exception and every caveat, and nobody read them -- an explanation that
+    // long is not an explanation, it is a place for the number to hide.
+    //
+    // What survives on the number itself: `⚠`/`?` (this total is not known to
+    // describe today, vibeic-eda#91) and `+N?` (N forks could not be measured,
+    // which is not zero). Both are one glyph and both change what you would do.
+    // The sync/release split stays in the parenthetical only while it is
+    // non-zero, because that is the only time it tells you which action to take.
+    [NTOOLS === null ? LEDGERS.length + " forks"
+                    : LEDGERS.length + " forks · " + NTOOLS + " tools",
+     {en:"Forks · tools in the image", zh:"fork 數 · image 工具數"}],
     [commitsBehind + behindMark + (behindUnknown?` +${behindUnknown}?`:``)
-       + (splitKnown.length ? ` (sync ${syncLag} · release ${releaseLag})` : ``),
-     {en:`Commits behind upstream — sync ${syncLag} (fork trails upstream: merge upstream in) · release ${releaseLag} (image pin trails our fork: bump the pin, rebuild)`
-         + ` — ${forksBehind} fork(s); +N? = could not be measured`
-         + (releaseOnly.length ? `; RELEASE-ONLY, merging upstream would change nothing: ${esc(releaseOnly.join(", "))}` : ``)
-         + (syncOnly.length ? `; sync-only: ${esc(syncOnly.join(", "))}` : ``)
-         + (splitUnknown ? `; ${splitUnknown} fork(s) have a gap with NO recorded split — re-run discovery` : ``)
-         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind` : ``)
-         + notFreshTxt,
-      zh:`落後上游的 commit 數 — sync ${syncLag}（fork 落後上游：把上游 merge 進來）· release ${releaseLag}（image 的 pin 落後我們的 fork：bump pin 重建）`
-         + ` —— ${forksBehind} 個 fork；+N? = 量不到，不等於零`
-         + (releaseOnly.length ? `；純 RELEASE 落後，merge 上游不會有任何改變：${esc(releaseOnly.join(", "))}` : ``)
-         + (syncOnly.length ? `；純 sync 落後：${esc(syncOnly.join(", "))}` : ``)
-         + (splitUnknown ? `；有 ${splitUnknown} 個 fork 有缺口但沒有記錄拆分 —— 請重跑 discovery` : ``)
-         + notFreshZh}],
+       // The split shows ONLY when one of the two halves is non-zero -- gated on
+       // the SPLIT, not on `commitsBehind`. `sync + release == behind` is NOT an
+       // identity (upstream commits between the pin and our tip are counted on
+       // both sides), and `test_the_split_is_not_derived_from_behind_commits`
+       // exists to stop anyone turning it into one. Gating on the total would
+       // hide a real split whenever that difference happened to land on zero.
+       //
+       // At zero there are no two
+       // conditions to tell apart -- "0 behind" cannot be misread as either --
+       // and `(sync 0 · release 0)` on every good day is noise on the state we
+       // are trying to reach. The moment the number is non-zero it splits
+       // again, because sync and release have OPPOSITE fixes (merge upstream in
+       // vs bump the pin and rebuild) and one number for both sent a reader to
+       // the wrong action twice (vibeic-eda#81).
+       + ((syncLag || releaseLag) && splitKnown.length
+            ? ` (sync ${syncLag} · release ${releaseLag})` : ``),
+     // The staleness clause is CONDITIONAL, and that is the whole compromise.
+     // On a good day it is absent and the label is three words. When a summed
+     // row's count is stale or unstamped the label NAMES it -- because the ⚠/?
+     // on the number says "some part of this is not known to describe today"
+     // and a reader cannot act on that without knowing WHICH fork. That was
+     // vibeic-eda#91's entire finding: a stale number and a fresh one look the
+     // same, and naming the row is what makes the difference actionable.
+     {en:"Commits behind upstream" + notFreshTxt,
+      zh:"落後上游的 commit 數" + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is
     // the only interesting part of that difference, and it is already inside this
     // card as `(+N NOT shipped)`. So the inventory count is gone and the shipped
     // count stays.
-    [`${shipPatches}/${totalOurs}` + (unship?` — ${unship} NOT shipped`:``) + (unknownShip?` +${unknownShip}?`:``),
-     {en:`Our commits that reach the shipped image (${unshipAll} past the pin, ${unship} of them substantive; ${notBuilt} fork(s) not built from ours; +N? = could not be measured)`,
-      zh:`真正進到出貨 image 的自有 commit（${unshipAll} 個卡在 pin 之後，其中 ${unship} 個是實質修改；${notBuilt} 個 fork 不是從我們的版本建置；+N? = 量不到）`}],
+    // The question this answers is "how much do we carry that upstream does not",
+    // so the number is the TOTAL we carry -- not the shipped fraction, which is a
+    // different question and was making the card read as a ratio nobody asked for.
+    //
+    // The one qualifier kept is the one that changes what you would do: work of
+    // ours that is not in the image. It is silent at zero, so on a good day this
+    // card is a single number. Today's whole story was a fix that had landed and
+    // never shipped, so when it is non-zero it must still say so.
+    [`${shipPatches}/${totalOurs}` + (unship?` — ${unship} NOT shipped`:``)
+       + (unknownShip?` +${unknownShip}?`:``),
+     {en:"Our commits in the shipped image", zh:"進到 image 的自有 commit"}],
     // REMOVED: "Untracked forks (no patches, not synced)". It counted
     // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
     // FORKS.json itself describes as "a pure mirror… we carry NO commits of our
@@ -802,8 +842,6 @@ function enhBlock(tool){
     // a fork-sync page it reads as if 566 were something about upstream. It still
     // has its own explained section further down the page, where the sentence
     // around it says what it is.
-    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
-     {en:"Last daily check", zh:"最後每日檢查"}],
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
     `<div class="fork-kpi${l.en==="Last daily check"&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
@@ -990,10 +1028,10 @@ function enhBlock(tool){
   document.getElementById("forkUpdated").innerHTML = REPORT
     ? `<span data-en="Last Gatekeeper run: ${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}" data-zh="最後 Gatekeeper 執行：${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}">Last Gatekeeper run: ${esc(REPORT.date||'')}</span>`
     : `<span data-en="Ledger seeded from live state; the daily Gatekeeper has not run yet." data-zh="Ledger 由即時狀態種入；每日 Gatekeeper 尚未執行。">Ledger seeded from live state; the daily Gatekeeper has not run yet.</span>`;
-  const enhEl = document.getElementById("enhSummary");
-  if(enhEl && enhRows){
-    enhEl.innerHTML = `<span data-en="Capability coverage vs commercial EDA: ${enhRows} capabilities tracked across ${enhVals.length} forks · ${enhDone} delivered · ${enhOpen} open (to-do + deferred). Click a tool to open its enhancement backlog." data-zh="對照商用 EDA 的能力覆蓋：跨 ${enhVals.length} 個 fork 追蹤 ${enhRows} 項能力 · 已交付 ${enhDone} · 待處理 ${enhOpen}（待做 + 延後）。點一個工具展開它的強化 backlog。">Capability coverage vs commercial EDA: ${enhRows} capabilities tracked across ${enhVals.length} forks · ${enhDone} delivered · ${enhOpen} open. Click a tool to open its enhancement backlog.</span>`;
-  }
+  // The capability-coverage summary line was REMOVED on owner instruction
+  // 2026-08-05 ("對照商用 EDA 的能力覆蓋：跨 N 個 fork 追蹤 M 項能力…").
+  // The per-tool enhancement backlog it pointed at is unchanged and still
+  // expands from each row; only the headline sentence is gone.
 
   document.querySelectorAll("tr.trow").forEach(tr => tr.addEventListener("click", ()=>{
     const d = document.querySelector(`tr.fork-detail[data-d="${tr.dataset.i}"]`);
@@ -1322,13 +1360,26 @@ def build(out: Path):
     # Measured now, not pasted. If it cannot be measured the section says so
     # rather than vanishing: a section that disappears on failure looks exactly
     # like one that was never meant to be there.
+    # The inventory SECTION was removed on owner instruction, but the measurement
+    # it rests on is still the only thing that can answer "how many tools does the
+    # image actually ship" -- so it is still taken, and now it feeds the KPI
+    # instead of being rendered and discarded.
+    #
+    # This exists because the KPI read "Tools tracked: 36" while the image ships
+    # 59 tools under /foss/tools. 36 is the number of FORKS we carry; the label
+    # said tools. The number was right and the word was wrong, which is worse
+    # than a wrong number because nothing looks off.
+    #
+    # `null` when it cannot be measured, NEVER 0 and never omitted: an image we
+    # could not inspect must not render as an image with no tools.
+    inv_html = ""
     try:
-        inv_html = render_inventory(inventory.collect(_image_ref()))
-    except Exception as exc:
-        inv_html = ('<section><div class="fork-wrap"><p class="fork-caption">'
-                    '<strong>Tool inventory: not rendered — the measurement failed '
-                    f'({_esc_html(str(exc)[:200])}). This is a gap in the page, not '
-                    'an empty inventory.</strong></p></div></section>')
+        _inv = inventory.collect(_image_ref())
+        _ntools = len(_inv.get("a") or _inv.get("tools") or [])
+        ntools = str(_ntools) if _ntools else "null"
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"  inventory: could not measure the image tool count ({exc})")
+        ntools = "null"
     data = json.dumps(ledgers, ensure_ascii=False)
     nav = NAV.replace("__NAVLINKS__", build_navlinks(out))
     footer = FOOTER.replace("__FOOTER_SITE__", build_footer_site(out))
@@ -1340,7 +1391,7 @@ def build(out: Path):
                      .replace("__NOPEN__", str(sum(
                          1 for v in enh.values() for r in v.get("rows", [])
                          if r.get("status") in ("todo", "deferred")))))
-            .replace("__INVENTORY__", inv_html)
+            .replace("__NTOOLS__", ntools)
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
             .replace("__PINNOTES__", json.dumps(PIN_NOTES, ensure_ascii=False))

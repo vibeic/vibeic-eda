@@ -122,6 +122,10 @@ def _render_metrics(rows) -> str:
     # arithmetic and left alone, so this cannot accidentally supply a rendered value.
     body = (body.replace("__DATA__", json.dumps(rows))
                 .replace("__REPORT__", "{}").replace("__ENH__", "{}")
+                # An unsubstituted placeholder is a ReferenceError that kills the
+                # WHOLE page script, so this fixture must fill every one. That is
+                # how this test caught `__NTOOLS__` being added upstream of it.
+                .replace("__NTOOLS__", "59")
                 .replace("__PINNOTES__", "{}"))
     prog = _DOM + "\n" + body + """
 ;console.log("\\u0001METRICS\\u0001" + (document.getElementById("forkMetrics").innerHTML||""));
@@ -181,13 +185,66 @@ def test_the_split_is_measured_on_the_real_fleet():
 
 
 def test_page_states_sync_and_release_separately_on_the_real_ledger():
-    """The RENDERED card names both halves. Nothing here computes them."""
+    """The RENDERED card names both halves WHENEVER IT SHOWS A GAP.
+
+    #81's principle, unchanged: sync lag and release lag have OPPOSITE fixes --
+    merge upstream in, versus bump the pin and rebuild -- so one number for both
+    sends a reader to the wrong action, and twice it did.
+
+    The split lives in the card's VALUE, not its label, which is what let it
+    survive the labels being cut to a few words on owner instruction 2026-08-05.
+    The same instruction removed `(sync 0 · release 0)` from a clean fleet, so
+    the requirement is conditional -- and BOTH directions are asserted here, so
+    "we shortened it" cannot become licence to drop the split when it matters.
+
+    The condition is read OFF THE PAGE'S OWN OUTPUT, not recomputed. An earlier
+    revision summed `behind_commits` across every row to decide what to expect,
+    counted the contents-assertion rows the page excludes, and concluded the
+    fleet was behind while the card correctly read 0 -- re-implementing the
+    page's row filter, which is the exact mistake the differential test below
+    warns about, one level up.
+    """
     html = _render_metrics(_enrich(_real_rows()))
-    assert "sync" in html.lower(), (
-        "the KPI card never mentions sync lag. One number for two conditions with "
-        "opposite fixes is the defect this test exists for.\n" + html[:1200])
-    assert "release" in html.lower(), (
-        "the KPI card never mentions release lag.\n" + html[:1200])
+    m = re.search(r'<div class="n">([^<]*)</div><div class="l" data-en="Commits behind', html)
+    assert m, ("the 'Commits behind upstream' card was not rendered at all\n"
+               + html[:1200])
+    value = m.group(1)
+
+    lead = re.match(r"\s*(\d+)", value)
+    assert lead, f"the card's value does not start with a number: {value!r}"
+
+    if int(lead.group(1)):
+        assert "sync" in value.lower(), (
+            "the card shows a non-zero gap and never mentions sync lag. One "
+            f"number for two conditions with opposite fixes is the defect this "
+            f"test exists for. value={value!r}")
+        assert "release" in value.lower(), (
+            f"the card shows a non-zero gap and never mentions release lag. "
+            f"value={value!r}")
+    else:
+        assert "sync" not in value.lower(), (
+            "the fleet is level and the card still prints a zero split; the "
+            "split exists to tell a reader WHICH fix to apply, and at zero "
+            f"there is no fix to apply. value={value!r}")
+
+
+def test_the_card_label_stays_short():
+    """The labels carried the full split, every exception and every caveat, and
+    nobody read them. An explanation that long is not an explanation; it is
+    somewhere for the number to hide.
+
+    Owner instruction 2026-08-05: these two cards say the number and little
+    else. Pinned here so the next person adding "just one more clause" has to
+    decide to, rather than drift into it.
+    """
+    src = (HERE / "build_page.py").read_text(encoding="utf-8")
+    i = src.index("const kpis = [")
+    block = src[i:src.index("\n  ];", i)]
+    for needle in ('zh:"落後上游的 commit 數"',
+                   'zh:"進到 image 的自有 commit"'):
+        assert needle in block, (
+            f"the KPI label {needle} has grown clauses again; the split and the "
+            f"caveats belong on the NUMBER, where they are one glyph each")
 
 
 def test_a_release_only_fork_is_not_described_as_behind_upstream():
@@ -249,10 +306,25 @@ def test_the_rendered_figure_tracks_its_input(field, word):
                    and isinstance(d.get("release_lag"), int)), None)
     if target is None:
         pytest.skip("no fully-measured pinned row on the fleet right now")
-    before = _rendered(_render_metrics(rows), word)
     DELTA = 1000                      # distinctive: no real lag is near it
-    bumped = [dict(d, **({field: d[field] + DELTA} if d is target else {})) for d in rows]
-    after = _rendered(_render_metrics(bumped), word)
+
+    # MEASURED AT +DELTA AND +2*DELTA, not at the fleet's current value.
+    #
+    # The split is rendered only when one of its halves is non-zero (owner
+    # instruction 2026-08-05: no `(sync 0 · release 0)` on a clean fleet), so
+    # reading the baseline directly fails the moment the fleet reaches the state
+    # we are trying to reach -- the test would go red exactly on success.
+    #
+    # Two bumped renders keep every tooth: both have a figure to read, the
+    # difference between them is still exactly DELTA, and a constant, the wrong
+    # field, or a sum that drops this row all still fail. It asks the same
+    # question from a point where the answer is observable.
+    def _at(mult):
+        rows2 = [dict(d, **({field: d[field] + DELTA * mult} if d is target else {}))
+                 for d in rows]
+        return _rendered(_render_metrics(rows2), word)
+
+    before, after = _at(1), _at(2)
     assert after - before == DELTA, (
         f"the rendered {word} figure did not track its input: {target.get('tool')}'s "
         f"{field} was raised by {DELTA} and the card moved {after - before}. The number "
