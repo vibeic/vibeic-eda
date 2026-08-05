@@ -33,6 +33,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _nda_tokens import find as _nda_find      # noqa: E402
+# HARD import. The verdict tallies this module puts in a PR TITLE are the same ones
+# the report body states, and they come from one place (vibe-ic#875). A soft import
+# with a private fallback would restore exactly the second arithmetic that put two
+# different numbers under one word.
+import report_counts                           # noqa: E402
 
 try:
     # The ONE derivation of the headline counts (vibeic/vibeic-eda#7). Imported, never
@@ -141,6 +146,31 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
     if not REPO.is_dir():
         return (False, f"vibe-ic clone not found at {REPO}")
 
+    # THE TITLE AND THE BODY STATE ONE SET OF NUMBERS (vibe-ic#875, #838).
+    # This used to build "DEFERRED {len(failed)}" — the ACTIONABLE subset — and
+    # bolt it onto a body that had independently rendered "DEFERRED
+    # {counts['DEFERRED']}" over a table with that many rows. Both were right
+    # about their own population and the PR contradicted itself, twice.
+    #
+    # Now the tallies come from the one derivation the report itself used, and
+    # the actionable subset keeps its own NAME below rather than borrowing the
+    # word DEFERRED. Refuse before touching git: a PR whose headline cannot be
+    # stated is not a PR to open with a guessed one.
+    try:
+        counts = report_counts.verdict_counts(summary)
+    except report_counts.CountsUnavailable as e:
+        return (False, f"refusing to title a PR whose counts cannot be stated: {e}")
+    # …and the check that this is true of the BYTES, not of two call sites that
+    # happen to agree today: read the headline back out of the exact body about
+    # to be published. Unreadable is its own outcome, never "close enough".
+    body_counts = report_counts.parse_phrase(report_md or "")
+    if body_counts is None:
+        return (False, "refusing: the report body states no headline counts, so the "
+                       "title cannot be shown to agree with the body it publishes")
+    if body_counts != counts:
+        return (False, f"refusing: the title would state {counts} while the body it "
+                       f"publishes states {body_counts}")
+
     date = str(summary.get("date", "")).strip() or "undated"
     branch = f"eda-fork-sync-{date}"
     dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
@@ -194,7 +224,17 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         changed.append(LOG_FILE)
 
         _run(["git", "-C", str(wt), "add", *changed])
-        title = (f"[eda-fork] {date}: MERGED {len(merged)} · DEFERRED {len(failed)}"
+        # `phrase` narrows to the two verdicts a title has room for; it cannot
+        # change what either number IS — both still come out of `counts`, the
+        # same dict the body's headline was rendered from and checked against.
+        head = report_counts.phrase(counts, ("MERGED", "DEFERRED"))
+        # The actionable subset, under its OWN name. Stated only when it differs,
+        # because "(10 actionable)" beside "DEFERRED 10" is noise; but when it
+        # differs it is the whole reason this PR exists, and dropping it would
+        # trade a contradiction for a silence.
+        if len(failed) != counts["DEFERRED"]:
+            head += f" ({len(failed)} actionable)"
+        title = (f"[eda-fork] {date}: {head}"
                  + (f" — vibeic-eda:{newver}" if merged and newver else ""))
         rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])
         if rc != 0:
@@ -202,8 +242,12 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
 
         body = (report_md or "").rstrip() + (
             "\n\n---\n_Opened automatically by the eda-fork-gatekeeper. "
-            "MERGED rows bump the `vibeic-eda:` doc pins to the shipped image; DEFERRED rows "
-            "are a backlog item (a new upstream release that needs a manual rebase). "
+            "MERGED rows bump the `vibeic-eda:` doc pins to the shipped image. "
+            f"{len(failed)} of the {counts['DEFERRED']} DEFERRED row(s) are ACTIONABLE — a "
+            "measured new upstream release, or a release gap that could not be measured at "
+            "all — and those are the backlog item (a manual rebase). The remaining DEFERRED "
+            "rows are deferred for a reason that is not a pending release: there is no new "
+            "upstream work for anyone to integrate. "
             "Review + merge (or close) — this PR is the record, not an auto-merge._\n")
 
         if dry:

@@ -71,6 +71,11 @@ import discover_forks as disc  # noqa: E402
 from discover_forks import release_gap, release_gap_status, release_gap_unknown  # noqa: E402
 import build_page  # noqa: E402
 import fleet_config  # noqa: E402  — is the configuration we ran on the committed one?
+# HARD import, deliberately: this is the one derivation of the verdict tallies the
+# report and the PR title both state (vibe-ic#875). A soft `try/except → None`
+# fallback would be a second, unpoliced way to render those numbers, which is the
+# defect itself.
+import report_counts  # noqa: E402
 try:
     import pr_notify  # opens a vibe-ic PR on actionable ticks (replaced email)
 except Exception:  # noqa: BLE001
@@ -813,7 +818,11 @@ def _maybe_notify(summary: dict, assessments: dict | None = None,
 
 
 def _report_md(s: dict) -> str:
-    c = s["counts"]
+    # The tallies come from `report_counts`, which is also where the PR TITLE gets
+    # them (vibe-ic#875): the title said "DEFERRED 3" over a body that said
+    # "DEFERRED 10" for two ticks running, because the two were two renders of two
+    # different populations sharing one word. One derivation, one formatter.
+    c = report_counts.verdict_counts(s)
     lines = [f"# EDA Fork Gatekeeper — daily report {s['date']}", "",
              f"Generated {s['generated_at']}. Image `vibeic/vibeic-eda:{s.get('image_version')}`. "
              f"Policy: track **releases** (not commits); a new upstream release triggers an "
@@ -823,8 +832,7 @@ def _report_md(s: dict) -> str:
     # agrees with itself says nothing about whether the right forks were audited.
     if s.get("fleet_config"):
         lines += [fleet_config.stamp_line(s["fleet_config"]), ""]
-    lines += [f"**MERGED {c['MERGED']} · DEFERRED {c['DEFERRED']} · CLEAN {c['CLEAN']} · "
-             f"NOT_LAYERED {c['NOT_LAYERED']}**", "",
+    lines += [f"**{report_counts.phrase(c)}**", "",
              "| Tool | Verdict | New releases | Target | Note |", "|---|---|---|---|---|"]
     order = {"MERGED": 0, "DEFERRED": 1, "CLEAN": 2, "NOT_LAYERED": 3}
     for r in sorted(s["results"], key=lambda r: (order.get(r["verdict"], 9), r["tool"])):
