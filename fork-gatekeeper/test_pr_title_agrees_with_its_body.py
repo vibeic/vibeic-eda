@@ -280,7 +280,11 @@ def test_a_missing_count_is_not_a_zero():
 def test_parse_phrase_reads_back_exactly_what_phrase_wrote():
     import report_counts                                     # noqa: PLC0415
 
-    counts = {"MERGED": 0, "DEFERRED": 10, "CLEAN": 26, "NOT_LAYERED": 0}
+    # Built FROM the canonical list rather than spelled out, so the round trip is
+    # asserted over whatever the headline currently states. A literal four-verdict
+    # dict here passed only while `VERDICTS` had four entries, and went red on the
+    # tick that added UNMEASURABLE — testing the fixture's age, not the property.
+    counts = {v: i for i, v in enumerate(report_counts.VERDICTS)}
     assert report_counts.parse_phrase(
         f"**{report_counts.phrase(counts)}**") == counts
     # "DEFERRED 1" must never be read out of "DEFERRED 10"

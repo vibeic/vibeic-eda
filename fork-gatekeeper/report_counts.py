@@ -64,6 +64,12 @@ import re
 #: 36), which is the same class of defect as the title/body split.
 VERDICTS = ("MERGED", "DEFERRED", "RESOLVED", "UNMEASURABLE", "CLEAN", "NOT_LAYERED")
 
+#: The verdicts every report has tallied since the format existed. A summary
+#: missing one of THESE is corrupt and must raise — "a missing count is not a
+#: zero" is the whole rule. The two added later may legitimately be absent from
+#: an archived report, and only for those is a rows-derived zero allowed.
+_ALWAYS = ("MERGED", "DEFERRED", "CLEAN", "NOT_LAYERED")
+
 _SEP = " · "
 
 #: Reads back a headline this module rendered. Built from `VERDICTS` for the
@@ -106,13 +112,15 @@ def verdict_counts(summary: dict) -> dict[str, int]:
         n = counts.get(v)
         rows = sum(1 for r in results
                    if isinstance(r, dict) and r.get("verdict") == v)
-        if v not in counts and rows == 0:
+        if v not in counts and v not in _ALWAYS and rows == 0:
             # A report written before this verdict existed — every archived day
             # under reports/ predates RESOLVED and UNMEASURABLE. This is NOT the
             # "render a zero for an absent measurement" hazard the class docstring
             # forbids: the zero is READ OFF THE ROWS, which are right here and
-            # carry none. A missing key with rows that DO carry the verdict falls
-            # through to the disagreement below, where it belongs.
+            # carry none. Restricted to the late verdicts, because a summary that
+            # has lost one of the ORIGINAL four is corrupt rather than old, and
+            # that one must still raise. A missing key with rows that DO carry the
+            # verdict falls through to the disagreement below, where it belongs.
             out[v] = 0
             continue
         if not isinstance(n, int) or isinstance(n, bool):

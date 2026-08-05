@@ -1475,6 +1475,25 @@ def _agree_cell(agr: dict | None, settled: bool) -> str:
 # is a count that drifts, so the derivation lives here once and the documents render it.
 HEADLINE = ("clearly_safe", "carried", "decided", "outstanding")
 
+#: The buckets that PARTITION the range, which is a different question from which
+#: numbers the headline sentence states, and the two only looked like one tuple
+#: while there were four of each.
+#:
+#: `HEADLINE` is "what the sentence says", and `_HEADLINE_RE` / `parse_headline` /
+#: `cross_check` are all built to recover exactly those four from rendered text.
+#: `PARTITION` is "what every commit in the range is sorted into", and the
+#: arithmetic self-check is over THAT. `on_mainline` is a fifth `decision` value
+#: (commits our own fork mainline already merged but our shipped pin does not
+#: carry): a real bucket that removes commits from `outstanding` — `summary_counts`
+#: already subtracts it — but NOT a number the headline sentence states.
+#:
+#: Checking the partition with the four-tuple counted every already-merged commit
+#: as "in no bucket at all" and reported a DERIVATION FAILURE, which is fatal: the
+#: tick publishes no report, no assessment and no PR. On today's corpus 42 of 54
+#: commits across six tools are on our mainline, so the daily round would have gone
+#: dark on the first tick that measured them.
+PARTITION = HEADLINE + ("on_mainline",)
+
 # How to recount a category from the per-commit rows when the summary list is missing.
 # The rows are the SAME structured record the lists were built from, so this is a second
 # reading of the classification, not an estimate — which is why it sits ahead of any
@@ -1629,7 +1648,7 @@ def summary_counts(rep: dict) -> dict:
     # Positive: commits no bucket claims. Negative: buckets claiming more than the range
     # holds. Zero: the four numbers account for the range, which is the only shape a
     # document may state.
-    out["unaccounted"] = cc - sum(out[f] for f in HEADLINE)
+    out["unaccounted"] = cc - sum(out[f] for f in PARTITION)
     return out
 
 
@@ -1661,8 +1680,8 @@ def counts_conflict(rep: dict) -> list[str]:
     short = n["unaccounted"]
     return [
         f"{rep.get('tool', '?')}: the headline counts do not account for the range — "
-        + " + ".join(f"{f}={n[f]}" for f in HEADLINE) +
-        f" = {sum(n[f] for f in HEADLINE)}, against {n['commits']} upstream "
+        + " + ".join(f"{f}={n[f]}" for f in PARTITION) +
+        f" = {sum(n[f] for f in PARTITION)}, against {n['commits']} upstream "
         f"commit(s) in the same sentence "
         + (f"({short} commit(s) in no bucket at all)" if short > 0 else
            f"({-short} commit(s) counted more than once, or a total too small for its "
@@ -1882,8 +1901,8 @@ def _unaccounted_lines(counts: dict) -> list[str]:
         return []
     return [f"> **⚠ THESE COUNTS DO NOT ADD UP — {counts['commits']} commit(s) in the "
             f"range, "
-            + " + ".join(f"{f}={counts[f]}" for f in HEADLINE) +
-            f" = {sum(counts[f] for f in HEADLINE)}.** "
+            + " + ".join(f"{f}={counts[f]}" for f in PARTITION) +
+            f" = {sum(counts[f] for f in PARTITION)}.** "
             + (f"{short} commit(s) are in no bucket at all." if short > 0 else
                f"{-short} commit(s) are counted more than once, or the stated total is "
                f"too small for its own buckets.") +
