@@ -1746,20 +1746,66 @@ def test_the_render_survives_a_report_that_predates_the_confirmation():
 # The real cached verdict for magic 8.3.674 → 8.3.678, assessor b38988077cdc95ed,
 # reduced to the fields the documents read. Kept as a FIXTURE because the numbers are
 # what regressed: 108 commits of which 2 are carried, 1 has a recorded skip, 1 is
-# clearly-safe and 2 need a human — the other 102 are `rec=skip` CI/build commits that
-# need no adoption decision and must not be counted as open work.
+# clearly-safe and 104 are marked `human` — 102 of those carrying the assessor's
+# `rec=skip` on CI/build commits.
+#
+# THOSE 102 USED TO BE ABSENT FROM THIS FIXTURE, and the comment here used to say they
+# "must not be counted as open work" — the retired `recommend != "skip"` predicate,
+# fossilised in a test double. It listed ONE row beside four summary lists naming six
+# shas, against a `commit_count` of 108: 102 commits stated in the total and accounted
+# for in no bucket. `counts_conflict` refuses to publish exactly that shape, so the
+# double had to become a report that could actually be published — which is the point.
+# A fixture nothing would let past the gate is not a fixture of a report.
+def _magic_0728_rows():
+    """The 108 per-commit rows behind the summary lists below."""
+    rows = [{"sha": "be83d2954d53", "title": "t", "decision": "auto-safe",
+             "category": "bugfix", "recommend": "adopt"},
+            {"sha": "a22b7508acfe", "title": "t", "decision": "carried",
+             "category": "carried", "recommend": "carried"},
+            {"sha": "cc4da9a05fde", "title": "t", "decision": "carried",
+             "category": "carried", "recommend": "carried"},
+            {"sha": "42b346e31887", "title": "t", "decision": "recorded:skip",
+             "category": "decided", "recommend": "skip"},
+            {"sha": "86fbd2b50f81", "title": "t", "decision": "human",
+             "category": "bugfix", "recommend": "adopt"},
+            {"sha": "3f1747b1fb91", "title": "t", "decision": "human",
+             "category": "bugfix", "recommend": "adopt", "reachability_conflict": True}]
+    # the 102 CI/build commits the assessor recommends skipping — a recommendation, on
+    # rows whose `decision` column still says `human`
+    rows += [{"sha": f"c1{i:010x}", "title": "t", "decision": "human",
+              "category": "other", "recommend": "skip"} for i in range(102)]
+    return rows
+
+
 MAGIC_0728 = {
     "tool": "magic", "status": "assessed", "base_release": "8.3.674", "latest": "8.3.678",
     "commit_count": 108, "our_patch_files": 59,
     "assessor": "b38988077cdc95ed", "assessed_at": "2026-07-27T23:07:21Z",
     "clearly_safe": ["be83d2954d53"],
-    "outstanding": ["86fbd2b50f81", "3f1747b1fb91"],
+    "outstanding": [c["sha"] for c in _magic_0728_rows() if c["decision"] == "human"],
     "carried": ["a22b7508acfe", "cc4da9a05fde"],
     "decided": ["42b346e31887"],
     "not_assessed": [], "unreachable": ["3f1747b1fb91"], "unconfirmed": [],
-    "commits": [{"sha": "be83d2954d53", "title": "t", "decision": "auto-safe",
-                 "category": "bugfix", "recommend": "adopt"}],
+    "commits": _magic_0728_rows(),
 }
+
+
+def _other_vintage(n_open=105, **kw):
+    """A DIFFERENT vintage of the 0728 report — a whole earlier assessment, rows and all.
+
+    Several gates below are armed by rendering one report while summarising another, and
+    they used to build the second by mutating only a summary LIST. That stopped producing
+    a divergent render once the rows became authoritative (a stale index is now re-derived
+    from the record it indexes), and a gate whose injected fault has quietly stopped being
+    a fault is a gate that passes for the wrong reason. So the second vintage is now what
+    it always was in the incident: an earlier judgement with its own rows.
+    """
+    rows = [{"sha": f"5tale{i:07x}", "title": "t", "decision": "human",
+             "category": "other", "recommend": "adopt"} for i in range(n_open)]
+    return {**MAGIC_0728, "commit_count": n_open, "commits": rows,
+            "clearly_safe": [], "carried": [], "decided": [],
+            "not_assessed": [], "unreachable": [], "unconfirmed": [],
+            "outstanding": [c["sha"] for c in rows], **kw}
 
 
 def test_every_document_of_one_tick_states_the_same_counts():
@@ -1768,7 +1814,7 @@ def test_every_document_of_one_tick_states_the_same_counts():
     entry = _gk().assessment_entry(MAGIC_0728, 4, "8.3.678")
     line = _pn().tally_line("magic", MAGIC_0728)
 
-    want = {"clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 2}
+    want = {"clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 104}
     assert A.parse_headline("assessment", md) == want, md.splitlines()[2]
     assert A.parse_headline("report", entry["note"]) == want, entry["note"]
     assert A.parse_headline("pr", line) == want, line
@@ -1777,6 +1823,9 @@ def test_every_document_of_one_tick_states_the_same_counts():
     # and the check that would have caught it agrees they agree
     assert A.cross_check(MAGIC_0728, {"assessment": md, "report": entry["note"],
                                       "pr": line}) == []
+    # …and all four account for the range, which is the property that would have caught
+    # the OTHER understatement this same fixture used to carry: 1 + 2 + 1 + 2 = 6 of 108.
+    assert sum(want.values()) == MAGIC_0728["commit_count"]
 
 
 def test_the_pr_body_no_longer_answers_with_subtraction():
@@ -1784,7 +1833,7 @@ def test_the_pr_body_no_longer_answers_with_subtraction():
     `outstanding`, not even as a fallback, so it was wrong even on a complete report."""
     line = _pn().tally_line("magic", MAGIC_0728)
     assert "107" not in line, line
-    assert "2 need human review" in line, line
+    assert "104 need human review" in line, line
 
 
 def test_the_structured_value_is_reached_before_any_arithmetic():
@@ -1818,10 +1867,10 @@ def test_cross_check_names_the_field_and_both_readings():
     """It must say WHICH number disagrees and what each document claims — a bare
     'documents disagree' sends the reader back to diffing two files by hand."""
     md = A.render_md(MAGIC_0728)
-    stale = A.render_md({**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105})
+    stale = A.render_md(_other_vintage(105))
     bad = A.cross_check(MAGIC_0728, {"assessment": stale})
-    assert any("outstanding" in b and "105" in b and "2" in b for b in bad), bad
-    assert any("clearly_safe" in b for b in bad), bad
+    assert any("outstanding" in b and "105" in b and "104" in b for b in bad), bad
+    assert any("clearly_safe" in b and "0" in b and "1" in b for b in bad), bad
     assert A.cross_check(MAGIC_0728, {"assessment": md}) == []
 
 
@@ -1949,8 +1998,8 @@ def test_a_tick_whose_documents_disagree_publishes_neither():
     """The gate. A renderer that drifts — or an assessment regenerated from another
     vintage — must stop the tick, not produce a report beside a table that contradicts
     it. Injected by rendering the STALE 05:32 verdict (0 clearly-safe, 105 open) while
-    the report summarises the repaired one (1, 2): the 2026-07-28 pair exactly."""
-    stale = {**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105}
+    the report summarises the repaired one (1, 104): the 2026-07-28 pair exactly."""
+    stale = _other_vintage(105)
     with tempfile.TemporaryDirectory() as d:
         state = Path(d)
         try:
@@ -1975,10 +2024,12 @@ def test_a_tick_whose_documents_agree_publishes_both_and_verifies_on_disk():
         date = summary["date"]
         report = json.loads((state / "reports" / f"{date}.json").read_text())
         got = next(r for r in report["results"] if r["tool"] == "magic")
-        assert got["assessed"]["clearly_safe"] == 1 and got["assessed"]["outstanding"] == 2
+        assert got["assessed"]["clearly_safe"] == 1 and got["assessed"]["outstanding"] == 104
+        assert got["assessed"]["unaccounted"] == 0, \
+            "a published row must account for its own range"
         md = (state / "reports" / "assessments" / f"{date}-magic.md").read_text()
         assert A.parse_headline("assessment", md) == {"clearly_safe": 1, "carried": 2,
-                                                      "decided": 1, "outstanding": 2}
+                                                      "decided": 1, "outstanding": 104}
         # the round trip the tick runs on itself
         os.environ["GK_STATE_DIR"] = str(state)
         try:
@@ -1986,8 +2037,8 @@ def test_a_tick_whose_documents_agree_publishes_both_and_verifies_on_disk():
             assert gk2.verify_documents(date) == []
             # ...and it CATCHES a later re-render that the report was never regenerated
             # for — the 2026-07-28 failure, reproduced on the published files.
-            stale = {**MAGIC_0728, "clearly_safe": [], "outstanding": ["x"] * 105,
-                     "assessor": "0" * 16, "assessed_at": "2026-07-27T21:32:00Z"}
+            stale = _other_vintage(105, assessor="0" * 16,
+                                   assessed_at="2026-07-27T21:32:00Z")
             (state / "reports" / "assessments" / f"{date}-magic.md").write_text(
                 A.render_md(stale))
             bad = gk2.verify_documents(date)
@@ -2301,8 +2352,8 @@ def test_the_added_clause_is_inside_the_document_the_cross_check_reads():
         # the counts still parse out of the row the gate checked — this is the published
         # text, clause and all
         assert A.parse_headline("report", row["note"]) == {
-            "clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 2}
-        assert row["assessed"]["outstanding"] == 2
+            "clearly_safe": 1, "carried": 2, "decided": 1, "outstanding": 104}
+        assert row["assessed"]["outstanding"] == 104
         date = summary["date"]
         os.environ["GK_STATE_DIR"] = str(state)
         try:
@@ -2399,7 +2450,7 @@ def test_a_document_the_guard_cannot_read_is_a_failure_not_a_skip():
     assert bad, "the guard skipped the document with the wrongest number in it"
     assert len(bad) == 1, bad
     assert "pr" in bad[0] and "magic" in bad[0], bad
-    assert "outstanding=2" in bad[0], "it must state what the assessment says it should"
+    assert "outstanding=104" in bad[0], "it must state what the assessment says it should"
     assert "parse_headline" in bad[0], "and name what to repair"
     # ...including the degenerate case: a render that RAISED leaves the caller holding
     # "" (`gatekeeper.tick` passes `rendered.get(tool) or ""`), which is unreadable for
@@ -2444,7 +2495,7 @@ _RENDERS = {
 # Report shapes that reach every branch the three renders can take for an ASSESSED range.
 # A coverage table proven on one report shape is a coverage table for one report shape.
 _READABLE_REPS = {
-    # the 2026-07-28 range: 108 commits, 1 safe / 2 carried / 1 decided / 2 open
+    # the 2026-07-28 range: 108 commits, 1 safe / 2 carried / 1 decided / 104 open
     "the real range": MAGIC_0728,
     # replayed: `render_md` leads with the REPLAYED banner instead of the ordinary
     # provenance line, above the same headline
@@ -2458,7 +2509,14 @@ _READABLE_REPS = {
     # every disclosure at once. The warnings are appended AFTER the counts in both the
     # report note and the PR line, so this is also the test that they do not push the
     # numbers out of the parser's reach.
-    "every disclosure": _rep(commit_count=7, clearly_safe=["s"], carried=["c"],
+    #
+    # `commit_count` is 5 — the four buckets — and used to be 7, which no bucket
+    # accounted for. `not_assessed` / `unreachable` / `unconfirmed` are DISCLOSURE
+    # overlays on rows the four buckets have already counted (all three are `human`
+    # rows), so adding them to the total double-counts: that is what made this double
+    # unpublishable under `counts_conflict`, and it is a real reading error about what
+    # those three columns mean.
+    "every disclosure": _rep(commit_count=5, clearly_safe=["s"], carried=["c"],
                              decided=["d"], outstanding=["o", "p"], not_assessed=["n"],
                              unreachable=["u"], unconfirmed=["v"],
                              commits=[{"sha": "aaa", "decision": "human",
@@ -3881,3 +3939,136 @@ def test_the_headline_shows_the_split_without_hiding_the_total():
                       "commits": rows})
     assert "needs human decision: 2" in md, md[:400]
     assert "1 the assessor would adopt" in md and "1 it would skip" in md, md[:400]
+
+
+# ── a summary list outlives the predicate that built it (2026-08-06) ─────────────────
+#
+# LIVE INCIDENT, ~/.cache/eda-fork-gatekeeper/assessment-cache/cocotb.json, entry
+# `cocotb|v2.0.0|v2.0.1|…`: it stores `outstanding` as a SEVENTEEN-sha list while its own
+# 64 rows carry `decision == "human"` on SIXTY-ONE of them. f9a3469 repaired the
+# predicate that builds that list — `decision == "human" AND recommend != "skip"`, a
+# recommendation read as a decision — but a predicate fix cannot reach a list already
+# written, and the cache key is the INPUT and the ASSESSOR, neither of which a repair to
+# our own post-processing moves. `summary_counts` then preferred the stored list to the
+# rows it had been derived from, so every later tick REPLAYED the retired predicate's
+# answer: the 2026-08-05 and 2026-08-06 daily reports both published "17 need human
+# review", and 44 commits nobody has decided were absent from every summary a human
+# reads.
+#
+# The same sentence carried the disproof from the first day: 3 clearly-safe + 0 carried
+# + 0 previously decided + 17 needing review is 20, against the 64 it states as the size
+# of the range. A set of counts that does not account for the range it describes is a
+# derivation failure, and it is the cheapest one there is to detect.
+
+
+def _cocotb_0804():
+    """The live cache entry, reduced to the fields the headline counts are read from.
+
+    64 rows — 3 `auto-safe` and 61 `human`, 17 of the latter carrying the assessor's
+    `recommend: adopt`, which is exactly the population the retired predicate kept. The
+    `outstanding` list is the 17 shas that predicate wrote and that are still on disk.
+    """
+    rows = [{"sha": f"safe{i:08x}", "title": "t", "category": "bugfix",
+             "decision": "auto-safe", "recommend": "adopt"} for i in range(3)]
+    rows += [{"sha": f"adopt{i:07x}", "title": "t", "category": "bugfix",
+              "decision": "human", "recommend": "adopt"} for i in range(17)]
+    rows += [{"sha": f"skip{i:08x}", "title": "t", "category": "other",
+              "decision": "human", "recommend": "skip"} for i in range(44)]
+    return {"tool": "cocotb", "status": "assessed", "base_release": "v2.0.0",
+            "latest": "v2.0.1", "commit_count": 64, "our_patch_files": 2,
+            "assessor": "045760ee09202510", "assessed_at": "2026-08-03T21:46:45Z",
+            "cached": True, "replayed_at": "2026-08-06T05:30:12Z",
+            "clearly_safe": [c["sha"] for c in rows if c["decision"] == "auto-safe"],
+            "carried": [], "decided": [],
+            # WRITTEN BY THE RETIRED PREDICATE, and still on disk
+            "outstanding": [c["sha"] for c in rows if c["decision"] == "human"
+                            and c["recommend"] != "skip"],
+            "commits": rows}
+
+
+def test_a_stale_summary_list_loses_to_the_rows_it_indexes():
+    """The rows are the RECORD; every summary list is an index built over them by a
+    predicate. A repaired predicate must re-reach every report that carries rows,
+    including one restored from a cache written before the repair — otherwise the fix
+    lands in the source and never in anything published."""
+    rep = _cocotb_0804()
+    assert sum(1 for c in rep["commits"] if c["decision"] == "human") == 61
+    assert len(rep["outstanding"]) == 17, "the fixture must carry the STALE list"
+
+    n = A.summary_counts(rep)
+    assert n["outstanding"] == 61, (
+        f"the 61 rows marked `human` are the record and the 17-sha list is an index a "
+        f"retired predicate wrote; the index must not outrank what it indexes. got {n}")
+    # and the disagreement is DISCLOSED, not quietly repaired: a stored list that no
+    # longer matches its rows is a fact about the cache the operator has to be told.
+    assert any("outstanding" in s for s in n["stale_lists"]), n["stale_lists"]
+
+    note = _gk().assessment_entry(rep, 1, "v2.0.1")["note"]
+    md = A.render_md(rep)
+    assert "61 need human review" in note, note
+    assert "17 need human review" not in note, note
+    assert A.parse_headline("assessment", md)["outstanding"] == 61, md.splitlines()[2]
+    assert A.parse_headline("report", note)["outstanding"] == 61, note
+    assert A.cross_check(rep, {"assessment": md, "report": note}) == []
+
+
+def test_a_headline_that_does_not_account_for_its_range_is_reported_not_published():
+    """THE CHEAPEST DETECTOR. Four buckets partition the range by construction, so
+    `clearly_safe + carried + decided + outstanding` is the commit count or the
+    derivation is broken. Here the rows are gone, so nothing can repair the stale list
+    and the numbers account for 20 of 64 commits — which is what the 2026-08-05 report
+    published, in a sentence that stated both halves."""
+    rep = {**_cocotb_0804(), "commits": []}
+    total = rep["commit_count"]
+    note = _gk().assessment_entry(rep, 1, "v2.0.1")["note"]
+    got = A.parse_headline("report", note)
+    assert got is not None, note
+    assert sum(got[f] for f in A.HEADLINE) == 20 != total, \
+        "the fixture is supposed to be inconsistent"
+    assert "DO NOT ADD UP" in note.upper(), (
+        f"published {got} against {total} commit(s) with no disclosure — the "
+        f"arithmetic was available and nothing checked it: {note}")
+
+    bad = A.cross_check(rep, {"assessment": A.render_md(rep), "report": note})
+    assert bad, "the publish gate cleared a headline accounting for 20 of 64 commits"
+    assert any("64" in b and "20" in b and "44" in b for b in bad), (
+        "the failure must name the range, what the buckets account for, and the "
+        f"shortfall: {bad}")
+    # ...and a consistent report is still clean: the gate is arithmetic, not suspicion.
+    assert A.cross_check(_cocotb_0804(), {}) == []
+
+
+def test_nothing_outstanding_cannot_be_claimed_while_commits_are_unaccounted_for():
+    """slang, 2026-08-04, is the shape at its worst: `needs human decision: 0` on a
+    range whose one commit was marked `human`. `outstanding == 0 and clearly_safe == 0`
+    is the RESOLVED branch, so an under-counted `outstanding` does not merely understate
+    the work — it declares the range SETTLED and drops the tool from triage entirely."""
+    rep = {"tool": "slang", "status": "assessed", "base_release": "v1", "latest": "v2",
+           "our_patch_files": 0, "commit_count": 1, "clearly_safe": [], "carried": [],
+           "decided": [], "outstanding": [], "commits": []}
+    entry = _gk().assessment_entry(rep, 1, "v2")
+    assert entry["verdict"] != "RESOLVED", (
+        f"1 commit, 0 accounted for, and the range was declared settled: {entry}")
+    assert "nothing outstanding" not in entry["note"], entry["note"]
+    assert "DO NOT ADD UP" in entry["note"].upper(), entry["note"]
+
+
+def test_a_tick_whose_counts_do_not_account_for_the_range_publishes_nothing():
+    """End to end on the production path: the arithmetic failure travels the same
+    channel as a cross-document disagreement, because the fail-safe reading of either is
+    that the day's triage is unknown — not that the numbers may be published anyway."""
+    rep = {**_cocotb_0804(), "tool": "magic", "commits": [],
+           "base_release": "8.3.674", "latest": "8.3.678"}
+    with tempfile.TemporaryDirectory() as d:
+        state = Path(d)
+        try:
+            _tick_fixture(state, rep)
+        except Exception as e:            # gatekeeper.CountsDisagree
+            assert type(e).__name__ == "CountsDisagree", repr(e)
+            assert "nothing published" in str(e)
+        else:
+            raise AssertionError(
+                "the tick published a headline accounting for 20 of 64 commits")
+        assert list((state / "reports").glob("*")) == [], "a report was published"
+        led = json.loads((state / "ledger" / "magic.json").read_text())
+        assert not led.get("sync_log"), "the ledger recorded a tick that never published"

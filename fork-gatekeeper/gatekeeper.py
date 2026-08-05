@@ -219,7 +219,14 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
                           "assessor": rep.get("assessor"),
                           "assessed_at": rep.get("assessed_at"),
                           "replayed": bool(rep.get("cached")),
-                          "derived": n["derived"]}}
+                          "derived": n["derived"],
+                          # The self-check, carried in the STRUCTURED row as well as the
+                          # note. 0 means the four buckets account for the range; any
+                          # other value means they do not, and a downstream reader of
+                          # the JSON must be able to tell without re-adding the note.
+                          "unaccounted": n["unaccounted"],
+                          # …and which stored summary list its own rows contradicted.
+                          "stale_lists": n["stale_lists"]}}
     resolved = f"{carried} already carried, {decided} previously decided"
     entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
                      f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
@@ -237,12 +244,43 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
             f" — {n_unconf} commit(s) cleared every other auto-adopt condition but "
             f"their JUDGEMENT DID NOT REPRODUCE across independent samples "
             f"(every reading is on the row → human decision, not auto-proposed)")
-    if n_open == 0 and safe == 0:
+    # THE SELF-CHECK. `clearly_safe + carried + decided + outstanding` is one `decision`
+    # column sliced four ways, so it IS `commit_count`; any other value means the
+    # derivation lost commits. It is stated here rather than only in `counts_conflict`
+    # because this note is the sentence that carried the disproof in the first place:
+    # "64 upstream commit(s) … 3 clearly-safe, 0 already carried, 0 previously decided,
+    # 17 need human review" published 20 of 64 for two days, in a line that showed both
+    # halves. `assess_release.cross_check` refuses to publish it; this makes the refusal
+    # legible to anyone holding the row.
+    if n["unaccounted"]:
+        entry["note"] += (
+            f" — ⚠ THESE COUNTS DO NOT ADD UP: {safe} + {carried} + {decided} + "
+            f"{n_open} = {safe + carried + decided + n_open}, against the {cc} commit(s) "
+            f"this same line states. A DERIVATION FAILURE, not a triage result — do not "
+            f"read these numbers as the state of the range")
+    if n_open == 0 and safe == 0 and not n["unaccounted"]:
         # Nothing is outstanding: reporting DEFERRED here is what turned settled work
         # into a recurring proposal.
+        #
+        # `not n["unaccounted"]` guards the same claim from the opposite side. This
+        # branch says the range is SETTLED and drops the tool out of triage, and it is
+        # reached on `outstanding == 0` — precisely the value an under-count produces. On
+        # 2026-08-04 slang published "needs human decision: 0" over one commit marked
+        # `human`: an understated count anywhere else costs a reader accuracy, here it
+        # costs them the tool. A total nothing accounts for may not conclude anything.
         entry["verdict"] = "RESOLVED"
         entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → "
                          f"{latest}: {resolved} — nothing outstanding")
+    # AFTER the RESOLVED branch, which REPLACES the note: a stale stored list can coexist
+    # with a correct re-derived zero, and dropping the disclosure exactly in the branch
+    # that takes the tool out of triage is where it would cost the most. Nothing here is
+    # wrong — the cache is — and that has to travel with the row either way.
+    if n["stale_lists"]:
+        entry["note"] += (
+            f" — ⚠ the counts above were RE-DERIVED from this report's own rows because "
+            f"a stored summary list contradicted them ({'; '.join(n['stale_lists'])}); "
+            f"the cache still holds the old answer and will replay it until this range "
+            f"is re-judged")
     return entry
 
 

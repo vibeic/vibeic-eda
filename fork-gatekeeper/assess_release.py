@@ -1112,17 +1112,40 @@ def summary_counts(rep: dict) -> dict:
 
     Reads the STRUCTURED value wherever one exists, in descending order of directness:
 
-      1. the summary list itself (`rep["outstanding"]` &c) — exact;
-      2. failing that, a recount over `rep["commits"]` by the `decision`/`recommend`
-         columns — also exact, and available on every report ever cached, because the
-         rows are what the lists were derived from in the first place;
-      3. only when BOTH are absent, arithmetic — and then `derived` is set so the
+      1. a recount over `rep["commits"]` by the `decision`/`recommend` columns, whenever
+         the report carries a row for every commit it claims — the rows ARE the record;
+      2. failing that, the summary list itself (`rep["outstanding"]` &c);
+      3. failing both, a partial recount over whatever rows there are;
+      4. only when there are neither, arithmetic — and then `derived` is set so the
          documents can say the number was inferred rather than measured.
 
-    Step 2 is the repair. The old fallbacks were reached whenever a summary list was
-    missing, and they guessed with subtraction while the exact answer was sitting in the
-    rows one key away. Arithmetic-shaped counts are now reachable only for a report that
-    carries no rows at all.
+    THE ROWS OUTRANK THE LISTS, and that ordering is the 2026-08-06 repair. A summary
+    list is an INDEX built over the rows by a predicate; the rows are the classification
+    itself. An index is a redundant copy, a redundant copy is what goes stale, and this
+    one goes stale in a place nothing re-derives: the assessment cache, whose key is the
+    input range and the assessor and therefore does not move when we repair our own
+    post-processing. f9a3469 fixed `outstanding` — which had read `decision == "human"
+    AND recommend != "skip"`, a recommendation mistaken for a decision — and could not
+    reach the cocotb v2.0.0→v2.0.1 entry already on disk. Reading the stored list first
+    REPLAYED the retired predicate: 17 published against 61 rows marked `human`, on the
+    2026-08-05 and 2026-08-06 ticks, from a fix that had shipped on 08-04.
+    Re-deriving from the rows makes such a repair retroactive by construction.
+
+    "Every commit it claims" is the condition, not "has rows": a report carrying a
+    partial row list would be recounted DOWNWARD, and an undercount is the failure this
+    is repairing. Where the two readings disagree the list is not thrown away silently —
+    `stale_lists` names every field, because "the cache holds a value its own rows
+    contradict" is a fact about the cache and not a detail of one render.
+
+    `unaccounted` is the self-check (§2 of the same repair). The four HEADLINE buckets
+    are one `decision` column sliced four ways, so they partition the range by
+    construction and `clearly_safe + carried + decided + outstanding` IS `commit_count`.
+    Any other value means a bucket lost commits, the total is wrong, or the report is
+    truncated — three different defects, all of which publish silently and all of which
+    this one subtraction catches. It was available from the first day the sentence was
+    written: "64 upstream commit(s) … 3 clearly-safe, 0 already carried, 0 previously
+    decided, 17 need human review" states its own disproof. `counts_conflict` is what
+    refuses to publish it.
 
     The fail-safe DIRECTION of the old fallback is kept, and is why the arithmetic is
     what it is: an unknown `clearly_safe` counts as 0 (nothing may be claimed safe when
@@ -1134,15 +1157,24 @@ def summary_counts(rep: dict) -> dict:
     rows = rows if isinstance(rows, list) else []
     cc = rep.get("commit_count")
     cc = cc if isinstance(cc, int) else len(rows)
+    # A row per commit claimed: only then is a recount a reading of the WHOLE range.
+    complete = bool(rows) and len(rows) == cc
     out: dict = {"commits": cc}
-    derived = []
+    derived, stale = [], []
     for name, pred in _ROW_PREDICATES.items():
         v = rep.get(name)
-        if isinstance(v, list):                       # 1. the summary list
+        recount = (sum(1 for c in rows if isinstance(c, dict) and pred(c))
+                   if rows else None)
+        if complete:                                  # 1. the rows, which are the record
+            out[name] = recount
+            if isinstance(v, list) and len(v) != recount:
+                stale.append(f"{name}: the report's stored list says {len(v)}, its "
+                             f"{cc} rows say {recount}")
+        elif isinstance(v, list):                     # 2. the summary list
             out[name] = len(v)
-        elif rows:                                    # 2. recount from the rows
-            out[name] = sum(1 for c in rows if isinstance(c, dict) and pred(c))
-        else:                                         # 3. unknown → fail-safe
+        elif rows:                                    # 3. a partial recount
+            out[name] = recount
+        else:                                         # 4. unknown → fail-safe
             out[name] = None
             derived.append(name)
     for name in ("clearly_safe", "carried", "decided", "not_assessed",
@@ -1152,7 +1184,50 @@ def summary_counts(rep: dict) -> dict:
     if out["outstanding"] is None:
         out["outstanding"] = max(cc - out["clearly_safe"] - out["carried"] - out["decided"], 0)
     out["derived"] = sorted(derived)
+    out["stale_lists"] = stale
+    # Positive: commits no bucket claims. Negative: buckets claiming more than the range
+    # holds. Zero: the four numbers account for the range, which is the only shape a
+    # document may state.
+    out["unaccounted"] = cc - sum(out[f] for f in HEADLINE)
     return out
+
+
+def counts_conflict(rep: dict) -> list[str]:
+    """Does this report's own arithmetic hold? [] when it does, one line per failure.
+
+    Separate from `cross_check`'s document comparison on purpose: that check asks whether
+    two RENDERS of one report agree, and two renders of the same broken derivation agree
+    perfectly. The 2026-08-05 tick is the proof — its report, its assessment table and
+    its PR body all said 17, the guard cleared all three, and the number was wrong in
+    every one of them. Agreement between readers is not a property of the number.
+
+    A report that states no counts (an error entry, a clean / not-layered fork) has no
+    arithmetic to check, and is skipped by the same `states_counts` predicate for the
+    same reason `cross_check` skips it.
+
+    A STALE summary list is deliberately NOT reported here. Blocking is the fail-safe
+    for "the correct number is unknown"; a list contradicted by a complete row set is a
+    case where it is known — the rows have it — so the repair is to publish the right
+    number and DISCLOSE that the cache still holds the wrong one (`stale_lists`, rendered
+    by `_stale_lines`). Making it fatal would take the daily report off the air until an
+    operator hand-cleared a cache entry the program had already corrected for.
+    """
+    if not states_counts(rep):
+        return []
+    n = summary_counts(rep)
+    if not n["unaccounted"]:
+        return []
+    short = n["unaccounted"]
+    return [
+        f"{rep.get('tool', '?')}: the headline counts do not account for the range — "
+        + " + ".join(f"{f}={n[f]}" for f in HEADLINE) +
+        f" = {sum(n[f] for f in HEADLINE)}, against {n['commits']} upstream "
+        f"commit(s) in the same sentence "
+        + (f"({short} commit(s) in no bucket at all)" if short > 0 else
+           f"({-short} commit(s) counted more than once, or a total too small for its "
+           f"own buckets)") +
+        " — this is a DERIVATION FAILURE, not a triage result, and the numbers must "
+        "not be published as though they were measured"]
 
 
 # Each document phrases the counts for its own reader; the numbers are parsed back out
@@ -1267,7 +1342,11 @@ def cross_check(rep: dict, documents: dict[str, str]) -> list[str]:
     if not states_counts(rep):
         return []
     want = summary_counts(rep)
-    bad = []
+    # BEFORE comparing the documents to each other: do the numbers they all render
+    # account for the range they all state? Three documents agreeing on a broken
+    # derivation is what shipped on 2026-08-05 — see `counts_conflict`. Same list, same
+    # caller, same refusal: `gatekeeper.tick` publishes nothing when this is non-empty.
+    bad = counts_conflict(rep)
     for kind, text in sorted(documents.items()):
         got = parse_headline(kind, text)
         if got is None:
@@ -1346,6 +1425,47 @@ def _derived_lines(counts: dict) -> list[str]:
             "present. They err toward 'needs review'.", ""]
 
 
+def _unaccounted_lines(counts: dict) -> list[str]:
+    """The four numbers above do not add up to the range they describe — say so, first.
+
+    `counts_conflict` stops the tick publishing this document at all, so in the ordinary
+    run nobody reads these lines. They exist because `render_md` is also how an operator
+    inspects a report by hand, and a headline that a reader has to add up for themselves
+    is exactly what went unadded for two days.
+    """
+    short = counts.get("unaccounted") or 0
+    if not short:
+        return []
+    return [f"> **⚠ THESE COUNTS DO NOT ADD UP — {counts['commits']} commit(s) in the "
+            f"range, "
+            + " + ".join(f"{f}={counts[f]}" for f in HEADLINE) +
+            f" = {sum(counts[f] for f in HEADLINE)}.** "
+            + (f"{short} commit(s) are in no bucket at all." if short > 0 else
+               f"{-short} commit(s) are counted more than once, or the stated total is "
+               f"too small for its own buckets.") +
+            " The four buckets are one `decision` column sliced four ways, so they "
+            "partition the range by construction: a different sum is a DERIVATION "
+            "FAILURE. Do not triage from these numbers.", ""]
+
+
+def _stale_lines(counts: dict) -> list[str]:
+    """A stored summary list this report's own rows contradict.
+
+    The rows won and the number above is theirs, so this is not a warning about what is
+    printed — it is a warning about what is still ON DISK. The cache entry keeps the old
+    answer until the range is re-judged, and any reader that trusts a stored list rather
+    than re-deriving gets the retired predicate's number back.
+    """
+    if not counts.get("stale_lists"):
+        return []
+    return [f"> **⚠ A STORED SUMMARY LIST CONTRADICTS THIS REPORT'S OWN ROWS: "
+            f"{'; '.join(counts['stale_lists'])}.** The counts above are RE-DERIVED "
+            "from the rows, which are the classification itself; the stored list is an "
+            "index a predicate wrote, and this one was written by a predicate no longer "
+            "applied — typically a cached verdict predating the repair. Nothing here is "
+            "wrong; the CACHE is.", ""]
+
+
 def render_md(rep: dict) -> str:
     tool = rep.get("tool", "?")
     if rep.get("error"):
@@ -1365,6 +1485,11 @@ def render_md(rep: dict) -> str:
          + (f" ({n_open_adopt} the assessor would adopt · {n_open - n_open_adopt} it "
             f"would skip — its recommendation, not a decision)" if n_open else ""), ""]
     L += _provenance_lines(rep)
+    # FIRST of the banners: every other one qualifies a number, this one says the set of
+    # numbers does not describe the range. A reader who has started triaging has already
+    # been misled.
+    L += _unaccounted_lines(n)
+    L += _stale_lines(n)
     L += _derived_lines(n)
     # An assessment that did not complete must SAY SO, above the table, before a reader
     # starts triaging cells that no classifier ever filled in.
@@ -1378,7 +1503,12 @@ def render_md(rep: dict) -> str:
               "adopt-candidates, so for an unassessed commit the our-patch-overlap and "
               "cherry-pick analyses DID NOT RUN either. The per-commit reason is in the "
               "summary column.", ""]
-    if (n_carried or n_decided) and not n_open and not n_safe and not n_na:
+    # `not n["unaccounted"]`: "every upstream commit is either carried or decided" is a
+    # claim ABOUT ALL OF THEM, so it may only be made by a report whose buckets account
+    # for all of them. Reached with commits in no bucket, it is the strongest possible
+    # statement of the understated count — the tool leaves triage altogether.
+    if (n_carried or n_decided) and not n_open and not n_safe and not n_na \
+            and not n["unaccounted"]:
         L += ["> **This range is DECIDED — no action required.** Every upstream commit is "
               "either already in our shipped ref (as an ancestor or a cherry-pick) or "
               "carries a recorded skip decision in `DECISIONS.json`. `behind_releases` "
