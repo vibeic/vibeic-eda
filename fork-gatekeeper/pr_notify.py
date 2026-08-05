@@ -390,11 +390,16 @@ def tally_line(tool: str, a: dict) -> str | None:
     # and the only one nothing derived from the assessment.
     if _assess is None:
         return None
+    if a.get("status") == "pin_ahead_of_release":
+        d = a.get("target_direction") or {}
+        return (f"- **{tool}**: NO TARGET — the newest tagged release `{d.get('target')}` "
+                f"is not a descendant of the ref we ship (`{d.get('pin')}`): "
+                f"{d.get('why')}. Nothing is proposed (needs manual review)")
     n = _assess.summary_counts(a)
     line = (f"- **{tool}**: {n['commits']} upstream commit(s) {a.get('base_release')} → "
             f"{a.get('latest')} — {n['clearly_safe']} clearly-safe, {n['carried']} already "
             f"carried, {n['decided']} previously decided, {n['outstanding']} "
-            f"need human review")
+            f"need human review{_assess.direction_note(a)}")
     # An incomplete judgment must be visible in the PR BODY, not only in the attached
     # per-commit table. Otherwise the summary a reviewer reads first presents "N need
     # review" as a triage result when nothing was triaged.

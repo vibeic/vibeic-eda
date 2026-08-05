@@ -177,6 +177,25 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
     if rep.get("error"):
         return {"verdict": "DEFERRED",
                 "note": f"{nr} new release(s) → {latest}; assessment error: {rep['error']}"}
+    # THE PIN IS AHEAD OF THE TAG. Its own state, and the reason it is one: this row used
+    # to read "N upstream commit(s) <base> → <latest>" for a `latest` that is BEHIND the
+    # ref we ship — Trilinos published exactly that on three consecutive days, proposing
+    # a move onto a tag 407 commits behind `TRILINOS_REF`. The number of releases and the
+    # tag name are still stated, because upstream really does hold work we lack; what is
+    # withdrawn is the claim that the tag is somewhere we can go.
+    if rep.get("status") == "pin_ahead_of_release":
+        d = rep.get("target_direction") or {}
+        return {"verdict": "DEFERRED",
+                "target_refused": d.get("target"),
+                "note": (f"{nr} new release(s), but the newest ({d.get('target')}) is NOT a "
+                         f"descendant of the ref we ship (`{d.get('pin')}`) — our pin is "
+                         f"{d.get('pin_ahead')} commit(s) ahead of it and it carries "
+                         f"{d.get('target_ahead')} we lack, on a line we cannot move onto "
+                         f"without dropping the rest, so advancing to it would be a "
+                         f"DOWNGRADE — "
+                         f"{assess_release.no_forward_range_phrase(rep)}. NOTHING is "
+                         f"proposed: adopting that work is a cherry-pick decision, not a "
+                         f"release this fork can be advanced to")}
     # CONSUME the assessment's own classification — via the ONE derivation in
     # assess_release, never a private re-derivation. This block used to compute "needs
     # human" for itself as `commit_count - clearly_safe`, which silently discards the two
@@ -228,9 +247,18 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
                           # …and which stored summary list its own rows contradicted.
                           "stale_lists": n["stale_lists"]}}
     resolved = f"{carried} already carried, {decided} previously decided"
-    entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → {latest}: "
+    # NAME THE RANGE THAT WAS ASSESSED, not the one the ledger's tag suggests. This read
+    # `rep['base_release'] → latest`, pairing the report's own base with the CALLER's
+    # newest-tag argument — two ends of two different ranges whenever `assess()` falls
+    # back off the release range, which it does for every fork whose upstream ships from
+    # rolling master and now for every refused-target fork as well. `rep['latest']` is
+    # the end `rep['base_release']` was measured to; `latest` stays as the fallback for
+    # a stub report that states no range of its own.
+    span = f"{rep.get('base_release')} → {rep.get('latest') or latest}"
+    entry["note"] = (f"{cc} upstream commit(s) {span}: "
                      f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
-                     f"selective-merge assessment filed (not auto-merged)")
+                     f"selective-merge assessment filed (not auto-merged)"
+                     f"{assess_release.direction_note(rep)}")
     if n_na:
         entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
                           f"commit(s) NOT ASSESSED (no classification made)")
@@ -269,8 +297,8 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
         # `human`: an understated count anywhere else costs a reader accuracy, here it
         # costs them the tool. A total nothing accounts for may not conclude anything.
         entry["verdict"] = "RESOLVED"
-        entry["note"] = (f"{cc} upstream commit(s) {rep.get('base_release')} → "
-                         f"{latest}: {resolved} — nothing outstanding")
+        entry["note"] = (f"{cc} upstream commit(s) {span}: {resolved} — nothing "
+                         f"outstanding{assess_release.direction_note(rep)}")
     # AFTER the RESOLVED branch, which REPLACES the note: a stale stored list can coexist
     # with a correct re-derived zero, and dropping the disclosure exactly in the branch
     # that takes the tool out of triage is where it would cost the most. Nothing here is

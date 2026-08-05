@@ -148,6 +148,144 @@ def recorded_decisions(tool: str) -> dict[str, dict]:
     return d if isinstance(d, dict) else {}
 
 
+#: The three answers to "may we ADVANCE to this release?", and UNDETERMINED is not a
+#: quiet yes — every document that names a target has to say which of the three it got.
+FORWARD, BEHIND, DIR_UNKNOWN = "forward", "behind", "undetermined"
+
+
+def _git_in(clone: Path, *args: str, timeout: int = 60):
+    """`git -C <clone> …`, or None if git could not be run at all. Never raises."""
+    try:
+        return subprocess.run(["git", "-C", str(clone), *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def target_direction(tool: str, our_ref: str | None, fork_point: str | None,
+                     target: str | None) -> dict:
+    """Is `target` a release we could ADVANCE to from the ref we actually ship?
+
+    MEASURED (2026-08-06, Trilinos). The daily report proposed
+    `trilinos-release-16-2-1 → trilinos-release-17-1-1` on three consecutive days.
+    Against the live pin `5edda67161cc` the target is 407 commits BEHIND us and
+    12 ahead: adopting it would delete four hundred upstream commits we already
+    build. The stated base was worse than wrong — `trilinos-release-16-2-1` is the
+    RETAINED FALLBACK pin, not the one in the image; `TRILINOS_REF` moved to a
+    17.2 branch on 2026-08-01.
+
+    Why the release bucketing did not catch it, and why this is a SECOND question
+    rather than a bug in the first. `discover_forks` decides `behind_releases` by
+    trunk-divergence order anchored at `base` — the newest release our pin CONTAINS
+    — and by that rule `trilinos-release-17-1-1` legitimately counts: it carries 12
+    commits we do not have, so upstream really does hold work we lack. That is the
+    question "does upstream have something we don't". It is not the question a
+    TARGET answers, which is "can we move onto this without dropping work we
+    already ship". A release cut on a maintenance branch answers yes to the first
+    and no to the second, and every one of the six forks measured in that shape
+    (Trilinos, cocotb, gtkwave, iverilog, slang, yices2) was having a downgrade
+    proposed for it.
+
+    THE PREDICATE, and no tool appears in it:
+
+      * our pinned ref is an ancestor of the target  → FORWARD. Nothing is dropped.
+      * else the target contains our FORK POINT      → FORWARD. Everything it lacks
+        is our own carried patches, which a merge re-applies; that is what makes
+        `netgen 1.5.323` (15 of our commits ahead, 223 upstream commits to take)
+        a real target while Trilinos is not.
+      * else                                         → BEHIND. There are commits
+        reachable from the ref we ship that the target does not have and that are
+        not ours to re-apply.
+      * anything unanswerable                        → UNDETERMINED, which callers
+        must publish as its own state. It is never folded into either verdict.
+
+    Returns {verdict, target, pin, pin_ahead, target_ahead, why}. `pin_ahead` /
+    `target_ahead` are the two `rev-list --count` sides, or None when unmeasured —
+    they are DISCLOSURE, never the verdict: nothing here compares two numbers.
+    """
+    out = {"verdict": DIR_UNKNOWN, "target": target, "pin": (our_ref or "")[:12],
+           "pin_ahead": None, "target_ahead": None, "why": ""}
+    if not target:
+        out["why"] = "no upstream release target to compare against"
+        return out
+    if not our_ref:
+        out["why"] = ("no pinned ref is recorded, so there is nothing to measure the "
+                      "target against")
+        return out
+    clone = FORKS_DIR / tool
+    if not (clone / ".git").is_dir():
+        out["why"] = (f"no local clone at {clone}, so the target's direction relative to "
+                      f"our pin was NOT measured")
+        return out
+
+    def _resolve(ref: str) -> str | None:
+        r = _git_in(clone, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        return (r.stdout or "").strip() if (r is not None and r.returncode == 0) else None
+
+    def _ancestor(a: str, b: str) -> bool | None:
+        """True/False, and None when git did not answer — rc 0 and rc 1 are the only
+        two answers `--is-ancestor` gives; anything else is the probe failing, which
+        must not read as 'not an ancestor'."""
+        r = _git_in(clone, "merge-base", "--is-ancestor", a, b)
+        if r is None or r.returncode not in (0, 1):
+            return None
+        return r.returncode == 0
+
+    def _count(a: str, b: str) -> int | None:
+        r = _git_in(clone, "rev-list", "--count", f"{a}..{b}")
+        if r is None or r.returncode != 0:
+            return None
+        try:
+            return int((r.stdout or "").strip())
+        except ValueError:
+            return None
+
+    pin_sha, tgt_sha = _resolve(our_ref), _resolve(target)
+    missing = [n for n, v in ((f"our pin {our_ref[:12]}", pin_sha), (target, tgt_sha))
+               if not v]
+    if missing:
+        out["why"] = (f"{' and '.join(missing)} does not resolve in {clone}, so the "
+                      f"target's direction was NOT measured")
+        return out
+    out["pin_ahead"], out["target_ahead"] = _count(tgt_sha, pin_sha), _count(pin_sha, tgt_sha)
+
+    fwd = _ancestor(pin_sha, tgt_sha)
+    if fwd is None:
+        out["why"] = f"the ancestry probe did not answer in {clone}"
+        return out
+    if fwd:
+        out["verdict"] = FORWARD
+        out["why"] = f"the ref we ship is an ancestor of {target}"
+        return out
+
+    if fork_point:
+        fp_sha = _resolve(fork_point)
+        if not fp_sha:
+            out["why"] = (f"{target} is not a descendant of the ref we ship, and our fork "
+                          f"point {fork_point[:12]} does not resolve in {clone} — so "
+                          f"whether the commits it drops are ours or upstream's was NOT "
+                          f"measured")
+            return out
+        fp = _ancestor(fp_sha, tgt_sha)
+        if fp is None:
+            out["why"] = f"the fork-point ancestry probe did not answer in {clone}"
+            return out
+        if fp:
+            out["verdict"] = FORWARD
+            out["why"] = (f"{target} contains our fork point {fork_point[:12]}, so the only "
+                          f"commits it lacks are our own carried patches")
+            return out
+
+    out["verdict"] = BEHIND
+    ahead = out["pin_ahead"]
+    out["why"] = (f"{target} is NOT a descendant of the ref we ship"
+                  + (f" — our pin is {ahead} commit(s) ahead of it" if ahead else "")
+                  + (f" and it does not contain our fork point {fork_point[:12]}"
+                     if fork_point else "")
+                  + "; advancing to it would be a DOWNGRADE")
+    return out
+
+
 def already_carried(tool: str, our_ref: str, commits: list[dict]) -> set[str]:
     """The subset of `commits` our shipped ref ALREADY contains.
 
@@ -771,10 +909,39 @@ def assess(tool: str) -> dict:
     # those undecided releases contain, so it is the one range that cannot miss
     # them. What it must never do is fall through as if the gap had been measured
     # at zero — that is `or 0` on a null, which is the defect being fixed.
+    # WHICH WAY does the release target lie from the ref we actually ship? Measured
+    # before the range is fixed, because a target that is BEHIND our pin is not a
+    # target at all — see `target_direction` for the Trilinos measurement that put
+    # this here. The verdict travels on the report so every document that names a
+    # range says which of the three answers it got; UNDETERMINED keeps the release
+    # range (refusing a whole fork over a missing clone loses more than it protects)
+    # but is DISCLOSED, never rendered as a measured forward.
+    direction = target_direction(tool, our_ref,
+                                 (led.get("fork_point") or {}).get("sha"),
+                                 led.get("upstream_latest_release"))
+
     if ((rel_unknown or not rel_gap)
             and (led.get("behind_commits") or 0) > 0
             and our_ref):
         base_ref, new_ref = our_ref, up_branch
+    elif direction["verdict"] == BEHIND:
+        # The release we would "advance" to drops work we already build. There are two
+        # honest answers and neither of them is the tag: if upstream's default branch
+        # has moved past our pin, THAT is the forward range and it is assessed instead;
+        # if it has not, this fork has nowhere to go and the report has to say so rather
+        # than propose a downgrade for a fourth consecutive day.
+        if (led.get("behind_commits") or 0) > 0 and our_ref:
+            base_ref, new_ref = our_ref, up_branch
+        else:
+            bc = led.get("behind_commits")
+            return {"tool": tool, "status": "pin_ahead_of_release", "commits": [],
+                    "base_release": led.get("base_release"),
+                    "latest": led.get("upstream_latest_release"),
+                    # Carried, and int-or-None: the row's second clause is a claim
+                    # about the DEFAULT BRANCH, and "the ledger has no number" is not
+                    # "the branch has not moved" (see `no_forward_range_phrase`).
+                    "behind_commits": bc if isinstance(bc, int) else None,
+                    "target_direction": direction}
 
     if not (base_ref and new_ref):
         return {"tool": tool,
@@ -916,6 +1083,11 @@ def assess(tool: str) -> dict:
 
     rep = {"tool": tool, "status": "assessed", "upstream": upstream,
            "base_release": base_ref, "latest": new_ref,
+           # WHICH WAY the newest tagged release lies from the ref we ship — forward,
+           # behind, or not measured. Carried on every assessed report (not only the
+           # awkward ones) so the cached shape is the same either way and no reader has
+           # to treat "absent" as "fine".
+           "target_direction": direction,
            # PROVENANCE — who judged this, WHAT THEY WERE ASKED, and when. Carried into
            # the cache so a replayed report can say it was restored, by whom it was
            # decided, and under which question (vibeic/vibeic-eda#11: a verdict reached
@@ -1105,6 +1277,50 @@ _ROW_PREDICATES = {
     "unreachable": lambda c: bool(c.get("reachability_conflict")),
     "unconfirmed": lambda c: bool(c.get("sampling_conflict")),
 }
+
+
+def direction_note(rep: dict) -> str:
+    """The clause every document appends when the release TARGET is not a plain forward.
+
+    "" for a measured FORWARD — a target that is what it looks like needs no sentence.
+    The other two answers each get their own, and they say different things: BEHIND is a
+    measurement ("we refused this target and here is the range we assessed instead"),
+    UNDETERMINED is the absence of one ("nothing established that this target is ahead of
+    us"). Folding the second into silence is exactly how a downgrade gets published as a
+    plan, so a report carrying no `target_direction` at all — anything cached before this
+    existed — reads as UNDETERMINED, not as fine.
+    """
+    d = rep.get("target_direction")
+    if not isinstance(d, dict):
+        return (" — the newest tagged release was NOT checked against the ref we ship "
+                "(this report predates the check), so nothing here establishes that it "
+                "is a target we could advance to")
+    v, tgt = d.get("verdict"), d.get("target")
+    if v == FORWARD:
+        return ""
+    if v == BEHIND:
+        return (f" — TARGET REFUSED: `{tgt}` is not a target we can advance to "
+                f"({d.get('why')}), so the range assessed above is "
+                f"`{rep.get('base_release')} → {rep.get('latest')}` instead")
+    return (f" — DIRECTION UNMEASURED for `{tgt}`: {d.get('why')}; it is not established "
+            f"that the newest tagged release is ahead of the ref we ship")
+
+
+def no_forward_range_phrase(rep: dict) -> str:
+    """Why a refused target left NOTHING to assess — and the two reasons are different.
+
+    A `pin_ahead_of_release` row falls back to the commit range `our pin … upstream's
+    default branch` whenever that range is non-empty, so reaching this state means the
+    fallback was not available. It was not available for one of two reasons, and only
+    the first is a measurement: the branch has genuinely not moved, or the ledger holds
+    no `behind_commits` at all. Printing the first sentence for the second case is the
+    same `or 0` substitution the release-gap work spent a round removing.
+    """
+    if rep.get("behind_commits") == 0:
+        return ("upstream's default branch has not moved past our pin either, so there "
+                "is no forward range to assess")
+    return ("and whether upstream's default branch has moved past our pin is NOT "
+            "recorded, so no forward range could be offered either")
 
 
 def summary_counts(rep: dict) -> dict:
@@ -1312,6 +1528,9 @@ def states_counts(rep: dict) -> bool:
     "assessment error — …") and a fork that is CLEAN or NOT LAYERED ("nothing to
     assess"). Everything else is an assessed range, and every document it produces states
     four numbers — so a document of one that does not parse is a defect, not a stub.
+
+    `pin_ahead_of_release` is the third stub shape: no range was assessed because the
+    newest tagged release is behind the ref we ship, so there are no commits to count.
     """
     return not rep.get("error") and rep.get("status") in (None, "assessed")
 
@@ -1472,6 +1691,17 @@ def render_md(rep: dict) -> str:
         return f"### {tool}: assessment error — {rep['error']}\n"
     if rep.get("status") in ("clean", "not_layered"):
         return f"### {tool}: {rep['status']} — nothing to assess.\n"
+    if rep.get("status") == "pin_ahead_of_release":
+        d = rep.get("target_direction") or {}
+        return (f"### {tool}: PIN IS AHEAD OF THE NEWEST TAGGED RELEASE — no target to "
+                f"advance to.\n"
+                f"The newest upstream release is **{rep.get('latest')}** and it is NOT a "
+                f"descendant of the ref we ship (`{d.get('pin')}`): {d.get('why')}. "
+                f"Our pin is {d.get('pin_ahead')} commit(s) ahead of it; it carries "
+                f"{d.get('target_ahead')} commit(s) we do not have, on a line we cannot "
+                f"move onto without dropping the rest — {no_forward_range_phrase(rep)}. "
+                f"Adopting that work means CHERRY-PICKING from it, which is a decision — "
+                f"not a tag this fork can be advanced to.\n")
     n = summary_counts(rep)
     n_carried, n_decided = n["carried"], n["decided"]
     n_safe, n_open = n["clearly_safe"], n["outstanding"]
@@ -1479,7 +1709,8 @@ def render_md(rep: dict) -> str:
     L = [f"## {tool} — selective-merge assessment",
          f"Range **{rep['base_release']} → {rep['latest']}** · {n['commits']} upstream "
          f"commit(s) · our branch carries patches over "
-         f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} file(s).",
+         f"{rep['our_patch_files'] if rep.get('our_patch_files') is not None else '?'} "
+         f"file(s).{direction_note(rep)}",
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
          f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**"
          + (f" ({n_open_adopt} the assessor would adopt · {n_open - n_open_adopt} it "
