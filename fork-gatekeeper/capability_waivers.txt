@@ -1,20 +1,70 @@
 # Capabilities that capability_smoke.py measures as BROKEN and that we are
 # knowingly shipping broken, each with the decision that made it acceptable.
 #
-# THIS FILE IS A LIABILITY, NOT A SCOREBOARD.  Two rules keep it from outliving
-# its truth, both enforced by capability_gate.py rather than by discipline:
+# THIS FILE IS A LIABILITY, NOT A SCOREBOARD.  Four rules keep it from outliving
+# its truth, all enforced by capability_gate.py rather than by discipline:
 #
 #   1. A name here that capability_smoke now reports as WORKS is a STALE WAIVER
 #      and FAILS the gate.  You cannot leave an entry behind after fixing the
 #      thing; the gate makes you delete it.
 #   2. A name here that capability_smoke does not know is a FAIL too, so a typo
 #      cannot silently waive nothing while looking like it waived something.
+#   3. An entry with no RECORDED DECISION is a FAIL (vibeic-eda#90).  A waiver
+#      whose rationale lives only in a comment is a waiver nobody has to own,
+#      and the three entries below sat that way long enough that one of them had
+#      the wrong mechanism written beside it -- see openroad/python-api, where
+#      `-DBUILD_PYTHON=ON` named a CMake flag on a build that has not used CMake
+#      since upstream defaulted to Bazel.  A rationale that reads plausibly and
+#      was never measured is worse than no rationale, because it launders a
+#      guess into the record and sends the next person to fix the wrong thing.
+#   4. NOT KNOWING DOES NOT PROMOTE.  `decision: PENDING-OWNER` (reason measured,
+#      nobody has ruled) and `decision: UNKNOWN-WHY` (we could not determine why
+#      the capability is absent) each BLOCK, under their own heading.  They exist
+#      so that "we do not know yet" is WRITABLE -- the alternative is that the
+#      only way to make the gate green is to invent a decision, which is the
+#      defect this file is trying not to have.
 #
 # There is deliberately no count and no "expected failures: N".  A number is
 # what lets a second regression hide behind the first.  Waive by NAME or not at
 # all.
 #
-# Format:  <capability-name>  # <why, and who owns the decision>
+# FORMAT.  An entry is a capability NAME at column 0, followed by indented
+# `key: value` fields.  A value may continue on further indented lines that do
+# not themselves start with a `key:`; an unrecognised `key:` is an ERROR, not a
+# continuation, so that a typo cannot absorb itself into the value above.  To
+# continue a line that really does begin `error:` / `warning:` / `note:` -- which
+# quoted tool output constantly does -- start it with `...` and it is a
+# continuation whatever follows.  Required on every entry:
+#
+#   why:        the MEASURED reason the capability is absent -- what the tool
+#               actually printed, not what we assume the build did.
+#   evidence:   the exact command that produced it.  A rationale with no command
+#               behind it is a hypothesis; the gate requires the command.
+#   cost:       what it would take to HAVE the capability, concretely -- name the
+#               flag, the package, or the missing upstream capability.  This is
+#               the information the decision turns on, so it is not optional.
+#   decision:   one of
+#                 DO-NOT-ADVERTISE  terminal: the image does not offer this.
+#                 BUILD             we intend to build it; still waived until we
+#                                   do.  Passes, and prints as DATED debt.
+#                 PENDING-OWNER     measured, unruled.  BLOCKS.
+#                 UNKNOWN-WHY       we could not determine why.  BLOCKS.
+#   by:         who owns the decision -- the person whose ruling it is, which
+#               for a PENDING-OWNER entry is who still has to make it.
+#   on:         YYYY-MM-DD, a real calendar date: when this record was last
+#               written.  For a settled decision that is when it was made; for a
+#               PENDING-OWNER it is when the measurement was taken, which is what
+#               tells you whether the "pending" is a day old or a quarter old.
+#
+#   recommend:  optional; the measured recommendation attached to a
+#               PENDING-OWNER entry, so that ruling on it is a yes/no rather
+#               than a re-investigation.
+#
+# WHAT THIS DOES NOT DO, stated so a green gate is not read as more than it is:
+# a BUILD decision does not expire.  The gate dates it and prints it as
+# outstanding debt on every release; it does not count it and does not age it
+# out.  An expiry would be a number, and a number in this file is the thing rule
+# 1 exists to prevent.
 
 # cocotb/icarus-waves was waived here and is now DELETED, not because anyone
 # worked on it but because the gate refused to let the line survive its own fix.
@@ -22,6 +72,147 @@
 # iverilog's FST support fixed it as a side effect. The stale-waiver rule turned a
 # silent free win into a required edit — which is the whole reason the rule exists.
 
-sby/smtbmc-z3              # smtbmc's z3 engine line errors rc=16; image ships yices, not z3. Same root as the verilator solver finding, but sby's engine list is a config decision. Owner: team-lead.
-yosys/vhdl-synth           # ghdl-yosys-plugin is ABI-broken vs the shipped yosys (Dockerfile:419 already says so). Policy call, explicitly deferred: rebuild the plugin vs delete it and document VHDL as simulate-only. Owner: team-lead.
-openroad/python-api        # OpenROAD built without -DBUILD_PYTHON=ON. Deliberate yes/no pending: the vibe-ic flow drives Tcl and no plugin code imports openroad/odb. Owner: team-lead.
+sby/smtbmc-z3
+    why:        Not a solver bug and not an sby bug: the z3 EXECUTABLE is not in
+                the image.  sby's engine driver shells out to `z3` on PATH and
+                reports `SMT Solver 'z3' not found in path.`, then dies rc=16 --
+                which reads as a property that could not be proved rather than a
+                tool that is not there.  `libz3-4` and `libz3-dev` ARE installed
+                (4.8.12-3.1build1, pulled in as a LIBRARY by something else), so
+                "z3 is in the image" is true of the shared object and false of
+                the binary, which is why this looked configured.
+    evidence:   docker run --rm --entrypoint bash IMAGE -lc 'cd /tmp && printf
+                "module top(input clk); reg [3:0] c=0; always @(posedge clk)
+                c<=c+1; always @* assert(c<16); endmodule\n" > top.sv && printf
+                "[options]\nmode bmc\ndepth 4\n\n[engines]\nsmtbmc z3\n\n
+                [script]\nread -formal top.sv\nprep -top top\n\n[files]\ntop.sv\n"
+                > p.sby && sby -f p.sby; grep -i "not found in path" p/logfile.txt'
+                -> "SMT Solver 'z3' not found in path."  And, separating binary
+                from library: `command -v z3` -> nothing, `dpkg -l | grep z3` ->
+                libz3-4 + libz3-dev both ii.
+    cost:       CHEAP, and it is a package, not a flag: apt `z3` on noble is
+                4.8.12-3.1build1, Installed-Size 16023 KB (measured delta 16 MB),
+                download 5.9 MB, Depends only libc6/libgcc-s1/libstdc++6 -- all
+                already present, so no new dependency chain.  0.05% of a 31.3 GB
+                image; build time is one apt line.  Note the SECOND consumer:
+                verilator/constrained-randomize failed on 0.2.63 with
+                `VlRProcess::open: execvp(z3): No such file or directory`, i.e.
+                the same missing binary, and the repo already ruled on that one
+                the other way -- the Dockerfile sets VERILATOR_SOLVER="yices-smt2
+                --incremental" rather than installing z3.
+    decision:   PENDING-OWNER
+    recommend:  DO-NOT-ADVERTISE, for consistency with the verilator ruling
+                already in the Dockerfile: we ship yices as THE solver and point
+                every consumer at it.  Adopting z3 for sby alone means the image
+                carries two SMT solvers and answers "which solver proved our
+                properties" with "it depends on the .sby file".  If the owner
+                prefers z3 present, the cost is one apt line and 16 MB -- this is
+                a policy call, not an engineering one.
+    by:         team-lead
+    on:         2026-08-05
+
+yosys/vhdl-synth
+    why:        TWO layers, and the outer one hides the real cause.  What a user
+                hits is `plugin -i ghdl` -> `ghdl.so: cannot open shared object
+                file`, because /foss/tools/yosys/share/yosys/plugins/ does not
+                exist at all -- our yosys replaces the base's tree and nothing
+                re-installs the plugin.  That makes "just symlink it into the
+                plugin dir" the obvious fix, and it does not work: loading the
+                file BY ABSOLUTE PATH gets `undefined symbol:
+                _ZN5Yosys4PassC2ENSt7__cxx1112basic_stringIcSt11char_traitsIcE
+                SaIcEEES6_15source_location`.  The base image's prebuilt ghdl.so
+                (dated Jun 22, from hpretl/iic-osic-tools) was compiled against a
+                yosys whose Yosys::Pass ctor has no `source_location` parameter;
+                ours is 0.67+ (5b942cb91, vibeic fork) where it does.  So the ABI
+                claim at Dockerfile:419 is CORRECT, and it is the second layer,
+                not the first.
+    evidence:   docker run --rm --entrypoint bash IMAGE -lc 'yosys -p "plugin -i
+                /foss/tools/ghdl-yosys-plugin/ghdl.so"' -> `yosys: symbol lookup
+                ... error: ... undefined symbol: _ZN5Yosys4PassC2E ... source_location`;
+                `ls /foss/tools/yosys/share/yosys/plugins/` -> No such file or
+                directory; control `ghdl -a inv.vhd` -> rc=0, so VHDL analysis
+                itself is fine and the defect is the yosys bridge alone.
+    cost:       MEDIUM -- a new fork plus a new per-tool image, not a flag.
+                ghdl-yosys-plugin is NOT in FORKS.json (36 forks, absent), and
+                tools/check_fork_only.py fails the build on a clone of anything
+                outside github.com/vibeic, so it must be forked before it can be
+                built.  Everything the build NEEDS is already in the image and
+                measured present: `yosys-config --cxxflags` resolves (-std=c++20
+                ... -I/foss/tools/yosys/share/yosys/include, and the kernel
+                headers are shipped), libghdl-7_0_0_dev.so + libghdl.a +
+                libghdl.link are at /foss/tools/ghdl/lib, and the exact source
+                commit is recorded beside the stale artefact
+                (/foss/tools/ghdl-yosys-plugin/SOURCES -> ghdl-yosys-plugin
+                a1087d950ad5a62ae108b79b91f1c2aeb985e024).  Payload ~7.6 MB.
+                THE COUPLING IS THE REAL COST: ghdl itself is NOT ours -- it comes
+                from the base image -- so the plugin would be pinned against a
+                dependency we do not control, and the next base bump re-breaks it
+                exactly the way this one broke.  There is no cheaper route: our
+                yosys has no Verific frontend, and nvc (1.21.1, present) has no
+                yosys bridge, so ghdl-yosys-plugin is the only VHDL synthesis path
+                that exists.
+    decision:   PENDING-OWNER
+    recommend:  DO-NOT-ADVERTISE, and say plainly that VHDL is SIMULATE-ONLY in
+                this image: ghdl and nvc both work, synthesis does not.  The
+                deciding fact is the coupling, not the effort -- forking the
+                plugin buys a capability whose lifetime is set by a base-image
+                bump we do not schedule.  If the owner wants VHDL synthesis, the
+                honest version is to fork ghdl as well, and that is a materially
+                bigger decision than this line.
+    by:         team-lead
+    on:         2026-08-05
+
+openroad/python-api
+    why:        THE PREVIOUS RATIONALE HERE WAS WRONG ABOUT THE MECHANISM, and is
+                corrected by measurement.  It said "OpenROAD built without
+                -DBUILD_PYTHON=ON"; that is a CMake flag, and this image's
+                OpenROAD is not a CMake build.  tools/openroad/Dockerfile calls
+                `./etc/Build.sh -threads=N -prefix=/vibeic-openroad`, and at the
+                pinned commit Build.sh has `useBazel=yes` with `-cmake-build`
+                documented as the opt-in ("By default OpenROAD is built with
+                Bazel") -- the Dockerfile says as much one comment up, about a
+                different dead cmake option.  So passing -DBUILD_PYTHON=ON would
+                change nothing.  In the Bazel build OPENROAD_DEFINES hardcodes
+                `BUILD_PYTHON=false` (BUILD.bazel:141), and the macro that
+                actually gates the embedded interpreter, ENABLE_PYTHON3, appears
+                in exactly one file tree-wide -- src/CMakeLists.txt:396 -- i.e.
+                NOWHERE in the Bazel build.  `openroad -python` is guarded by
+                `#ifdef ENABLE_PYTHON3` (src/Main.cc:268), so under Bazel the flag
+                is not merely off: the option does not exist.  The binary prints
+                its usage and exits 1, and `-python` is absent from
+                `openroad -help`.
+    evidence:   docker run --rm --entrypoint bash IMAGE -lc 'openroad -python
+                /tmp/p.py; echo RC=$?; openroad -help 2>&1 | grep -ci python; ldd
+                $(command -v openroad) | grep -ci python' -> RC=1 with the usage
+                block, 0 mentions of python in -help, 0 libpython linked; control
+                `openroad -no_init -exit p.tcl` -> rc=0.  In the source at the
+                pinned ref 9dfaec5fb907: `git show <ref>:BUILD.bazel | grep -n
+                BUILD_PYTHON` -> line 141 `"BUILD_PYTHON=false"`; `git grep -n
+                ENABLE_PYTHON3 <ref> -- '*.bazel' '*.bzl' CMakeLists.txt
+                src/CMakeLists.txt` -> one hit, src/CMakeLists.txt:396.
+    cost:       DEPENDS WHICH CAPABILITY IS MEANT, and the probe and the users
+                want different ones.  (a) `openroad -python`, which is what the
+                probe drives: NOT AVAILABLE under Bazel at any price short of
+                switching the whole build to CMake (-cmake-build plus
+                -DBUILD_PYTHON=ON) -- a build-system change for one feature, and
+                it would discard the Bazel path the Dockerfile's stamp/provenance
+                work is built on.  (b) `import openroad` / `import odb` from
+                python3, which is what a script actually wants: the Bazel targets
+                EXIST and are public -- `//:openroad_py` (py_library) and
+                `//:_openroadpy.so` (cc_binary, linkshared) -- and are simply
+                never installed, because packaging/BUILD.bazel declares
+                `srcs = ["//:openroad"]`, one binary.  Cost of (b) is a second
+                `bazel build` plus install in the same stage, mirroring how the
+                standalone `sta` is already rescued out of bazel-bin in this very
+                Dockerfile.  MEDIUM, and no new dependency.
+    decision:   PENDING-OWNER
+    recommend:  DO-NOT-ADVERTISE for (a); and if the owner wants the Python API at
+                all, take (b) and RE-AIM THE PROBE at `python3 -c "import
+                openroad"`.  As it stands the probe measures the CMake-only
+                embedded interpreter, so it can never go green on a Bazel build no
+                matter what we install -- a probe that cannot pass is not a
+                measurement.  Standing fact behind DO-NOT-ADVERTISE: the vibe-ic
+                flow drives OpenROAD through Tcl and no plugin code imports
+                openroad or odb.
+    by:         team-lead
+    on:         2026-08-05
