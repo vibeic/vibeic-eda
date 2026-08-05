@@ -29,14 +29,14 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:724a389-7f0732
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:5b942cb-6e4564
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:9dfaec5-56b6bf
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:600df90-124fd6
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:1b70fc1-622112
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:0da4c3b-0334b7d-46a666
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:26933e0-5b8871
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ef3c73c-246df4
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:a5a7a2d-7ef8ee
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e1e7aa4-1ddd70
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:db524bc-c66901
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:1ffd741-5d449c
