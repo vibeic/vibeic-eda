@@ -273,6 +273,12 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
                           "carried": carried, "decided": decided,
                           "outstanding": n_open, "not_assessed": n_na,
                           "unreachable": n_unreach, "unconfirmed": n_unconf,
+                          # Already merged into our fork mainline, not yet in the pin —
+                          # ours, but not shipped, and not an adopt/skip decision. Its
+                          # UNDETERMINED companion rides along so a reader can tell an
+                          # unread mainline from an empty one.
+                          "on_mainline": n["on_mainline"],
+                          "mainline_undetermined": n.get("mainline_undetermined"),
                           # WHICH assessment this report summarises. Without it the daily
                           # report and the assessment filed under the same date are
                           # indistinguishable when they are two different vintages — the
@@ -301,7 +307,8 @@ def assessment_entry(rep: dict, nr: int | str, latest) -> dict:
     entry["note"] = (f"{cc} upstream commit(s) {span}: "
                      f"{safe} clearly-safe, {resolved}, {n_open} need human review — "
                      f"selective-merge assessment filed (not auto-merged)"
-                     f"{assess_release.direction_note(rep)}")
+                     f"{assess_release.direction_note(rep)}"
+                     + assess_release.mainline_clause(n, rep))
     if n_na:
         entry["note"] += (f" — WARNING: the AI judge did not complete, {n_na} "
                           f"commit(s) NOT ASSESSED (no classification made)")

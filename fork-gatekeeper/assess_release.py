@@ -356,6 +356,197 @@ def already_carried(tool: str, our_ref: str, commits: list[dict]) -> set[str]:
     return carried
 
 
+def our_mainline_ref(tool: str, led: dict) -> str | None:
+    """The remote-tracking ref for OUR FORK's mainline in the shared clone, or None.
+
+    NOT re-derived. `discover_forks` already owns this question and records its answer
+    on the ledger as `ours_unshipped_measured_against`, with the reasoning for the
+    candidate order (our own integration branch first, then origin/master, then
+    origin/main) and for why a remote-tracking ref rather than HEAD: these clones are
+    shared, so HEAD is whatever the last process to touch the directory left checked
+    out, which is not a fact about our fork. A second implementation of that rule here
+    is how the two drift apart, so the ledger's answer is used when it verifies and the
+    probe below exists only for a row written by an older `discover_forks`.
+
+    None means WE DO NOT KNOW which ref is our mainline — never "we have no mainline".
+    Every caller must treat it as undetermined.
+    """
+    clone = FORKS_DIR / tool
+    if not (clone / ".git").is_dir():
+        return None
+
+    def _resolves(ref: str) -> bool:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(clone), "rev-parse", "--verify", "-q", ref],
+                capture_output=True, text=True, timeout=60).returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
+
+    cands: list[str] = []
+    recorded = led.get("ours_unshipped_measured_against")
+    if isinstance(recorded, str) and recorded:
+        cands.append(recorded)
+    vb = led.get("vibeic_branch")
+    if isinstance(vb, str) and vb:
+        cands.append(f"origin/{vb}")
+    cands += ["origin/master", "origin/main"]
+    for c in cands:
+        if _resolves(c):
+            return c
+    return None
+
+
+def on_our_mainline(tool: str, mainline_ref: str | None,
+                    commits: list[dict]) -> tuple[set[str], set[str]]:
+    """The subset of `commits` OUR FORK'S MAINLINE has already merged, and the subset we
+    could not decide. Returns (on_mainline, undetermined) as SHORT shas.
+
+    THE THIRD WAY THE WORK IS ALREADY OURS, and the one the 05:30 tick creates itself.
+    `already_carried` asks the SHIPPED PIN, and on the commit-range code path the pin is
+    the range's own base (`base_ref, new_ref = our_ref, up_branch`), so the commit set is
+    by construction `pin..upstream` — nothing in it CAN be an ancestor of the pin. That
+    half of `already_carried` is therefore structurally incapable of firing on this path;
+    it reads 0 every day no matter what is true, and only its patch-id half can ever
+    answer. Meanwhile the SAME TICK'S `daily_merge` step has already merged upstream into
+    our fork mainline, minutes earlier, and `daily_release` advances the pin onto that
+    mainline hours later the same day.
+
+    MEASURED on the 2026-08-06 tick's own PR, per commit, against the live pins:
+
+        tool                    range   in the PIN   on OUR MAINLINE   genuinely new
+        OpenROAD                   22            0                14               8
+        OpenROAD-flow-scripts      14            0                12               2
+        klayout                     6            0                 6               0
+        slang                       2            0                 2               0
+        verilator                   5            0                 5               0
+        yosys                       5            0                 3               2
+
+    "0 already carried" was ARITHMETICALLY CORRECT on all six rows — and 42 of the 54
+    commits it left for a human to adopt-or-skip were already merged into our own
+    mainline before the PR was written. klayout, slang and verilator had NOTHING left to
+    decide. The right-hand column is `sync_lag`, which `discover_forks.lag_split` already
+    computes and which matched this per-commit walk on 6 rows out of 6.
+
+    A commit here is NOT reported as `carried`: it is not in what we ship, and saying so
+    would trade one false number for another. It is its own bucket, because the adopt /
+    skip question is settled — the merge happened — and what remains is a pin bump or a
+    revert, which is a different program's decision.
+
+    UNDETERMINED IS ITS OWN RETURN VALUE, never folded into either answer: no clone, no
+    resolvable mainline ref, a commit object the clone does not have, or a git failure.
+    Callers keep those commits in human review (the safe direction, which over-asks) and
+    the documents say the probe did not run — silence would publish "nothing was already
+    ours" as though it had been checked.
+    """
+    if not commits:
+        return set(), set()
+    clone = FORKS_DIR / tool
+    all_shas = {c["sha"] for c in commits if c.get("sha")}
+    if not mainline_ref or not (clone / ".git").is_dir():
+        return set(), all_shas
+
+    def _git(*args: str):
+        try:
+            return subprocess.run(["git", "-C", str(clone), *args],
+                                  capture_output=True, text=True, timeout=60)
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    tip = _git("rev-parse", "--verify", "-q", mainline_ref)
+    if tip is None or tip.returncode != 0:
+        return set(), all_shas
+
+    on: set[str] = set()
+    unknown: set[str] = set()
+    for c in commits:
+        short, full = c.get("sha") or "", c.get("sha_full") or c.get("sha") or ""
+        if not short or not full:
+            continue
+        have = _git("cat-file", "-e", f"{full}^{{commit}}")
+        if have is None or have.returncode != 0:
+            unknown.add(short)          # the clone does not have the object → NOT "no"
+            continue
+        anc = _git("merge-base", "--is-ancestor", full, mainline_ref)
+        if anc is None:
+            unknown.add(short)
+        elif anc.returncode == 0:
+            on.add(short)
+        elif anc.returncode == 1:
+            pass                        # a real "no": upstream has it, our line does not
+        else:
+            unknown.add(short)          # git spoke, but not an answer to this question
+    return on, unknown
+
+
+def _mainline_summary(main_ref: str | None, our_ref: str | None, keep: str = "") -> str:
+    """One wording for the per-commit cell, fresh assessment and replay alike."""
+    s = (f"ALREADY MERGED into our fork mainline ({main_ref or 'our mainline'}) — not yet "
+         f"in the shipped pin {(our_ref or '')[:12]}, so the open action is a PIN BUMP or "
+         f"a revert, not an adopt/skip")
+    if keep:
+        # Nothing the judge said is resolved away — same shape as the reachability and
+        # sampling disclosures, which print BOTH readings rather than picking one.
+        s += f" · the judge's reading is kept: \"{keep}\""
+    return s
+
+
+def _refresh_mainline(tool: str, led: dict, our_ref: str | None, rep: dict) -> dict:
+    """Re-measure "already on our mainline" on a REPLAYED report, and re-derive the
+    counts that depend on it.
+
+    The cache exists so an unchanged range is not re-sampled by the judge — the magic
+    range assessed 7 days running, contradicting itself. Our OWN MAINLINE is not part of
+    that range and it moves EVERY DAY: the same 05:30 tick merges upstream into it before
+    this assessment runs. And the cache key is `tool|base|new|our_ref` where `new` is a
+    BRANCH NAME, so a replay does not even require upstream to have stood still.
+
+    Replaying the mainline answer would therefore publish a measurement taken on another
+    day; for an entry written before this probe existed there is no answer to replay at
+    all, and its absence would render as `already on our mainline: 0` — a number nobody
+    measured. Cheap local git, re-run; the expensive sampled half, replayed.
+
+    A row is only ever DEMOTED into the mainline bucket, never promoted out of one on a
+    guess: if our mainline no longer contains a commit it once did (a force-push, a
+    revert), the judge's own recorded decision is restored from `decision_before_mainline`
+    rather than invented. `carried` and recorded decisions outrank this and are untouched.
+    """
+    rows = rep.get("commits")
+    if not isinstance(rows, list):
+        return rep
+    main_ref = our_mainline_ref(tool, led)
+    on, unknown = on_our_mainline(tool, main_ref, rows)
+
+    def _settled(c: dict) -> bool:
+        d = str(c.get("decision") or "")
+        return d == "carried" or d.startswith("recorded:")
+
+    settled = {c.get("sha") for c in rows if _settled(c)}
+    on -= settled
+    unknown -= settled
+
+    out = []
+    for c in rows:
+        sha, dec = c.get("sha"), c.get("decision")
+        if sha in on and not _settled(c) and dec != "mainline":
+            out.append({**c, "decision": "mainline", "decision_before_mainline": dec,
+                        "recommend": "on-mainline",
+                        "summary": _mainline_summary(main_ref, our_ref,
+                                                     str(c.get("summary") or "")[:300])})
+        elif dec == "mainline" and sha not in on:
+            out.append({**c, "decision": c.get("decision_before_mainline") or "human"})
+        else:
+            out.append(c)
+
+    rep = {**rep, "commits": out, "mainline_ref": main_ref,
+           "on_mainline": sorted(on), "mainline_undetermined": sorted(unknown)}
+    # The summary lists that MOVED. Recomputed through the same predicates every other
+    # reader uses, so the stored lists cannot outlive the rows they summarise.
+    for name in ("clearly_safe", "outstanding", "outstanding_rec_adopt"):
+        rep[name] = [c["sha"] for c in out if _ROW_PREDICATES[name](c)]
+    return rep
+
+
 def clean_cherrypick(tool: str, our_ref: str, commit_sha: str) -> bool | None:
     """Probe (in the local fork clone, non-destructive) whether commit_sha cherry-picks
     cleanly onto our_ref. None if we can't tell (no clone / fetch fail). Never mutates
@@ -961,8 +1152,9 @@ def assess(tool: str) -> dict:
     if os.environ.get("GK_ASSESS_NOCACHE") not in ("1", "true", "yes"):
         hit = _cache_get(tool, ckey)
         if hit is not None:
-            return {**hit, "cached": True, "assessor": aid, "judge_context": qid,
-                    "replayed_at": _now_iso()}
+            return _refresh_mainline(tool, led, our_ref,
+                                     {**hit, "cached": True, "assessor": aid,
+                                      "judge_context": qid, "replayed_at": _now_iso()})
         # MISS. If we HAVE judged this same range before, say WHICH input to the verdict
         # moved — widening the key re-judges every cached range exactly once, and an
         # unexplained spike in API calls is how a correct invalidation gets
@@ -983,7 +1175,17 @@ def assess(tool: str) -> dict:
     carried = already_carried(tool, our_ref, commits) if our_ref else set()
     # A commit with a RECORDED gatekeeper decision is settled too — don't re-judge it.
     decided = recorded_decisions(tool)
-    todo = [c for c in commits if c["sha"] not in carried and c["sha"] not in decided]
+    # …and so is a commit OUR OWN MAINLINE has already merged. On this code path the
+    # range's base IS the pin, so `already_carried`'s ancestry half cannot fire and the
+    # tick's own 05:30 merge is invisible to it — see `on_our_mainline` for the per-commit
+    # measurement (42 of 54 on the 2026-08-06 tick). Kept a SEPARATE bucket from `carried`:
+    # these are ours, but they are not what we ship.
+    main_ref = our_mainline_ref(tool, led)
+    on_main, main_unknown = on_our_mainline(tool, main_ref, commits)
+    on_main = {s for s in on_main if s not in carried and s not in decided}
+    main_unknown = {s for s in main_unknown if s not in carried and s not in decided}
+    todo = [c for c in commits if c["sha"] not in carried and c["sha"] not in decided
+            and c["sha"] not in on_main]
     # `role` — the same local the cache key was derived from. Two readings of the ledger
     # is how the key and the prompt drift apart again (vibeic/vibeic-eda#11).
     cls_map = classify_commits(tool, role, todo)
@@ -995,7 +1197,7 @@ def assess(tool: str) -> dict:
     # motivated the issue — rather than on the range.
     probes: dict = {}
     for c in commits:
-        if c["sha"] in carried or c["sha"] in decided:
+        if c["sha"] in carried or c["sha"] in decided or c["sha"] in on_main:
             continue
         cls = cls_map.get(c["sha"], _not_assessed("this commit was never sent to the judge"))
         # cheap overlap signal from the aggregate diff isn't per-commit; do a per-commit
@@ -1043,6 +1245,13 @@ def assess(tool: str) -> dict:
                              "recommend": rec.get("decision", "skip"),
                              "touches_our_patches": None, "clean_cherrypick": None,
                              "decision": f"recorded:{rec.get('decision', 'skip')}"})
+            continue
+        if c["sha"] in on_main:
+            assessed.append({**c, "category": "on-mainline",
+                             "summary": _mainline_summary(main_ref, our_ref),
+                             "relevant": None, "risk": None, "reproduce": "",
+                             "recommend": "on-mainline", "touches_our_patches": None,
+                             "clean_cherrypick": None, "decision": "mainline"})
             continue
         p = probes[c["sha"]]
         cls, cand = p["cls"], p["cand"]
@@ -1097,7 +1306,15 @@ def assess(tool: str) -> dict:
            "our_ref": (our_ref or "")[:12],
            "our_patch_files": (len(our_files) if our_files is not None else None),
            "commit_count": len(commits), "aggregate_files": len(agg_files),
-           "carried": sorted(carried), "clearly_safe": safe, "commits": assessed}
+           "carried": sorted(carried), "clearly_safe": safe, "commits": assessed,
+           # OURS, BUT NOT SHIPPED. Separate from `carried` on purpose — see
+           # `on_our_mainline`. `mainline_ref` travels with the counts because "already
+           # on our mainline" is meaningless without saying WHICH ref answered, and
+           # `mainline_undetermined` is the third state: commits the probe could not
+           # decide, which stay in human review rather than reading as "not ours".
+           "mainline_ref": main_ref,
+           "on_mainline": sorted(on_main),
+           "mainline_undetermined": sorted(main_unknown)}
     # Nothing left to decide: every upstream commit is either already ours or has
     # been triaged. Say so explicitly — a range whose only outstanding item is a
     # deliberate SKIP is DECIDED, not pending, and must not read as open work.
@@ -1265,6 +1482,9 @@ HEADLINE = ("clearly_safe", "carried", "decided", "outstanding")
 _ROW_PREDICATES = {
     "clearly_safe": lambda c: c.get("decision") == "auto-safe",
     "carried": lambda c: c.get("decision") == "carried",
+    # Already merged into our fork mainline, not yet in the shipped pin. A row, and a
+    # count, of its own — folding it into `carried` would claim we ship it.
+    "on_mainline": lambda c: c.get("decision") == "mainline",
     "decided": lambda c: str(c.get("decision") or "").startswith("recorded:"),
     # `decision == "human"` and nothing else: the column means "a human must decide",
     # so every row carrying it is outstanding. Filtering by the assessor's `recommend`
@@ -1393,12 +1613,17 @@ def summary_counts(rep: dict) -> dict:
         else:                                         # 4. unknown → fail-safe
             out[name] = None
             derived.append(name)
-    for name in ("clearly_safe", "carried", "decided", "not_assessed",
+    for name in ("clearly_safe", "carried", "on_mainline", "decided", "not_assessed",
                  "unreachable", "unconfirmed"):
         if out[name] is None:
             out[name] = 0
     if out["outstanding"] is None:
-        out["outstanding"] = max(cc - out["clearly_safe"] - out["carried"] - out["decided"], 0)
+        out["outstanding"] = max(cc - out["clearly_safe"] - out["carried"]
+                                 - out["on_mainline"] - out["decided"], 0)
+    # Not a row category — a probe result — so it is read from the report, not recounted
+    # from the rows, and stays None (NOT 0) when the report does not carry it.
+    mu = rep.get("mainline_undetermined")
+    out["mainline_undetermined"] = len(mu) if isinstance(mu, list) else None
     out["derived"] = sorted(derived)
     out["stale_lists"] = stale
     # Positive: commits no bucket claims. Negative: buckets claiming more than the range
@@ -1685,6 +1910,36 @@ def _stale_lines(counts: dict) -> list[str]:
             "wrong; the CACHE is.", ""]
 
 
+def mainline_clause(counts: dict, rep: dict) -> str:
+    """The "already ours, not yet shipped" clause — ONE wording for all three documents.
+
+    The assessment file, the daily report note and the PR body each phrase their own
+    summary, and the headline sentence they share is parsed back out of the rendered text
+    by `parse_headline`. This clause is therefore APPENDED AFTER that sentence, in the
+    same place the not-assessed and unreachable warnings already go, so every existing
+    regex still recovers the same four numbers from the same shape. Empty string when
+    there is nothing to say, so a report with a fully-decided range is unchanged.
+
+    The undetermined half is not decoration. A tick that could not read our mainline is
+    NOT a tick that found nothing there, and those commits stayed in human review — the
+    reader has to be able to tell an over-ask from a measurement.
+    """
+    n_main = counts.get("on_mainline") or 0
+    n_unk = counts.get("mainline_undetermined")
+    ref = rep.get("mainline_ref")
+    out = ""
+    if n_main:
+        out += (f" — {n_main} of them are ALREADY MERGED INTO OUR FORK MAINLINE "
+                f"({ref or 'our mainline'}) and are NOT a human adopt/skip decision: the "
+                f"merge already happened, so the open action is a pin bump or a revert")
+    if n_unk:
+        out += (f" — ⚠ **our mainline could not be read for {n_unk} commit(s)**"
+                + (f" (no ref resolved for {rep.get('tool', 'this fork')})" if not ref else "")
+                + "; they are counted as needing review because the probe did NOT run, "
+                  "which is not the same as finding they are new")
+    return out
+
+
 def render_md(rep: dict) -> str:
     tool = rep.get("tool", "?")
     if rep.get("error"):
@@ -1705,6 +1960,7 @@ def render_md(rep: dict) -> str:
     n = summary_counts(rep)
     n_carried, n_decided = n["carried"], n["decided"]
     n_safe, n_open = n["clearly_safe"], n["outstanding"]
+    n_main, n_main_unk = n["on_mainline"], (n.get("mainline_undetermined") or 0)
     n_open_adopt = min(n.get("outstanding_rec_adopt") or 0, n_open)
     L = [f"## {tool} — selective-merge assessment",
          f"Range **{rep['base_release']} → {rep['latest']}** · {n['commits']} upstream "
@@ -1714,7 +1970,8 @@ def render_md(rep: dict) -> str:
          f"**Already carried: {n_carried}** · **decided (recorded): {n_decided}** · "
          f"**clearly-safe to auto-adopt: {n_safe}** · **needs human decision: {n_open}**"
          + (f" ({n_open_adopt} the assessor would adopt · {n_open - n_open_adopt} it "
-            f"would skip — its recommendation, not a decision)" if n_open else ""), ""]
+            f"would skip — its recommendation, not a decision)" if n_open else "")
+         + mainline_clause(n, rep), ""]
     L += _provenance_lines(rep)
     # FIRST of the banners: every other one qualifies a number, this one says the set of
     # numbers does not describe the range. A reader who has started triaging has already
@@ -1734,12 +1991,32 @@ def render_md(rep: dict) -> str:
               "adopt-candidates, so for an unassessed commit the our-patch-overlap and "
               "cherry-pick analyses DID NOT RUN either. The per-commit reason is in the "
               "summary column.", ""]
-    # `not n["unaccounted"]`: "every upstream commit is either carried or decided" is a
-    # claim ABOUT ALL OF THEM, so it may only be made by a report whose buckets account
-    # for all of them. Reached with commits in no bucket, it is the strongest possible
-    # statement of the understated count — the tool leaves triage altogether.
+    # OURS ALREADY, one merge short of shipped. Above the table for the same reason the
+    # not-assessed banner is: a reader must not start triaging rows whose decision was
+    # taken by this very tick, hours before they opened the file.
+    if n_main:
+        L += [f"> **{n_main} of {n['commits']} commit(s) are ALREADY MERGED INTO OUR FORK "
+              f"MAINLINE** (`{rep.get('mainline_ref') or 'our mainline'}`) and are NOT "
+              "adopt/skip decisions — the merge already happened, on this tick or an "
+              "earlier one. They are NOT counted as `already carried`, because that field "
+              "means the SHIPPED PIN and these are not in it: the open action on them is a "
+              "PIN BUMP (`release_lag`) or a revert. `already carried` reads 0 on ranges "
+              "like this BY CONSTRUCTION — the range's base IS the pin, so no commit in it "
+              "can be an ancestor of the pin — which is why this second bucket exists.", ""]
+    if n_main_unk:
+        L += [f"> **⚠ OUR MAINLINE COULD NOT BE READ for {n_main_unk} commit(s).** No answer "
+              "was obtained about whether our fork has already merged them "
+              f"(`mainline_ref` = `{rep.get('mainline_ref') or 'unresolved'}`). They are "
+              "counted as needing review — the fail-safe direction, which OVER-asks. Do not "
+              "read that as a finding that they are new: the probe did not run.", ""]
+    # BOTH guards, because both are the same rule from two directions: "every upstream
+    # commit is either carried or decided" is a claim ABOUT ALL OF THEM, so it may only
+    # be made by a report whose buckets account for all of them (`not n["unaccounted"]`)
+    # and none of which this tick merged onto our mainline behind the reader's back
+    # (`not n_main`). Reached with either condition unmet, it is the strongest possible
+    # statement of a wrong count — the tool leaves triage altogether.
     if (n_carried or n_decided) and not n_open and not n_safe and not n_na \
-            and not n["unaccounted"]:
+            and not n["unaccounted"] and not n_main:
         L += ["> **This range is DECIDED — no action required.** Every upstream commit is "
               "either already in our shipped ref (as an ancestor or a cherry-pick) or "
               "carries a recorded skip decision in `DECISIONS.json`. `behind_releases` "

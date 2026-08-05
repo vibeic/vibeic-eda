@@ -425,6 +425,11 @@ def tally_line(tool: str, a: dict) -> str | None:
             f"{a.get('latest')} — {n['clearly_safe']} clearly-safe, {n['carried']} already "
             f"carried, {n['decided']} previously decided, {n['outstanding']} "
             f"need human review{_assess.direction_note(a)}")
+    # The PR body is the first and often only thing a reviewer reads, so the fact that
+    # our own mainline already merged some of these — the 2026-08-06 tick's PR listed 42
+    # such commits out of 54 as "need human review" — belongs HERE, not only in the
+    # attached table. Same wording as the assessment file and the daily report.
+    line += _assess.mainline_clause(n, a)
     # An incomplete judgment must be visible in the PR BODY, not only in the attached
     # per-commit table. Otherwise the summary a reviewer reads first presents "N need
     # review" as a triage result when nothing was triaged.
