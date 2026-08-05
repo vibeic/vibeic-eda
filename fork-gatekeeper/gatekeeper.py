@@ -700,6 +700,71 @@ def tick() -> dict:
                   else "no upstream release to compare against, so no" if nr is None
                   else str(nr))
         latest = led.get("upstream_latest_release")
+
+        # THE REFUSAL MUST BIND EVERY BRANCH, NOT THE ASSESSED ONE (vibeic-eda#102).
+        #
+        # `target_direction` was added to stop the report proposing a target that is
+        # BEHIND the ref we ship — Trilinos was proposed as
+        # `→ trilinos-release-17-1-1` on three consecutive days while our pin sat 407
+        # commits AHEAD of that tag. But it was consulted only where `assess()`
+        # succeeded, and `assess()` failures are swallowed on purpose ("assessment
+        # must never break the tick"). So the safety property depended on a NETWORK
+        # CALL SUCCEEDING: with the harness degraded, the same downgrade sailed
+        # through the fallback branch below. A guard that holds only on the happy
+        # path is a guard that fails open exactly when things are already going
+        # wrong.
+        #
+        # Applied HERE, at the single point `latest` is bound, so it covers the
+        # assessed branch, both DEFERRED fallbacks, and any branch added later —
+        # rather than being re-asserted at each call site, where the next one added
+        # would silently not have it.
+        #
+        # THREE STATES, and the third is why this is not a boolean: FORWARD keeps
+        # the target; BEHIND replaces it with a refusal and REMOVES the target, so
+        # no reader can act on it; anything else (the probe could not answer — clone
+        # absent, ref unresolvable, no network) leaves the target in place and SAYS
+        # the direction was not established. Silently dropping an unverifiable
+        # target would turn "we could not check" into "we checked and it is bad".
+        # `assess_release` may be a stub, an older build, or absent -- this file
+        # imports it defensively everywhere else for exactly that reason. Reaching
+        # straight for `.target_direction` turns a DEGRADED assessor into an
+        # AttributeError, i.e. makes the "could not measure" state RAISE instead of
+        # report. Resolve by getattr; absence is UNDETERMINED, the third state this
+        # guard promises. (Caught by test_unmeasurable_verdict's stub, which has
+        # neither attribute -- the stub was right and the first draft was wrong.)
+        _dirfn = getattr(assess_release, "target_direction", None)
+        _BEHIND = getattr(assess_release, "BEHIND", "behind")
+        _FORWARD = getattr(assess_release, "FORWARD", "forward")
+        _DIRUNK = getattr(assess_release, "DIR_UNKNOWN", "undetermined")
+        tgt_dir = None
+        if latest and _dirfn is not None:
+            try:
+                # Field names copied from `assess_release`'s own call site, not
+                # guessed: the pin lives in `pinned_ref_full` (`our_ref`/`pin` are
+                # absent from a real ledger), and `fork_point` is a DICT whose
+                # `sha` is what the probe wants. Passing the dict makes the probe
+                # answer UNDETERMINED for every tool -- a guard that never fires.
+                tgt_dir = _dirfn(
+                    tool,
+                    led.get("pinned_ref_full") or led.get("pinned_ref"),
+                    (led.get("fork_point") or {}).get("sha"),
+                    latest)
+            except Exception as exc:                                # noqa: BLE001
+                tgt_dir = {"verdict": _DIRUNK,
+                           "why": f"the direction probe raised: {exc}"}
+        if tgt_dir and tgt_dir.get("verdict") == _BEHIND:
+            refused_target, latest = latest, None
+            entry_target_refusal = (
+                f" TARGET REFUSED: `{refused_target}` — {tgt_dir.get('why')}. "
+                f"No target is proposed for this tool until a release ahead of the "
+                f"ref we ship exists.")
+        elif tgt_dir and tgt_dir.get("verdict") not in (_FORWARD, None):
+            entry_target_refusal = (
+                f" TARGET DIRECTION NOT ESTABLISHED for `{latest}`: "
+                f"{tgt_dir.get('why')}. The target is shown, but it has NOT been "
+                f"shown to be ahead of the ref we ship.")
+        else:
+            entry_target_refusal = ""
         entry = {"date": date, "verdict": None, "note": "", "new_releases": nr,
                  "new_releases_status": rel_status,
                  # THE SECOND QUESTION, on the row (vibeic-eda#101). "Are we on the
@@ -814,6 +879,15 @@ def tick() -> dict:
         # inside another fork's ref is pinned for as long as it is in the image, not only
         # while it is a candidate (vibeic/vibeic-eda#8).
         entry["note"] += pin_provenance(led)
+
+        # THE TARGET-DIRECTION VERDICT, appended once for every verdict, for the
+        # same reason `pin_provenance` is: there are eleven `entry["note"] = ...`
+        # assignments above, and appending at each of them means the next branch
+        # somebody adds silently does not carry it. Placed BEFORE the cross-check
+        # below, which documents that it must read the note in its FINAL form.
+        entry["note"] += entry_target_refusal
+        if entry_target_refusal:
+            entry["target_direction"] = (tgt_dir or {}).get("verdict")
 
         # CROSS-DOCUMENT CHECK (vibeic/vibeic-eda#7). Both documents are now rendered;
         # parse the numbers back OUT of each and require them to agree. Checking the
