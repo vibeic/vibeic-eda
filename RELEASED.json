@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.67",
-  "pins_fingerprint": "28e497cbf06f",
+  "version": "0.2.68",
+  "pins_fingerprint": "db9a9ad4e733",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -10,9 +10,9 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "b64a496b9c81d3ae648ce63c4d6f23fd918968b3",
+    "OpenROAD": "01bc02aaaffb6bc0fc9ddbae73b1225d19d50a33",
     "OpenROAD-flow-scripts": "f4b9d7dbe727c054da13449c0b281cafa616c921",
-    "Trilinos": "5edda67161cc39a035662ab280ac0d2bc37b5822",
+    "Trilinos": "381bf0316b9861d30af0b537d73d3d8f888a5d89",
     "Xyce": "d72b5846a0397ddf852a49305cb6f395457685ca",
     "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
     "ciel": "714d1bbb626d41e3cecc0ea23e752775166fde6e",
@@ -21,7 +21,7 @@
     "gtkwave": "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b",
     "iverilog": "ef3c73ca45b3c8501dca72ccf53fc657cb04e9c2",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
-    "klayout": "a5a7a2d6be41d4f66338eacdc65ceb573985c3ee",
+    "klayout": "e89f9b272eb4dcf676029672bd7bc9aef6a961cb",
     "magic": "0da4c3b60886ccc4f114d1d089f6e54fc6462868",
     "netgen": "0334b7dfb1d6adce0a8079f5552f68982815d3d9",
     "ngspice": "1b70fc18e70c84149910465d4e8e9bfc796db1fb",
@@ -30,9 +30,9 @@
     "slang": "1ffd741812189b1207f019a5aa338c60b662991f",
     "sv-elab": "e2829839afc62961d704123f30ed46e75477f33c",
     "sv2v": "6662fa5da71f87797598060f17728b284b99a9fc",
-    "verilator": "db524bc35379fcd840c146592e867b96d8e9e82b",
+    "verilator": "3764903febc44736922ce331674149329fadf5dc",
     "xschem": "ff2f4824c1a24e158d218f44db11cc682b4881c8",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "2ae1ec0ce6f432950daf02a5a95d99688de7e87e"
+    "yosys": "4f59b5cd7c13334e1922af1b0b2cd4c2a300a75d"
   }
 }
