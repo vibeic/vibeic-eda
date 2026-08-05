@@ -117,14 +117,22 @@ def _actionable(summary):
     `(r.get("new_releases") or 0) > 0` reads null as zero — which would drop the
     one row where nobody knows what we are missing, on the grounds that we are
     missing nothing.
+
+    …and since vibeic-eda#101 that row's VERDICT is UNMEASURABLE, not DEFERRED.
+    Matching on the verdict string alone would have quietly un-escalated exactly
+    the rows the paragraph above was written to keep — the same defect one level
+    over, arrived at by renaming the thing being matched. The `unknown` arm still
+    does the selecting, so a NOT-PROBED row (an upstream that publishes no release
+    at all) stays out: it is unmeasurable and it is also not actionable, and a PR
+    every morning about a state no human can clear is how a channel gets muted.
     """
     merged, failed = [], []
     for r in summary.get("results", []):
         if r.get("verdict") == "MERGED":
             merged.append(r)
-        elif r.get("verdict") == "DEFERRED" and ((isinstance(r.get("new_releases"), int)
-                                                  and r["new_releases"] > 0)
-                                                 or r.get("new_releases_status") == "unknown"):
+        elif (r.get("verdict") in ("DEFERRED", "UNMEASURABLE")
+                and ((isinstance(r.get("new_releases"), int) and r["new_releases"] > 0)
+                     or r.get("new_releases_status") == "unknown")):
             failed.append(r)
     return merged, failed
 
@@ -135,7 +143,12 @@ def _log_entry(summary, merged, failed) -> str:
     for r in merged:
         lines.append(f"- **MERGED** {r['tool']} → {r.get('latest_release','?')} — {r.get('note','')}")
     for r in failed:
-        lines.append(f"- **DEFERRED** {r['tool']} → {r.get('latest_release','?')} — {r.get('note','')}")
+        # The ROW'S OWN verdict, not the literal this list was named after
+        # (vibeic-eda#101). `failed` now carries UNMEASURABLE rows too, and
+        # stamping DEFERRED on them here would republish the collapse the new
+        # verdict exists to end — in the one document a human actually reads.
+        lines.append(f"- **{r.get('verdict') or 'DEFERRED'}** {r['tool']} → "
+                     f"{r.get('latest_release') or '?'} — {r.get('note','')}")
     return "\n".join(lines) + "\n\n"
 
 
@@ -219,20 +232,32 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
                 "# EDA Fork Sync Log\n\n"
                 "Machine-owned, append-only. One entry per actionable fork-gatekeeper tick.\n"
                 "MERGED = a fork release integrated + shipped in a new vibeic-eda image.\n"
-                "DEFERRED = a new upstream release that failed to integrate (needs a human).\n\n"
+                "DEFERRED = a new upstream release that failed to integrate (needs a human).\n"
+                "UNMEASURABLE = the question was not answered — not a deferral and not a "
+                "clean bill (vibeic-eda#101).\n\n"
                 + entry)
         changed.append(LOG_FILE)
 
         _run(["git", "-C", str(wt), "add", *changed])
-        # `phrase` narrows to the two verdicts a title has room for; it cannot
-        # change what either number IS — both still come out of `counts`, the
-        # same dict the body's headline was rendered from and checked against.
-        head = report_counts.phrase(counts, ("MERGED", "DEFERRED"))
+        # `phrase` narrows to the verdicts a title has room for; it cannot change
+        # what any number IS — every one still comes out of `counts`, the same
+        # dict the body's headline was rendered from and checked against.
+        #
+        # UNMEASURABLE is NAMED here rather than folded into DEFERRED
+        # (vibeic-eda#101): a title that says "DEFERRED 10" over seven rows whose
+        # release question was never answered states a triage result for rows that
+        # have none. It is stated only when it occurred, so a day with none reads
+        # exactly as it did before. Both fixes are the same rule — the number and
+        # the word it follows have to describe one population.
+        named = ("MERGED", "DEFERRED") + (
+            ("UNMEASURABLE",) if counts.get("UNMEASURABLE") else ())
+        head = report_counts.phrase(counts, named)
         # The actionable subset, under its OWN name. Stated only when it differs,
         # because "(10 actionable)" beside "DEFERRED 10" is noise; but when it
         # differs it is the whole reason this PR exists, and dropping it would
-        # trade a contradiction for a silence.
-        if len(failed) != counts["DEFERRED"]:
+        # trade a contradiction for a silence. Measured against the verdicts the
+        # title just named, since `failed` now carries UNMEASURABLE rows too.
+        if len(failed) != sum(counts[v] for v in named if v != "MERGED"):
             head += f" ({len(failed)} actionable)"
         title = (f"[eda-fork] {date}: {head}"
                  + (f" — vibeic-eda:{newver}" if merged and newver else ""))

@@ -15,7 +15,14 @@ Flow each day (only for the forks in FORKS.json):
        NOT_LAYERED — forked but NOT REACHED BY THE IMAGE BUILD at all: no ARG pin of its
                      own and not vendored inside one, so the image uses upstream directly
                      and there is nothing to sync; informational
-       CLEAN       — in the image + already on the latest upstream release; filtered out
+       CLEAN       — in the image + already on the latest upstream release; filtered out.
+                     A RELEASE-level claim only: the row states the commit-level gap
+                     separately, and says so when that one was not measured.
+       UNMEASURABLE — the release question WAS NOT ANSWERED: containment could not be
+                     decided (`unknown`), or the upstream publishes no release to
+                     compare against (`not-probed`). Deliberately neither CLEAN nor
+                     DEFERRED — both of those read as "measured, here is the answer".
+                     Counted and named; fatal to nothing (vibeic-eda#101).
        candidate   — a newer upstream release exists → try to integrate
   3. GATE (option B): integrating a candidate = rebase our vibeic branch onto the new
      release, bump the Dockerfile ARG, and **rebuild the vibeic-eda image**. That image
@@ -69,6 +76,7 @@ import discover_forks as disc  # noqa: E402
 # also silently remove the one function that keeps an unmeasured gap from
 # reading as zero.
 from discover_forks import release_gap, release_gap_status, release_gap_unknown  # noqa: E402
+from discover_forks import commit_gap, commit_gap_status  # noqa: E402
 import build_page  # noqa: E402
 import fleet_config  # noqa: E402  — is the configuration we ran on the committed one?
 # HARD import, deliberately: this is the one derivation of the verdict tallies the
@@ -84,6 +92,41 @@ try:
     import assess_release  # selective-merge assessment engine (per-commit triage)
 except Exception:  # noqa: BLE001
     assess_release = None
+
+
+#: Every verdict this report can publish, in the order a reader wants them.
+#:
+#: UNMEASURABLE is the one added by vibeic-eda#101, and it is NOT a shade of
+#: DEFERRED. DEFERRED says "we looked, there is outstanding work, it is not done
+#: yet"; UNMEASURABLE says "the question was not answered", which is a different
+#: instruction to whoever reads the row. Folding the second into the first (or,
+#: worse, into CLEAN) publishes a measurement nobody made — and both plausible
+#: foldings are wrong in the same direction, because both read as "measured, here
+#: is the answer".
+#:
+#: RESOLVED has been produced by `assessment_entry` since #369 and was in no
+#: count and in no sort order; a row that verdict landed on was invisible in the
+#: headline and sorted last by accident. Listing the verdicts in ONE place is
+#: what stops the next one being added the same way.
+#:
+#: UNMEASURABLE does NOT fail the round, and that is a decision rather than an
+#: oversight: seven of today's rows are unmeasurable because their upstream
+#: publishes no release at all, a state nobody can act on and which will never
+#: clear, and a permanently red round is one people route around. The contract is
+#: COUNTED in the headline, NAMED in its own row with the reason on it, and
+#: escalated to a human ONLY when the sub-status is `unknown` — "we asked and
+#: could not decide". `_maybe_notify` and `pr_notify._actionable` are where that
+#: last clause lives; there is no flag for it, because a constant nothing reads is
+#: a comment wearing code's clothes.
+#:
+#: BOUND, not re-declared. `report_counts` renders the headline, parses it back
+#: and cross-checks it against the rows; if this were a second tuple that happened
+#: to list the same verdicts, the two would drift and the drift is silent. It was
+#: literally two tuples for one integration round: a six-verdict list here and a
+#: four-verdict list there rendered a headline `parse_phrase` could not read, and
+#: `open_pr` then refused every tick — the sync PR stopped being published, from
+#: two lists that each looked right in its own file.
+VERDICTS = report_counts.VERDICTS
 
 
 class CountsDisagree(RuntimeError):
@@ -346,6 +389,38 @@ def _undetermined_note(led: dict) -> str:
             f"{shown}{more}")
 
 
+def commit_level_note(led: dict) -> str:
+    """The clause that states the COMMIT-level answer on a row whose RELEASE-level
+    answer does not exist (vibeic-eda#101).
+
+    The two questions are independent and the report has one verdict column, so a
+    row that can only answer one of them has to say WHICH — otherwise UNMEASURABLE
+    reads as "nothing at all is known", which is its own overstatement. Measured on
+    today's corpus: FasterCap's upstream publishes no release (release gap NOT
+    PROBED, so the verdict is UNMEASURABLE) while its commit gap is a real,
+    clone-measured 0. "We know nothing about FasterCap" would be as false as
+    "FasterCap is CLEAN".
+
+    Unlike `unassessed_drift` this states the answer in ALL THREE states, including
+    a measured zero: on a row whose headline is "not measured", the one thing a
+    reader must not have to infer is which half was.
+    """
+    st = commit_gap_status(led)
+    branch = led.get("upstream_default_branch") or "the default branch"
+    if st == "not-probed":
+        return (" — the COMMIT-level gap has no subject either: nothing pins this "
+                "tool, so there is no ref to compare from")
+    if st == "unknown":
+        return (f" — and the COMMIT-level gap was NOT MEASURED either: no compare "
+                f"against {branch} answered")
+    n = commit_gap(led)
+    if not n:
+        return (f" — the COMMIT-level gap IS measured and is 0: our pinned ref "
+                f"carries all of {branch}")
+    return (f" — the COMMIT-level gap IS measured: {n} upstream commit(s) on "
+            f"{branch} are not in our pinned ref")
+
+
 def unassessed_drift(led: dict) -> str:
     """What a CLEAN row does not say: upstream commits our pinned ref does not carry.
 
@@ -363,8 +438,35 @@ def unassessed_drift(led: dict) -> str:
     it is what surfaced the gap in the first place. The line above it used to read
     "the owner's directive is to track releases"; that is no longer true and saying
     so here matters more than the two words it costs.
+
+    THREE STATES, since vibeic-eda#101. `led.get("behind_commits") or 0` was still
+    here, and it is the `or 0` this campaign exists to remove: a commit gap that
+    COULD NOT BE MEASURED took the same branch as one measured at zero, and the
+    row said nothing at all. CLEAN then reads as "nothing to do" on a fork whose
+    commit-level state nobody established — the exact sentence vibeic-eda#101 was
+    filed about, one function below the verdict it blamed.
+
+    So: a measured 0 stays silent (there is genuinely no drift to disclose), and
+    an ABSENT measurement says so, in its own words, on a row that is otherwise
+    entirely reassuring.
     """
-    n = led.get("behind_commits") or 0
+    if commit_gap_status(led) == "not-probed":
+        # No pinned ref, so there is nothing to compare FROM — a different claim
+        # from "the compare did not answer", and not one this clause is about.
+        # A row in that state normally reaches NOT_LAYERED rather than CLEAN
+        # (`integrated` and `pinned_ref_full` are written together), so this is
+        # defensive against a hand-written or pre-`pinned_ref_full` ledger; the
+        # point is that it must not borrow the "NOT MEASURED" sentence below,
+        # which would name a failed measurement that never started.
+        return ""
+    n = commit_gap(led)
+    if n is None:
+        return (" — and the COMMIT-LEVEL gap was NOT MEASURED: this row states we "
+                "are on the newest upstream RELEASE, it does NOT state that our "
+                "pinned ref carries "
+                f"{led.get('upstream_default_branch') or 'the default branch'}. "
+                "Read it as release-current and commit-level UNKNOWN, not as "
+                "nothing-to-do")
     if not n:
         return ""
     return (f" — {n} upstream commit(s) on "
@@ -593,6 +695,16 @@ def tick() -> dict:
         latest = led.get("upstream_latest_release")
         entry = {"date": date, "verdict": None, "note": "", "new_releases": nr,
                  "new_releases_status": rel_status,
+                 # THE SECOND QUESTION, on the row (vibeic-eda#101). "Are we on the
+                 # newest tag" and "does our pin carry upstream's branch" are two
+                 # measurements with two answers, and the report had one verdict
+                 # column to say both in. Carried as its own pair of fields so a
+                 # row can be release-current and commit-level-unknown at once —
+                 # and so the table can render them side by side instead of
+                 # leaving the reader to find one of them in prose, and only when
+                 # it happened to be non-zero.
+                 "behind_commits": commit_gap(led),
+                 "behind_commits_status": commit_gap_status(led),
                  "latest_release": latest, "merged_release": None}
         cross_checked = None
 
@@ -644,6 +756,31 @@ def tick() -> dict:
             # produces. It still accepts a plain int — that is what its tests pass.
             entry.update(assessment_entry(assessments[tool], nr_txt, latest))
             cross_checked = tool
+        elif nr is None:
+            # THE RELEASE QUESTION HAS NO ANSWER, and nothing above supplied one
+            # (vibeic-eda#101). Reached only after the harness and the assessment
+            # have both declined the row, so a fork whose commits WERE triaged
+            # keeps its DEFERRED and its triage — this branch is for the rows
+            # where no measurement of any kind exists to defer ON.
+            #
+            # Both of the verdicts this used to fall through to are wrong in the
+            # SAME direction: CLEAN and DEFERRED each read as "measured, here is
+            # the answer". Seven rows landed on DEFERRED with the note "harness
+            # returned no result for this tool" — blaming the harness for a
+            # question that was never askable, because their upstreams publish no
+            # release at all.
+            entry["verdict"] = "UNMEASURABLE"
+            entry["note"] = (
+                "the RELEASE gap is " + ("UNKNOWN — we compared and could not "
+                                         "decide containment for at least one "
+                                         "upstream release"
+                                         if rel_unknown else
+                                         "NOT PROBED — this question has no "
+                                         "subject: the upstream publishes no "
+                                         "release or tag to compare against") +
+                f", so no verdict about upstream releases is available for this "
+                f"tool. This is NOT 'nothing to do' and it is NOT a deferral"
+                f"{_undetermined_note(led)}{commit_level_note(led)}")
         elif not cfg:
             entry["verdict"] = "DEFERRED"
             rels = ", ".join(r.get("tag") for r in (led.get("new_releases") or [])[:5] if r.get("tag"))
@@ -651,8 +788,20 @@ def tick() -> dict:
                              f"{_undetermined_note(led)} {not_configured}")
         else:
             entry["verdict"] = "DEFERRED"
-            entry["note"] = (f"{nr_txt} new release(s) → {latest}; harness returned no "
-                             f"result for this tool{_undetermined_note(led)}")
+            # WHY nothing ran, when we know why. A CONTENTS ASSERTION is excluded
+            # from the candidate loop above ON PURPOSE (vibeic-eda#79) — the round
+            # decided not to look, and "harness returned no result" reports that
+            # decision as a failure of the harness. Same collapse as the verdict
+            # this branch sits beside: "we could not look" printed where "we chose
+            # not to look" is the truth.
+            why = ("not offered to the harness: pinned by "
+                   f"`{led.get('dockerfile_arg') or '?'}`, a CONTENTS ASSERTION "
+                   f"about a prebuilt artefact — adopting a newer upstream means "
+                   f"CUTTING A NEW ARTEFACT, which is a decision, not a merge round"
+                   if led.get("pin_kind") == "contents_assertion"
+                   else "harness returned no result for this tool")
+            entry["note"] = (f"{nr_txt} new release(s) → {latest}; "
+                             f"{why}{_undetermined_note(led)}")
 
         # HOW this fork is pinned, appended once for every verdict — a fork vendored
         # inside another fork's ref is pinned for as long as it is in the image, not only
@@ -732,8 +881,16 @@ def tick() -> dict:
                # sub-dict is dropped: the report states the configuration it ran on, not
                # a second copy of the checker's working notes.
                "fleet_config": {k: v for k, v in fleet.items() if k != "files"},
-               "counts": {v: sum(1 for r in results if r["verdict"] == v)
-                          for v in ("MERGED", "DEFERRED", "CLEAN", "NOT_LAYERED")},
+               # COMPLETE BY CONSTRUCTION (vibeic-eda#101). This was a literal
+               # four-tuple, so a verdict absent from it was absent from the
+               # headline — and `assessment_entry` has produced RESOLVED since
+               # #369, uncounted the whole time. The canonical list seeds the
+               # zeros so the shape never depends on the day's data; the second
+               # pass then counts EVERY verdict actually published, so the next
+               # verdict added cannot go missing the way this one nearly did.
+               "counts": {**{v: 0 for v in VERDICTS},
+                          **{v: sum(1 for r in results if r["verdict"] == v)
+                             for v in {r["verdict"] for r in results}}},
                "results": results}
     (REPORTS / f"{date}.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     (REPORTS / f"{date}.md").write_text(_report_md(summary))
@@ -854,7 +1011,17 @@ def _maybe_notify(summary: dict, assessments: dict | None = None,
     # …or whose release gap could not be MEASURED. An unknown gap is the row most
     # in need of a human, and `(x or 0) > 0` on a null is exactly how it would
     # instead be filtered out as "nothing new".
-    uncovered = any(r["verdict"] == "DEFERRED"
+    #
+    # UNMEASURABLE joins DEFERRED here (vibeic-eda#101) because the rows that used
+    # to reach this predicate as DEFERRED-with-an-unknown-gap now carry the new
+    # verdict, and dropping them would have silently un-escalated the one row most
+    # in need of a human — a fix that removes an escalation is a regression wearing
+    # the fix's name. The `unknown` arm is what selects them: an UNMEASURABLE row
+    # always has `new_releases: null`, so a NOT-PROBED row (an upstream that cuts
+    # no releases, which no human can act on and which will never clear) still
+    # opens no PR. That is deliberate — see the VERDICTS note at the top of this
+    # module for why UNMEASURABLE is counted and named rather than made fatal.
+    uncovered = any(r["verdict"] in ("DEFERRED", "UNMEASURABLE")
                     and ((isinstance(r.get("new_releases"), int)
                           and r["new_releases"] > 0)
                          or r.get("new_releases_status") == "unknown")
@@ -898,10 +1065,18 @@ def _report_md(s: dict) -> str:
     # agrees with itself says nothing about whether the right forks were audited.
     if s.get("fleet_config"):
         lines += [fleet_config.stamp_line(s["fleet_config"]), ""]
+    # EVERY verdict, through the ONE formatter (vibe-ic#875 + vibeic-eda#101).
+    # Two things had to be true at once here: the number after a verdict is
+    # rendered in exactly one place so the PR title cannot state a different one,
+    # AND the set of verdicts is `VERDICTS` so UNMEASURABLE has somewhere to
+    # appear and RESOLVED stops being invisible. `report_counts.phrase` over the
+    # shared `VERDICTS` is both; a hand-rolled join here would be the second
+    # renderer again, and the four-verdict subset would under-account the table.
     lines += [f"**{report_counts.phrase(c)}**", "",
-             "| Tool | Verdict | New releases | Target | Note |", "|---|---|---|---|---|"]
-    order = {"MERGED": 0, "DEFERRED": 1, "CLEAN": 2, "NOT_LAYERED": 3}
-    for r in sorted(s["results"], key=lambda r: (order.get(r["verdict"], 9), r["tool"])):
+              "| Tool | Verdict | New releases | Commit gap | Target | Note |",
+              "|---|---|---|---|---|---|"]
+    order = {v: i for i, v in enumerate(VERDICTS)}
+    for r in sorted(s["results"], key=lambda r: (order.get(r["verdict"], 99), r["tool"])):
         # `unknown`, spelled out, never a digit. The column is a MEASUREMENT of how
         # much upstream work we lack; printing 0 for a row where that could not be
         # decided is the one thing a reader cannot recover from, because nothing
@@ -910,15 +1085,32 @@ def _report_md(s: dict) -> str:
                else "not probed" if (r.get("new_releases_status") == "not-probed"
                                      or r.get("new_releases") is None)
                else r["new_releases"])
-        lines.append(f"| {r['tool']} | {r['verdict']} | {nrc} | "
+        # THE SECOND MEASUREMENT, in its own column, under the same rule as the
+        # first: three states, and the two that are not a number are spelled out.
+        # A report written before this column existed carries neither field, and
+        # renders `—` rather than borrowing the release column's answer.
+        bcs, bc = r.get("behind_commits_status"), r.get("behind_commits")
+        bcc = ("unmeasured" if bcs == "unknown"
+               else "not probed" if bcs == "not-probed"
+               else bc if isinstance(bc, int) else "—")
+        lines.append(f"| {r['tool']} | {r['verdict']} | {nrc} | {bcc} | "
                      f"{r.get('latest_release') or '—'} | {r['note']} |")
     lines += ["", "> CLEAN = already on the latest upstream release. NOT_LAYERED = forked but "
               "the image build never fetches it — no ARG pin of its own and not vendored "
               "inside one. DEFERRED tools have a new upstream release staged; the image "
               "auto-rebuilds + merges once image_build.cmd is wired and the rebuild is green. "
+              "UNMEASURABLE = THE QUESTION WAS NOT ANSWERED — the release gap is `unknown` "
+              "(we compared and could not decide) or `not probed` (the upstream publishes no "
+              "release to compare against). It is neither CLEAN nor DEFERRED: both of those "
+              "read as \"measured, here is the answer\", and this row has no answer to give. "
+              "It does not fail the round — it is counted and named, and it reaches a human "
+              "only when the sub-status is `unknown`. "
               "`New releases = unknown` means CONTAINMENT COULD NOT BE DECIDED for at least "
               "one upstream release — it is not zero and it is not a count; the row's note "
-              "names the releases and the error that stopped each one."]
+              "names the releases and the error that stopped each one. "
+              "`Commit gap` is the SEPARATE, commit-level measurement (does our pinned ref "
+              "carry upstream's default branch); `unmeasured` there is not 0, and a row can "
+              "be release-current with a commit gap nobody established."]
     return "\n".join(lines) + "\n"
 
 

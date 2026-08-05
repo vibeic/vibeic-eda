@@ -252,13 +252,26 @@ if [ -f "${DIR}/inbound_survey.py" ]; then
     # A partial result is a result. What must not be lost is WHICH part failed,
     # so the errors are printed too rather than the report replacing them.
     if [ "${inbound_rc}" != "2" ]; then
-        head -1 "${INBOUND_OUT}" | sed 's/^/[inbound]   /' | tee -a "${LOG}"
-        grep -E "SAMPLED|NOTE:|behind +[1-9]" "${INBOUND_OUT}" \
+        # THE HEADLINE BY NAME, not `head -1` (vibeic-eda#101). This file is
+        # `> out 2>&1`, and stderr is unbuffered while stdout is block-buffered, so
+        # the first LINE of it is routinely an error row — measured on the
+        # 2026-08-06 tick, where all three stderr rows precede the headline. The
+        # daily log has therefore been showing a per-fork error where it says it is
+        # showing the summary, which is the same shape as everything else this
+        # issue is about: a value that answers the question NEXT TO the one asked.
+        grep -m1 "^inbound_survey:" "${INBOUND_OUT}" | sed 's/^/[inbound]   /' \
+            | tee -a "${LOG}" || true
+        # `UNMEASURABLE:` (with the colon — the STDOUT summary line, not the
+        # per-fork stderr rows, which the PARTIAL branch below prints) joins the
+        # pattern: the survey now states the count of forks it could not ask about
+        # beside the number they are not part of, and a summary line nobody greps
+        # for is a summary line nobody sees.
+        grep -E "SAMPLED|NOTE:|UNMEASURABLE:|behind +[1-9]" "${INBOUND_OUT}" \
             | sed 's/^/[inbound]   /' | tee -a "${LOG}" || true
     fi
     if [ "${inbound_rc}" = "1" ]; then
-        log "[inbound] survey PARTIAL — the forks below could not be surveyed; every other tool IS reported above"
-        grep -E "ERROR" "${INBOUND_OUT}" | head -5 | sed 's/^/[inbound]   /' \
+        log "[inbound] survey PARTIAL — the forks below are UNMEASURABLE, not zero; every other tool IS reported above"
+        grep -E "UNMEASURABLE \(ERROR\)" "${INBOUND_OUT}" | head -5 | sed 's/^/[inbound]   /' \
             | tee -a "${LOG}" || true
     elif [ "${inbound_rc}" != "0" ]; then
         log "[inbound] survey produced NOTHING (rc=${inbound_rc}) — details in ${INBOUND_OUT}"

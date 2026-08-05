@@ -266,6 +266,14 @@ STYLE = """<style>
 .fork-commit .sha{color:#63a8ea;flex:none}
 .fork-verd{font-family:ui-monospace,monospace;font-size:.78rem}
 .fork-verd.MERGED{color:#2f8f6b}.fork-verd.DEFERRED{color:#c07d1e}.fork-verd.SKIP{color:var(--text-muted,#6b7684)}.fork-verd.CLEAN{color:#63a8ea}
+/* UNMEASURABLE gets its OWN colour, not the unstyled default (vibeic-eda#101).
+   The markup already emits the verdict as a class name, so before this rule the
+   new verdict rendered in the same body colour as NOT_LAYERED and as anything
+   else nobody had styled — which is the visual form of the collapse the verdict
+   was added to end. Deliberately NOT green and NOT the DEFERRED amber: it is
+   neither a result nor a deferral, and a reader scanning colours must not sort
+   it into either pile. */
+.fork-verd.UNMEASURABLE{color:#8b5cf6}.fork-verd.NOT_LAYERED{color:var(--text-muted,#6b7684)}
 .fork-caption{color:var(--text-muted,#6b7684);font-size:.85rem;margin:.4rem 0 0}
 .fork-scroll{overflow-x:auto}
 @media(max-width:760px){.fork-hide-sm{display:none}}

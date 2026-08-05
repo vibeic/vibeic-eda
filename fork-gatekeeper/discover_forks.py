@@ -2361,6 +2361,48 @@ def release_gap_unknown(led: dict) -> bool:
     return release_gap_status(led) == UNKNOWN
 
 
+def commit_gap_status(led: dict) -> str:
+    """MEASURED / UNKNOWN / NOT_PROBED for the COMMIT-level gap (vibeic-eda#101).
+
+    The SECOND question about a fork, and it is not the one `release_gap_status`
+    answers. "Are we on the newest tag?" and "does our pinned ref carry upstream's
+    default branch?" have different answers on the same row every day: OpenROAD is
+    on 26Q3 (release gap 0) and 22 commits behind master.
+
+    Three claims, for the same reason the release reader has three:
+
+      MEASURED   — a compare ran and `behind_commits` is its answer.
+      UNKNOWN    — a compare was possible in principle and did not answer. Both
+                   the API compare and the clone can fail: a mirror has no GitHub
+                   parent so the cross-repo compare 404s, and `_local_compare`
+                   returns None rather than guess when it cannot hold both heads.
+                   `record_behind` writes None for exactly this, never 0.
+      NOT_PROBED — nothing pins this tool into the image, so there is no ref to
+                   compare FROM. Not a failed measurement; there was no subject.
+
+    The defect this exists to stop is one level up, in the report: `behind_commits
+    or 0` renders UNKNOWN as "no drift", so a row that says CLEAN — a RELEASE-level
+    claim — reads as "nothing to do" for a fork whose commit-level state nobody
+    established.
+    """
+    n = led.get("behind_commits")
+    if isinstance(n, int) and not isinstance(n, bool):
+        return MEASURED
+    return NOT_PROBED if not led.get("pinned_ref_full") else UNKNOWN
+
+
+def commit_gap(led: dict):
+    """The ledger's commit gap as an int, or None when it is not a measurement.
+
+    THE ONE READER, for the same reason `release_gap` is: `led.get("behind_commits")
+    or 0` is the coercion being removed, and it is the one that was still live in
+    `gatekeeper.unassessed_drift`.
+    """
+    if commit_gap_status(led) != MEASURED:
+        return None
+    return led.get("behind_commits")
+
+
 def _ls_remote_head(url: str, branch: str) -> str | None:
     """The commit `refs/heads/<branch>` points at, from ONE `git ls-remote`.
 

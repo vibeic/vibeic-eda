@@ -48,8 +48,21 @@ import re
 
 #: The verdicts a daily report tallies, in the order the headline states them.
 #: Everything below is derived from this tuple — the renderer, the parser and
-#: the cross-check — so the four never drift into four different lists.
-VERDICTS = ("MERGED", "DEFERRED", "CLEAN", "NOT_LAYERED")
+#: the cross-check — so the six never drift into six different lists.
+#:
+#: THIS IS THE ONLY COPY. `gatekeeper.VERDICTS` is bound to this same tuple, and
+#: that is load-bearing rather than tidy: while it was two tuples in two modules
+#: (a four-verdict list here, a six-verdict list there) the body headline
+#: rendered `MERGED · DEFERRED · RESOLVED · UNMEASURABLE · CLEAN · NOT_LAYERED`
+#: and `parse_phrase` — whose pattern wants DEFERRED and CLEAN adjacent — read it
+#: back as None, so `open_pr` refused every tick and no sync PR was published at
+#: all. Two lists that agree today are two lists.
+#:
+#: RESOLVED and UNMEASURABLE are in it for the reason the count exists: a row
+#: that renders in the table and is tallied in none of the headline's verdicts
+#: makes the headline under-account its own table (on today's corpus, 29 rows of
+#: 36), which is the same class of defect as the title/body split.
+VERDICTS = ("MERGED", "DEFERRED", "RESOLVED", "UNMEASURABLE", "CLEAN", "NOT_LAYERED")
 
 _SEP = " · "
 
@@ -91,10 +104,19 @@ def verdict_counts(summary: dict) -> dict[str, int]:
     out: dict[str, int] = {}
     for v in VERDICTS:
         n = counts.get(v)
-        if not isinstance(n, int) or isinstance(n, bool):
-            raise CountsUnavailable(f"counts[{v!r}] is {n!r}, not a count")
         rows = sum(1 for r in results
                    if isinstance(r, dict) and r.get("verdict") == v)
+        if v not in counts and rows == 0:
+            # A report written before this verdict existed — every archived day
+            # under reports/ predates RESOLVED and UNMEASURABLE. This is NOT the
+            # "render a zero for an absent measurement" hazard the class docstring
+            # forbids: the zero is READ OFF THE ROWS, which are right here and
+            # carry none. A missing key with rows that DO carry the verdict falls
+            # through to the disagreement below, where it belongs.
+            out[v] = 0
+            continue
+        if not isinstance(n, int) or isinstance(n, bool):
+            raise CountsUnavailable(f"counts[{v!r}] is {n!r}, not a count")
         if rows != n:
             raise CountsUnavailable(
                 f"counts[{v!r}] = {n} but {rows} row(s) carry that verdict — "

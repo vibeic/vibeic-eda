@@ -47,6 +47,19 @@ from typing import Dict, List, Optional
 
 RC_OK, RC_PARTIAL, RC_NOTHING = 0, 1, 2
 
+#: The row state for a fork this survey COULD NOT ASK ABOUT (vibeic-eda#101).
+#:
+#: The condition was already detected — "compare failed in both cross-repo and
+#: upstream-internal scope" — and then carried only as a free-text `error`, which
+#: the headline counted into the surveyed population anyway. Measured on the
+#: 2026-08-06 tick: three forks (Fault, FasterCap, Trilinos) are mirrors with no
+#: GitHub parent whose upstream also lacks our pin, so both compares 404 — and the
+#: headline read "24 fork(s), 12 upstream commit(s) our pins lack" when 21 were
+#: surveyed. Reporting a sample as a population is the exact failure this file's
+#: own docstring says it was written to prevent.
+UNMEASURABLE = "UNMEASURABLE"
+SURVEYED = "SURVEYED"
+
 #: GitHub returns at most this many commits from the compare endpoint. Named
 #: rather than inline so the truncation disclosure below cannot drift from it.
 COMPARE_CAP = 250
@@ -168,7 +181,8 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
         parent = (declared or {}).get(repo)
         source = "forks-json"
     if not parent:
-        return {"repo": repo, "error": "no upstream recorded by GitHub or FORKS.json"}
+        return {"repo": repo, "state": UNMEASURABLE,
+                "error": "no upstream recorded by GitHub or FORKS.json"}
     if not branch:
         # Resolved from the upstream itself rather than assumed: guessing
         # "master" on a repo that renamed to "main" turns a real survey into a
@@ -195,7 +209,12 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
         cmp_doc = _gh_json(f"repos/{parent}/compare/{ref}...{branch}")
         scope = "upstream-internal"
     if cmp_doc is None:
+        # NAMED, not merely errored (vibeic-eda#101). The distinction the caller
+        # has to make is "this fork was surveyed and the answer is N" versus "this
+        # fork was not surveyed"; an `error` key alone made that a matter of which
+        # fields the reader happened to check, and the headline did not check.
         return {"repo": repo, "upstream": parent, "upstream_source": source,
+                "state": UNMEASURABLE,
                 "error": "compare failed in both cross-repo and upstream-internal scope"}
 
     behind = cmp_doc.get("total_commits", 0)
@@ -213,6 +232,7 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
                                .get("date", ""))[:10]})
     return {
         "repo": repo, "upstream": parent, "branch": branch, "pin": ref[:9],
+        "state": SURVEYED,
         # Where the upstream came from. A slug GitHub vouches for and one we
         # asserted in FORKS.json carry different weight, and a reader that
         # cannot tell them apart is trusting our own claim as verification.
@@ -253,21 +273,38 @@ def main(argv=None) -> int:
 
     declared = declared_upstreams(Path(a.eda_root))
     results = [survey_one(repo, ref, declared) for repo, ref in sorted(pins.items())]
+    # UNMEASURABLE is a STATE, not the absence of one. `errored` is kept as the
+    # exit-code input it has always been; what changed (vibeic-eda#101) is that
+    # these rows are no longer inside the population the headline describes.
+    unmeasurable = [r for r in results if r.get("state") == UNMEASURABLE]
     errored = [r for r in results if r.get("error")]
+    surveyed = [r for r in results if r.get("state") == SURVEYED]
 
-    total_behind = sum(r.get("behind", 0) for r in results)
-    total_fixes = sum(r.get("fix_candidates", 0) for r in results)
-    any_trunc = any(r.get("truncated") for r in results)
+    total_behind = sum(r.get("behind", 0) for r in surveyed)
+    total_fixes = sum(r.get("fix_candidates", 0) for r in surveyed)
+    any_trunc = any(r.get("truncated") for r in surveyed)
 
-    print(f"inbound_survey: {len(results)} fork(s), {total_behind} upstream "
-          f"commit(s) our pins lack, {total_fixes} whose subject reads as a "
-          f"defect fix")
+    # `len(surveyed)`, never `len(results)`. The old line said "24 fork(s), 12
+    # upstream commit(s) our pins lack" on a tick that surveyed 21 and could not
+    # ask about 3 — a denominator that includes the rows it has no answer for,
+    # which is the same defect as a verdict column with nowhere to put them.
+    print(f"inbound_survey: {len(surveyed)} of {len(results)} fork(s) surveyed, "
+          f"{total_behind} upstream commit(s) our pins lack, {total_fixes} whose "
+          f"subject reads as a defect fix")
+    if unmeasurable:
+        # COUNTED AND NAMED ON STDOUT, beside the number it is not part of. It was
+        # only ever on stderr, so the file a reader opens showed a population of 24
+        # with no sign that 3 of them were never asked. Not fatal: the exit code
+        # below still says PARTIAL, and the round continues.
+        print(f"  UNMEASURABLE: {len(unmeasurable)} fork(s) could not be surveyed "
+              f"at all — {', '.join(r['repo'] for r in unmeasurable)}. Their gap is "
+              f"NOT zero and is NOT included above")
     if any_trunc:
         print("  NOTE: at least one fork exceeded GitHub's 250-commit compare "
               "cap; its fix count is over a SAMPLE, not the whole gap")
     for r in results:
         if r.get("error"):
-            print(f"  {r['repo']}: ERROR {r['error']}", file=sys.stderr)
+            print(f"  {r['repo']}: UNMEASURABLE (ERROR) {r['error']}", file=sys.stderr)
             continue
         flag = "  [SAMPLED]" if r["truncated"] else ""
         print(f"  {r['repo']:<12} pin {r['pin']}  behind {r['behind']:>4}  "
@@ -279,12 +316,17 @@ def main(argv=None) -> int:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
         Path(a.json).write_text(json.dumps(
             {"program": "inbound_survey", "forks": results,
+             # The DENOMINATOR the totals below are over, on the document rather
+             # than inferable from it. A consumer that reads `total_behind` beside
+             # `len(forks)` computes an average over rows that carry no answer.
+             "surveyed": len(surveyed), "unmeasurable": len(unmeasurable),
+             "unmeasurable_repos": [r["repo"] for r in unmeasurable],
              "total_behind": total_behind, "total_fix_candidates": total_fixes,
              "any_truncated": any_trunc}, indent=2) + "\n", encoding="utf-8")
 
     if errored:
-        print(f"[PARTIAL] {len(errored)} fork(s) could not be surveyed",
-              file=sys.stderr)
+        print(f"[PARTIAL] {len(errored)} fork(s) UNMEASURABLE — not surveyed, and "
+              f"not counted as zero", file=sys.stderr)
         return RC_PARTIAL
     return RC_OK
 
