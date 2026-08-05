@@ -549,7 +549,7 @@ function enhBlock(tool){
   //
   // SUMMED OVER THE ROWS THAT CARRY THEM, and counted separately when they do not:
   // a ledger written before these fields existed has no split, and rendering that
-  // as `sync 0 · release 0` beside a non-zero gap would invent a clean answer for
+  // as a zero split beside a non-zero gap would invent a clean answer for
   // a question never asked.
   const splitKnown    = behindKnown.filter(d=>typeof d.sync_lag === "number"
                                            && typeof d.release_lag === "number");
@@ -798,7 +798,7 @@ function enhBlock(tool){
        //
        // At zero there are no two
        // conditions to tell apart -- "0 behind" cannot be misread as either --
-       // and `(sync 0 · release 0)` on every good day is noise on the state we
+       // and a zero split printed on every good day is noise on the state we
        // are trying to reach. The moment the number is non-zero it splits
        // again, because sync and release have OPPOSITE fixes (merge upstream in
        // vs bump the pin and rebuild) and one number for both sent a reader to
@@ -1029,7 +1029,7 @@ function enhBlock(tool){
     ? `<span data-en="Last Gatekeeper run: ${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}" data-zh="最後 Gatekeeper 執行：${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}">Last Gatekeeper run: ${esc(REPORT.date||'')}</span>`
     : `<span data-en="Ledger seeded from live state; the daily Gatekeeper has not run yet." data-zh="Ledger 由即時狀態種入；每日 Gatekeeper 尚未執行。">Ledger seeded from live state; the daily Gatekeeper has not run yet.</span>`;
   // The capability-coverage summary line was REMOVED on owner instruction
-  // 2026-08-05 ("對照商用 EDA 的能力覆蓋：跨 N 個 fork 追蹤 M 項能力…").
+  // 2026-08-05: the capability-coverage headline above the table.
   // The per-tool enhancement backlog it pointed at is unchanged and still
   // expands from each row; only the headline sentence is gone.
 
