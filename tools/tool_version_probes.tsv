@@ -1,0 +1,28 @@
+# The tools we REPLACE whose versions the base image's /foss/pdks/versions.txt
+# also names. One row per tool: name, the command that prints its version, and
+# the regex whose first group is the version.
+#
+# ONE table, two readers, on purpose:
+#
+#   * fork-gatekeeper/check_image_claims.py -- asks whether the shipped
+#     manifest matches the shipped binary.
+#   * tools/refresh_versions_manifest.sh    -- rewrites the manifest at compose
+#     time so it does.
+#
+# If those two ever held separate tables, the refresher could update a tool the
+# checker does not inspect (silently useless) or the checker could police a tool
+# the refresher never touches (permanently red). That is the same shape as
+# vibeic-eda#93 -- a check and the thing it checks drifting apart -- so the table
+# is shared rather than duplicated.
+#
+# NO VERSION NUMBERS LIVE HERE. Writing one down is what created the defect this
+# file fixes: the manifest said xschem 3.4.6 while the image ran 3.4.8RC,
+# klayout 0.30.5 against 0.30.10, magic 8.3.589 against 8.3.678, ngspice 43
+# against 46. A recorded version is a claim that goes stale on its own; a probe
+# cannot.
+#
+# name	command	regex
+klayout	klayout -v	([0-9]+\.[0-9]+\.[0-9]+)
+magic	magic --version	([0-9]+\.[0-9]+\.[0-9]+)
+ngspice	ngspice -v	ngspice-([0-9]+)
+xschem	xschem --version	([0-9]+\.[0-9]+\.[0-9]+)

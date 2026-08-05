@@ -1350,7 +1350,34 @@ RUN set -e; \
 # identity no user has. Restoring USER 1000 on the next line is what keeps this
 # step from changing the identity the image ships with.
 COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
+
+# --- the tool manifest must name the tools THIS image ships ---
+#
+# `/foss/pdks/versions.txt` is the BASE image's list, and we replace several of
+# the tools it names. Nobody rewrote it, so our image shipped a file telling
+# users the base's versions: xschem 3.4.6 against an actual 3.4.8, klayout
+# 0.30.5 against 0.30.10, magic 8.3.589 against 8.3.679, ngspice 43 against 46.
+# A file we publish, stating the wrong version of tools we deliberately replaced.
+#
+# Corrected by PROBING the binaries, never from a recorded number -- a recorded
+# version is a claim that goes stale the next time a pin moves, which is exactly
+# how this defect arose. The probe table is shared with
+# fork-gatekeeper/check_image_claims.py so the refresher and the checker cannot
+# police different sets of tools.
+#
+# ABOVE the PDK reconciliation on purpose. It writes under /foss/pdks/, and
+# `test_verify_is_the_last_RUN_in_the_file` exists because a step added below
+# the verify is outside the window "every local modification" is measured over.
+# It caught this exact mistake when the step was first placed after it.
+#
+# BLOCKS the build if any tool cannot be probed or written: "not known to be
+# correct" is not a pass. The script's own first draft reported success for four
+# writes that had all failed with EACCES, so it now reads the file back.
+COPY tools/refresh_versions_manifest.sh /vibeic/refresh_versions_manifest.sh
+COPY tools/tool_version_probes.tsv /vibeic/tool_version_probes.tsv
 USER root
+RUN bash /vibeic/refresh_versions_manifest.sh /vibeic/tool_version_probes.tsv
+
 RUN set -e; \
     python3 /vibeic/pdk/pdk_local_mods.py verify \
         --root /foss/pdks/ciel \
@@ -1360,5 +1387,6 @@ RUN set -e; \
         --pdk-symlink /foss/pdks/sky130A \
         --pdk-symlink /foss/pdks/gf180mcuD \
         --record /foss/pdks/LOCAL_MODIFICATIONS.json
+
 # restore the base's non-root runtime user
 USER 1000

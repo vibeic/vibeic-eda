@@ -59,12 +59,41 @@ DIR = Path(__file__).resolve().parent
 #: How to ask each tool its version, and which token of the answer to take.
 #: Derived from the real binaries rather than a table of expected strings — an
 #: expected-version table is the same drift one level over.
-_TOOL_PROBE = {
-    "klayout": ("klayout -v", r"([0-9]+\.[0-9]+\.[0-9]+)"),
-    "magic": ("magic --version", r"([0-9]+\.[0-9]+\.[0-9]+)"),
-    "ngspice": ("ngspice -v", r"ngspice-([0-9]+)"),
-    "xschem": ("xschem --version", r"([0-9]+\.[0-9]+\.[0-9]+)"),
-}
+#: The probe table lives in ONE file, shared with
+#: `tools/refresh_versions_manifest.sh`, which rewrites the manifest at compose
+#: time. Two separate tables would let the refresher correct a tool this check
+#: does not inspect (silently useless) or let this check police a tool the
+#: refresher never touches (permanently red) -- the vibeic-eda#93 shape, a check
+#: and the thing it checks drifting apart.
+_PROBE_TABLE = Path(__file__).resolve().parent.parent / "tools" / "tool_version_probes.tsv"
+
+
+def _load_probes(path: Path = _PROBE_TABLE):
+    """tool -> (command, regex). Missing/empty table raises, deliberately.
+
+    Returning {} would make `manifest_findings` compare nothing and report no
+    findings, which is indistinguishable from every claim holding. If the table
+    cannot be read, the answer is "not compared", not "fine".
+    """
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing; the version claims cannot be checked, which is "
+            f"NOT the same as their holding")
+    out = {}
+    for ln in path.read_text().splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        parts = ln.split("\t")
+        if len(parts) != 3:
+            raise ValueError(f"{path}: expected 3 tab-separated fields, got "
+                             f"{len(parts)}: {ln!r}")
+        out[parts[0].strip()] = (parts[1].strip(), parts[2].strip())
+    if not out:
+        raise ValueError(f"{path} names no tools; nothing would be compared")
+    return out
+
+
+_TOOL_PROBE = _load_probes()
 
 
 def _sh(cmd, timeout=600):
