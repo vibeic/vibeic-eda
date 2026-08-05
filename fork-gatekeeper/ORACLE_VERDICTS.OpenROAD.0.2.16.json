@@ -1,0 +1,24 @@
+{
+  "_comment": "The CONTROL. Same suite, same judge, same method as the 0.2.63 ledger, run against the last shipped image whose OpenROAD PREDATES our post-route min-area repair: ghcr.io/vibeic/vibeic-eda:0.2.16 carries openroad -version = 26Q3-111-g3efb695851 (2026-07-09), and ee778e7ced landed 2026-07-11. drt:top_level_term2 PASSES here against the SAME unmodified golden it fails against at 0.2.63 -- so the golden is not merely old, it encodes the pre-patch routed DEF, and the flip is measured rather than argued. Two ledgers bracketing the change is what turns oracle_map's attribution from golden-relative into measured-flip. ndr_no_auto_taper is ABSENT, not FAIL: the test does not exist at this sha, and a test that was never there is not a test that failed.",
+  "tool": "OpenROAD",
+  "measured_at_sha": "3efb695851",
+  "measured_by": "ghcr.io/vibeic/vibeic-eda:0.2.16 stock binary via test/regression_test.sh",
+  "measured_on": "2026-08-05",
+  "scope": "src/drt only -- 14 of 14 tests registered for drt at this sha",
+  "verdicts": {
+    "drt:down_access_term": "PASS",
+    "drt:drc_test": "PASS",
+    "drt:ispd18_sample": "PASS",
+    "drt:ispd18_sample_incr": "PASS",
+    "drt:ndr_vias1": "PASS",
+    "drt:ndr_vias2": "PASS",
+    "drt:ndr_vias3": "PASS",
+    "drt:obstruction": "PASS",
+    "drt:single_step": "PASS",
+    "drt:ta_ap_aligned": "PASS",
+    "drt:ta_pin_aligned": "PASS",
+    "drt:top_level_term": "PASS",
+    "drt:top_level_term2": "PASS",
+    "drt:via_access_layer": "PASS"
+  }
+}

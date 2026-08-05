@@ -29,3 +29,18 @@ docs/TOOL_INVENTORY.md
 # this file is `eda-tool-*` or the `hpretl/...` base, never `vibeic-eda:X.Y.Z` —
 # a version of ours appears here only as the SUBJECT of a measurement.
 Dockerfile
+
+# `fork-gatekeeper/ORACLE_VERDICTS.*.json` — the verdict ledgers oracle_map.py
+# reads (vibeic-eda#93). Each names the image whose STOCK BINARY produced the
+# verdicts in it, and the whole point of the pair is that they are DIFFERENT
+# versions: 0.2.16 carries an OpenROAD that predates our min-area repair and
+# 0.2.63 carries one that includes it, which is what makes `drt:top_level_term2`
+# a measured PASS→FAIL flip instead of an argued one. Bumping either to the
+# current VERSION would claim a suite was run against an image it was never run
+# against — and bumping the 0.2.16 one would erase the control entirely.
+#
+# Registered together with the ledgers themselves: --check caught the 0.2.16 file
+# immediately, which is the gate working. The 0.2.63 file is registered at the
+# same time even though it happens to match VERSION today, because it would fail
+# for the same reason on the next release and a latent version of this is worse.
+fork-gatekeeper/ORACLE_VERDICTS.*.json

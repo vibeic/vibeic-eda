@@ -157,6 +157,8 @@ Use these words; they are the distinctions the work actually needed.
 | `REDUNDANT-WITH-UPSTREAM` | upstream now carries the same fix. A **third category**, not a corpse: superseded by upstream, not by a later patch of ours. |
 | `UNTESTED` | no signal, and no proof available to re-run. |
 | `NOT-RUN` | not attempted. Say so; never let it read as a pass. |
+| `BROKE-EXISTING-ORACLE` | the patch turned a **pre-existing** test red and it was left that way. Not the same as having no oracle: it HAS one, and killed it. Remedy is **regenerate the golden** (after the review in §6), never "write a test". |
+| `COULD-NOT-MEASURE` | no test of the module was run, so `NO-ORACLE` — which asserts *breaks nothing* — is unavailable. An absent verdict is not a passing one. |
 
 ### 3.1 — When is a missing test worth writing? A precondition, not a judgment call
 
@@ -290,13 +292,38 @@ the shipped pipeline — is tracked as **vibe-ic#813**. Two fork commits
 noticing the scale, because the CMake run is green and nobody compares the two
 target sets.
 
-**Related defect class: a permanently-red oracle is a dead oracle.** Four
-OpenROAD tests fail on stale goldens (upstream changed DPL/GPL log formatting).
-Their own assertions still pass; only the log-vs-golden diff fails. While that
-holds, reverting the patches behind them leaves the suite *exactly as red as
-it already was* — indistinguishable, so those patches are unguarded.
+**Related defect class: a permanently-red oracle is a dead oracle.** At least
+five OpenROAD tests fail on stale goldens. Their own assertions still pass; only
+the log-vs-golden diff fails. While that holds, reverting the patches behind
+them leaves the suite *exactly as red as it already was* — indistinguishable, so
+those patches are unguarded.
+
+**Two varieties, and only one of them is upstream's doing.** Four went stale
+because *upstream* changed DPL/GPL log formatting under *our* goldens.
+`drt:top_level_term2` went stale the other way round: **our** patch
+(`ee778e7ced`, DRT-0700 post-route min-area repair) changed the routed DEF of a
+test **upstream owns**, and nobody regenerated the golden. We broke someone
+else's test and left it red. Five is a **floor** — the whole suite has not been
+re-run — and it is stated as a floor deliberately, because a corrected number
+presented as complete is the same defect one layer up.
+
+🔴 **The map has to ask the second question too** (vibeic-eda#93). §6 above says
+build the patch→oracle map first. The map as first built asked *does this commit
+SHIP a test?* — and a commit that BREAKS one ships nothing, so `ee778e7ced` was
+filed **NO-ORACLE, "substantive code, no test at all, 494 adds"** when it was in
+fact the *cause* of a dead oracle. Those two conditions have opposite remedies —
+write a test vs regenerate a golden — so one bucket sends the reader to the
+wrong repair. `fork-gatekeeper/oracle_map.py` now asks both, consumes measured
+verdict ledgers rather than inferring verdicts from git, and refuses to say
+"breaks nothing" for a module nothing was run against.
 
 🔴 **Do not refresh a golden to fix this mid-campaign.** Refreshing means
 accepting current behaviour as correct, which defines away the question the
 campaign is asking. It is a deliberate act with its own review: someone has to
-look at the new output and say "this is right".
+look at the new output and say "this is right". What that review costs, worked
+through on `drt:top_level_term2`: the diff was one line; DRT-0700 reported
+exactly one polygon patched; the rect's size was pinned to the layer's published
+`AREA 0.24`; the other fourteen drt tests passed and DRT-0700 fired on none of
+them; the last shipped pre-patch binary reproduced the old golden exactly; and
+the router's own whole-design checker reported 0 violations on the patched
+route. Below that bar it is a baseline bump wearing a regeneration's clothes.

@@ -484,6 +484,46 @@ else
     unship_rc=2
 fi
 
+# vibeic-eda#93 — the patch->oracle map, asking BOTH of its questions.
+#
+# The hand-built map asked "does this commit SHIP a test?" and nothing else, so
+# `ee778e7ced` (494 adds) was filed NO-ORACLE while it was in fact the CAUSE of
+# a dead one: it changed the routed DEF that upstream's `drt:top_level_term2`
+# diffs against, the golden was never regenerated, and the test has been
+# permanently red since. Ship-a-test and break-a-test are opposite conditions
+# with opposite remedies, and one question cannot separate them.
+#
+# DOES NOT FAIL THE TICK, and the reason is the same one that makes the CI block
+# above non-fatal: who can act. A stale golden is cleared by a source change a
+# human lands; no tick can regenerate it, so failing here would be daily noise
+# on a standing state. What it must not do is stay invisible — hence the log line
+# and the JSON, on every round.
+#
+# COULD-NOT-MEASURE is the expected majority answer and is NOT a defect of this
+# check: the verdict ledgers cover the modules that were actually run. An absent
+# verdict is reported as absent, never as a pass.
+ORACLE_OUT="${LOG_DIR}/oracle-map.txt"
+oracle_rc=0
+if [ -f "${DIR}/oracle_map.py" ]; then
+    OR_DIR="/home/reyerchu/vibe-ic-forks/OpenROAD"
+    LEDGERS=""
+    for L in "${DIR}"/ORACLE_VERDICTS.OpenROAD.*.json; do
+        [ -f "${L}" ] && LEDGERS="${LEDGERS} --verdicts ${L}"
+    done
+    # shellcheck disable=SC2086
+    python3 "${DIR}/oracle_map.py" --repo "${OR_DIR}" --head HEAD \
+        --json "${LOG_DIR}/oracle-map.json" ${LEDGERS} > "${ORACLE_OUT}" 2>&1
+    oracle_rc=$?
+    grep -E "BROKE-EXISTING-ORACLE ·|counting:" "${ORACLE_OUT}" \
+        | sed 's/^/[oracle] /' | tee -a "${LOG}" || true
+    [ "${oracle_rc}" = "1" ] && log "[oracle] a commit of ours BROKE a pre-existing test — the remedy is to regenerate the golden, not to write a test (vibeic-eda#93)"
+    [ "${oracle_rc}" = "2" ] && log "[oracle] the map could not be built — nothing was measured, which is not a clean result"
+else
+    echo "MISSING: ${DIR}/oracle_map.py — whether our commits broke an existing test was NOT asked" > "${ORACLE_OUT}"
+    log "[oracle] nothing was checked, which is not a clean result"
+    oracle_rc=2
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1

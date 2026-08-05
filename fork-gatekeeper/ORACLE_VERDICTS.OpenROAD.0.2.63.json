@@ -1,0 +1,25 @@
+{
+  "_comment": "Measured verdicts, not inferred ones. oracle_map.py refuses to answer 'did this commit break an existing test?' from git alone, so this file records what was actually run. Every drt test registered in src/drt/test/CMakeLists.txt at this sha was executed with the STOCK SHIPPED binary inside ghcr.io/vibeic/vibeic-eda:0.2.63 (openroad -version = 26Q3-1110-g2f9fbcd47e, i.e. built from exactly this sha), judged by the repo's OWN judge test/regression_test.sh with TEST_CHECK_LOG=True -- not by exit code, which FORK_PATCH_AUDIT.md s4 records as vacuous for a suite that signals by printing. Scope: the drt module only. Tests of every other module are ABSENT here, which oracle_map renders as COULD-NOT-MEASURE, never as a pass.",
+  "tool": "OpenROAD",
+  "measured_at_sha": "2f9fbcd47e01f785cf21bafa521e33f9cf7491be",
+  "measured_by": "ghcr.io/vibeic/vibeic-eda:0.2.63 stock binary via test/regression_test.sh",
+  "measured_on": "2026-08-05",
+  "scope": "src/drt only -- 15 of 15 tests registered for drt at this sha",
+  "verdicts": {
+    "drt:down_access_term": "PASS",
+    "drt:drc_test": "PASS",
+    "drt:ispd18_sample": "PASS",
+    "drt:ispd18_sample_incr": "PASS",
+    "drt:ndr_vias1": "PASS",
+    "drt:ndr_vias2": "PASS",
+    "drt:ndr_vias3": "PASS",
+    "drt:ndr_no_auto_taper": "PASS",
+    "drt:obstruction": "PASS",
+    "drt:single_step": "PASS",
+    "drt:ta_ap_aligned": "PASS",
+    "drt:ta_pin_aligned": "PASS",
+    "drt:top_level_term": "PASS",
+    "drt:top_level_term2": "FAIL",
+    "drt:via_access_layer": "PASS"
+  }
+}
