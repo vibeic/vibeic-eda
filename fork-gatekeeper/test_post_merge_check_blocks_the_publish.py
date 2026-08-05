@@ -277,7 +277,16 @@ def test_the_same_merge_with_the_fix_applied_publishes(tmp_path, monkeypatch):
         upstream_file="src/rcx/src/ext.i", upstream_body=THEIRS_524,
         extra={"etc/find_messages.py": checker})
     before = _tip(bare)
-    res = _run(monkeypatch, root, D.post_merge_checks("OpenROAD"))
+    # The REAL declaration, narrowed to the row under test. OpenROAD declares a
+    # second check since vibe-ic#813 (`test-registration-parity`), and this
+    # fixture is a two-file synthetic tree with no `src/*/test/CMakeLists.txt` —
+    # so that checker would correctly report "could not check" and block, for a
+    # reason that has nothing to do with the collision this test is about.
+    # `test_openroad_declares_the_dup_id_check` is what pins the row's presence.
+    checks = [c for c in D.post_merge_checks("OpenROAD")
+              if c.get("name") == "dup-logger-ids"]
+    assert checks, "OpenROAD no longer declares dup-logger-ids"
+    res = _run(monkeypatch, root, checks)
     assert res["state"] == "MERGED", res
     assert _tip(bare) != before
 

@@ -20,7 +20,8 @@ OWN exit code.
 
 Everything else the tick's exit code depends on is stubbed GREEN, so a 7 can
 only have come from the capability block:
-  guard_rc -> 3, merge_rc -> 4, release_rc -> 5, ship_rc -> 6, cap_rc -> 7.
+  guard_rc -> 3, merge_rc -> 4, release_rc -> 5, ship_rc -> 6, cap_rc -> 7,
+  selftest_rc -> 8 (vibe-ic#813).
 The `test_a_green_tick_exits_zero` case is what proves that stubbing worked;
 without it every other assertion here would also pass against a tick that
 exits non-zero for some unrelated reason.
@@ -61,7 +62,7 @@ def _fleet(tmp_path: Path, cap: str | None) -> tuple[Path, dict]:
                  "check_fork_presence_claims.py"):
         _stub(root / "tools" / name, OK)
     for name in ("daily_merge.py", "daily_release.py", "check_our_commits_ship.py",
-                 "gatekeeper.py"):
+                 "gatekeeper.py", "check_fork_selftests.py"):
         _stub(dirp / name, OK)
     if cap is not None:
         _stub(dirp / "check_no_capability_lost.py", cap)

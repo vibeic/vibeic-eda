@@ -524,6 +524,66 @@ else
     oracle_rc=2
 fi
 
+# --- THE FORKS' OWN CHECKS, RUN ON THE CLONES THE IMAGE IS BUILT FROM (vibe-ic#813) ---
+#
+# Every check above is OURS, about the fleet. This one runs checks the FORKS
+# declare about themselves, in `FORKS.json` under `post_merge_check`.
+#
+# NOT A SECOND MECHANISM. vibeic-eda#89 owns that declaration and runs it in the
+# merge worktree before the push, which is strictly stronger than reporting
+# afterwards — a failing check leaves the fork at its previous tip and publishes
+# nothing. This adds no declaration and no second judgement: the driver imports
+# `daily_merge.run_post_merge_checks` rather than reimplementing it.
+#
+# What it adds is the half that gate CANNOT reach, visible in daily_merge.py:
+#
+#     if behind == 0:
+#         res.update(state="ALREADY_CURRENT", ...)
+#         return res          # <- returns BEFORE run_post_merge_checks
+#
+# The checks are MERGE-TRIGGERED. On a day upstream is level, nothing runs. That
+# is not hypothetical: all 27 unwired tests in vibe-ic#813 arrived through OUR
+# OWN patches, not an upstream merge, so #89's gate would have caught none of
+# them. Two questions, two call sites:
+#
+#   daily_merge.py  "may this MERGE be published?"           blocks the push
+#   here            "is the tree we BUILD FROM clean today,  fails the tick
+#                    however it got that way?"
+#
+# HERE and not in a pre-push hook, for the rest: a hook is one machine's word,
+# lives in .git/hooks, does not travel with a clone, and `--no-verify` bypasses
+# it. This tick runs unconditionally on a machine nobody edited. Measured cost
+# for OpenROAD's two declared checks: 0.15s + 0.3s.
+#
+# THREE STATES. rc=2 is COULD-NOT-CHECK (clone absent, checker absent from the
+# tree, malformed declaration, could not execute, timed out) and it fails the
+# tick just like a red result, because the oracle lives inside the tree it
+# audits: a merge that deleted it produces no output at all, which is precisely
+# how this class of defect has hidden every previous time. Absence is not a pass.
+# #89 collapses those two into one "do not publish" verdict, which is right when
+# the only decision is push-or-not; here the verdict is a REPORT, and "the fork
+# dropped the checker" and "the checker found something" need different actions.
+SELFTEST_OUT="${LOG_DIR}/fork-selftests.txt"
+selftest_rc=0
+if [ -f "${DIR}/check_fork_selftests.py" ]; then
+    python3 "${DIR}/check_fork_selftests.py" \
+        --json "${LOG_DIR}/fork-selftests.json" \
+        --log-dir "${LOG_DIR}" > "${SELFTEST_OUT}" 2>&1
+    selftest_rc=$?
+    # The `-> ` lines are the REASONS, and for COULD-NOT-CHECK the reason is the
+    # whole information: "the clone is absent" and "the fork dropped the
+    # checker" need different actions. A filter that showed only the verdict
+    # would log the word and nothing anyone could act on.
+    grep -E "^  (PASS|FAIL|COULD-NOT-CHECK) |^      -> |^fork self-checks:" "${SELFTEST_OUT}" \
+        | sed 's/^/[selftest] /' | tee -a "${LOG}" || true
+    [ "${selftest_rc}" = "1" ] && log "[selftest] a fork's own check is RED and the image is built from that tree (vibe-ic#813)"
+    [ "${selftest_rc}" = "2" ] && log "[selftest] a registered fork check COULD NOT RUN — that is not a pass; see ${SELFTEST_OUT}"
+else
+    echo "MISSING: ${DIR}/check_fork_selftests.py — the forks' own checks were NOT run" > "${SELFTEST_OUT}"
+    log "[selftest] nothing was checked, which is not a clean result"
+    selftest_rc=2
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
@@ -540,5 +600,10 @@ rc=$?
 # (vibeic-eda#88). rc=2 from that program means it could not probe the image at
 # all, and it lands here for the same reason rc=1 does: nothing was compared.
 [ "${cap_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=7
+# Nor by a fork's own declared check being red — or never having run at all
+# (vibe-ic#813). A tick that published an image built from a tree whose own
+# regression suite is unwired has not had a clean day, and reporting 0 would say
+# it did. rc=8: 7 was taken by the capability gate while this was in flight.
+[ "${selftest_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=8
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}

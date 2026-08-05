@@ -235,10 +235,51 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         # 127 is this module's own "could not run it at all" (see `_sh`), and it
         # is not distinguishable from a program that genuinely exits 127. Both
         # block, so the ambiguity costs nothing; the detail says which we saw.
-        tail = (err.strip() or out.strip()).splitlines()
         rows.append({"name": name, "ok": rc == 0, "rc": rc,
-                     "detail": " | ".join(tail[-4:])[:400] if rc != 0 else "clean"})
+                     "detail": _salient(out, err) if rc != 0 else "clean"})
     return rows
+
+
+#: Markers that NAME a defect, as opposed to lines that merely sit at the end.
+#: Deliberately not a word list — "ERROR" matched 8 rows of `find_messages.py`'s
+#: 3000-line message INVENTORY, every one a message that exists on purpose.
+_DEFECT_MARKERS = (
+    "Error: ",          # find_messages.py — "<SET> <id> used N times"
+    "Appears in ",      # find_messages.py — where the collision is
+    "FAIL:",            # check_test_registration_parity.py
+    "UNEXPECTED",
+    "STALE ALLOWLIST",
+    "integration ",     # its per-row output
+    "cpp-unit ",
+)
+
+
+def _salient(out: str, err: str) -> str:
+    """The lines that say WHAT BROKE, not the last four lines of the output.
+
+    `tail` is wrong here for the reason `prepush-gates.sh` already documents: an
+    aggregating check puts its failure in the middle and its ADVICE at the end.
+    Measured on `check_test_registration_parity.py` with one test un-wired — the
+    last four lines are "Wire each into its module's BUILD ... bazel sandboxes,
+    and an undeclared data file fails the test", which is true, generic, and
+    names neither the module nor the test. `tap:bound_to_placement` was four
+    lines above it.
+
+    Streams are searched SEPARATELY and stderr first, because the two checks
+    this fleet declares put their verdict in opposite places: find_messages.py
+    prints its whole inventory to stdout and the collision to stderr, so a
+    merged search is a haystack that does not contain the needle.
+    """
+    for stream in (err, out):
+        lines = (stream or "").splitlines()
+        hit = [ln.strip() for ln in lines
+               if any(k in ln for k in _DEFECT_MARKERS)]
+        if hit:
+            return " | ".join(hit[:8])[:400]
+    tail = ((err or "").strip() or (out or "").strip()).splitlines()
+    # No recognised marker: say so rather than presenting a guess as a finding.
+    return ("(no recognised marker; last lines) "
+            + " | ".join(tail[-4:]))[:400]
 
 
 def build_branches(eda_root: Path) -> Dict[str, str]:

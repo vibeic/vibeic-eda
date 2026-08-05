@@ -122,9 +122,25 @@
         {
           "name": "dup-logger-ids",
           "path": "etc/find_messages.py",
-          "cmd": ["python3", "etc/find_messages.py", "-d", "src"],
+          "cmd": [
+            "python3",
+            "etc/find_messages.py",
+            "-d",
+            "src"
+          ],
           "why": "Our resistance-clamp warning in src/rcx/src/extmain_v2.cpp has been renumbered THREE times in six days because upstream grew a logger message id underneath it: 515->519 (2f9fbcd47e), 519->524 (5bb6ca31ee), 524->527 (724a389026). Every one of those merges was TEXTUALLY CLEAN — the two call sites are in different files — so git took it silently and a person found it afterwards. This is the detector that sees it, and until 2026-08-05 nothing ran it at merge time (vibeic-eda#89).",
           "note": "etc/find_dup_ids.sh is the BAZEL wrapper around exactly this command and cannot run from a plain checkout: outside bazel it resolves find_messages.py to $(dirname $0)/_main/etc/find_messages.py — measured, `bash etc/find_dup_ids.sh` from the repo root exits 1 with 'Cannot find find_messages.py at .../etc/_main/etc/find_messages.py'. A merge worktree is a plain checkout, so registering the wrapper would have produced a check that is red every day for a reason that is not a collision. The command below is what the wrapper runs, and is the same command all three historical fix commits quote as their proof."
+        },
+        {
+          "name": "test-registration-parity",
+          "path": "etc/check_test_registration_parity.py",
+          "cmd": [
+            "python3",
+            "etc/check_test_registration_parity.py",
+            "."
+          ],
+          "why": "etc/Build.sh has defaulted to bazel since the 2026-07-29 daily merge, and the image is built with it, but our regression tests were still being written for CMake. Nothing compared the two target sets, so 27 of the fork's own tests -- including the proofs FIX_STATUS.md records for dpl, drt, fin, grt, ppl, psm, rsz and tap -- had stopped being reachable by the build that produces the binary, while the CMake run stayed green (vibe-ic#813). Registered here rather than in a program's own list so there is ONE declaration: daily_merge.py runs it before a merge is pushed, and check_fork_selftests.py runs the same command daily on the checked-out clone, which is the half a merge-triggered gate cannot reach -- all 27 arrived through our own patches, not an upstream merge.",
+          "note": "Runs from a plain checkout in 0.15s: it parses src/*/test/CMakeLists.txt and src/*/**/BUILD and compares the two sets. It needs no bazel, no build and no PDK, which is what makes it safe to run in a merge worktree and on every tick."
         }
       ]
     },
