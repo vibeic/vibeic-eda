@@ -11,3 +11,12 @@
 !tools
 tools/*
 !tools/pdk
+# SECOND EXCEPTION: the tool-manifest refresh. `/foss/pdks/versions.txt` is the
+# BASE image's list and we replace several of the tools it names, so the compose
+# rewrites it by PROBING the binaries. Both files must be in the context for the
+# COPY to resolve -- and when they were not, the compose failed with
+# `"/tools/tool_version_probes.tsv": not found` AFTER a 20-minute OpenROAD
+# rebuild, because a build-context omission cannot be seen from anywhere except
+# a build.
+!tools/refresh_versions_manifest.sh
+!tools/tool_version_probes.tsv
