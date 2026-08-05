@@ -100,7 +100,7 @@ sby/smtbmc-z3
                 the same missing binary, and the repo already ruled on that one
                 the other way -- the Dockerfile sets VERILATOR_SOLVER="yices-smt2
                 --incremental" rather than installing z3.
-    decision:   PENDING-OWNER
+    decision:   DO-NOT-ADVERTISE
     recommend:  DO-NOT-ADVERTISE, for consistency with the verilator ruling
                 already in the Dockerfile: we ship yices as THE solver and point
                 every consumer at it.  Adopting z3 for sby alone means the image
@@ -151,7 +151,7 @@ yosys/vhdl-synth
                 yosys has no Verific frontend, and nvc (1.21.1, present) has no
                 yosys bridge, so ghdl-yosys-plugin is the only VHDL synthesis path
                 that exists.
-    decision:   PENDING-OWNER
+    decision:   DO-NOT-ADVERTISE
     recommend:  DO-NOT-ADVERTISE, and say plainly that VHDL is SIMULATE-ONLY in
                 this image: ghdl and nvc both work, synthesis does not.  The
                 deciding fact is the coupling, not the effort -- forking the
@@ -205,7 +205,7 @@ openroad/python-api
                 `bazel build` plus install in the same stage, mirroring how the
                 standalone `sta` is already rescued out of bazel-bin in this very
                 Dockerfile.  MEDIUM, and no new dependency.
-    decision:   PENDING-OWNER
+    decision:   DO-NOT-ADVERTISE
     recommend:  DO-NOT-ADVERTISE for (a); and if the owner wants the Python API at
                 all, take (b) and RE-AIM THE PROBE at `python3 -c "import
                 openroad"`.  As it stands the probe measures the CMake-only
