@@ -2552,6 +2552,44 @@ def lag_split(clone, pin: str, tip: str, up_ref: str) -> dict:
     return out
 
 
+#: The key carrying WHEN `behind_commits` was measured. One literal, so the writer
+#: here and the reader in `build_page` cannot drift apart.
+BEHIND_MEASURED_AT = "behind_measured_at"
+
+
+def _stamp() -> str:
+    """Now, in the same local-offset ISO shape every other timestamp in this file uses."""
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def record_behind(led: dict, n) -> dict:
+    """Write `behind_commits` AND the time it was measured, as ONE act (vibeic-eda#91).
+
+    WHY A FUNCTION rather than two adjacent assignments. The count and its "as of"
+    are one fact, and the failure this fixes is precisely them coming apart: a
+    number published without the time it was taken. Two lines side by side stay
+    together by convention, which is what a future edit is free to break; a
+    function makes the pairing structural, and `test_the_count_and_its_time_are_one_write`
+    holds it there.
+
+    WHY NOT `generated_at`, which this row already carries and which a reader would
+    reach for first. `generated_at` is stamped at the TOP of `discover_one`, before
+    anything is measured, and it survives every early return — a row whose repo meta
+    404'd and which therefore measured NOTHING still carries a `generated_at` from
+    seconds ago. Reading it as the age of the count would mean answering "when was
+    this measured?" with "when was this row written?", which is the same shape as
+    every other defect this file's comments record: a value that answers the
+    question NEXT TO the one asked, and reads as an answer to it.
+
+    NULL, NEVER ABSENT AND NEVER NOW, when there was no measurement. `n is None`
+    means the compare could not be run; the stamp is then None too, so
+    "unmeasurable" cannot borrow the freshness of the attempt that failed.
+    """
+    led["behind_commits"] = n
+    led[BEHIND_MEASURED_AT] = _stamp() if isinstance(n, int) and not isinstance(n, bool) else None
+    return led
+
+
 def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     tool, up_full = fork["tool"], fork["upstream"]
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -2708,7 +2746,11 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         mb = cmp.get("merge_base_commit") or {}
         led["fork_point"] = _commit_brief(mb) if mb else None
         led["ahead"] = cmp.get("ahead_by", 0)                 # our patches on the pinned branch
-        led["behind_commits"] = cmp.get("behind_by", 0)       # informational (commit granularity)
+        # THE COUNT AND ITS "AS OF", together. This is the point of measurement — the
+        # compare has just answered — so this is where the clock is read. See
+        # `record_behind`; it is not two assignments here because it must not become
+        # possible for one of them to survive an edit without the other.
+        record_behind(led, cmp.get("behind_by", 0))           # informational (commit granularity)
         led["carried_patches"] = [_commit_brief(c) for c in (cmp.get("commits") or [])][:CAP]
         led["fork_point_status"] = source
 
@@ -2787,6 +2829,11 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     else:
         led["compare_error"] = cmp["_err"]
         led["fork_point_status"] = "undetermined"
+        # RECORDED AS UNMEASURED, not left absent. The count was already null here by
+        # omission; what was missing is a row that SAYS the question failed, so a
+        # reader can tell "we asked and could not get an answer" from "this ledger
+        # shape predates the question". Same reasoning as `lag_split`'s all-None row.
+        record_behind(led, None)
 
     # RELEASE tracking, by CONTAINMENT — see the block above `classify_releases`.
     # `pin_date` (the fork-point date) stays in the ledger as display metadata; no

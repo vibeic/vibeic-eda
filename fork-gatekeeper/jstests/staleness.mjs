@@ -2,8 +2,14 @@ import fs from "node:fs";
 const src = fs.readFileSync(process.argv[2], "utf8");
 // Extract the SHIPPED expressions rather than retyping them: a test that
 // re-derives the rule proves the re-derivation.
+// The threshold moved out to a shared constant when the per-row rule needed the same
+// number (vibeic-eda#91). EXTRACTED, not retyped: if the two ever stop being one
+// literal, this line stops finding it and the test says so instead of quietly
+// testing a 30 that only exists here.
+const thresholdDecl = src.match(/const STALE_HOURS = \d+;/);
+if (!thresholdDecl) { console.log("FAIL  `const STALE_HOURS = <n>;` not found in the page source"); process.exit(1); }
 const seg = src.slice(src.indexOf("const genMs = Date.parse(generatedAt);"));
-const body = seg.slice(0, seg.indexOf("const ageTxt")) ;
+const body = thresholdDecl[0] + "\n" + seg.slice(0, seg.indexOf("const ageTxt")) ;
 const ageTxtLine = seg.slice(seg.indexOf("const ageTxt"));
 const ageTxtSrc = ageTxtLine.slice(0, ageTxtLine.indexOf(";") + 1);
 const NOW = Date.parse("2026-08-03T05:30:00+08:00");

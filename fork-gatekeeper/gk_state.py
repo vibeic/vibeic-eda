@@ -219,6 +219,14 @@ def describe(prov) -> str:
             f"{'+dirty' if prov.get('dirty') else ''} · {prov.get('at') or '?'}")
 
 
+#: Keys this function must NEVER remove, named so the intent is checkable rather than a
+#: property of how the removal happens to be written today. `behind_measured_at` is WHEN
+#: the published count was measured (vibeic-eda#91). It names no host, no checkout and no
+#: NDA token — it is a UTC instant — and without it the page can state a number but not
+#: how old the number is, which is the whole defect #91 records.
+PUBLISHED_KEYS = ("behind_measured_at",)
+
+
 def strip_provenance(obj):
     """The provenance block, removed — for the PUBLISH boundary.
 
@@ -226,6 +234,13 @@ def strip_provenance(obj):
     monitor page, so provenance (which names a local checkout path and a hostname) must
     come off there. Same reasoning as the NDA redaction that already guards that boundary:
     what an internal file records and what a public page carries are two questions.
+
+    A DENYLIST OF EXACTLY ONE KEY, and deliberately so. The alternative — an allowlist of
+    fields the page may carry — would have to be edited every time the ledger grows a
+    field, and the failure mode of forgetting is that a fact silently stops being
+    published while both halves keep working. #91 is that failure already paid for once
+    in a different form. So everything travels except the one block that must not, and
+    `PUBLISHED_KEYS` pins the members whose survival is load-bearing.
     """
     if isinstance(obj, dict):
         return {k: v for k, v in obj.items() if k != PROVENANCE_KEY}

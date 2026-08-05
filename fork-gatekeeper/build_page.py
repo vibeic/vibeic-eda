@@ -245,6 +245,13 @@ STYLE = """<style>
 .fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
 .fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
 .fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
+/* WHEN a count was measured, beside the count (vibeic-eda#91). Fresh is muted — it is
+   the ordinary case and should not compete with the number. Stale and unknown-age are
+   coloured, because those are the two states in which the number beside them does not
+   describe today, and the whole defect was that they looked exactly like the fresh one. */
+.fork-age{font-size:.8rem;color:var(--text-muted,#6b7684);margin-left:.35rem;white-space:nowrap}
+.fork-age-stale{color:#ff9d9d}
+.fork-age-unknown-age{color:#e2b04a}
 .fork-rel{border-left-color:#63a8ea;background:rgba(99,168,234,.07)}
 .fork-rel .fork-gap-list>li{margin-bottom:.55rem}
 .fork-rel .enh-pill{margin-left:.3rem}
@@ -521,6 +528,7 @@ function enhBlock(tool){
   const behindUnknown = gapRows.length - behindKnown.length;
   const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
+
   // ONE NUMBER FOR TWO CONDITIONS WITH OPPOSITE FIXES was this card's remaining
   // defect after the contents-assertion one. `behind_commits` is pin->upstream,
   // which is SYNC LAG plus RELEASE LAG:
@@ -564,6 +572,105 @@ function enhBlock(tool){
   // the whole reason its ARG exists.
   const assertRows    = LEDGERS.filter(d=>isAssertion(d));
   const patchForks    = LEDGERS.filter(d=>(d.ahead||0)>0).length;
+
+  // ============ HOW OLD IS EACH COUNT? (vibeic-eda#91) ==========================
+  //
+  // MEASURED 2026-08-04: this page rendered 39 commits behind for a state whose
+  // GitHub-fork half was, at that moment, 4 — iverilog 12/live 0, verilator 4/live 1,
+  // OpenROAD 2/live 3. Nothing about the page or the data said which. Every ledger
+  // row carried its count with no record of WHEN the count was taken, so a day-old
+  // 12 and a just-measured 0 were the same kind of thing, and the only signal that
+  // separated them was a FILE MTIME — a property of the filesystem, not of the
+  // record, which does not survive the row being read, embedded here, and published.
+  //
+  // WHY THIS IS NOT THE #58 BANNER AGAIN. That banner asks "has the whole page gone
+  // stale?" off ONE row's `generated_at` (`LEDGERS[0]`), and it is right to. It
+  // cannot answer this question. A round that runs and dies partway through rewrites
+  // some rows and leaves the rest at yesterday's values, so the page is FRESH by that
+  // banner's test while carrying counts of mixed age — and the mixed ones are summed
+  // into the headline above with no mark on them. Per-row age is the only thing that
+  // separates those.
+  //
+  // WHY NOT `generated_at` PER ROW, which exists and would need no new field.
+  // `generated_at` is stamped at the top of `discover_one` BEFORE anything is
+  // measured, and it survives every early return: a row whose repo meta 404'd, which
+  // measured nothing at all and has no `behind_commits`, still carries a
+  // `generated_at` from seconds ago. Using it here would answer "when was this
+  // measured?" with "when was this row written?" — an adjacent question wearing the
+  // asked one's clothes, which is the exact failure mode #91 was filed about. The
+  // count's own timestamp is written at the point the compare answers
+  // (`discover_forks.record_behind`) and is null when there was no answer.
+  //
+  // AGE THRESHOLD — 30 h, and it is the SAME literal the page-level banner below
+  // uses; `STALE_HOURS` is declared here and read there, deliberately one constant.
+  // The round is cron'd at 05:30 daily, so 24 h is one full cycle and 30 h adds six
+  // hours of slack for a round that starts on time and runs long; a count that has
+  // outlived that has outlived a round that should have replaced it. Two thresholds
+  // off one clock is how two programs came to say opposite things about the same
+  // four pins (#29). Same honest limitation as the banner's: this cannot fire AT the
+  // moment a round is missed, only on the morning after.
+  //
+  // THREE STATES, AND THE THIRD IS THE COMMON ONE. Every ledger written before this
+  // field existed has no stamp, and that is most of them on the day this ships. Such
+  // a row is UNKNOWN-AGE — it is NOT rendered as current, and it is not rendered as
+  // stale either, because we do not know that it is. A future stamp (clock skew) and
+  // an unparseable one land in the same bucket, for the reason the banner already
+  // gives: the one direction that must never read as healthy.
+  const STALE_HOURS = 30;
+  const measuredAgeH = d => {
+    const t = Date.parse((d && d.behind_measured_at) || "");
+    return isFinite(t) ? (Date.now() - t) / 3600000 : NaN;
+  };
+  // "fresh" | "stale" | "unknown-age" | "not-measured".
+  // `not-measured` is a row with NO COUNT — there is nothing for an age to qualify,
+  // and it is already reported as `+N?` beside the headline.
+  const measuredState = d => {
+    if (!d || typeof d.behind_commits !== "number") return "not-measured";
+    const a = measuredAgeH(d);
+    if (!isFinite(a) || a < -1) return "unknown-age";
+    return a > STALE_HOURS ? "stale" : "fresh";
+  };
+  const ageWords = h => !isFinite(h) ? "" : (Math.abs(h) < 48
+      ? `${Math.round(h)} h` : `${Math.floor(h/24)} d`);
+  // The clause that travels BESIDE a count wherever one is printed. A fresh row says
+  // when; a stale row says STALE and when; an unknown-age row says so and stops.
+  const ageClause = d => {
+    const s = measuredState(d);
+    if (s === "not-measured") return "";
+    if (s === "unknown-age") return ` · <b>UNKNOWN-AGE</b> (this row records no measurement time)`;
+    const w = ageWords(measuredAgeH(d));
+    return s === "stale" ? ` · <b>STALE</b>, measured ${w} ago` : ` · measured ${w} ago`;
+  };
+  const ageClauseZh = d => {
+    const s = measuredState(d);
+    if (s === "not-measured") return "";
+    if (s === "unknown-age") return ` · <b>年齡不明</b>（這一列沒有記錄量測時間）`;
+    const w = ageWords(measuredAgeH(d));
+    return s === "stale" ? ` · <b>已過期</b>，量測於 ${w} 前` : ` · ${w} 前量測`;
+  };
+  // The clause as the site's bilingual span, so `setLang` swaps it like every other
+  // string on the page instead of leaving an English age beside a Chinese sentence.
+  // Empty for a row with no count — there is nothing whose age to state.
+  const ageSpan = d => {
+    const en = ageClause(d);
+    if (!en) return "";
+    return `<span class="fork-age fork-age-${measuredState(d)}" data-en="${en.replace(/"/g,'&quot;')}" data-zh="${ageClauseZh(d).replace(/"/g,'&quot;')}">${en}</span>`;
+  };
+  // The headline sums these rows, so the headline has to carry how many of them are
+  // not known to be current. A total whose parts are of unknown age is of unknown
+  // age, and printing it bare is the sentence this whole block exists to stop.
+  const agedRows    = behindKnown.filter(d=>measuredState(d) === "stale");
+  const noStampRows = behindKnown.filter(d=>measuredState(d) === "unknown-age");
+  const notFreshTxt =
+      (agedRows.length ? `; ${agedRows.length} of the summed row(s) are STALE (measured over ${STALE_HOURS} h ago): ${esc(agedRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``)
+    + (noStampRows.length ? `; ${noStampRows.length} of the summed row(s) record NO measurement time, so their age is UNKNOWN and they are not known to be current: ${esc(noStampRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``);
+  const notFreshZh =
+      (agedRows.length ? `；被加總的列中有 ${agedRows.length} 列已過期（量測時間超過 ${STALE_HOURS} 小時）：${esc(agedRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``)
+    + (noStampRows.length ? `；被加總的列中有 ${noStampRows.length} 列沒有記錄量測時間，年齡不明，不能當作是現況：${esc(noStampRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``);
+  // The mark ON the number itself. A caveat only in the tooltip is a caveat nobody
+  // reads; the headline is what people act on, and two proposals already acted on
+  // this one (#74, #78).
+  const behindMark = agedRows.length ? " ⚠" : (noStampRows.length ? " ?" : "");
   // THE SECOND DAILY QUESTION: are our own commits actually IN the shipped image?
   // `totalPatches` answers "how many patches do we HOLD", which is not the same
   // thing. A fork can carry 57 of our commits and ship none of them, because the
@@ -648,7 +755,7 @@ function enhBlock(tool){
   // freshness — the one direction that must never read as healthy.
   const genMs = Date.parse(generatedAt);
   const ageH  = isFinite(genMs) ? (Date.now() - genMs) / 3600000 : NaN;
-  const stale = isFinite(ageH) && ageH > 30;
+  const stale = isFinite(ageH) && ageH > STALE_HOURS;
   const ahead = isFinite(ageH) && ageH < -1;
   const ageTxt = !isFinite(ageH) ? "" : (ageH < 48
       ? `${Math.round(ageH)} h` : `${Math.floor(ageH/24)} d`);
@@ -663,20 +770,25 @@ function enhBlock(tool){
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
     // will act on it, and two proposals already did. The assertion clause appears
     // only when there is one, and it names the block further down that carries them.
-    [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``)
+    // `behindMark` is on the NUMBER, not only in the label: ⚠ when a summed row is
+    // stale, ? when one records no measurement time at all. Both say the same thing
+    // in one glyph — this total is not known to describe today (vibeic-eda#91).
+    [commitsBehind + behindMark + (behindUnknown?` +${behindUnknown}?`:``)
        + (splitKnown.length ? ` (sync ${syncLag} · release ${releaseLag})` : ``),
      {en:`Commits behind upstream — sync ${syncLag} (fork trails upstream: merge upstream in) · release ${releaseLag} (image pin trails our fork: bump the pin, rebuild)`
          + ` — ${forksBehind} fork(s); +N? = could not be measured`
          + (releaseOnly.length ? `; RELEASE-ONLY, merging upstream would change nothing: ${esc(releaseOnly.join(", "))}` : ``)
          + (syncOnly.length ? `; sync-only: ${esc(syncOnly.join(", "))}` : ``)
          + (splitUnknown ? `; ${splitUnknown} fork(s) have a gap with NO recorded split — re-run discovery` : ``)
-         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``),
+         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``)
+         + notFreshTxt,
       zh:`落後上游的 commit 數 — sync ${syncLag}（fork 落後上游：把上游 merge 進來）· release ${releaseLag}（image 的 pin 落後我們的 fork：bump pin 重建）`
          + ` —— ${forksBehind} 個 fork；+N? = 量不到，不等於零`
          + (releaseOnly.length ? `；純 RELEASE 落後，merge 上游不會有任何改變：${esc(releaseOnly.join(", "))}` : ``)
          + (syncOnly.length ? `；純 sync 落後：${esc(syncOnly.join(", "))}` : ``)
          + (splitUnknown ? `；有 ${splitUnknown} 個 fork 有缺口但沒有記錄拆分 —— 請重跑 discovery` : ``)
-         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``)}],
+         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``)
+         + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is
@@ -735,7 +847,9 @@ function enhBlock(tool){
         const zh = n === null
           ? `image 出貨的是 PREBUILT 產物，<code>${esc(d.dockerfile_arg||"該 ARG")}</code> 記錄的是它帶著哪一個上游 commit`
           : `PREBUILT 產物之後還有 <b>${n}</b> 個上游 commit，但沒有任何一個是這個 image 補得掉的缺口`;
-        return `<li><code>${esc(d.tool||d.repo||"?")}</code> <span class="fork-mono">${esc(d.pinned_ref||"")}</span> — <span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span></li>`;
+        // Its "as of" too. This number is not a gap, but it is still a measurement
+        // published as if it described now, which is the whole of #91.
+        return `<li><code>${esc(d.tool||d.repo||"?")}</code> <span class="fork-mono">${esc(d.pinned_ref||"")}</span> — <span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>${ageSpan(d)}</li>`;
       }).join("")
     + `</ul>`
     + `<p class="fork-gap-note" data-en="Nothing fetches at these values. The artefact is built elsewhere and the image only ASSERTS what it carries, refusing to ship if the two disagree — so advancing the ARG would rebuild nothing and turn a true statement into a false one. Adopting newer upstream work here means CUTTING A NEW ARTEFACT, which is a decision rather than a sync. Classified from the ledger&#39;s own pin_kind, which comes from the Dockerfile text: an assertion-named value that a fetch step reads is a misnamed PIN and is counted as a gap above." data-zh="沒有任何步驟會去這些值抓東西。產物是別處建好的，image 只是 ASSERT 它帶著什麼，兩邊不一致就拒絕出貨 —— 所以把這個 ARG 往前推不會重建任何東西，只會把一句真話變成假話。要採用更新的上游工作，意思是重新切一份產物，那是一個決定而不是一次同步。分類來自 ledger 自己的 pin_kind，而它來自 Dockerfile 的內容：名字長得像宣告、卻被抓取步驟讀到的值，是命名錯誤的 PIN，會被算進上面的缺口。">Nothing fetches at these values — advancing the ARG would rebuild nothing and make a true statement false.</p>`);
@@ -748,7 +862,10 @@ function enhBlock(tool){
     if (!gapTools.length) {
       gapEl.innerHTML = '<p data-en="Every fork is either carrying patches of ours or level with upstream." data-zh="每一個 fork 都不是揹著我們的補丁、就是跟上游齊平。">Every fork is either carrying patches of ours or level with upstream.</p>' + assertBlock + unrecBlock;
     } else {
-      const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span></li>`).join("");
+      // The count carries its "as of" in the same sentence as the count. A row with
+      // no recorded measurement time says UNKNOWN-AGE here; it is never printed bare,
+      // which would read as "measured just now" (vibeic-eda#91).
+      const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span>${ageSpan(d)}</li>`).join("");
       gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>` + assertBlock + unrecBlock;
     }
   }
