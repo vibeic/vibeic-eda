@@ -96,19 +96,49 @@ def test_the_page_names_no_tool_in_its_gap_rule():
     assert "pin_kind" in code, "the rule must key on the ledger's recorded kind"
 
 
-def test_the_excluded_rows_are_rendered_not_dropped():
-    """A row that vanishes is a row nobody can audit. `fork_gap_report` prints
-    its assertions under their own heading for this reason; the page must too, or
-    the fix trades a wrong number for a hidden one."""
+def test_the_page_does_not_claim_to_list_rows_it_no_longer_renders():
+    """The contents-assertion LIST was removed on owner instruction 2026-08-05.
+
+    The principle behind the test this replaces still holds and is what is
+    asserted here: a row that vanishes is a row nobody can audit, so the page
+    must not trade a wrong number for a hidden one. Two things keep that true
+    after the removal:
+
+    * the excluded rows are still COUNTED and still NAMED in the summary
+      ("N contents assertion(s) excluded"), so the reader knows they exist;
+    * `fork_gap_report` still prints them under their own heading, which is the
+      auditable record. The page is the summary, not the ledger.
+
+    What would be dishonest is the page saying the rows are "listed below" when
+    nothing lists them. That sentence shipped for one build after the block was
+    removed, and this is the assertion that catches it returning.
+    """
     src = (_HERE / "build_page.py").read_text(encoding="utf-8")
-    assert "assertBlock" in src and "Contents assertions" in src
-    assert "gapEl.innerHTML" in src
-    for branch in src.split("gapEl.innerHTML")[1:]:
-        head = branch[:branch.index("\n")]
-        assert "assertBlock" in head, (
-            "one branch of the gap block renders without the assertion rows; "
-            "an assertion that disappears when the gap list is empty is exactly "
-            "the silent drop this test exists to prevent")
+
+    assert "listed below" not in src, (
+        "the summary still points the reader at a list of contents assertions, "
+        "but the block that rendered them was removed — the page is describing "
+        "something it does not show")
+    assert "列在下方" not in src, (
+        "the Chinese summary still says the rows are listed below, and they "
+        "are not")
+
+    # The count must survive: removing the list must not remove the fact.
+    assert "contents assertion(s) excluded" in src, (
+        "the excluded rows are no longer even counted in the summary, so a "
+        "reader cannot tell they exist — that is the silent drop this test "
+        "exists to prevent")
+
+
+def test_the_empty_gap_container_is_hidden_not_drawn():
+    """`.fork-gap` carries a 3px orange left border and a tinted background, so
+    an empty one renders as a bare coloured line with nothing in it. Once the
+    tracking gap reaches zero — the goal state — that line is all that is left,
+    and it reads as a defect marker for the absence of defects."""
+    src = (_HERE / "build_page.py").read_text(encoding="utf-8")
+    assert "gapEl.hidden = !gapEl.innerHTML.trim()" in src, (
+        "the gap container is not hidden when empty; at zero gaps the page "
+        "draws a styled, empty box")
 
 
 # ── the real tree: one authority, one field, one population ──────────────────

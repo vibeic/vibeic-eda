@@ -334,7 +334,6 @@ __NAV__
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
 
-<div class="fork-gap fork-rel" id="forkRel"></div>
         <p class="fork-caption" id="forkUpdated"></p>
         <p class="fork-caption" id="enhSummary"></p>
 
@@ -356,11 +355,6 @@ __NAV__
         <p class="fork-caption" data-en="Click a tool for its carried patches, the upstream commits still pending, and the daily sync log. Data refreshes every day." data-zh="點一個工具可看它揹著的補丁、仍待合的上游 commit、以及每日同步 log。資料每天更新。">Click a tool for its carried patches, the upstream commits still pending, and the daily sync log. Data refreshes every day.</p>
     </div>
 </section>
-
-__GAP__
-
-__INVENTORY__
-
 __FOOTER__
 
 <script>
@@ -780,14 +774,13 @@ function enhBlock(tool){
          + (releaseOnly.length ? `; RELEASE-ONLY, merging upstream would change nothing: ${esc(releaseOnly.join(", "))}` : ``)
          + (syncOnly.length ? `; sync-only: ${esc(syncOnly.join(", "))}` : ``)
          + (splitUnknown ? `; ${splitUnknown} fork(s) have a gap with NO recorded split — re-run discovery` : ``)
-         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind, listed below` : ``)
+         + (assertRows.length ? `; ${assertRows.length} contents assertion(s) excluded — no ref to be behind` : ``)
          + notFreshTxt,
       zh:`落後上游的 commit 數 — sync ${syncLag}（fork 落後上游：把上游 merge 進來）· release ${releaseLag}（image 的 pin 落後我們的 fork：bump pin 重建）`
          + ` —— ${forksBehind} 個 fork；+N? = 量不到，不等於零`
          + (releaseOnly.length ? `；純 RELEASE 落後，merge 上游不會有任何改變：${esc(releaseOnly.join(", "))}` : ``)
          + (syncOnly.length ? `；純 sync 落後：${esc(syncOnly.join(", "))}` : ``)
          + (splitUnknown ? `；有 ${splitUnknown} 個 fork 有缺口但沒有記錄拆分 —— 請重跑 discovery` : ``)
-         + (assertRows.length ? `；另有 ${assertRows.length} 個內容宣告不計入 —— 沒有 ref 可以落後，列在下方` : ``)
          + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
@@ -836,31 +829,27 @@ function enhBlock(tool){
   // is a row nobody can audit, and silently dropping it is #60's unverified pin
   // wearing the opposite mask. Everything rendered comes off the row itself —
   // `dockerfile_arg`, `pinned_ref`, `behind_commits` — so no tool is named in code.
-  const assertBlock = !assertRows.length ? "" : (
-    `<h4 data-en="Contents assertions — not a gap (${assertRows.length})" data-zh="內容宣告 —— 不是缺口（${assertRows.length}）">Contents assertions — not a gap (${assertRows.length})</h4>`
-    + `<ul class="fork-gap-list">`
-    + assertRows.map(d=>{
-        const n = (typeof d.behind_commits === "number") ? d.behind_commits : null;
-        const en = n === null
-          ? `the image ships a PREBUILT artefact and <code>${esc(d.dockerfile_arg||"the ARG")}</code> records which upstream commit it carries`
-          : `<b>${n}</b> upstream commit(s) exist beyond the PREBUILT artefact this image ships, and none of them is a gap this image can close`;
-        const zh = n === null
-          ? `image 出貨的是 PREBUILT 產物，<code>${esc(d.dockerfile_arg||"該 ARG")}</code> 記錄的是它帶著哪一個上游 commit`
-          : `PREBUILT 產物之後還有 <b>${n}</b> 個上游 commit，但沒有任何一個是這個 image 補得掉的缺口`;
-        // Its "as of" too. This number is not a gap, but it is still a measurement
-        // published as if it described now, which is the whole of #91.
-        return `<li><code>${esc(d.tool||d.repo||"?")}</code> <span class="fork-mono">${esc(d.pinned_ref||"")}</span> — <span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>${ageSpan(d)}</li>`;
-      }).join("")
-    + `</ul>`
-    + `<p class="fork-gap-note" data-en="Nothing fetches at these values. The artefact is built elsewhere and the image only ASSERTS what it carries, refusing to ship if the two disagree — so advancing the ARG would rebuild nothing and turn a true statement into a false one. Adopting newer upstream work here means CUTTING A NEW ARTEFACT, which is a decision rather than a sync. Classified from the ledger&#39;s own pin_kind, which comes from the Dockerfile text: an assertion-named value that a fetch step reads is a misnamed PIN and is counted as a gap above." data-zh="沒有任何步驟會去這些值抓東西。產物是別處建好的，image 只是 ASSERT 它帶著什麼，兩邊不一致就拒絕出貨 —— 所以把這個 ARG 往前推不會重建任何東西，只會把一句真話變成假話。要採用更新的上游工作，意思是重新切一份產物，那是一個決定而不是一次同步。分類來自 ledger 自己的 pin_kind，而它來自 Dockerfile 的內容：名字長得像宣告、卻被抓取步驟讀到的值，是命名錯誤的 PIN，會被算進上面的缺口。">Nothing fetches at these values — advancing the ARG would rebuild nothing and make a true statement false.</p>`);
+  // Contents-assertion block REMOVED on owner instruction 2026-08-05.
+  // It rendered "Contents assertions — not a gap", i.e. it spent space
+  // explaining something that is NOT a gap, on a page whose subject is gaps.
+  // The assertion rows are still measured and still reported by
+  // fork_gap_report; they are simply not published here.
+  const assertBlock = "";
+
   // A row nobody classified is counted above; here it is NAMED, so the state that
   // produced this defect can never again be invisible.
   const unrecBlock = !kindUnrecorded.length ? "" : (
     `<p class="fork-gap-note" data-en="${kindUnrecorded.length} row(s) above carry a commit gap but no recorded pin_kind, so it is not known whether their gap is closable. They are COUNTED — an unclassified row is not evidence of no gap — and named here: ${esc(kindUnrecorded.map(d=>d.tool||d.repo||"?").join(", "))}. Re-run the discovery pass to classify them." data-zh="上面有 ${kindUnrecorded.length} 列有 commit 缺口但沒有記錄 pin_kind，因此無法判斷那個缺口補不補得掉。它們有被計入（沒分類不等於沒缺口），並在這裡點名：${esc(kindUnrecorded.map(d=>d.tool||d.repo||"?").join(", "))}。重跑一次 discovery 就會分類。">${kindUnrecorded.length} row(s) carry a commit gap but no recorded pin_kind; they are counted, not assumed clean.</p>`);
   const gapEl = document.getElementById("forkGap");
+  // `.fork-gap` carries a 3px orange left border and a tinted background, so an
+  // EMPTY one renders as a bare coloured line with nothing in it -- which is
+  // exactly what it became once the contents-assertion block was removed and the
+  // tracking gap reached zero. A container that is styled when it has content
+  // must be hidden when it has none; otherwise "no gaps" is drawn as a defect
+  // marker. Set at the end of this block, after every branch has written.
   if (gapEl) {
     if (!gapTools.length) {
-      gapEl.innerHTML = '<p data-en="Every fork is either carrying patches of ours or level with upstream." data-zh="每一個 fork 都不是揹著我們的補丁、就是跟上游齊平。">Every fork is either carrying patches of ours or level with upstream.</p>' + assertBlock + unrecBlock;
+      gapEl.innerHTML = assertBlock + unrecBlock;
     } else {
       // The count carries its "as of" in the same sentence as the count. A row with
       // no recorded measurement time says UNKNOWN-AGE here; it is never printed bare,
@@ -868,6 +857,7 @@ function enhBlock(tool){
       const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span>${ageSpan(d)}</li>`).join("");
       gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>` + assertBlock + unrecBlock;
     }
+    gapEl.hidden = !gapEl.innerHTML.trim();
   }
 
   // WHICH tools have a new release. The KPI above is a bare count, and a count the
@@ -883,61 +873,10 @@ function enhBlock(tool){
   const relTools = LEDGERS.filter(d=>relGap(d)>0 || (d.integrated && relUnknown(d)))
                           .sort((a,b)=>(relGap(b)==null?1e9:relGap(b))
                                       -(relGap(a)==null?1e9:relGap(a)));
-  const relEl = document.getElementById("forkRel");
-  if (relEl) {
-    if (!relTools.length) {
-      relEl.innerHTML = '<p data-en="Every tracked tool is on the newest upstream release." data-zh="每個追蹤中的工具都在上游最新的 release 上。">Every tracked tool is on the newest upstream release.</p>';
-    } else {
-      const BADGE = {
-        "held":  {cls:"deferred", en:"HELD BY DESIGN", zh:"刻意凍結"}
-      };
-      const relRows = relTools.map(d=>{
-        const tool = d.tool||d.repo||"?";
-        const note = PINNOTES[tool];
-        // `base_release` is now the newest release MEASURED to be contained in the
-        // ref we build, so the page states what the ledger measured. The override
-        // that used to sit in front of it here was a display-layer repair of a
-        // wrong number, and it made the row disagree with its own count.
-        const ours = d.base_release || d.pinned_ref || "?";
-        const pin  = (d.pinned_ref && d.pinned_ref !== ours)
-          ? ` <span class="fork-mono" style="color:var(--text-muted,#6b7684)">(${esc(d.pinned_ref)})</span>` : "";
-        const latest = d.upstream_latest_release || "?";
-        const unk = relUnknown(d);
-        // A release EQUAL to the one we build is not a release we are missing, no
-        // matter what the detector counted — listing it as "in between" would be a
-        // plain falsehood on the page.
-        const tags = (d.new_releases||[]).map(r=>r&&r.tag).filter(t=>t && t!==ours);
-        const shown = tags.slice(0,6);
-        const more = tags.length > shown.length ? ` +${tags.length-shown.length}` : "";
-        const between = shown.length
-          ? `<span class="enh-note"><span data-en="Tags in between:" data-zh="中間的 tag：">Tags in between:</span> <span class="fork-mono">${esc(shown.join(", ")+more)}</span></span>`
-          : "";
-        // The releases nobody could decide, named with the error that stopped each
-        // one, so the reader's next move is a command rather than a guess.
-        const und = (d.undetermined_releases||[]);
-        const undTxt = und.length
-          ? `<span class="enh-note"><span data-en="Undetermined:" data-zh="無法判定：">Undetermined:</span> <span class="fork-mono">${esc(und.slice(0,4).map(u=>`${u&&u.tag||"?"} — ${u&&u.error||"?"}`).join(" · "))}${und.length>4?` +${und.length-4}`:``}</span></span>`
-          : "";
-        const b = note && BADGE[note.kind];
-        const badge = unk
-          ? `<span class="enh-pill deferred" data-en="CONTAINMENT UNDETERMINED" data-zh="無法判定是否已包含">CONTAINMENT UNDETERMINED</span>`
-          : (b ? `<span class="enh-pill ${b.cls}" data-en="${esc(b.en)}" data-zh="${esc(b.zh)}">${esc(b.en)}</span>` : "");
-        const why = note ? `<span class="enh-note" data-en="${esc(note.en)}" data-zh="${esc(note.zh)}">${esc(note.en)}</span>` : "";
-        // An undecided row states NO NUMBER. It used to be possible for this page
-        // to print a count and then explain, in the prose beneath it, that the
-        // count was not real; a page that argues with itself has already lost the
-        // reader it was written for.
-        const n = relGap(d);
-        const tail = unk
-          ? `<span data-en="the release gap could not be measured — ${und.length} upstream release(s) could not be checked for containment, so this is neither 0 nor a count" data-zh="這個 release 缺口量不出來 —— 有 ${und.length} 個上游 release 無法判定是否已包含，所以它既不是 0 也不是一個數字">the release gap could not be measured — ${und.length} upstream release(s) could not be checked for containment, so this is neither 0 nor a count</span>`
-          : (b && note.kind==="held")
-          ? `<b>${n}</b> <span data-en="measured to carry work we do not have — none of them adoptable" data-zh="經量測確實帶有我們沒有的東西 —— 但沒有一個能升上去">measured to carry work we do not have — none of them adoptable</span>`
-          : `<b>${n}</b> <span data-en="release(s) ahead of us" data-zh="個 release 在我們前面">release(s) ahead of us</span>`;
-        return `<li><code>${esc(tool)}</code> ${badge} — <span data-en="we build" data-zh="我們建置的是">we build</span> <span class="fork-mono">${esc(ours)}</span>${pin}, <span data-en="upstream latest" data-zh="上游最新">upstream latest</span> <span class="fork-mono">${esc(latest)}</span> — ${tail}${between}${undTxt}${why}</li>`;
-      }).join("");
-      relEl.innerHTML = `<h4 data-en="Tools with a new release (${relTools.length})" data-zh="有新 release 的工具（${relTools.length}）">Tools with a new release (${relTools.length})</h4><ul class="fork-gap-list">${relRows}</ul><p class="fork-gap-note" data-en="A release counts here only when it was MEASURED to carry work the ref each Dockerfile pins does not already contain — resolved to its target commit, deduplicated by commit, then tested by ancestry and by whether it changes any file relative to our pin. No publication date takes part. Not every row is a gap: HELD BY DESIGN is a deliberate ceiling — the newer release would break the build, so there is nothing here to close. CONTAINMENT UNDETERMINED means the check could not run for some release; that row has no count at all, and it is not zero. A row with no mark is an ordinary, unexplained gap." data-zh="一個 release 只有在「經量測確定帶有我們鎖定的 ref 尚未包含的內容」時才會被算進來 —— 先解析到它指向的 commit、依 commit 去重，再用 ancestry 以及「相對於我們的 pin 是否改到任何檔案」來測。完全不看發布日期。並不是每一列都是缺口：「刻意凍結」是刻意設下的天花板 —— 升上去會直接讓建置壞掉，這裡沒有東西要補。「無法判定是否已包含」代表某些 release 的檢查跑不起來；那一列根本沒有數字，而且它不等於零。沒有標記的那一列，才是一般的、還沒有人解釋的缺口。">A release counts here only when it was MEASURED to carry work our pinned ref does not contain. CONTAINMENT UNDETERMINED is not zero.</p>`;
-    }
-  }
+  // The "Tools with a new release" block was REMOVED on owner instruction
+  // 2026-08-05, along with its container. `relTools` and `relGap` stay: the
+  // per-row release column below still uses them, so this is a removal of the
+  // summary section, not of the measurement.
 
   const rows = LEDGERS.map((d,i)=>{
     const ahead = d.ahead||0;
