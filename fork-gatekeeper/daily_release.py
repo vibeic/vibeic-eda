@@ -831,6 +831,26 @@ def main(argv=None) -> int:
         refs_now = {f"{args_of[r]}_REF": s for r, s in
                     {**pins, **{m["repo"]: m["sha"] for m in moved}}.items()
                     if r in args_of}
+        # RE-PUBLISH the recipe digests, because `rewrite_pin` just edited the
+        # very files they are the hash OF.
+        #
+        # The call above runs before anything reads a tag, which is right for
+        # everything between there and here. But a pin lives INSIDE
+        # `tools/<t>/Dockerfile`, so moving it necessarily moves
+        # `sha256(tools/<t>/Dockerfile)[:6]` — and the digest published a moment
+        # ago is now describing a file that no longer exists in that form.
+        #
+        # `retag_images` below recomputes the tag from the CURRENT file, so
+        # without this the two sites disagree by construction on every release
+        # that moves a pin: `docker-bake.hcl` keeps the pre-edit digest and the
+        # composing Dockerfile gets the post-edit one. That is the exact
+        # `check_pins_agree` failure the 2026-08-05 tick reported for openroad,
+        # yosys and verilator — "bake would publish a tag the composing
+        # Dockerfile does not pull" — reported AFTER the release, by which point
+        # the round had already failed to compose.
+        for s2 in write_recipe_vars(root, targets):
+            print(f"  recipe changed (after pin move): {s2}")
+
         result["retagged"] = retag_images(root, refs_now, targets)
         for t in result["retagged"]:
             print(f"  retag {t}")
