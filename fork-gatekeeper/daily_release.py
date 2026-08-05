@@ -391,7 +391,23 @@ def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
     # the docs land in the same commit as the VERSION they describe; left out, the
     # sync would run every release and be discarded every release. Still explicit,
     # still never `-A`.
-    files = ["VERSION", "RELEASED.json", "README.md"]
+    #
+    # THE PIN SITES ARE HERE TOO, and their absence was a real defect. The run
+    # that published 0.2.65 moved OPENROAD_REF to b64a496b9 and composed the
+    # image from it, then committed VERSION/RELEASED.json/README.md and left the
+    # pin uncommitted -- so HEAD recorded f396ce8ee while the published image
+    # was built from b64a496b9. Anyone cloning main got pins that do not
+    # describe the image the same commit says was released, and RELEASED.json's
+    # whole purpose is to answer "what was this built from".
+    #
+    # Listed by name, never `-A`: the three places a pin is written, plus the
+    # composing Dockerfile's IMG_ tags. `git status --porcelain -- <paths>`
+    # below already drops the ones this run did not touch, so naming them all is
+    # safe and does not sweep in unrelated edits.
+    files = ["VERSION", "RELEASED.json", "README.md",
+             "Dockerfile", "docker-bake.hcl"]
+    files += sorted(str(f.relative_to(eda_root))
+                    for f in (eda_root / "tools").glob("*/Dockerfile"))
     present = [f for f in files if (eda_root / f).is_file()]
     if not present:
         return False, "neither VERSION nor RELEASED.json exists"
