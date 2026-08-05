@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 FROM alpine/git AS tb-src
 ARG COCOTB_REF=562d2400d70d3b77d87136e36eeda9d48c2de55c  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
-ARG PYUVM_REF=a66408ed4b3b0875be049b42c711d4eb8a0b9c82  # master tip. Advanced from
+ARG PYUVM_REF=b3a4d47ae07f4c28cb1222919d240251fcefbc3d  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
