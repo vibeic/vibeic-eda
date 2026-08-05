@@ -34,6 +34,10 @@ RULES THIS ENCODES
   the image is BUILT FROM. Any other source describes something else.
 - A pin that cannot be found is `null`, never 0, and makes the run exit 2.
 - A clone that cannot be read is `null`, never 0.
+- The tip every count is taken FROM must be CURRENT, not merely resolvable. A
+  ledger-recorded branch that has stopped tracking the default is rejected and
+  said so — see `published_tip`, and vibeic-eda#92 for the run it would have
+  reported green while our commits sat unshipped.
 - `integrated=false` (the image does not build from our fork at all) is reported
   as its own state, because a fork that ships nothing has no meaningful pin gap
   and must not be silently counted as "0 behind".
@@ -60,7 +64,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # IMPORTED, never re-derived — see its docstring, and vibeic-eda#29 for what two
@@ -352,8 +356,58 @@ def vendored_pin(forks_root: Path, led: dict) -> Optional[str]:
     return parts[2]
 
 
-def published_tip(clone: Path, led: dict) -> Optional[str]:
-    """Our fork's PUBLISHED line — never the clone's HEAD.
+#: `published_tip`'s verdict on the ledger's `vibeic_branch`. FOUR NAMES, because
+#: the old code had TWO outcomes (a ref, or None) and reality has four — and
+#: vibeic-eda#92 is exactly what a missing name costs: "resolves" was allowed to
+#: stand in for "is current", and a stale ref answers cleanly.
+TIP_CURRENT = "current"            #: MEASURED: the branch contains the default
+TIP_BEHIND = "behind"              #: MEASURED: it does not — REJECTED
+TIP_UNDETERMINED = "undetermined"  #: NOT MEASURED — never a synonym for current
+TIP_NO_CLAIM = "no_claim"          #: the ledger records no branch; nothing to check
+
+
+class TipVerdict(NamedTuple):
+    """`(ref, state, why)` — the tip to measure against, and WHAT IS KNOWN about it.
+
+    `ref` is None only when there is nothing defensible to measure against at
+    all; the caller renders that as NOT MEASURED. `state` is never inferred from
+    `ref` — a usable ref with an unverified provenance is a real and common
+    outcome (`TIP_UNDETERMINED` with `ref` set), and collapsing it into "we got a
+    ref, so we are fine" is the shape of the defect this type exists to end.
+    """
+    ref: Optional[str]
+    state: str
+    why: str
+
+
+def default_ref(clone: Path) -> Optional[str]:
+    """This clone's own default branch, as a remote-tracking ref. None if unknown.
+
+    `origin/HEAD` is consulted LAST, not first, and that ordering is load-bearing.
+    It is a LOCAL symbolic-ref that anyone can point anywhere (`git remote
+    set-head`), so letting it displace a real `origin/master` would hand the
+    currency check below a defeat switch: aim `origin/HEAD` at the stale branch
+    and the branch becomes its own yardstick, trivially current. Reached only when
+    neither conventional name exists — which covers a fork whose default is
+    `develop` without opening that door.
+
+    Its target is VERIFIED to resolve. A bare fork whose `master` was deleted
+    leaves `origin/HEAD` pointing at a ref that is no longer there, and a name
+    that does not resolve is not a default branch, it is a dangling string.
+    """
+    for c in ("origin/master", "origin/main"):
+        if _git(clone, "rev-parse", "--verify", "-q", c):
+            return c
+    head = _git(clone, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if head and head.startswith("refs/remotes/"):
+        cand = head[len("refs/remotes/"):]
+        if _git(clone, "rev-parse", "--verify", "-q", cand):
+            return cand
+    return None
+
+
+def published_tip(clone: Path, led: dict) -> TipVerdict:
+    """Our fork's PUBLISHED line — never the clone's HEAD, and never a STALE branch.
 
     These clones are shared. `HEAD` is whatever the last process to touch the
     directory left checked out, and that is not a fact about our fork.
@@ -375,16 +429,118 @@ def published_tip(clone: Path, led: dict) -> Optional[str]:
     the tip we actually publish, so it is the only defensible answer to "have our
     commits reached the image".
 
-    None when it cannot be resolved — never a fall back to HEAD.
+    IT CLOSED THE HEAD ROUTE AND LEFT THE LEDGER ROUTE OPEN (vibeic-eda#92)
+    ======================================================================
+    Everything above is why this function refuses `HEAD`. It then took the
+    ledger's `vibeic_branch` on the strength of `rev-parse --verify` — EXISTENCE,
+    not currency — and ranked it ABOVE `origin/master`. A recorded branch that has
+    stopped tracking the default still resolves perfectly well, and `sync_lag`,
+    `release_lag` and `ours_past_the_pin` are then all counted from it. A stale
+    tip counts FEWER of our commits past the pin than there are, so the report
+    reads GREEN precisely when work is stranded. The docstring above exists to
+    refuse an untrustworthy ref; the code below trusted a different one.
+
+    THE PREDICATE, AND WHY IT RUNS THE DIRECTION IT DOES
+    ===================================================
+    Accept the branch only when it CONTAINS the repo default — `merge-base
+    --is-ancestor <default> <branch>`. Stated as a property: *nothing that is on
+    the default is missing from the tip*, which is exactly what the counts below
+    need, since anything missing from the tip is silently subtracted from them.
+
+    #92 asks for the opposite direction — "reject a vibeic_branch that is not
+    ancestor-or-equal of origin/master" — and that predicate is INVERTED. Measured
+    2026-08-05 on `vibeic/rcx-515-collision-with-upstream`, the very branch whose
+    staleness prompted the issue::
+
+        git merge-base --is-ancestor origin/vibeic/rcx-515… origin/master  -> rc 0
+        git merge-base --is-ancestor origin/master origin/vibeic/rcx-515…  -> rc 1
+        origin/vibeic/rcx-515…..origin/master  ->  18 commits
+
+    A branch 18 commits BEHIND master is a strict ANCESTOR of master, so the
+    literal rule would have ACCEPTED the motivating example — and it would REJECT
+    a healthy publishing branch that is legitimately AHEAD of master, which is the
+    only reason to keep a separate branch at all. It has both cases exactly the
+    wrong way round. The direction here rejects the stale branch and accepts the
+    ahead one. Both live non-default ledgers agree either way (`Trilinos` is
+    EQUAL, `klayout` does not resolve), which is why the fleet as it stands cannot
+    tell the two rules apart and a test has to.
+
+    THREE STATES, NOT TWO
+    =====================
+    `TIP_CURRENT` measured and contains the default; `TIP_BEHIND` measured and
+    does not, so it is REJECTED and the default is measured against INSTEAD — with
+    the rejection stated, because a silent fallthrough is how this stayed
+    invisible; `TIP_UNDETERMINED` when the question could not be answered at all.
+    The third never reads as the first.
+
+    UNDETERMINED IS NOT AUTOMATICALLY FATAL, and the asymmetry is deliberate:
+
+      * a branch that RESOLVES BUT IS BEHIND would have been used, and would have
+        produced confident wrong integers. That is a measurement defect: the
+        caller holds the run at rc=2.
+      * a branch that DOES NOT RESOLVE could never have been used by any code
+        path — the old `rev-parse --verify` already dropped it — so nothing was
+        ever miscounted. What was wrong is that the ledger's claim went unsaid.
+        That is a documentation defect: it is NAMED on every run and does not turn
+        the round red. `klayout` is in this state today (`vibeic/klayout-signoff-int`,
+        derived from a Dockerfile comment, resolves neither locally nor on the
+        remote), and a permanently red report is one people route around — the
+        failure mode this module warns about in three other places.
+
+    `ref` is None — NOT MEASURED — when there is no defensible tip: never a fall
+    back to HEAD, and never a resolving branch whose currency cannot be checked.
     """
-    cands = []
-    if led.get("vibeic_branch"):
-        cands.append("origin/%s" % led["vibeic_branch"])
-    cands += ["origin/master", "origin/main"]
-    for c in cands:
-        if _git(clone, "rev-parse", "--verify", "-q", c):
-            return c
-    return None
+    dflt = default_ref(clone)
+    claim = led.get("vibeic_branch")
+
+    if not claim:
+        if dflt:
+            return TipVerdict(dflt, TIP_NO_CLAIM, "")
+        return TipVerdict(None, TIP_UNDETERMINED,
+                          "no ledger vibeic_branch and no default branch in this "
+                          "clone — NOT MEASURED, not zero")
+
+    ref = "origin/%s" % claim
+    if not _git(clone, "rev-parse", "--verify", "-q", ref):
+        return TipVerdict(
+            dflt, TIP_UNDETERMINED,
+            f"ledger records vibeic_branch={claim!r} but {ref} does not resolve in "
+            f"this clone, so its currency is UNVERIFIABLE"
+            + (f"; measuring against {dflt} instead" if dflt
+               else " and there is no default branch either — NOT MEASURED"))
+
+    if dflt is None:
+        return TipVerdict(
+            None, TIP_UNDETERMINED,
+            f"{ref} resolves but this clone has no default branch (origin/master, "
+            f"origin/main, origin/HEAD) to check it against — its currency is "
+            f"UNMEASURABLE, and an unmeasurable tip is NOT MEASURED rather than "
+            f"assumed current (vibeic-eda#92)")
+
+    # `_run`, not `_git`: rc=1 is git's ANSWER (not an ancestor) and rc=128 or
+    # RC_NO_ANSWER is git failing to answer. `_git` returns None for both, and a
+    # function that cannot tell "no" from "no idea" has already thrown away the
+    # distinction these three states exist to keep.
+    r = _run(clone, "merge-base", "--is-ancestor", dflt, ref)
+    if r.returncode == 0:
+        return TipVerdict(ref, TIP_CURRENT, "")
+    if r.returncode == 1:
+        missing = count(clone, ref, dflt)
+        extra = count(clone, dflt, ref)
+        return TipVerdict(
+            dflt, TIP_BEHIND,
+            f"ledger records vibeic_branch={claim!r}, but {ref} does not contain "
+            f"{dflt} ("
+            f"{'?' if missing is None else missing} commit(s) of {dflt} missing "
+            f"from it, {'?' if extra is None else extra} of its own that {dflt} "
+            f"lacks) — REJECTED as our published line; measuring against {dflt}. "
+            f"A stale ref resolves cleanly and every count taken from it would "
+            f"have read GREEN while our commits sat unshipped (vibeic-eda#92)")
+    return TipVerdict(
+        dflt, TIP_UNDETERMINED,
+        f"could not compare {ref} against {dflt} (git rc={r.returncode}: "
+        f"{_first_error_line(r)}) — currency UNVERIFIED, not current; measuring "
+        f"against {dflt}")
 
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
@@ -405,6 +561,7 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
                "ahead": led.get("ahead"), "pin": None, "kind": "pin",
                "asserted_contents": None,
                "sync_lag": None, "release_lag": None, "image_behind": None,
+               "tip_state": None, "tip_note": None,
                "note": None}
 
         # the pin, by the ARG stem that matches this tool (case/dash-insensitive)
@@ -486,10 +643,17 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
             row["note"] = why
             rows.append(row); continue
 
-        tip = published_tip(clone, led)
-        if tip is None:
-            row["note"] = "no published origin branch — NOT MEASURED"
+        # The verdict is recorded on the row WHETHER OR NOT it changed the answer.
+        # A rejection that only shows up as a different number is a rejection
+        # nobody can audit, and #92 survived precisely because this step made no
+        # statement about what it had chosen or why.
+        verdict = published_tip(clone, led)
+        row["tip_state"] = verdict.state
+        row["tip_note"] = verdict.why or None
+        if verdict.ref is None:
+            row["note"] = verdict.why or "no published origin branch — NOT MEASURED"
             rows.append(row); continue
+        tip = verdict.ref
         row["tip"] = tip
         row["sync_lag"] = count(clone, tip, up)
         if row["pin"]:
@@ -545,6 +709,13 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         "q2_unmeasured_ship": [r["tool"] for r in rows
                                if r["integrated"] and r["pin"]
                                and r["ours_unshipped"] is None],
+        # Published as first-class report fields, not left to be inferred from a
+        # note string: the page and the daily round both read this JSON, and a
+        # finding that only exists inside prose is one no other program can act on.
+        "tip_rejected": [{"tool": r["tool"], "why": r["tip_note"]}
+                         for r in rows if r["tip_state"] == TIP_BEHIND],
+        "tip_unverified": [{"tool": r["tool"], "why": r["tip_note"]}
+                           for r in rows if r["tip_state"] == TIP_UNDETERMINED],
         "rows": rows,
     }
 
@@ -653,10 +824,21 @@ def main(argv=None) -> int:
     for r in disagreed:
         print(f"  PIN DISAGREEMENT {r['tool']}: {r['pin_disagreement']}")
 
+    # SAID OUT LOUD, both of them. The rejection holds the run (a branch that
+    # resolves-but-is-stale WOULD have been counted from, so what our published
+    # line even is is now an open question); the unverified one is named on every
+    # run without turning the round red — see `published_tip` for why those two
+    # get different treatment rather than the same one.
+    for r in rep["tip_rejected"]:
+        print(f"  LEDGER BRANCH REJECTED {r['tool']}: {r['why']}")
+    for r in rep["tip_unverified"]:
+        print(f"  LEDGER BRANCH UNVERIFIED {r['tool']}: {r['why']}")
+
     unmeasured = (rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
                   + [r["tool"] for r in disagreed])
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
+    if unmeasured or rep["tip_rejected"]:
         return 2
     # #60 — a fork carrying a patch it cannot ship. No baseline excuses this:
     # the baseline covers "not built from", not "patched and unshippable".

@@ -56,7 +56,8 @@ _FIELDS = dict(integrated=False, ahead=0, image_behind=None, sync_lag=None,
                release_lag=None, pin=None, ours_unshipped=None,
                ours_unshipped_substantive=None, unshipped_commits=[],
                note="", pin_disagreement=None,
-               kind="pin", asserted_contents=None)
+               kind="pin", asserted_contents=None,
+               tip_state=None, tip_note=None)
 
 
 def _run(rows, monkeypatch, baseline=None):
@@ -74,6 +75,13 @@ def _run(rows, monkeypatch, baseline=None):
         # the exit-ladder tests that a shape `analyse` never produces is fine.
         "assertions": [{"tool": r["tool"], "contents": r["asserted_contents"]}
                        for r in rows if r.get("kind") == "contents_assertion"],
+        # Same reason, same derivation `analyse` uses (vibeic-eda#92). `main`
+        # reads both directly and `tip_rejected` participates in the exit ladder,
+        # so a stub that omitted them would be quietly testing a different `main`.
+        "tip_rejected": [{"tool": r["tool"], "why": r.get("tip_note")}
+                         for r in rows if r.get("tip_state") == F.TIP_BEHIND],
+        "tip_unverified": [{"tool": r["tool"], "why": r.get("tip_note")}
+                           for r in rows if r.get("tip_state") == F.TIP_UNDETERMINED],
     }
     monkeypatch.setattr(F, "_UNPINNED_BASELINE",
                         _SYNTHETIC_BASELINE if baseline is None else baseline)
