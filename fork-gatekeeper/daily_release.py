@@ -1050,8 +1050,9 @@ def main(argv=None) -> int:
                     # tag `docker pull` cannot resolve, and BEFORE the record commit
                     # so README.md lands in the same commit as VERSION rather than
                     # as a stray edit nobody stages.
-                    _rc, _dout = _sh(["python3", str(root / "sync_image_version.py"),
-                                      "--set", new], cwd=str(root))
+                    _rc, _dout, _derr = _sh(
+                        ["python3", str(root / "sync_image_version.py"),
+                         "--set", new], cwd=str(root))
                     print(f"  docs: {'synced to ' + new if _rc == 0 else 'SYNC FAILED — ' + (_dout or '').strip()[-160:]}")
                     _ok, _note = commit_release_record(root, new)
                     print(f"  record: {_note}")
