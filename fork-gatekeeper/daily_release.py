@@ -254,6 +254,59 @@ def bake_targets(eda_root: Path) -> Dict[str, List[str]]:
     return out
 
 
+def _is_pure_mirror(repo: str) -> bool:
+    """Does this fork carry NO commits of ours anywhere, on any branch?
+
+    `branch_is_ours` asks about ONE branch. That is the right question for the
+    case it guards -- vibeic-eda#23/#25, where slang, xschem, Xyce and sv-elab
+    were pinned to the commits the image ships and the next release wanted to
+    move all four to `master`, a four-tool version bump smuggled under "build 6
+    absent artefacts".
+
+    But for a fork that carries nothing ANYWHERE, that refusal is unconditional:
+    the pin can never advance, so the fleet can never converge. Measured
+    2026-08-06: OpenROAD-flow-scripts and slang are each 0 ahead of upstream and
+    0 behind it -- exactly level -- while their pins trailed by 18 commits, and
+    `release 18` was closed by hand every time. For such a fork the pin's only
+    meaning is "which upstream commit do we build", and advancing it IS tracking
+    upstream.
+
+    Measured from the LOCAL CLONE, by ancestry, not from a name or a config flag:
+    a fork becomes non-mirror the moment one commit of ours lands, and nobody has
+    to remember to edit a list. Refuses to answer True when it cannot measure --
+    an unreadable clone must not turn into "advance it freely".
+    """
+    clone = Path(os.environ.get("GK_FORKS_DIR")
+                 or os.path.expanduser("~/vibe-ic-forks")) / repo
+    if not (clone / ".git").is_dir():
+        return False
+    def _g(*a):
+        try:
+            r = subprocess.run(["git", "-C", str(clone), *a],
+                               capture_output=True, text=True, timeout=120)
+            return r.stdout.strip() if r.returncode == 0 else None
+        except Exception:                                            # noqa: BLE001
+            return None
+    up = None
+    for cand in ("upstream/master", "upstream/main"):
+        if _g("rev-parse", "--verify", "--quiet", cand):
+            up = cand
+            break
+    if not up:
+        return False
+    ours = None
+    for cand in ("origin/master", "origin/main"):
+        if _g("rev-parse", "--verify", "--quiet", cand):
+            ours = cand
+            break
+    if not ours:
+        return False
+    n = _g("rev-list", "--count", f"{up}..{ours}")
+    if n is None or not n.isdigit():
+        return False
+    return int(n) == 0
+
+
 def rewrite_pin(eda_root: Path, arg: str, new: str) -> List[str]:
     """Write `new` at every site that states this pin. Returns the paths changed.
 
@@ -741,9 +794,34 @@ def main(argv=None) -> int:
                "behind": v.get("behind"), "branch_is_ours": ours}
         if ours:
             moved.append(row)
+        elif ours is False and _is_pure_mirror(repo):
+            # A PURE MIRROR HAS NOTHING TO PROTECT (vibeic-eda#106).
+            #
+            # `branch_is_ours` guards a real thing: vibeic-eda#23/#25 pinned
+            # slang, xschem, Xyce and sv-elab to the commits the IMAGE SHIPS, and
+            # the next release wanted to move all four to `master` -- a four-tool
+            # version bump smuggled under "build 6 absent artefacts". Refusing
+            # that is right, and this does not change it.
+            #
+            # But it refuses on ONE branch carrying none of our commits, and for a
+            # fork that carries none ANYWHERE the refusal is unconditional: the
+            # pin can never advance, so the fleet can never converge. Measured
+            # 2026-08-06: OpenROAD-flow-scripts and slang are each 0 ahead of
+            # upstream and 0 behind it -- exactly level -- while their pins
+            # trailed by 18 commits, and `release 18` had to be closed by hand
+            # every time. A gatekeeper decision that is the same decision every
+            # day is not a decision, it is a chore the program refused to do.
+            #
+            # For such a fork the pin's only meaning is "which upstream commit do
+            # we build", and advancing it IS tracking upstream. The distinction
+            # is measured per FORK, not per branch: carry one commit of ours
+            # anywhere and the old refusal applies again, unchanged.
+            row["pure_mirror"] = True
+            moved.append(row)
         elif ours is False:
-            # Not stale — a deliberate pin on upstream history. Reported so it is
-            # visible, never advanced on its own.
+            # Not stale — a deliberate pin on upstream history, in a fork that
+            # DOES carry work of ours elsewhere. Reported so it is visible, never
+            # advanced on its own.
             upstream_bump.append(row)
         else:
             # UNKNOWN IS NOT A NEGATIVE. This used to fall in with the branch

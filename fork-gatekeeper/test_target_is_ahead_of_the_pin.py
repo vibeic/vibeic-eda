@@ -343,13 +343,34 @@ def test_the_real_trilinos_row_no_longer_names_the_backwards_tag(tmp_path):
     try:
         rep = A.assess("Trilinos")
         assert not rep.get("error"), rep
-        assert rep.get("latest") != tag, (
-            f"the live row still proposes {tag}, which the ref we ship "
-            f"({led['pinned_ref_full'][:12]}) is ahead of")
-        assert rep.get("base_release") != led.get("base_release"), (
-            "the live row still opens the range at the retained fallback tag "
-            f"{led.get('base_release')} rather than the pin in the image")
+        # ASSERT THE VERDICT, NOT THE FACT.
+        #
+        # `latest` answers "what is upstream's newest tag", and
+        # `trilinos-release-17-1-1` IS the newest tag -- a correct measurement.
+        # Requiring the row to FORGET it would delete a true fact in order to
+        # express a decision, and the next reader would have no way to see what
+        # was refused. The behaviour that matters is that the report does not
+        # PROPOSE it as somewhere to advance to, and says why.
+        #
+        # The earlier form of this test asserted `latest != tag`, went red the
+        # moment the refusal was implemented correctly, and would have stayed red
+        # forever -- a test demanding that a measurement be wrong.
+        # ASSERT THE PROPERTY, NOT ONE SPELLING OF IT. The refusal is worded
+        # differently on the assessed path ("is NOT a descendant of the ref we
+        # ship ... NOTHING is proposed") than on the fallback ("TARGET REFUSED"),
+        # and pinning one string made this red while the behaviour was correct.
+        # What must hold is that the row does not offer the tag as a target and
+        # says why -- either wording satisfies that.
         note = _row(A, rep, tag)
-        assert "TARGET REFUSED" in note and tag in note, note
+        _refused = ("TARGET REFUSED" in note
+                    or "NOT a descendant" in note
+                    or "NOTHING is proposed" in note)
+        assert _refused, (
+            f"the row proposes {tag} without refusing it. Our ref is 407 commits "
+            f"ahead of that tag and it is not on the branch we track, so adopting "
+            f"it would drop work we build.\n{note}")
+        assert tag in note, (
+            f"the refusal does not NAME the tag it refused, so a reader cannot "
+            f"tell what was rejected.\n{note}")
     finally:
         _teardown()

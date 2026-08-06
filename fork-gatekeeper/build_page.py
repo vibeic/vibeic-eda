@@ -566,6 +566,7 @@ function enhBlock(tool){
                                              && typeof d.release_lag === "number")).length;
   const syncLag       = splitKnown.reduce((a,d)=>a+(d.sync_lag||0),0);
   const releaseLag    = splitKnown.reduce((a,d)=>a+(d.release_lag||0),0);
+
   // Named, because they are the rows whose FIX the page cannot yet state. A fork
   // that is behind only by release lag looks identical, in the combined number, to
   // one that needs an upstream merge.
@@ -793,8 +794,11 @@ function enhBlock(tool){
     // which is not zero). Both are one glyph and both change what you would do.
     // The sync/release split stays in the parenthetical only while it is
     // non-zero, because that is the only time it tells you which action to take.
-    [NTOOLS === null ? LEDGERS.length + " forks"
-                    : LEDGERS.length + " forks · " + NTOOLS + " tools",
+    // THE VALUE IS SHARED BY BOTH LANGUAGES -- only the LABEL carries data-en /
+    // data-zh, so an English word inside the value is shown to a Chinese reader.
+    // `36 forks · 59 tools` did exactly that. The value is now digits only and
+    // the words live in the label, where the page can translate them.
+    [NTOOLS === null ? `${LEDGERS.length}` : `${LEDGERS.length} · ${NTOOLS}`,
      {en:"Forks · tools in the image", zh:"fork 數 · image 工具數"}],
     [commitsBehind + behindMark + (behindUnknown?` +${behindUnknown}?`:``)
        // The split shows ONLY when one of the two halves is non-zero -- gated on
@@ -811,15 +815,14 @@ function enhBlock(tool){
        // again, because sync and release have OPPOSITE fixes (merge upstream in
        // vs bump the pin and rebuild) and one number for both sent a reader to
        // the wrong action twice (vibeic-eda#81).
-       + ((syncLag || releaseLag) && splitKnown.length
-            ? ` (sync ${syncLag} · release ${releaseLag})` : ``),
-     // The staleness clause is CONDITIONAL, and that is the whole compromise.
-     // On a good day it is absent and the label is three words. When a summed
-     // row's count is stale or unstamped the label NAMES it -- because the ⚠/?
-     // on the number says "some part of this is not known to describe today"
-     // and a reader cannot act on that without knowing WHICH fork. That was
-     // vibeic-eda#91's entire finding: a stale number and a fresh one look the
-     // same, and naming the row is what makes the difference actionable.
+       // NO SPLIT ON THE CARD (owner instruction 2026-08-06). The card is one
+       // number. sync and release are still measured, still split per row in the
+       // table below, and `fork_gap_report` still prints both -- what is gone is
+       // the parenthetical that made a reader do arithmetic that does not close:
+       // `sync + release == behind` is NOT an identity (a commit between the pin
+       // and our tip that is also in upstream is counted twice), so `28 (sync 14
+       // · release 17)` was three apart and looked like a bug in the page.
+       ,
      {en:"Commits behind upstream" + notFreshTxt,
       zh:"落後上游的 commit 數" + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
@@ -836,9 +839,33 @@ function enhBlock(tool){
     // ours that is not in the image. It is silent at zero, so on a good day this
     // card is a single number. Today's whole story was a fix that had landed and
     // never shipped, so when it is non-zero it must still say so.
-    [`${shipPatches}/${totalOurs}` + (unship?` — ${unship} NOT shipped`:``)
+    // THE FRACTION AND THE CLAUSE MUST COUNT THE SAME THING (vibeic-eda#105).
+    //
+    // `shipPatches = totalOurs - unshipAll`, so `totalOurs - shipPatches` is
+    // `unshipAll` -- EVERY commit past the pin. The clause used `unship`, the
+    // SUBSTANTIVE subset. Rendered together the row read
+    //
+    //     424/427 — 1 NOT shipped
+    //
+    // and 427-424 is 3, not 1. One row, two answers to "how many are not
+    // shipped", and a reader who does the arithmetic finds the page disagreeing
+    // with itself. Both numbers are real and both matter: 3 commits are absent
+    // from the image, and only 1 of them is ours in substance -- the others are
+    // merge commits whose content is upstream's. So the row now says both, and
+    // the subtraction a reader performs lands on the number it names.
+    [`${shipPatches}/${totalOurs}`
        + (unknownShip?` +${unknownShip}?`:``),
-     {en:"Our commits in the shipped image", zh:"進到 image 的自有 commit"}],
+     // Same rule: the counts go in the LABEL, which is translated, never in the
+     // shared value. `424/427 — 1 NOT shipped` put English in front of a Chinese
+     // reader AND disagreed with its own subtraction (427-424 is 3, not 1),
+     // because the fraction counts every commit past the pin and the clause
+     // counted only the substantive ones.
+     {en:"Our commits in the shipped image"
+         + (unshipAll ? ` — ${unshipAll} past the pin`
+                        + (unship !== unshipAll ? `, ${unship} substantive` : ``) : ``),
+      zh:"進到 image 的自有 commit"
+         + (unshipAll ? ` —— ${unshipAll} 個卡在 pin 之後`
+                        + (unship !== unshipAll ? `，其中 ${unship} 個是實質修改` : ``) : ``)}],
     // REMOVED: "Untracked forks (no patches, not synced)". It counted
     // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
     // FORKS.json itself describes as "a pure mirror… we carry NO commits of our
@@ -951,11 +978,33 @@ function enhBlock(tool){
       : ((d.ahead||0) > 0
           ? `<span class="pill bad" data-en="NO — ${d.ahead} of our commit(s) not shipped" data-zh="沒有 —— 我們的 ${d.ahead} 個 commit 沒出貨">NO · ${d.ahead} stranded</span>`
           : `<span class="pill warn" data-en="no — image uses the base image's copy" data-zh="沒有 —— image 用的是 base image 的版本">no</span>`);
+    // WHICH FIX DOES THIS ROW NEED? (vibeic-eda#81, moved here 2026-08-06)
+    //
+    // sync lag and release lag have OPPOSITE remedies -- merge upstream in,
+    // versus bump the pin and rebuild -- so one number for both sends a reader
+    // to the wrong action, and twice it did. It used to be a parenthetical on
+    // the headline card; the card is now one number, on owner instruction,
+    // because `sync + release == behind` is NOT an identity (a commit between
+    // the pin and our tip that is also in upstream is counted twice) and the
+    // sum visibly did not close.
+    //
+    // Per ROW is where it belongs anyway: the action is per fork, not fleet-wide.
+    // Shown only when there IS a gap, so a converged fleet stays quiet.
+    const sl = typeof d.sync_lag === "number" ? d.sync_lag : null;
+    const rl = typeof d.release_lag === "number" ? d.release_lag : null;
+    const lagWhich = (sl || rl)
+      ? `<br><span style="color:var(--text-muted,#6b7684);font-size:.78rem"`
+        + ` data-en="${sl ? `sync ${sl}: merge upstream in` : ``}`
+        + `${sl && rl ? ` · ` : ``}${rl ? `release ${rl}: bump the pin, rebuild` : ``}"`
+        + ` data-zh="${sl ? `sync ${sl}：把上游 merge 進來` : ``}`
+        + `${sl && rl ? ` · ` : ``}${rl ? `release ${rl}：bump pin 重建` : ``}">`
+        + `${sl ? `sync ${sl}` : ``}${sl && rl ? ` · ` : ``}${rl ? `release ${rl}` : ``}</span>`
+      : ``;
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
       <td class="fork-hide-sm">${pin}</td>
-      <td>${pill(ahead,'ahead')}</td>
+      <td>${pill(ahead,'ahead')}${lagWhich}</td>
       <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
       <td>${inImagePill(d)}</td>

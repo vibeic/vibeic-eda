@@ -109,8 +109,19 @@ globalThis.navigator = {language:"en"};
 """
 
 
-def _render_metrics(rows) -> str:
-    """Run build_page's REAL script over `rows`; return what #forkMetrics rendered."""
+def _render_rows(rows) -> str:
+    """Same harness, but return what #forkRows rendered.
+
+    The sync/release split moved OFF the headline card on 2026-08-06 (owner
+    instruction: the card is one number) and ONTO each row, which is where the
+    action is anyway -- merging upstream or bumping a pin is per fork, never
+    fleet-wide. The #81 principle is unchanged and is asserted here instead.
+    """
+    return _render_metrics(rows, element="forkRows")
+
+
+def _render_metrics(rows, element: str = "forkMetrics") -> str:
+    """Run build_page's REAL script over `rows`; return what `element` rendered."""
     if not shutil.which("node"):
         pytest.skip("node not available — cannot drive the page's own script")
     bp = _load("build_page")
@@ -126,10 +137,14 @@ def _render_metrics(rows) -> str:
                 # WHOLE page script, so this fixture must fill every one. That is
                 # how this test caught `__NTOOLS__` being added upstream of it.
                 .replace("__NTOOLS__", "59")
-                .replace("__PINNOTES__", "{}"))
-    prog = _DOM + "\n" + body + """
-;console.log("\\u0001METRICS\\u0001" + (document.getElementById("forkMetrics").innerHTML||""));
-"""
+                .replace("__PINNOTES__", "{}")
+                .replace("__EL__", json.dumps(element)))
+    # The element id is interpolated HERE, not through `body.replace` -- this line
+    # is appended after the body, so a placeholder substituted into the body never
+    # reached it and node died on an undefined name.
+    prog = (_DOM + "\n" + body
+            + '\n;console.log("\\u0001METRICS\\u0001" + '
+            + '(document.getElementById(' + json.dumps(element) + ').innerHTML||""));\n')
     # VIA A FILE, not `node -e`. The real ledger is ~1 MB of JSON and `-e` puts it in
     # argv, which is `OSError: [Errno 7] Argument list too long` — and a harness that
     # dies on the REAL corpus while working on a two-row fixture is the exact way a
@@ -147,7 +162,7 @@ def _render_metrics(rows) -> str:
         pytest.fail(f"the page's own script did not run: {r.stderr[-1500:]}")
     m = re.search("METRICS(.*)", r.stdout, re.S)
     if not m:
-        pytest.fail(f"script ran but #forkMetrics was never written: {r.stdout[-800:]}")
+        pytest.fail(f"script ran but #" + element + " was never written: {r.stdout[-800:]}")
     return m.group(1)
 
 
@@ -185,47 +200,46 @@ def test_the_split_is_measured_on_the_real_fleet():
 
 
 def test_page_states_sync_and_release_separately_on_the_real_ledger():
-    """The RENDERED card names both halves WHENEVER IT SHOWS A GAP.
+    """The RENDERED page names both halves WHEREVER IT SHOWS A GAP.
 
     #81's principle, unchanged: sync lag and release lag have OPPOSITE fixes --
     merge upstream in, versus bump the pin and rebuild -- so one number for both
     sends a reader to the wrong action, and twice it did.
 
-    The split lives in the card's VALUE, not its label, which is what let it
-    survive the labels being cut to a few words on owner instruction 2026-08-05.
-    The same instruction removed `(sync 0 · release 0)` from a clean fleet, so
-    the requirement is conditional -- and BOTH directions are asserted here, so
-    "we shortened it" cannot become licence to drop the split when it matters.
+    WHERE it is asserted moved on 2026-08-06. It used to be a parenthetical on the
+    headline card; the owner asked for the card to be one number, and the card was
+    the wrong home anyway for two reasons:
 
-    The condition is read OFF THE PAGE'S OWN OUTPUT, not recomputed. An earlier
-    revision summed `behind_commits` across every row to decide what to expect,
-    counted the contents-assertion rows the page excludes, and concluded the
-    fleet was behind while the card correctly read 0 -- re-implementing the
-    page's row filter, which is the exact mistake the differential test below
-    warns about, one level up.
+      * `sync + release == behind` is NOT an identity -- a commit between the pin
+        and our tip that is ALSO in upstream is counted on both sides -- so the
+        card read `28 (sync 14 · release 17)` and the sum was three too big. A
+        reader doing the obvious arithmetic concluded the page was broken.
+      * the ACTION is per fork. "Merge upstream into yosys" and "bump slang's pin"
+        are different jobs on different repos; a fleet-wide sum tells nobody which
+        repo to touch.
+
+    So the split lives on the ROW now, next to the fork it is about, and this
+    asserts it there. The principle is not weakened: a gap must still say which
+    fix it needs.
     """
-    html = _render_metrics(_enrich(_real_rows()))
-    m = re.search(r'<div class="n">([^<]*)</div><div class="l" data-en="Commits behind', html)
-    assert m, ("the 'Commits behind upstream' card was not rendered at all\n"
-               + html[:1200])
-    value = m.group(1)
-
-    lead = re.match(r"\s*(\d+)", value)
-    assert lead, f"the card's value does not start with a number: {value!r}"
-
-    if int(lead.group(1)):
-        assert "sync" in value.lower(), (
-            "the card shows a non-zero gap and never mentions sync lag. One "
-            f"number for two conditions with opposite fixes is the defect this "
-            f"test exists for. value={value!r}")
-        assert "release" in value.lower(), (
-            f"the card shows a non-zero gap and never mentions release lag. "
-            f"value={value!r}")
-    else:
-        assert "sync" not in value.lower(), (
-            "the fleet is level and the card still prints a zero split; the "
-            "split exists to tell a reader WHICH fix to apply, and at zero "
-            f"there is no fix to apply. value={value!r}")
+    html = _render_rows(_enrich(_real_rows()))
+    rows = _enrich(_real_rows())
+    gap = sum((d.get("sync_lag") or 0) + (d.get("release_lag") or 0)
+              for d in rows
+              if isinstance(d.get("sync_lag"), int)
+              and isinstance(d.get("release_lag"), int))
+    if not gap:
+        assert "sync " not in html.lower(), (
+            "the fleet is level and the rows still print a zero split; the split "
+            "exists to tell a reader WHICH fix to apply, and at zero there is no "
+            "fix to apply")
+        return
+    assert "sync" in html.lower(), (
+        "the fleet IS behind and no row mentions sync lag. One number for two "
+        "conditions with opposite fixes is the defect this test exists for.\n"
+        + html[:1200])
+    assert "release" in html.lower(), (
+        "the fleet IS behind and no row mentions release lag.\n" + html[:1200])
 
 
 def test_the_card_label_stays_short():
@@ -267,7 +281,7 @@ def test_a_release_only_fork_is_not_described_as_behind_upstream():
           and d["release_lag"] > 0 and d["sync_lag"] == 0]
     if not ro:
         pytest.skip("no release-only fork on the fleet right now — nothing to assert")
-    html = _render_metrics(rows)
+    html = _render_rows(rows)
     for tool in ro:
         assert tool in html, (
             f"{tool} is release-only (sync 0, release>0): merging upstream into it "
@@ -322,7 +336,7 @@ def test_the_rendered_figure_tracks_its_input(field, word):
     def _at(mult):
         rows2 = [dict(d, **({field: d[field] + DELTA * mult} if d is target else {}))
                  for d in rows]
-        return _rendered(_render_metrics(rows2), word)
+        return _rendered(_render_rows(rows2), word)
 
     before, after = _at(1), _at(2)
     assert after - before == DELTA, (
