@@ -150,9 +150,50 @@ python3 "${DIR}/check_ledger_is_fresh.py" \
 FRESH=$?
 echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
 
+# DID THE ROUND ACTUALLY CONVERGE? (vibeic-eda#104)
+#
+# `fork_gap_report` runs above, measures the gap, writes it to JSON -- and its
+# exit code was NOT in the condition below. So the round measured that our forks
+# were behind upstream, said so in a file, and reported success. Measured
+# 2026-08-06: `daily_0530 exit 1` on five consecutive mornings (08-02 .. 08-06)
+# while the fleet sat 12 commits behind upstream, and nothing escalated, because
+# the one number that says whether the round did its job was the one number the
+# round did not look at.
+#
+# SYNC LAG IS FATAL. "Merge upstream into our line" is this round's primary duty;
+# if the round finishes and a fork is still behind upstream, the round did not do
+# it, whatever else went right. That is a different claim from "something needed
+# a human" (SIX=1), which is information: a conflict handed to the gatekeeper is
+# the system working.
+#
+# RELEASE LAG IS NAMED, NOT FATAL. A pin trailing our own fork tip closes with a
+# rebuild, and `daily_release` DELIBERATELY declines to move a pure mirror's pin
+# on its own -- ORFS and slang carry none of our commits, so advancing them is a
+# gatekeeper decision, not an automatic one. Failing the round on a decision that
+# is deliberately reserved for a human would make it permanently red, and a
+# permanently red round is one people route around.
+SYNC_LAG=$(python3 -c "
+import json,sys
+try:
+    d=json.load(open('${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json'))
+    print(d.get('q1_sync_lag') if d.get('q1_sync_lag') is not None else 'unmeasured')
+except Exception:
+    print('unmeasured')
+" 2>/dev/null)
+if [ "${SYNC_LAG}" = "unmeasured" ]; then
+    echo "[$(date -Is)] CONVERGENCE: sync lag COULD NOT BE MEASURED (fork_gap_report exit ${GAP}) — that is not zero, and the round is not clean" >> "${LOG}"
+    GAP_FATAL=1
+elif [ "${SYNC_LAG}" -ne 0 ] 2>/dev/null; then
+    echo "[$(date -Is)] CONVERGENCE: FAILED — ${SYNC_LAG} commit(s) still behind upstream after the round. Merging upstream into our line is this round's primary duty; it did not happen." >> "${LOG}"
+    GAP_FATAL=1
+else
+    echo "[$(date -Is)] CONVERGENCE: sync lag 0 — every fork is level with upstream" >> "${LOG}"
+    GAP_FATAL=0
+fi
+
 # 0 only when BOTH are clean; the six steps' own 1 means "a case still needs a
 # human", which is information, not noise.
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
-   || [ "${TESTS}" -ne 0 ]; then exit 1; fi
+   || [ "${TESTS}" -ne 0 ] || [ "${GAP_FATAL}" -ne 0 ]; then exit 1; fi
 exit 0
