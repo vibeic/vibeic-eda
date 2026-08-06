@@ -50,8 +50,8 @@ variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "46d595" }
-variable "OPENROAD_RECIPE" { default = "6e86d0" }
-variable "YOSYS_RECIPE" { default = "07de12" }
+variable "OPENROAD_RECIPE" { default = "c0902c" }
+variable "YOSYS_RECIPE" { default = "41e5b1" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "622112" }
 variable "LVS_RECIPE" { default = "46a666" }
@@ -62,7 +62,7 @@ variable "VERILATOR_RECIPE" { default = "9edd3e" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
 variable "XSCHEM_RECIPE" { default = "f0bdeb" }
 variable "SLANG_RECIPE" { default = "5d449c" }
-variable "XYCE_RECIPE" { default = "59ae39" }
+variable "XYCE_RECIPE" { default = "9611d7" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
 variable "SV_ELAB_RECIPE" { default = "42ffe6" }
@@ -73,8 +73,8 @@ variable "SV_ELAB_RECIPE" { default = "42ffe6" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "01bc02aaaffb6bc0fc9ddbae73b1225d19d50a33" }
-variable "YOSYS_REF"       { default = "4f59b5cd7c13334e1922af1b0b2cd4c2a300a75d" }
+variable "OPENROAD_REF"    { default = "58dbde489f3c3c37e4e097f22af695976105090d" }
+variable "YOSYS_REF"       { default = "41a01aecec3471a1cd49ac1ff578de89ea5737bc" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "1b70fc18e70c84149910465d4e8e9bfc796db1fb" }
