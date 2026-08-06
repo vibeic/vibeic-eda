@@ -717,6 +717,15 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         "tip_unverified": [{"tool": r["tool"], "why": r["tip_note"]}
                            for r in rows if r["tip_state"] == TIP_UNDETERMINED],
         "rows": rows,
+        # `--no-fetch` deliberately skips `fetch_confirms_current`'s network check
+        # (see its docstring), which means every number above can UNDER-report
+        # the gap by however stale the local clones happen to be -- measured
+        # 2026-08-07: it read Q1=0 while a fetching run of the same ledger read
+        # 117, because Trilinos's clone had not been fetched in 8+ hours. That is
+        # a fact about THIS RUN's confidence, not about the fleet, and it belongs
+        # on the report next to the numbers it qualifies -- not only in a
+        # docstring nobody reads before trusting a summary line (vibeic-eda#109).
+        "measured_with_fetch": fetch,
     }
 
 
@@ -787,6 +796,13 @@ def main(argv=None) -> int:
         a.json.parent.mkdir(parents=True, exist_ok=True)
         a.json.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
 
+    if not rep["measured_with_fetch"]:
+        print("⚠️  --no-fetch: every count below is against the clones AS THEY "
+              "LAST STOOD, not a live upstream check. A stale clone reads as "
+              "converged. Measured 2026-08-07: this mode printed Q1=0 while a "
+              "fetching run of the SAME ledger read 117 -- for a trustworthy "
+              "Q1, drop --no-fetch.")
+        print()
     print(f"{'TOOL':<24}{'image behind':>13}{'= sync':>8}{'+ release':>11}   state")
     for r in sorted(rep["rows"], key=lambda x: -(x["image_behind"] or 0)):
         if r["note"]:
