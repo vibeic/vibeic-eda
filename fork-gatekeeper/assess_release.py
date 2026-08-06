@@ -163,7 +163,7 @@ def _git_in(clone: Path, *args: str, timeout: int = 60):
 
 
 def target_direction(tool: str, our_ref: str | None, fork_point: str | None,
-                     target: str | None) -> dict:
+                     target: str | None, up_branch: str | None = None) -> dict:
     """Is `target` a release we could ADVANCE to from the ref we actually ship?
 
     MEASURED (2026-08-06, Trilinos). The daily report proposed
@@ -275,6 +275,47 @@ def target_direction(tool: str, our_ref: str | None, fork_point: str | None,
             out["why"] = (f"{target} contains our fork point {fork_point[:12]}, so the only "
                           f"commits it lacks are our own carried patches")
             return out
+
+    # IS THE TAG EVEN ON THE LINE WE TRACK? (vibeic-eda#103)
+    #
+    # Everything above asks "is the target a descendant of our pin". For a fork that
+    # follows upstream's DEFAULT BRANCH -- which is most of ours -- the answer is No
+    # for an ordinary reason: release tags trail the branch, so the newest tag is
+    # behind master by construction and our pin is ahead of it. Measured across the
+    # whole fleet on 2026-08-06, that predicate alone called **20 of 29** tools
+    # BEHIND, including OpenROAD (pin 1140 ahead of `26Q3`) and OpenSTA (2273 ahead
+    # of `v2.2.0`). Refusing all twenty would have made the report silent about two
+    # thirds of the fleet -- a guard that fires on the normal case is not a guard.
+    #
+    # The question that actually separates a DOWNGRADE from ordinary tag-lag is
+    # whether the tag sits on upstream's default branch:
+    #
+    #   OpenROAD  tag ON the default branch   -> tag-lag. We are ahead because we
+    #                                            track master. Nothing is being lost.
+    #   cocotb    tag OFF it, and we are 0 behind the default branch -> the tag is a
+    #                                            side branch we have already passed.
+    #   Trilinos  tag OFF it, and 42 behind    -> the same, plus a real gap on the
+    #                                            branch, which the commit-level
+    #                                            question reports separately.
+    #
+    # So a tag on the tracked line is FORWARD-with-nothing-to-do, not a refusal.
+    if up_branch:
+        up_sha = _resolve(up_branch) or _resolve(f"upstream/{up_branch}")
+        if up_sha:
+            on_line = _ancestor(tgt_sha, up_sha)
+            if on_line is None:
+                out["why"] = (f"whether {target} sits on {up_branch} could not be measured, "
+                              f"so tag-lag and a downgrade could not be told apart")
+                return out
+            if on_line:
+                out["verdict"] = FORWARD
+                out["tag_lag_only"] = True
+                out["why"] = (f"{target} is an ancestor of {up_branch}: it is an ordinary "
+                              f"release tag trailing the branch we track, not a target "
+                              f"that would drop work. Our pin is "
+                              f"{out['pin_ahead']} commit(s) ahead of the tag because we "
+                              f"follow the branch, not the tag.")
+                return out
 
     out["verdict"] = BEHIND
     ahead = out["pin_ahead"]
@@ -1109,7 +1150,8 @@ def assess(tool: str) -> dict:
     # but is DISCLOSED, never rendered as a measured forward.
     direction = target_direction(tool, our_ref,
                                  (led.get("fork_point") or {}).get("sha"),
-                                 led.get("upstream_latest_release"))
+                                 led.get("upstream_latest_release"),
+                                 up_branch)
 
     if ((rel_unknown or not rel_gap)
             and (led.get("behind_commits") or 0) > 0

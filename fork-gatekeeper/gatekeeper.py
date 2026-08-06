@@ -748,7 +748,8 @@ def tick() -> dict:
                     tool,
                     led.get("pinned_ref_full") or led.get("pinned_ref"),
                     (led.get("fork_point") or {}).get("sha"),
-                    latest)
+                    latest,
+                    led.get("upstream_default_branch") or "master")
             except Exception as exc:                                # noqa: BLE001
                 tgt_dir = {"verdict": _DIRUNK,
                            "why": f"the direction probe raised: {exc}"}
