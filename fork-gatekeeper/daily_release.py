@@ -775,6 +775,28 @@ def main(argv=None) -> int:
             # to widen the STALE test. Fixing a shared vocabulary in one program
             # and matching on the old vocabulary in the other is the same defect
             # #29 was about, one commit later.
+            # THE PURE-MIRROR CASE REACHES THIS BRANCH FIRST (vibeic-eda#106).
+            #
+            # `_is_pure_mirror` was added to the `branch_is_ours is False` arm
+            # further down, and it never fired: `UPSTREAM_AVAILABLE` short-
+            # circuits here with a `continue`, so ORFS and slang -- the two forks
+            # the fix exists for -- were intercepted before reaching it. Measured
+            # by running the release: it still printed "NOT MOVED — that branch
+            # carries none of our commits" for both, with the fix landed.
+            #
+            # That is worth naming: a guard added to one of two paths that reach
+            # the same outcome is a guard that has not been added. The two paths
+            # print the SAME sentence, so the log gave no hint which one produced
+            # it.
+            if _is_pure_mirror(repo):
+                _tip = _gh_tip(repo, v.get("branch"))
+                if _tip:
+                    moved.append({"repo": repo, "branch": v.get("branch"),
+                                  "arg": args_of.get(repo),
+                                  "from": pin[:9], "to": _tip[:9], "sha": _tip,
+                                  "behind": v.get("behind"),
+                                  "branch_is_ours": False, "pure_mirror": True})
+                    continue
             upstream_bump.append({"repo": repo, "branch": v.get("branch"),
                                   "from": pin[:9], "to": "(not moved)",
                                   "behind": v.get("behind"),
