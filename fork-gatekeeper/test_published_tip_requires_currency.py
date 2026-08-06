@@ -144,21 +144,49 @@ def fleet(tmp_path):
             "base": base, "o1": o1, "o2": o2, "o3": o3}
 
 
-def _ledger(fleet, branch):
-    """Write the ledger this fork would have, recording `branch` (or none)."""
+def _set_pin(fleet, sha):
+    """Rewrite the DOCKERFILE ARG (vibeic-eda#102), not the ledger field.
+
+    `analyse()`'s `row["pin"]` comes from `pins_from_dockerfiles(repo)` FIRST —
+    the ledger's `pinned_ref_full` is only a fallback used when no ARG resolves.
+    `pins_from_dockerfiles` reads the COMMITTED tree at `origin/main`, not the
+    working copy, so the pin has to be committed and `origin/main` re-pointed,
+    exactly like `_ledger`'s own setup does once at fixture build time.
+    """
+    repo = fleet["repo"]
+    (repo / "Dockerfile").write_text(f"FROM x\nARG TOOLX_REF={sha}\n", encoding="utf-8")
+    _git(repo, "add", "Dockerfile")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "repin")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def _ledger(fleet, branch, pin=None):
+    """Write the ledger this fork would have, recording `branch` (or none).
+
+    `pin` DEFAULTS TO `base` — unchanged, so every test that does not name a
+    pin keeps its original numbers. Three tests now pass `pin=fleet["o1"]`
+    (vibeic-eda#102): `published_tip` accepts a candidate branch when it
+    contains the PIN, not the default branch, so a pin fixed at `base` sits at
+    the exact same commit as `vibeic/stale` itself — "contains the pin" is
+    trivially true for a branch that has not regressed from anything we have
+    ACTUALLY shipped, which is a different (also correct) question from the one
+    those three tests model: `master` carries `o1`/`o2` and `vibeic/stale`
+    lacks them. `o1` is a real point on the line we ship from, which `stale`
+    genuinely lacks and `master`/`level`/`pub` genuinely have.
+    """
     led = fleet["ledger"]
     led.mkdir(exist_ok=True)
     body = {"tool": "toolx", "integrated": True, "upstream_default_branch": "master",
-            "pinned_ref_full": fleet["base"], "pin_kind": "pin", "ahead": 2}
+            "pinned_ref_full": pin or fleet["base"], "pin_kind": "pin", "ahead": 2}
     if branch is not None:
         body["vibeic_branch"] = branch
     (led / "toolx.json").write_text(json.dumps(body), encoding="utf-8")
     return led
 
 
-def _run(fleet, branch, fetch=False):
+def _run(fleet, branch, fetch=False, pin=None):
     m = _load()
-    rep = m.analyse(fleet["repo"], fleet["forks_root"], _ledger(fleet, branch), fetch)
+    rep = m.analyse(fleet["repo"], fleet["forks_root"], _ledger(fleet, branch, pin), fetch)
     return rep, next(r for r in rep["rows"] if r["tool"] == "toolx")
 
 
@@ -171,12 +199,20 @@ def test_a_stale_ledger_branch_cannot_hide_our_unshipped_commits(fleet):
     `pin..stale` is EMPTY — the report publishes `0 substantive` and rc=0. That
     zero is the bug, and it is the direction that reads as health.
     """
-    rep, row = _run(fleet, "vibeic/stale")
+    # pin=o1 (vibeic-eda#102): `published_tip` now accepts a candidate branch
+    # that contains the PIN, not the default. `vibeic/stale` sits at `base`; if
+    # the pin ALSO sat at `base` (as this fixture used to fix it, for every
+    # scenario in this file) "contains the pin" is trivially true and the
+    # rejection this test is about would never fire. `o1` is a real point on
+    # the line we ship from that `stale` genuinely lacks.
+    _set_pin(fleet, fleet["o1"])
+    rep, row = _run(fleet, "vibeic/stale", pin=fleet["o1"])
     assert row["note"] is None, row["note"]
-    assert rep["q2_ours_past_the_pin_substantive"] == 2, (
-        "a stale ledger branch was measured from: our 2 unshipped commits "
-        f"reported as {rep['q2_ours_past_the_pin_substantive']}")
-    assert row["release_lag"] == 2, row["release_lag"]
+    assert rep["q2_ours_past_the_pin_substantive"] == 1, (
+        "a stale ledger branch was measured from: our 1 unshipped commit "
+        f"(o2, past the o1 pin) reported as "
+        f"{rep['q2_ours_past_the_pin_substantive']}")
+    assert row["release_lag"] == 1, row["release_lag"]
     assert row["tip"].endswith("master"), row["tip"]
 
 
@@ -184,9 +220,11 @@ def test_the_rejection_is_stated_and_holds_the_run(fleet, capsys):
     """Rejecting silently is how this became invisible. It must SAY so, and the
     round must not come back green while what we publish is an open question."""
     m = _load()
+    _set_pin(fleet, fleet["o1"])
     rc = m.main(["--repo", str(fleet["repo"]),
                  "--forks-root", str(fleet["forks_root"]),
-                 "--ledger", str(_ledger(fleet, "vibeic/stale")), "--no-fetch"])
+                 "--ledger", str(_ledger(fleet, "vibeic/stale", pin=fleet["o1"])),
+                 "--no-fetch"])
     out = capsys.readouterr().out
     assert "LEDGER BRANCH REJECTED" in out and "toolx" in out, out
     assert "vibeic/stale" in out, out
@@ -257,7 +295,10 @@ def test_the_predicate_is_not_inverted(fleet):
     # ref the numbers came from and not about a new field. The inverted rule
     # leaves `origin/vibeic/stale` here (as the pristine tree does) and would
     # replace `origin/vibeic/pub` with `origin/master`.
-    _, stale_row = _run(fleet, "vibeic/stale")
+    # pin=o1 for `stale` (vibeic-eda#102) — see the comment in
+    # `test_a_stale_ledger_branch_cannot_hide_our_unshipped_commits`.
+    _set_pin(fleet, fleet["o1"])
+    _, stale_row = _run(fleet, "vibeic/stale", pin=fleet["o1"])
     _, pub_row = _run(fleet, "vibeic/pub")
     assert stale_row["tip"] == "origin/master", stale_row["tip"]
     assert pub_row["tip"] == "origin/vibeic/pub", pub_row["tip"]

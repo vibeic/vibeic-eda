@@ -406,7 +406,7 @@ def default_ref(clone: Path) -> Optional[str]:
     return None
 
 
-def published_tip(clone: Path, led: dict) -> TipVerdict:
+def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdict:
     """Our fork's PUBLISHED line — never the clone's HEAD, and never a STALE branch.
 
     These clones are shared. `HEAD` is whatever the last process to touch the
@@ -442,10 +442,11 @@ def published_tip(clone: Path, led: dict) -> TipVerdict:
 
     THE PREDICATE, AND WHY IT RUNS THE DIRECTION IT DOES
     ===================================================
-    Accept the branch only when it CONTAINS the repo default — `merge-base
-    --is-ancestor <default> <branch>`. Stated as a property: *nothing that is on
-    the default is missing from the tip*, which is exactly what the counts below
-    need, since anything missing from the tip is silently subtracted from them.
+    Accept the branch only when it CONTAINS WHAT WE LAST SHIPPED — `merge-base
+    --is-ancestor <pin> <branch>` when a pin is known, `<default>` otherwise.
+    Stated as a property: *nothing we have already published is missing from the
+    tip*, which is exactly what the counts below need, since anything missing
+    from the tip is silently subtracted from them.
 
     #92 asks for the opposite direction — "reject a vibeic_branch that is not
     ancestor-or-equal of origin/master" — and that predicate is INVERTED. Measured
@@ -464,6 +465,27 @@ def published_tip(clone: Path, led: dict) -> TipVerdict:
     ahead one. Both live non-default ledgers agree either way (`Trilinos` is
     EQUAL, `klayout` does not resolve), which is why the fleet as it stands cannot
     tell the two rules apart and a test has to.
+
+    PIN, NOT DEFAULT — WHY THIS CHANGED AGAIN (vibeic-eda#102, 2026-08-07)
+    ------------------------------------------------------------------
+    `<default>` was `origin/master` (or `origin/main`), on the assumption that a
+    fork has ONE conceptual line and a publishing branch is always "default plus
+    our patches" — so it should always contain everything on default. That breaks
+    for a fork with TWO independently-maintained lines, which Trilinos now is:
+    `master` tracks raw upstream; `vibeic/xyce-trilinos-17.2-epetra-restored` is
+    the line we actually ship, and reverts a series of upstream commits `master`
+    happily carries. The moment `master` gets even one commit the restored branch
+    does not have — an ordinary, harmless event on the OTHER line — the rejection
+    fired and held the round at rc=2 for a fork that had converged perfectly.
+
+    Comparing against the PIN instead of the default fixes this because the pin
+    IS, unambiguously, "what this fork last shipped" — no assumption about how
+    many lines the repo maintains, or which of them is "the" default. It stays
+    equally strict for the #92 motivating case: whatever the currently shipped
+    pin is, a genuinely stale/abandoned branch will not contain it either (it was
+    superseded by whatever DID produce that pin). Falls back to `<default>` only
+    when no pin is known yet (an unintegrated fork), which is the one case the
+    pin comparison cannot be made at all.
 
     THREE STATES, NOT TWO
     =====================
@@ -509,31 +531,50 @@ def published_tip(clone: Path, led: dict) -> TipVerdict:
             + (f"; measuring against {dflt} instead" if dflt
                else " and there is no default branch either — NOT MEASURED"))
 
-    if dflt is None:
+    # WHAT WE COMPARE THE CANDIDATE AGAINST (vibeic-eda#102). The pin — "what
+    # this fork last shipped" — when one is known and resolves in this clone;
+    # the repo default only as a fallback for a fork with no pin yet, where no
+    # sharper answer to "what have we shipped" exists. Checking `rev-parse`
+    # rather than trusting `pin` blindly: a pin that does not resolve here
+    # (wrong clone, not yet fetched) must degrade to the fallback, not crash the
+    # comparison or silently compare against nothing.
+    basis, basis_label = None, None
+    if pin and _git(clone, "rev-parse", "--verify", "-q", f"{pin}^{{commit}}"):
+        basis, basis_label = pin, f"the pin ({pin[:12]})"
+    elif dflt:
+        basis, basis_label = dflt, dflt
+
+    if basis is None:
         return TipVerdict(
             None, TIP_UNDETERMINED,
-            f"{ref} resolves but this clone has no default branch (origin/master, "
-            f"origin/main, origin/HEAD) to check it against — its currency is "
-            f"UNMEASURABLE, and an unmeasurable tip is NOT MEASURED rather than "
-            f"assumed current (vibeic-eda#92)")
+            f"{ref} resolves but this clone has neither a usable pin nor a "
+            f"default branch (origin/master, origin/main, origin/HEAD) to check "
+            f"it against — its currency is UNMEASURABLE, and an unmeasurable tip "
+            f"is NOT MEASURED rather than assumed current (vibeic-eda#92)")
 
     # `_run`, not `_git`: rc=1 is git's ANSWER (not an ancestor) and rc=128 or
     # RC_NO_ANSWER is git failing to answer. `_git` returns None for both, and a
     # function that cannot tell "no" from "no idea" has already thrown away the
     # distinction these three states exist to keep.
-    r = _run(clone, "merge-base", "--is-ancestor", dflt, ref)
+    r = _run(clone, "merge-base", "--is-ancestor", basis, ref)
     if r.returncode == 0:
         return TipVerdict(ref, TIP_CURRENT, "")
     if r.returncode == 1:
-        missing = count(clone, ref, dflt)
-        extra = count(clone, dflt, ref)
+        missing = count(clone, ref, basis)
+        extra = count(clone, basis, ref)
+        # `dflt` is the fallback measurement ref. Almost always present (basis was
+        # the pin, or basis WAS dflt and we would not be here) — but if a fork has
+        # neither a default branch nor a pin that survives rejection, there is
+        # nothing left to measure against; say so rather than printing "None".
+        fallback_note = (f"measuring against {dflt}" if dflt
+                         else "no default branch either — NOT MEASURED")
         return TipVerdict(
             dflt, TIP_BEHIND,
             f"ledger records vibeic_branch={claim!r}, but {ref} does not contain "
-            f"{dflt} ("
-            f"{'?' if missing is None else missing} commit(s) of {dflt} missing "
-            f"from it, {'?' if extra is None else extra} of its own that {dflt} "
-            f"lacks) — REJECTED as our published line; measuring against {dflt}. "
+            f"{basis_label} ("
+            f"{'?' if missing is None else missing} commit(s) missing from it, "
+            f"{'?' if extra is None else extra} of its own that are not on it) "
+            f"— REJECTED as our published line; {fallback_note}. "
             f"A stale ref resolves cleanly and every count taken from it would "
             f"have read GREEN while our commits sat unshipped (vibeic-eda#92)")
     return TipVerdict(
@@ -647,7 +688,7 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         # A rejection that only shows up as a different number is a rejection
         # nobody can audit, and #92 survived precisely because this step made no
         # statement about what it had chosen or why.
-        verdict = published_tip(clone, led)
+        verdict = published_tip(clone, led, row["pin"])
         row["tip_state"] = verdict.state
         row["tip_note"] = verdict.why or None
         if verdict.ref is None:
@@ -796,7 +837,13 @@ def main(argv=None) -> int:
         a.json.parent.mkdir(parents=True, exist_ok=True)
         a.json.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
 
-    if not rep["measured_with_fetch"]:
+    # `.get`, not `[...]`: a stubbed `rep` (the exit-ladder tests replace
+    # `analyse` wholesale to test `main` in isolation from it) is not obliged to
+    # know about every field `analyse` happens to add later. Defaulting to
+    # `True` is the safe direction — the caveat banner is opt-in noise, not a
+    # silent downgrade, so an unknown mode prints nothing rather than a false
+    # warning.
+    if not rep.get("measured_with_fetch", True):
         print("⚠️  --no-fetch: every count below is against the clones AS THEY "
               "LAST STOOD, not a live upstream check. A stale clone reads as "
               "converged. Measured 2026-08-07: this mode printed Q1=0 while a "
