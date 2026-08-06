@@ -19,7 +19,7 @@ you have the whole fixed toolchain. The image is published to the **GitHub Conta
 Registry (GHCR)** and is public (no login required):
 
 ```bash
-docker pull ghcr.io/vibeic/vibeic-eda:0.2.69
+docker pull ghcr.io/vibeic/vibeic-eda:0.2.70
 ```
 
 > The image lives on GHCR (`ghcr.io/vibeic/...`), **not** Docker Hub — always use the
@@ -382,7 +382,7 @@ on `vibeic/klayout-signoff-int`, which is the `KLAYOUT_REF` pinned in the Docker
 **Headless / batch (CI, scripted flows):**
 ```bash
 docker rm -f vibeic-eda 2>/dev/null || true   # "name already in use"? drop the old container first
-docker run -d --init --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.69 --skip sleep infinity
+docker run -d --init --name vibeic-eda ghcr.io/vibeic/vibeic-eda:0.2.70 --skip sleep infinity
 docker exec vibeic-eda yosys --version
 docker exec vibeic-eda openroad -version
 ```
@@ -397,7 +397,7 @@ container, or you get `cd: No such file or directory`. Start it with an identity
 ```bash
 docker run -d --init --name vibeic-eda \
   -v "$PWD:$PWD" -w "$PWD" \
-  ghcr.io/vibeic/vibeic-eda:0.2.69 --skip sleep infinity
+  ghcr.io/vibeic/vibeic-eda:0.2.70 --skip sleep infinity
 # then point the MCP at it:  EDA_CONTAINER=vibeic-eda
 ```
 
@@ -405,14 +405,14 @@ docker run -d --init --name vibeic-eda \
 ```bash
 docker run -d --name vibeic-eda \
   -p 5901:5901 -p 8080:80 \
-  ghcr.io/vibeic/vibeic-eda:0.2.69
+  ghcr.io/vibeic/vibeic-eda:0.2.70
 # noVNC:  http://localhost:8080     VNC: localhost:5901   (default password: abc123)
 ```
 
 **Mount your design directory:**
 ```bash
 docker run -it --rm -v "$PWD:/foss/designs/work" -w /foss/designs/work \
-  ghcr.io/vibeic/vibeic-eda:0.2.69 bash
+  ghcr.io/vibeic/vibeic-eda:0.2.70 bash
 ```
 
 Tools live at the same paths as the iic-osic-tools base (`/foss/tools/bin/...`), so any
@@ -536,7 +536,7 @@ Semantic versions track the fix-program milestones in `FIX_STATUS.md`:
   rather than done as a side effect of a docs fix. (The previous text here claimed
   `latest` matched `0.2.26` — `sha256:cafd850169ee…` — which was also untrue.)
 
-Current: **0.2.69** — the from-source release that is pinned by the plugin's
+Current: **0.2.70** — the from-source release that is pinned by the plugin's
 image-version gate. `0.2.29` was assigned and never published; the registry has no
 such tag, which is what that gate now blocks. For what each earlier tag added, see
 the table below.
