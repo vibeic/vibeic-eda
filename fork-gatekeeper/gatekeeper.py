@@ -886,9 +886,28 @@ def tick() -> dict:
         # assignments above, and appending at each of them means the next branch
         # somebody adds silently does not carry it. Placed BEFORE the cross-check
         # below, which documents that it must read the note in its FINAL form.
-        entry["note"] += entry_target_refusal
-        if entry_target_refusal:
-            entry["target_direction"] = (tgt_dir or {}).get("verdict")
+        # ONLY WHERE A TARGET IS ACTUALLY PROPOSED (vibeic-eda#103).
+        #
+        # A CLEAN row means "we are on the newest upstream release" and proposes
+        # nothing. Appending a refusal there produced rows that contradict
+        # themselves in one cell -- measured on the 2026-08-06 regeneration:
+        #
+        #   gtkwave  | CLEAN | on the latest upstream release (v3.3.116)
+        #                      TARGET REFUSED: `v3.3.116` ...
+        #
+        # Both halves are true and they answer DIFFERENT questions: CLEAN is
+        # release-level ("is there a newer tag": no), the refusal is directional
+        # ("would advancing to that tag drop work": yes, because we track the
+        # branch and the tag is off it). Printed together with no target on offer,
+        # it reads as one sentence disagreeing with itself, and a reader cannot
+        # tell which half to act on. The direction is still RECORDED on the row
+        # for anyone reading the JSON.
+        if entry_target_refusal and entry.get("verdict") != "CLEAN":
+            entry["note"] += entry_target_refusal
+        if tgt_dir:
+            entry["target_direction"] = tgt_dir.get("verdict")
+            if tgt_dir.get("tag_lag_only"):
+                entry["tag_lag_only"] = True
 
         # CROSS-DOCUMENT CHECK (vibeic/vibeic-eda#7). Both documents are now rendered;
         # parse the numbers back OUT of each and require them to agree. Checking the
