@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.72",
-  "pins_fingerprint": "1ab09e622b16",
+  "version": "0.2.73",
+  "pins_fingerprint": "bc52a610872e",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -10,8 +10,8 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "58dbde489f3c3c37e4e097f22af695976105090d",
-    "OpenROAD-flow-scripts": "778c4e556a6f1d104621b92f6a851324bf34ff1a",
+    "OpenROAD": "0fbc44b3d4ed7c4ada17667d363f4369b9b61aea",
+    "OpenROAD-flow-scripts": "1a48ddd621dcd69c58242dff4ec976805b8d49ca",
     "Trilinos": "8eab610fbedf5ec1561232d6b3f7f9cc870f8ebf",
     "Xyce": "d72b5846a0397ddf852a49305cb6f395457685ca",
     "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
@@ -22,17 +22,17 @@
     "iverilog": "7af4f4eb501e6ff8023e15190654692b9592258e",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
     "klayout": "e89f9b272eb4dcf676029672bd7bc9aef6a961cb",
-    "magic": "0da4c3b60886ccc4f114d1d089f6e54fc6462868",
+    "magic": "cc7d0fe3da4856599baa061cb62624dc6c88228a",
     "netgen": "0334b7dfb1d6adce0a8079f5552f68982815d3d9",
     "ngspice": "1b70fc18e70c84149910465d4e8e9bfc796db1fb",
     "pyuvm": "b3a4d47ae07f4c28cb1222919d240251fcefbc3d",
     "sby": "8a3cfb4132f7c51d5f8c5d7dc39fcc6f025c56aa",
-    "slang": "d69e89069834a07e0fe9518bd33e343b514e7007",
+    "slang": "a3d50cfc2f6dd18eb26cc3ad5c8d996d9275b97d",
     "sv-elab": "e2829839afc62961d704123f30ed46e75477f33c",
     "sv2v": "6662fa5da71f87797598060f17728b284b99a9fc",
     "verilator": "f6bffca9007af238b14aa60a5e8b5a9e374b3249",
-    "xschem": "ff2f4824c1a24e158d218f44db11cc682b4881c8",
+    "xschem": "482e5d23c1e12f78675cd793825f1e68169fdfee",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "41a01aecec3471a1cd49ac1ff578de89ea5737bc"
+    "yosys": "962993c2a40dad4f8839700a46e2117e61a0d3f7"
   }
 }
