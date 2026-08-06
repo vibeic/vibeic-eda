@@ -186,3 +186,39 @@ which the first line of the index says in as many words.
 Retention is best-effort by construction — `round_record.write` returns its
 errors instead of raising, because retention that could take a round down would
 be a worse defect than the one it closes.
+
+## Merging upstream into a "restoration" branch (e.g. Trilinos epetra-restored)
+
+A handful of forks carry a branch that exists to **revert** a class of upstream
+commits — `vibeic/xyce-trilinos-17.2-epetra-restored` reverts the series that
+removed the Epetra stack, because Xyce (also shipped) needs it. That branch's
+NAME describes a permanent disagreement with upstream, and the first instinct
+is to treat it as too delicate to touch automatically. It is not: `git log
+--merges` on the branch shows upstream gets merged into it routinely (`owner
+ruling 2026-07-29`), the same as any other fork. What changes is that **every
+merge needs one extra audit step**, not that the merge is off-limits.
+
+Measured 2026-08-07, 94 incoming commits / 1749 files: only 1 commit actually
+reintroduced a reverted removal. The procedure that found it, cheaply:
+
+1. `git merge --no-edit --no-commit upstream/<branch>` in a scratch worktree.
+2. Derive the REAL protected-package list from the original restoration
+   commits, not from memory — `git diff --name-only <before> <after>` over the
+   commit range that did the original revert-and-restore. Guessing the package
+   list from the branch name undercounts it (this fork's real list is 15
+   packages, not the 7 named in the pin comment: also amesos2, anasazi, belos,
+   nox, shylu, stokhos, thyra, trilinoscouplings).
+3. `git diff --name-only HEAD | grep -E "^packages/($PKGS)/"` — which of THIS
+   merge's files land inside that list.
+4. For each: `git diff HEAD -- <file> | grep -iE epetra`. Empty means the file
+   is in a protected package but the incoming change has nothing to do with
+   Epetra — ordinary upstream work, safe to accept as-is. Non-empty means read
+   it; if it removes Epetra content, find the offending commit
+   (`git log --oneline HEAD..upstream/<branch> -- <file>`) and `git revert` it
+   on top of the merge, using the SAME commit-message convention the original
+   restoration used (`Revert <sha> '<upstream message>' (<package> ...)`).
+5. Re-run step 3-4 until clean, THEN push.
+
+This is cheap (a `git diff`/`grep` pass over a few dozen candidate files, not a
+build) and it is the step that makes "merge routinely" safe — skipping it is
+what would make the branch dangerous, not merging in the first place.
