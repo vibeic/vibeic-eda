@@ -50,18 +50,18 @@ variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "46d595" }
-variable "OPENROAD_RECIPE" { default = "c0902c" }
-variable "YOSYS_RECIPE" { default = "41e5b1" }
+variable "OPENROAD_RECIPE" { default = "366e63" }
+variable "YOSYS_RECIPE" { default = "ce9f8b" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "622112" }
-variable "LVS_RECIPE" { default = "46a666" }
+variable "LVS_RECIPE" { default = "aac707" }
 variable "FASTERCAP_RECIPE" { default = "416e37" }
 variable "IVERILOG_RECIPE" { default = "08a605" }
 variable "KLAYOUT_RECIPE" { default = "a3644f" }
 variable "VERILATOR_RECIPE" { default = "048218" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
-variable "XSCHEM_RECIPE" { default = "f0bdeb" }
-variable "SLANG_RECIPE" { default = "158692" }
+variable "XSCHEM_RECIPE" { default = "681a30" }
+variable "SLANG_RECIPE" { default = "190a7d" }
 variable "XYCE_RECIPE" { default = "9611d7" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
@@ -73,12 +73,12 @@ variable "SV_ELAB_RECIPE" { default = "42ffe6" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "58dbde489f3c3c37e4e097f22af695976105090d" }
-variable "YOSYS_REF"       { default = "41a01aecec3471a1cd49ac1ff578de89ea5737bc" }
+variable "OPENROAD_REF"    { default = "0fbc44b3d4ed7c4ada17667d363f4369b9b61aea" }
+variable "YOSYS_REF"       { default = "962993c2a40dad4f8839700a46e2117e61a0d3f7" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "1b70fc18e70c84149910465d4e8e9bfc796db1fb" }
-variable "MAGIC_REF"       { default = "0da4c3b60886ccc4f114d1d089f6e54fc6462868" }
+variable "MAGIC_REF"       { default = "cc7d0fe3da4856599baa061cb62624dc6c88228a" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
@@ -91,9 +91,9 @@ variable "IVERILOG_REF"    { default = "7af4f4eb501e6ff8023e15190654692b9592258e
 variable "KLAYOUT_REF"     { default = "e89f9b272eb4dcf676029672bd7bc9aef6a961cb" }
 variable "VERILATOR_REF"   { default = "f6bffca9007af238b14aa60a5e8b5a9e374b3249" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
-variable "XSCHEM_REF" { default = "ff2f4824c1a24e158d218f44db11cc682b4881c8" }
+variable "XSCHEM_REF" { default = "482e5d23c1e12f78675cd793825f1e68169fdfee" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "d69e89069834a07e0fe9518bd33e343b514e7007" }
+variable "SLANG_REF" { default = "a3d50cfc2f6dd18eb26cc3ad5c8d996d9275b97d" }
 variable "XYCE_REF" { default = "d72b5846a0397ddf852a49305cb6f395457685ca" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
 variable "SV_ELAB_REF" { default = "e2829839afc62961d704123f30ed46e75477f33c" }

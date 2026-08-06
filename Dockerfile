@@ -29,17 +29,17 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:58dbde4-c0902c
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:41a01ae-41e5b1
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:0fbc44b-366e63
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:962993c-ce9f8b
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:1b70fc1-622112
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:0da4c3b-0334b7d-46a666
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:cc7d0fe-0334b7d-aac707
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:7af4f4e-08a605
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:e89f9b2-a3644f
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:f6bffca-048218
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ff2f482-f0bdeb
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:d69e890-158692
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:482e5d2-681a30
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:a3d50cf-190a7d
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -182,7 +182,7 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=778c4e556a6f1d104621b92f6a851324bf34ff1a  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=1a48ddd621dcd69c58242dff4ec976805b8d49ca  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
