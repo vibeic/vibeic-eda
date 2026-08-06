@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.68",
-  "pins_fingerprint": "db9a9ad4e733",
+  "version": "0.2.69",
+  "pins_fingerprint": "7a051d40cd44",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -10,9 +10,9 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "01bc02aaaffb6bc0fc9ddbae73b1225d19d50a33",
+    "OpenROAD": "58dbde489f3c3c37e4e097f22af695976105090d",
     "OpenROAD-flow-scripts": "f4b9d7dbe727c054da13449c0b281cafa616c921",
-    "Trilinos": "381bf0316b9861d30af0b537d73d3d8f888a5d89",
+    "Trilinos": "8eab610fbedf5ec1561232d6b3f7f9cc870f8ebf",
     "Xyce": "d72b5846a0397ddf852a49305cb6f395457685ca",
     "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
     "ciel": "714d1bbb626d41e3cecc0ea23e752775166fde6e",
@@ -33,6 +33,6 @@
     "verilator": "3764903febc44736922ce331674149329fadf5dc",
     "xschem": "ff2f4824c1a24e158d218f44db11cc682b4881c8",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "4f59b5cd7c13334e1922af1b0b2cd4c2a300a75d"
+    "yosys": "41a01aecec3471a1cd49ac1ff578de89ea5737bc"
   }
 }
