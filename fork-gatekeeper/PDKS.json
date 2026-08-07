@@ -27,8 +27,8 @@
     {
       "name": "ihp-sg13g2",
       "upstream": "IHP-GmbH/IHP-Open-PDK",
-      "status": "upstream",
-      "arrives": "pre-installed in the base image",
+      "status": "ours",
+      "arrives": "staged by our Dockerfile (tools/ihp-open-pdk/) from the vibeic/IHP-Open-PDK mirror, pinned by IHP_OPEN_PDK_REF -- moved off the base image by vibeic-eda#60 so a patch of ours to a tech file or device model has somewhere to go",
       "version_file": "COMMIT",
       "version_pattern": "[0-9a-f]{40}",
       "read_by": "the sg13g2 flow",

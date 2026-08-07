@@ -24,6 +24,15 @@ RUN git clone --filter=blob:none "${IHP_OPEN_PDK_REPO}" /src/ihp \
  && cd /src/ihp && git checkout ${IHP_OPEN_PDK_REF} \
  && test -d /src/ihp/ihp-sg13g2
 
+# PDKS.json declares ihp-sg13g2's version_file as COMMIT (40 hex chars), the
+# convention the base image's pre-baked copy shipped under before #60 moved
+# this PDK to our own build. A git checkout carries no such file on its own
+# (verified: neither vibeic/IHP-Open-PDK nor upstream ships one) -- write it
+# from the ref we actually pinned, or the next change to this PDK is
+# undetectable from outside the image (vibeic-eda claims-gate finding, 0.2.68).
+RUN printf '%s' "${IHP_OPEN_PDK_REF}" > /src/ihp/ihp-sg13g2/COMMIT \
+ && grep -qE '^[0-9a-f]{40}$' /src/ihp/ihp-sg13g2/COMMIT
+
 # The self-test asks what a PDK is FOR: the files every DRC/LVS/PnR run reads.
 # "The directory exists" has never been the question.
 RUN cd /src/ihp/ihp-sg13g2 \
