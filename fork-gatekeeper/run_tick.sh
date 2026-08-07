@@ -195,6 +195,49 @@ else
     log "[pins-after] MISSING — nothing was re-checked, which is not a clean result"
 fi
 
+# --- IS THE LAST RELEASE'S PIN MOVE COMMITTED? (vibeic-eda#99) ---
+#
+# `daily_release.write_released_record` measures `RELEASED.json`'s pins from
+# the WORKING TREE, after `rewrite_pin` has already edited it there.
+# `commit_release_record` then commits exactly `VERSION` / `RELEASED.json` /
+# `README.md` — never the pin files, on purpose (#71's revert dda4b8c,
+# `test_only_the_two_record_files_are_committed` is LOAD-BEARING and stays: a
+# release commit sweeping in an unreviewed pin move is what `git add -A` is
+# banned in this org to prevent). So the ORDINARY shape of a release leaves
+# `RELEASED.json` naming a pin the working tree holds and HEAD does not —
+# and every check above this line, including `[pins-after]`, reads the
+# working tree, so all of them read clean through the whole gap.
+#
+# Observed directly (#99's own report): after 0.2.65 published, HEAD kept
+# stating `OPENROAD_REF=f396ce8ee` while the image had been built from
+# `b64a496b9`, and nothing anywhere said so.
+#
+# THIS reads RELEASED.json's recorded pins against the pins actually
+# COMMITTED at HEAD (`git show HEAD:<path>`, never the filesystem) — the one
+# comparison an uncommitted edit cannot fool, because it never reads the copy
+# the edit lives in.
+#
+# NON-FATAL, on the same footing as [claims]/[oracle]/[ci-ran]: closing the
+# gap is the gatekeeper's review to make by committing the pin file(s) by
+# explicit path, and no tick can do that FOR itself without reintroducing the
+# exact defect #71's revert protects against — see the note on scope in #99.
+# Loud in the log and the JSON either way, so the outstanding review cannot go
+# unseen the way the #71 gap did.
+RELPIN_OUT="${LOG_DIR}/release-pins-committed.txt"
+relpin_rc=0
+if [ -f "${DIR}/check_release_pins_committed.py" ]; then
+    python3 "${DIR}/check_release_pins_committed.py" \
+        --json "${LOG_DIR}/release-pins-committed.json" > "${RELPIN_OUT}" 2>&1
+    relpin_rc=$?
+    grep -E "^\[(PASS|FAIL)\]|^  FAIL " "${RELPIN_OUT}" | sed 's/^/[release-pins]   /' | tee -a "${LOG}" || true
+    [ "${relpin_rc}" = "1" ] && log "[release-pins] a released pin is uncommitted at HEAD — the gatekeeper's review is outstanding (vibeic-eda#99)"
+    [ "${relpin_rc}" = "2" ] && log "[release-pins] could not tell — RELEASED.json is absent or unparseable, which is NOT a pass (vibeic-eda#99)"
+else
+    echo "MISSING: ${DIR}/check_release_pins_committed.py — whether the last release's pins are committed was NOT checked" > "${RELPIN_OUT}"
+    log "[release-pins] nothing was checked, which is not a clean result"
+    relpin_rc=2
+fi
+
 # Derived ONCE, before every consumer. It used to be computed inside the
 # `if [ -f fork_reaches_flow_check.py ]` branch while two later checks read it —
 # so a missing checker left REACH_IMG unset, and under this script's `set -u`
