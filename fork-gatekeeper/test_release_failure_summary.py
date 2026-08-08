@@ -85,7 +85,12 @@ def test_a_passing_round_has_no_error_block_to_find():
     import tempfile
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        f.write("composing ghcr.io/vibeic/vibeic-eda:0.2.99 …\nVERSION: 0.2.99\n")
+        # No "ghcr.io/vibeic/vibeic-eda:X.Y.Z" text here on purpose: that shape
+        # is exactly what sync_image_version.py's --check scans the whole repo
+        # for as a live pointer, and a synthetic version string in a test
+        # fixture is neither a live pointer nor real history -- it would fail
+        # that gate for a reason this test has nothing to do with.
+        f.write("composing the pinned artefacts …\nVERSION: (elided for this test)\n")
         path = f.name
     try:
         new = subprocess.run([SCRIPT, path], capture_output=True, text=True)
