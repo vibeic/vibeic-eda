@@ -520,6 +520,66 @@ def on_our_mainline(tool: str, mainline_ref: str | None,
     return on, unknown
 
 
+def resolve_base_sha(tool: str, ref: str | None) -> str | None:
+    """The full commit sha `ref` (a tag name, a short sha, or already a full sha)
+    names in the tool's local clone. None if `ref` is empty, the clone is absent,
+    or git cannot resolve it in that clone — never invented, never a truncated
+    guess (vibeic-eda#101, sub-defect 2).
+
+    WHY THIS EXISTS: at the 2026-08-05 tick, `assess()`'s range base for
+    OpenROAD/verilator matched neither the live pin nor the shipped image's
+    RELEASED.json — and nothing in the report said which of ITS OWN THREE
+    possible sources (the ledger's `base_release` release tag, a fork-point sha,
+    or the live `pinned_ref_full`) it had actually used. A tag name alone is not
+    reproducible even when it is right: `assess()` reads it fresh every tick, and
+    a re-cut release tag (rare, but real) would silently move what "the base" means
+    between two reports that both say the same tag. Resolving to the exact commit
+    the tag pointed at when THIS assessment ran is what makes the range checkable
+    by someone who was not in the room.
+    """
+    if not ref:
+        return None
+    clone = FORKS_DIR / tool
+    if not (clone / ".git").is_dir():
+        return None
+    try:
+        p = subprocess.run(["git", "-C", str(clone), "rev-parse", "-q", "--verify",
+                            f"{ref}^{{commit}}"],
+                           capture_output=True, text=True, timeout=30)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    sha = p.stdout.strip()
+    return sha if p.returncode == 0 and sha else None
+
+
+def assessment_base_is_recorded(rep: dict) -> tuple[bool, str]:
+    """vibeic-eda#101 sub-defect 2: an assessment whose base cannot be identified
+    cannot be checked by anyone -- every number in it has to be taken on trust or
+    re-derived from scratch, which is what closing vibe-ic#837 actually required.
+
+    Only meaningful for status == "assessed": the earlier-return statuses (clean,
+    pin_ahead_of_release, error, not_layered) report a `base_release` straight from
+    the ledger with none of `assess()`'s three-way override logic in play, so there
+    is no ambiguity for this check to catch there.
+
+    Returns (ok, reason) rather than raising or returning a bare bool: the reason
+    is what a caller logs, and "not applicable" (True) must read differently from
+    "a source is recorded but the sha would not resolve" (False) — collapsing
+    those to one boolean is the exact shape of defect this function exists to stop.
+    """
+    if rep.get("status") != "assessed":
+        return True, "not an assessed report"
+    source = rep.get("base_ref_source")
+    if not source:
+        return False, "base_ref_source is missing"
+    sha = rep.get("base_ref_sha")
+    if not sha:
+        return False, f"base_ref_sha did not resolve (source: {source})"
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return False, f"base_ref_sha is not a full 40-hex commit sha: {sha!r}"
+    return True, "ok"
+
+
 def _mainline_summary(main_ref: str | None, our_ref: str | None, keep: str = "") -> str:
     """One wording for the per-commit cell, fresh assessment and replay alike."""
     s = (f"ALREADY MERGED into our fork mainline ({main_ref or 'our mainline'}) — not yet "
@@ -1116,7 +1176,14 @@ def assess(tool: str) -> dict:
     upstream = led["upstream"]
     up_branch = led.get("upstream_default_branch") or "master"
     our_ref = led.get("pinned_ref_full")
-    base_ref = led.get("base_release") or (led.get("fork_point") or {}).get("sha")
+    # vibeic-eda#101 sub-defect 2: WHICH of these named `base_ref` travels with it
+    # from here on, through every reassignment below, so the report can say which
+    # question it answered instead of leaving a reader to guess between three.
+    if led.get("base_release"):
+        base_ref, base_source = led["base_release"], "ledger_base_release_tag"
+    else:
+        base_ref = (led.get("fork_point") or {}).get("sha")
+        base_source = "ledger_fork_point_sha" if base_ref else None
     new_ref = led.get("upstream_latest_release")
 
     # vibeic-eda#31, second half. A project that ships from rolling master has no
@@ -1156,7 +1223,7 @@ def assess(tool: str) -> dict:
     if ((rel_unknown or not rel_gap)
             and (led.get("behind_commits") or 0) > 0
             and our_ref):
-        base_ref, new_ref = our_ref, up_branch
+        base_ref, new_ref, base_source = our_ref, up_branch, "our_pinned_ref"
     elif direction["verdict"] == BEHIND:
         # The release we would "advance" to drops work we already build. There are two
         # honest answers and neither of them is the tag: if upstream's default branch
@@ -1164,7 +1231,7 @@ def assess(tool: str) -> dict:
         # if it has not, this fork has nowhere to go and the report has to say so rather
         # than propose a downgrade for a fourth consecutive day.
         if (led.get("behind_commits") or 0) > 0 and our_ref:
-            base_ref, new_ref = our_ref, up_branch
+            base_ref, new_ref, base_source = our_ref, up_branch, "our_pinned_ref"
         else:
             bc = led.get("behind_commits")
             return {"tool": tool, "status": "pin_ahead_of_release", "commits": [],
@@ -1334,6 +1401,15 @@ def assess(tool: str) -> dict:
 
     rep = {"tool": tool, "status": "assessed", "upstream": upstream,
            "base_release": base_ref, "latest": new_ref,
+           # vibeic-eda#101 sub-defect 2: `base_release` above is whichever of THREE
+           # possible things `base_ref` ended up holding (a ledger release tag, a
+           # fork-point sha, or the live pinned ref) — nothing said which, and a tag
+           # alone is not reproducible if it is ever re-cut. `base_ref_source` names
+           # which branch of the selection logic set it; `base_ref_sha` resolves it
+           # to the exact commit THIS assessment measured from, or None if the local
+           # clone could not answer (never invented — see `resolve_base_sha`).
+           "base_ref_source": base_source,
+           "base_ref_sha": resolve_base_sha(tool, base_ref),
            # WHICH WAY the newest tagged release lies from the ref we ship — forward,
            # behind, or not measured. Carried on every assessed report (not only the
            # awkward ones) so the cached shape is the same either way and no reader has
