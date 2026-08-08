@@ -70,6 +70,11 @@
       "upstream": "gtkwave/gtkwave"
     },
     {
+      "tool": "icsprout55-pdk",
+      "role": "PREVIEW-only 55nm open PDK (ICsprout Integrated Circuit Co. + Zhejiang University IC school + ECOS Team/ICT-CAS) — PDK data for vibe-ic's icsprout55 target (/foss/pdks/icsprout55). Production tapeout explicitly prohibited by the PDK's own README pending its first engineering-batch tapeout (Dec 2025); ships no DRC/LVS rule decks or SPICE device models as of this mirror (upstream README's own Todo list).",
+      "upstream": "openecos-projects/icsprout55-pdk"
+    },
+    {
       "tool": "IHP-Open-PDK",
       "role": "PDK data — /foss/pdks/ihp-sg13g2 and ihp-sg13cmos5l; the SG13G2 spm cell runs on it",
       "upstream": "IHP-GmbH/IHP-Open-PDK"
