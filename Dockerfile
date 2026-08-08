@@ -46,7 +46,7 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:a3d50cf-190a7d
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:6662fa5-a942c0
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:714d1bb-adea1b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-46d595
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-a9f473
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
