@@ -63,7 +63,7 @@ and fails on drift.
 
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
-| upstream projects the fork-gatekeeper tracks | **36** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| upstream projects the fork-gatekeeper tracks | **37** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
 | `vibeic/*` sources the build clones | **34** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
 | per-tool build artefacts (`tools/<name>/`) | **19** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
@@ -94,6 +94,16 @@ them is what puts them under the daily upstream check — every DRC and LVS deck
 comes from `open_pdks`, and until it was tracked nothing watched it. `sv-elab` is
 the fourth: built and pinned, deliberately not installed (vibeic-eda#24). See
 `fork-gatekeeper/PDKS.json` for which PDK each one produces and who reads it.
+
+A fifth, `icsprout55-pdk`, is tracked for the same upstream-pull-review reason
+but is a different case from the other four: it is not pre-installed in the
+base image, not staged by any Dockerfile stage, and not in `PDKS.json` — there
+is no image claim to make about it yet. It is the PDK data behind the plugin's
+new `--pdk icsprout55` target (vibe-ic, not this repo); today the plugin stages
+its files into a running container at runtime rather than through an image
+build. Baking it into the published image (a `PDKS.json` entry + a Dockerfile
+stage, the same path `ihp-sg13g2` took) is a separate decision this mirror
+does not make on its own.
 
 The mirrors are **not forks** — they are mirrors of upstream data, solver and PDK
 repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos, `open_pdks`,
