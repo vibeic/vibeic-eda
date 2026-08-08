@@ -82,7 +82,17 @@ _MULTI_BINARY = {"lvs": ("magic", "netgen"),
 #: and its artefact stays built; only the install is declined.
 _NO_COMMAND = {"sv-elab": "vibeic-eda#24 — a second slang frontend in one "
                           "process double-frees at exit; the artefact is built "
-                          "and pinned, the install is declined"}
+                          "and pinned, the install is declined",
+               "ihp-open-pdk": "a PDK data directory (COPY'd straight to "
+                          "/foss/pdks/ihp-sg13g2), not a binary — probing it "
+                          "with `command -v ihp-open-pdk` always prints NONE "
+                          "regardless of whether the PDK is correctly staged, "
+                          "the same category error `command -v ihp-sg13g2` "
+                          "would be. Its actual presence is verified "
+                          "elsewhere: the ngspice OSDI compile step "
+                          "(Dockerfile ~L542-560) depends on and would fail "
+                          "without /foss/pdks/ihp-sg13g2 existing, and "
+                          "check_image_claims covers its version provenance."}
 
 #: Commands installed from OUR source tree rather than copied from an artefact,
 #: so path containment cannot see them. The claim this program can make about
@@ -137,14 +147,36 @@ def _sh(cmd, timeout=600):
 def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
     """tool -> the image paths the root Dockerfile takes from that tool's artefact.
 
-    Reads `COPY --from=img-<tool> <src> <dst>`; the DESTINATION is what matters,
-    since that is where the composed image will hold our build.
+    Reads `COPY --from=img-<tool> <src>... <dst>`; the DESTINATION is what
+    matters, since that is where the composed image will hold our build.
+
+    A `COPY` line can name MORE THAN ONE source before the final destination
+    — Dockerfile:413 (`COPY --from=img-openroad .../openroad .../sta
+    .../bin/`) and :487 (`COPY --from=img-sat-solvers .../kissat .../cadical
+    .../bin/`) both do. The prior version fixed the capture at exactly two
+    `(\\S+)` groups after the tool name, so on a 3-source-plus-destination
+    line it grabbed the SECOND SOURCE as if it were the destination and
+    never saw the real one — openroad's own containment check then compared
+    the resolved binary's path against `[.../sta]` and reported it as
+    "resolves outside every path copied from our artefact" (a false
+    positive: the binary WAS ours, the check was looking at the wrong
+    token). `kissat`/`cadical` hit the identical bug but happened to print
+    text that run_tick.sh's grep filter does not match, so it never
+    surfaced there — same defect, silent in one caller and loud in another.
+
+    Fixed by taking the LAST whitespace-separated token on the line as the
+    destination, whatever the source count: `docker build` itself requires
+    the final COPY argument to be the destination when there is more than
+    one source, so this is not a heuristic — it is the same rule the builder
+    enforces.
     """
     out: Dict[str, List[str]] = {}
     for m in re.finditer(
-            r"^COPY\s+--from=img-([A-Za-z0-9_-]+)\s+(\S+)\s+(\S+)",
+            r"^COPY[ \t]+--from=img-([A-Za-z0-9_-]+)[ \t]+(\S+(?:[ \t]+\S+)*)$",
             dockerfile.read_text(errors="replace"), re.M):
-        out.setdefault(m.group(1).replace("_", "-"), []).append(m.group(3))
+        tokens = m.group(2).split()
+        dst = tokens[-1]
+        out.setdefault(m.group(1).replace("_", "-"), []).append(dst)
     return out
 
 
