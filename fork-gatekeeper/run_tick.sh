@@ -157,6 +157,23 @@ if [ -f "${DIR}/daily_release.py" ]; then
     head -1 "${RELEASE_OUT}" | sed 's/^/[release]   /' | tee -a "${LOG}"
     grep -E "VERSION|building|composing|UNRESOLVED|FAIL" "${RELEASE_OUT}" \
         | sed 's/^/[release]   /' | tee -a "${LOG}" || true
+    if [ "${release_rc}" != "0" ]; then
+        # vibeic-eda#96: head -1 above is right for a PASSING stage and wrong
+        # for a FAILING one -- on 2026-07-31 and 2026-08-05 it showed only a
+        # summary line truncated to a bare colon, while the actual
+        # "ERROR: failed to solve" sat ~130 lines into the same file, unread.
+        "${DIR}/release_failure_summary.sh" "${RELEASE_OUT}" \
+            | sed 's/^/[release]   /' | tee -a "${LOG}" || true
+        # Adjacent, same defect family: daily-release.txt is overwritten by
+        # the NEXT round, so a failure's full evidence survives only until
+        # tomorrow's 05:30 unless copied out now. Bounded retention (last 5)
+        # -- release failures are rare and cluster in bursts, not unbounded.
+        FAIL_ARCHIVE_DIR="${LOG_DIR}/failed-releases"
+        mkdir -p "${FAIL_ARCHIVE_DIR}"
+        cp "${RELEASE_OUT}" "${FAIL_ARCHIVE_DIR}/$(date -u +%Y-%m-%dT%H%M%SZ).txt"
+        ls -1t "${FAIL_ARCHIVE_DIR}"/*.txt 2>/dev/null | tail -n +6 | xargs -r rm -f
+        log "[release] full output archived to ${FAIL_ARCHIVE_DIR} (the next round overwrites daily-release.txt)"
+    fi
 else
     echo "MISSING: fork-gatekeeper/daily_release.py — nothing was released" \
         > "${RELEASE_OUT}"
