@@ -29,16 +29,16 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:cf20ce8-af7ea3
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:a3a9c75-3b7fd3
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:15ccb68-df0ea5
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:d1ee649-4527f0
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:c77a139-1b58cd
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:25e8bc3-0334b7d-fccd0f
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:7bb0908-09e392
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:e89f9b2-a3644f
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:17d29f9-97737c
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:6def8e3-b8d1e6
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:210aea2-52c997
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:66c632f-50fc93
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:4302860-c57936
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
