@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pytest
 import re
 import pathlib
@@ -318,22 +319,54 @@ def test_the_page_still_filters_on_integrated():
         "gapRows no longer applies the watch-only exclusion")
 
 
-def test_a_watch_only_fork_is_still_VISIBLE_on_the_page():
+def test_a_watch_only_fork_is_still_VISIBLE_on_the_page(tmp_path):
     """Excluded from the gap COUNT is not the same as erased. A fork nobody can
-    see is a fork nobody reviews."""
-    page = pathlib.Path("/home/reyerchu/vibeic.ai/eda-forks.html")
-    if not page.is_file():
-        return
-    html = page.read_text(encoding="utf-8", errors="replace")
-    import json, pathlib as _p
-    ledger_dir = _p.Path.home() / ".cache/eda-fork-gatekeeper/ledger"
+    see is a fork nobody reviews.
+
+    Asserted against a page this test GENERATES, never against the published
+    one. Reading the published file made this a ratchet on history instead of a
+    check on logic, and it deadlocked the publish: this suite gates
+    `build_page`, so the page could not gain a newly watch-only fork until it
+    already contained one. Measured 2026-08-10 — the round logged
+    `build_page SKIPPED — the round's own tests fail` with this as the only
+    failure, and no round could ever have cleared it.
+    """
+    # The ledgers this test reads and the ledgers build_page renders must be the
+    # SAME set, so the state dir is pinned for both rather than inherited. A
+    # dozen sibling test modules point GK_STATE_DIR at their own scratch dir;
+    # under the full suite that leaked into the subprocess and it rendered an
+    # empty LEDGERS, which reads exactly like the erasure this test is for.
+    state_dir = pathlib.Path.home() / ".cache/eda-fork-gatekeeper"
+    ledger_dir = state_dir / "ledger"
     if not ledger_dir.is_dir():
-        return
+        return                      # no live ledger on this host; nothing to render
+    watch_only = []
     for f in sorted(ledger_dir.glob("*.json")):
         if f.name == "index.json":
             continue
         d = json.loads(f.read_text(encoding="utf-8"))
         if d.get("integrated") is False and d.get("tool"):
-            assert d["tool"] in html, (
-                f"{d['tool']} is excluded from the gap count AND absent from the "
-                f"page — it has been erased rather than reclassified")
+            watch_only.append(d["tool"])
+    if not watch_only:
+        return                      # nothing is watch-only right now
+
+    out = tmp_path / "eda-forks.html"
+    r = subprocess.run(
+        [sys.executable, str(_HERE / "build_page.py"), "--out", str(out)],
+        capture_output=True, text=True, timeout=900,
+        env={**os.environ, "GK_STATE_DIR": str(state_dir)})
+    assert r.returncode == 0, f"build_page failed: {(r.stderr or r.stdout)[-2000:]}"
+    html = out.read_text(encoding="utf-8", errors="replace")
+
+    # The subject is the LEDGERS array the page renders its fork rows from, not
+    # the page text. `tool in html` passed even with the fork deleted from
+    # LEDGERS, because the name also occurs in an unrelated inbound-assessment
+    # block — a check that validated something ADJACENT to the claim.
+    m = re.search(r"const LEDGERS = (\[.*?\]);", html, re.S)
+    assert m, "no LEDGERS array on the generated page"
+    rendered = {d.get("tool") for d in json.loads(m.group(1))}
+
+    for tool in watch_only:
+        assert tool in rendered, (
+            f"{tool} is excluded from the gap count AND has no row in the page's "
+            f"LEDGERS — it has been erased rather than reclassified")
