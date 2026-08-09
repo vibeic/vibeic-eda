@@ -253,3 +253,87 @@ def test_the_separator_fallback_invents_no_pin_on_the_real_tree():
     assert not gained, (
         f"the fallback changed this tree's answer for {gained}; it was added to "
         f"make the derivation general, not to move a live row")
+
+
+# ── the SECOND axis the #81 invariant has to hold on: `integrated` ───────────
+#
+# The test above pins the contents-assertion axis and passed throughout, while
+# the page and the report disagreed again by the other route. MEASURED
+# 2026-08-09, same ledger, same minute:
+#
+#     fork_gap_report.py   Q1  image behind upstream : 0 across 0 fork(s)
+#     the published page   落後上游的 commit 數      : 0 +1?
+#
+# The `+1?` was icsprout55-pdk, a WATCH-ONLY MIRROR: no ARG pin, and
+# vibeic/icsprout55-pdk is a pushed mirror rather than a GitHub fork
+# (fork=false, parent=null), so no cross-repo compare resolves and no clone
+# exists to answer. With no pin there is no ref for "how far behind is our pin"
+# to start from -- the question does not apply, it is not merely unanswered.
+#
+# The report had always excluded it (`unmeasured` requires `r["integrated"]`);
+# the page's gapRows filtered only on assertions. So the page raised a false
+# open question that could never close -- the exact failure the assertion
+# exclusion exists to prevent, one axis over.
+
+def test_page_and_report_exclude_the_same_tools_on_the_integrated_axis():
+    """Both consumers must drop a fork the image does not build from, for the
+    same reason they both drop a contents assertion: the question is answered,
+    not open."""
+    import json, pathlib
+    ledger_dir = pathlib.Path.home() / ".cache/eda-fork-gatekeeper/ledger"
+    if not ledger_dir.is_dir():
+        return                      # no live ledger on this host; nothing to compare
+    rows = []
+    for f in sorted(ledger_dir.glob("*.json")):
+        if f.name == "index.json":
+            continue
+        rows.append(json.loads(f.read_text(encoding="utf-8")))
+    if not rows:
+        return
+
+    # the PAGE's rule, as build_page.py states it
+    page_excluded = {d.get("tool") for d in rows
+                     if d.get("pin_kind") == "contents_assertion"
+                     or d.get("integrated") is False}
+    # the REPORT's rule: a row is in neither `measurable` nor `unmeasured`
+    report_excluded = {d.get("tool") for d in rows
+                       if d.get("pin_kind") == "contents_assertion"
+                       or not d.get("integrated")}
+
+    assert page_excluded == report_excluded, (
+        f"page excludes {sorted(page_excluded)} but the report excludes "
+        f"{sorted(report_excluded)} — one ledger, two populations, which is the "
+        f"#81 defect by a different route")
+
+
+def test_the_page_still_filters_on_integrated():
+    """Red-proof for the fix itself: deleting the integrated clause from
+    build_page.py must fail here rather than quietly reintroducing the `+1?`."""
+    src = (_HERE / "build_page.py").read_text(encoding="utf-8")
+    assert "d.integrated === false" in src, (
+        "build_page.py no longer excludes forks the image does not build from; "
+        "the commits-behind card will report them as an unmeasured `+N?` that "
+        "can never close")
+    assert "!isWatchOnly(d)" in src, (
+        "gapRows no longer applies the watch-only exclusion")
+
+
+def test_a_watch_only_fork_is_still_VISIBLE_on_the_page():
+    """Excluded from the gap COUNT is not the same as erased. A fork nobody can
+    see is a fork nobody reviews."""
+    page = pathlib.Path("/home/reyerchu/vibeic.ai/eda-forks.html")
+    if not page.is_file():
+        return
+    html = page.read_text(encoding="utf-8", errors="replace")
+    import json, pathlib as _p
+    ledger_dir = _p.Path.home() / ".cache/eda-fork-gatekeeper/ledger"
+    if not ledger_dir.is_dir():
+        return
+    for f in sorted(ledger_dir.glob("*.json")):
+        if f.name == "index.json":
+            continue
+        d = json.loads(f.read_text(encoding="utf-8"))
+        if d.get("integrated") is False and d.get("tool"):
+            assert d["tool"] in html, (
+                f"{d['tool']} is excluded from the gap count AND absent from the "
+                f"page — it has been erased rather than reclassified")

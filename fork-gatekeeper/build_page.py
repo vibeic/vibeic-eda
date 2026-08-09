@@ -522,7 +522,30 @@ function enhBlock(tool){
   // an assertion from the gap is obvious. Leaving it in "could not be measured" would
   // replace a false gap with a false open question that never closes. "Not measured"
   // means the question is still open; this question is answered.
-  const gapRows       = LEDGERS.filter(d=>!isAssertion(d));
+  // A FORK THE IMAGE DOES NOT BUILD FROM IS NOT BEHIND — it is not on the line
+  // at all. `icsprout55-pdk` is registered as a WATCH-ONLY MIRROR: no ARG pin,
+  // and `vibeic/icsprout55-pdk` is a pushed mirror rather than a GitHub fork
+  // (fork=false, parent=null), so the cross-repo compare cannot resolve and no
+  // local clone exists to answer either. Its ledger says exactly that in
+  // `compare_error`. With no pin there is no ref for "how far behind is our
+  // pin" to start from, so the question is not unanswered — it does not apply.
+  //
+  // THE PAGE WAS THE ONE OUT OF STEP, not the report. `fork_gap_report`'s
+  // `unmeasured` has always required `r["integrated"]`, so it already excluded
+  // this row and printed `Q1 image behind upstream: 0 across 0 fork(s)` with no
+  // open question — while this card, reading the SAME ledger at the SAME moment,
+  // showed `0 +1?`. Two programs, one ledger, opposite answers (#29). Aligned
+  // here by adopting the report's rule rather than inventing a second one.
+  //
+  // EXCLUDED FROM BOTH the gap and the could-not-measure count, for the reason
+  // spelled out above for assertions: leaving it in "could not be measured"
+  // replaces a false gap with a false open question that never closes. Not
+  // measured means the question is still open; this question is answered.
+  //
+  // A FIELD, not a tool name: anything registered as watch-only is classified
+  // the morning it appears, with no edit here.
+  const isWatchOnly   = d => d.integrated === false;
+  const gapRows       = LEDGERS.filter(d=>!isAssertion(d) && !isWatchOnly(d));
   // A row that carries no `pin_kind` AT ALL is a third state — a ledger written before
   // the field existed. It is COUNTED, deliberately: not having classified a row is not
   // evidence that it has no gap, and a page that dropped it would under-report the one
