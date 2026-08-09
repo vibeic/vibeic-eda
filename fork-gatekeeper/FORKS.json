@@ -72,7 +72,8 @@
     {
       "tool": "icsprout55-pdk",
       "role": "PREVIEW-only 55nm open PDK (ICsprout Integrated Circuit Co. + Zhejiang University IC school + ECOS Team/ICT-CAS) — PDK data for vibe-ic's icsprout55 target (/foss/pdks/icsprout55). Production tapeout explicitly prohibited by the PDK's own README pending its first engineering-batch tapeout (Dec 2025); ships no DRC/LVS rule decks or SPICE device models as of this mirror (upstream README's own Todo list).",
-      "upstream": "openecos-projects/icsprout55-pdk"
+      "upstream": "openecos-projects/icsprout55-pdk",
+      "not_built_from": "PREVIEW-only upstream, mirrored so the daily round WATCHES it, not so the image builds from it. Its own README prohibits production tapeout pending the first engineering-batch run, and as of this mirror it ships no DRC/LVS rule decks and no SPICE device models -- the files a Phase-3 signoff or an analog corner sweep would actually read. Pinning it would add a PDK the flow cannot consume and make the image claim a capability it does not have. Revisit when the upstream Todo list (rules, models, PDN, RC) lands."
     },
     {
       "tool": "IHP-Open-PDK",

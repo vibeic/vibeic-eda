@@ -820,6 +820,30 @@ _UNPINNED_BASELINE: frozenset = frozenset()
 # BUILT FROM. It does not excuse carrying a patch that cannot reach a user.
 
 
+def declared_not_built_from(forks_json: Path) -> Dict[str, str]:
+    """tool -> the WRITTEN reason the image deliberately does not build from it.
+
+    Read from `FORKS.json`, beside the fork it is about, because that is the one
+    file the round already reads to know the fleet exists at all — a decision
+    kept anywhere else is a decision the next reader has to go find.
+
+    A MISSING or UNREADABLE file yields {} rather than raising: this feeds a
+    gate, and "the declarations could not be read" must never widen into "every
+    fork is excused". The empty answer excuses nothing, so the gate stays shut.
+    """
+    try:
+        d = json.loads(Path(forks_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, str] = {}
+    for f in d.get("forks", []) or []:
+        why = (f.get("not_built_from") or "").strip()
+        if why:
+            out[f.get("tool", "")] = why
+    out.pop("", None)
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", type=Path, default=Path("/home/reyerchu/vibeic-eda"))
@@ -921,8 +945,31 @@ def main(argv=None) -> int:
     # The four unpinned forks are a recorded, owner-pending state. NEW ones are
     # not, and a baseline that grew is a regression accommodated rather than
     # fixed — so both directions are checked.
+    # A DECLARED not-built-from is not the same finding as an undeclared one,
+    # and must not be answered by growing the baseline above (the comment there
+    # is explicit that a baseline which grows accommodates a regression rather
+    # than fixing it -- correct, and the reason this reads a declaration
+    # instead).
+    #
+    # icsprout55-pdk was the first fork registered as a WATCH-ONLY mirror: the
+    # round tracks it against upstream, and the image deliberately does not
+    # build from it because the PDK ships no DRC/LVS decks and no SPICE models,
+    # so there is nothing for a signoff or a corner sweep to read. That is a
+    # decision, and a decision belongs next to the fork it is about -- in
+    # FORKS.json, where the daily round already reads the fleet -- not in a
+    # frozenset here that says only "known", with the why in a code comment.
+    #
+    # The gate KEEPS ITS TEETH: a new unpinned fork with NO `not_built_from`
+    # still fails, which is the case the baseline mechanism exists for. Only a
+    # fork carrying a written reason is excused, and it is still PRINTED, so the
+    # state stays visible rather than becoming invisible by being accepted.
+    _declared = declared_not_built_from(Path(__file__).resolve().parent / "FORKS.json")
     _unpinned = set(rep["q2_forks_not_built_from_ours"])
-    _new = sorted(_unpinned - _UNPINNED_BASELINE)
+    for _t in sorted(set(_declared) & _unpinned):
+        _why = _declared[_t]
+        print(f"  [NOTE] {_t}: not built from ours BY DECLARATION — "
+              f"{_why if len(_why) <= 160 else _why[:160] + '…'}")
+    _new = sorted(_unpinned - _UNPINNED_BASELINE - set(_declared))
     _gone = sorted(_UNPINNED_BASELINE - _unpinned)
     if _gone:
         print(f"  [NOTE] baseline shrank — now pinned or no longer forked: "

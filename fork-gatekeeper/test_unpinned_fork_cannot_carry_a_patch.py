@@ -314,3 +314,60 @@ def test_the_fact_it_carries_is_still_reported(tmp_path):
     note = rep["rows"][0]["note"]
     assert "CONTENTS ASSERTION" in note and shas[0][:12] in note
     assert "rebuild" in note
+
+
+# ── a DECLARED not-built-from is excused; an undeclared one is not ───────────
+#
+# icsprout55-pdk was the first fork registered as a WATCH-ONLY mirror: tracked
+# against upstream, deliberately not built from, because the PDK ships no
+# DRC/LVS decks and no SPICE models and its own README prohibits production
+# tapeout. That is a decision, and it is written in FORKS.json beside the fork
+# it is about rather than in `_UNPINNED_BASELINE` -- whose own comment says a
+# baseline that GROWS accommodates a regression instead of fixing it.
+#
+# Both directions are pinned here, because "declared forks are excused" is only
+# safe while "undeclared forks still fail" stays true. The pair is the point.
+
+
+
+def test_a_declared_not_built_from_is_read_from_FORKS_json():
+    """The declaration is picked up from the shipped FORKS.json, not invented."""
+    import fork_gap_report as F
+    declared = F.declared_not_built_from(_HERE / "FORKS.json")
+    assert "icsprout55-pdk" in declared, (
+        "the shipped FORKS.json no longer declares icsprout55-pdk as watch-only; "
+        "if it was pinned, delete this test with the declaration")
+    why = declared["icsprout55-pdk"]
+    assert len(why) > 40, f"a declaration must state a REASON, got: {why!r}"
+
+
+def test_an_unreadable_declarations_file_excuses_nothing():
+    """Fail-shut. 'The declarations could not be read' must never widen into
+    'every fork is excused' — this feeds a gate."""
+    import fork_gap_report as F
+    assert F.declared_not_built_from(_HERE / "does-not-exist.json") == {}
+    import tempfile, pathlib
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write("{ not json at all")
+        bad = fh.name
+    try:
+        assert F.declared_not_built_from(pathlib.Path(bad)) == {}
+    finally:
+        pathlib.Path(bad).unlink()
+
+
+def test_a_blank_reason_does_not_count_as_a_declaration():
+    """An empty `not_built_from` is a field someone added and never filled in.
+    It must not excuse the fork — that is how a gate becomes a formality."""
+    import json as _j, tempfile, pathlib
+    import fork_gap_report as F
+    d = {"forks": [{"tool": "t1", "not_built_from": "   "},
+                   {"tool": "t2", "not_built_from": "a real, stated reason"}]}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        _j.dump(d, fh); bad = fh.name
+    try:
+        got = F.declared_not_built_from(pathlib.Path(bad))
+        assert "t1" not in got, "a blank reason was accepted as a declaration"
+        assert "t2" in got
+    finally:
+        pathlib.Path(bad).unlink()
