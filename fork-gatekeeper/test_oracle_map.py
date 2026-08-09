@@ -288,3 +288,68 @@ def test_a_ledger_without_measurements_is_refused(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", "-q", __file__]))
+
+
+# ── ledger order must come from the DATA, not from the filename ──────────────
+#
+# build_map reads ledgers[-1] and flip_range reads fails[-1] / reversed(passes),
+# so "last" has to mean NEWEST MEASUREMENT. The caller is run_tick.sh doing a
+# shell glob, which is lexicographic on the filename -- and version strings do
+# not sort chronologically that way (0.3.10 sorts before 0.3.9). The three
+# ledgers that existed when this was found happened to sort correctly, so the
+# order was right by luck of numbering, not by construction.
+#
+# The failure that invites is precisely the one this file exists to prevent: a
+# stale verdict outranking a current one and reporting a FIXED test as a dead
+# oracle. That had already happened once for drt:top_level_term2, for a
+# different reason (no newer ledger existed at all).
+
+def _order_ledger(tmp, name, measured_on, verdict, sha=None):
+    import json, pathlib
+    p = pathlib.Path(tmp) / f"L.{name}.json"
+    p.write_text(json.dumps({"tool": "X", "measured_on": measured_on,
+                             "measured_at_sha": sha or name,
+                             "verdicts": {"t": verdict}}))
+    return str(p)
+
+
+def test_newest_measurement_wins_even_when_the_filename_sorts_first(tmp_path):
+    """0.3.10 (newer) sorts BEFORE 0.3.9 (older) by filename. The newer
+    measurement must still be the authority."""
+    import oracle_map as O
+    old = _order_ledger(tmp_path, "0.3.9", "2026-01-01", "FAIL")
+    new = _order_ledger(tmp_path, "0.3.10", "2026-06-01", "PASS")
+    glob_order = sorted([old, new])          # what the shell hands over
+    assert glob_order[0].endswith("0.3.10.json"), "fixture no longer reproduces the hazard"
+    led = O.load_ledgers(glob_order)
+    assert led[-1]["verdicts"]["t"] == "PASS", (
+        "a stale verdict outranked a current one — ledger order is following the "
+        "filename again")
+
+
+def test_a_ledger_with_no_measured_on_sorts_oldest(tmp_path):
+    """Fail-safe direction: an undated ledger must not silently become the
+    authority over a dated one."""
+    import oracle_map as O
+    import json, pathlib
+    dated = _order_ledger(tmp_path, "0.9.0", "2026-06-01", "PASS")
+    undated = pathlib.Path(tmp_path) / "L.zzz.json"
+    undated.write_text(json.dumps({"tool": "X", "measured_at_sha": "zzz",
+                                   "verdicts": {"t": "FAIL"}}))
+    led = O.load_ledgers([str(undated), dated])
+    assert led[-1]["verdicts"]["t"] == "PASS"
+    led2 = O.load_ledgers([dated, str(undated)])
+    assert led2[-1]["verdicts"]["t"] == "PASS", "an undated ledger became the authority"
+
+
+def test_the_shipped_ledgers_are_in_measurement_order():
+    """Ground truth on the real files: whatever they are named, load_ledgers
+    must hand them back oldest-measured first."""
+    import oracle_map as O, glob, pathlib
+    here = pathlib.Path(__file__).resolve().parent
+    paths = sorted(glob.glob(str(here / "ORACLE_VERDICTS.OpenROAD.*.json")))
+    if len(paths) < 2:
+        return
+    led = O.load_ledgers(paths)
+    dates = [l.get("measured_on") or "" for l in led]
+    assert dates == sorted(dates), f"shipped ledgers not in measurement order: {dates}"

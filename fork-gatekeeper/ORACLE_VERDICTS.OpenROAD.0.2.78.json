@@ -1,0 +1,27 @@
+{
+  "_comment": "Measured verdicts, not inferred ones. oracle_map.py refuses to answer 'did this commit break an existing test?' from git alone, so this file records what was actually run.\n\nWHY THIS LEDGER EXISTS: the 0.2.63 ledger recorded drt:top_level_term2 = FAIL, and that was TRUE at the sha it names (2f9fbcd47e01). The golden was regenerated afterwards by b64a496b9 (2026-08-05), so from that commit on the FAIL described a tree that no longer existed -- and because oracle_map takes its verdicts from the NEWEST ledger it is given, 0.2.63 stayed newest and kept the test listed as a dead oracle for days after it was fixed. A verdict is a measurement OF A SHA; leaving the newest one behind the tree makes a stale measurement outrank a current one. Superseding it required measuring again, not editing the old file -- the old ledger is still correct about its own sha and is kept.\n\nMEASURED, not asserted: built at the pinned sha in openroad/ubuntu24.04-dev (./etc/Build.sh -cmake-build), `openroad -version` confirmed 193ee9ccfe3f5b9a669e9b4f94f26afdcbcee8b6, then `ctest -R '^drt\\.' -j16` -> '100% tests passed, 0 tests failed out of 21'. Verdicts parsed from the ctest result lines; a .tcl/.py pair that disagreed would have aborted the generation rather than collapsing to one verdict.",
+  "tool": "OpenROAD",
+  "measured_at_sha": "193ee9ccfe3f5b9a669e9b4f94f26afdcbcee8b6",
+  "measured_by": "ctest -R '^drt\\.' -j16, build2 (cmake) in openroad/ubuntu24.04-dev",
+  "measured_on": "2026-08-09",
+  "scope": "src/drt only -- 17 distinct test(s) from 21 registered drt ctest entries at this sha (.tcl/.py variants of one test collapse to a single key, matching the earlier ledgers' convention)",
+  "verdicts": {
+    "drt:cpp_tests": "PASS",
+    "drt:down_access_term": "PASS",
+    "drt:drc_test": "PASS",
+    "drt:ispd18_sample": "PASS",
+    "drt:ispd18_sample_incr": "PASS",
+    "drt:ndr_no_auto_taper": "PASS",
+    "drt:ndr_vias1": "PASS",
+    "drt:ndr_vias2": "PASS",
+    "drt:ndr_vias3": "PASS",
+    "drt:obstruction": "PASS",
+    "drt:single_step": "PASS",
+    "drt:ta_ap_aligned": "PASS",
+    "drt:ta_pin_aligned": "PASS",
+    "drt:top_level_term": "PASS",
+    "drt:top_level_term2": "PASS",
+    "drt:via_access_layer": "PASS",
+    "drt:via_patch_min_width": "PASS"
+  }
+}

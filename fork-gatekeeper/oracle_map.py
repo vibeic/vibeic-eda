@@ -264,6 +264,29 @@ def slice_of(repo: Path, sha: str) -> dict:
 
 
 def load_ledgers(paths: Sequence[str]) -> List[dict]:
+    """Ledgers in MEASUREMENT order, oldest first.
+
+    `build_map` takes its verdicts from `ledgers[-1]` and `flip_range` reads
+    `fails[-1]` / `reversed(passes)`, so "last" must mean NEWEST MEASUREMENT.
+    It used to mean "whatever order the caller passed", and the caller is
+    run_tick.sh doing `for L in ORACLE_VERDICTS.OpenROAD.*.json` — a shell glob,
+    i.e. LEXICOGRAPHIC ON THE FILENAME, which for version strings is not
+    chronological:
+
+        0.2.9  sorts AFTER  0.2.78          ('9' > '7')
+        0.3.10 sorts BEFORE 0.3.9           ('1' < '9')
+
+    Today's three files happen to sort correctly, so the ordering was right by
+    luck of numbering rather than by construction — and the failure it invites
+    is the exact one this file exists to prevent: a stale verdict outranking a
+    current one and reporting a fixed test as a dead oracle.
+
+    `measured_on` is already recorded in every ledger and already means this.
+    Sorting on it makes the order a property of the data instead of the
+    filename. Ties keep their given order (Python's sort is stable), and a
+    ledger with no `measured_on` sorts oldest — it cannot silently become the
+    authority, which is the fail-safe direction.
+    """
     out = []
     for p in paths:
         data = json.loads(Path(p).read_text())
@@ -272,6 +295,7 @@ def load_ledgers(paths: Sequence[str]) -> List[dict]:
                              f"measurements is not a ledger")
         data["_path"] = p
         out.append(data)
+    out.sort(key=lambda d: str(d.get("measured_on") or ""))
     return out
 
 
