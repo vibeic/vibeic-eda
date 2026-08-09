@@ -107,17 +107,28 @@ def _run(repo: Path, *args: str, timeout: int = 60):
                                            f"no answer: {type(exc).__name__}: {exc}")
 
 
+CAUSE_LINE_CAP = 160          # how much of a cause line is reported
+_ELISION = " ... "            # marks where the middle was cut
+
+
 def _first_error_line(cp) -> str:
     """The line of a failed command's output that NAMES the cause.
 
     git puts the diagnosis first and the boilerplate last, so `stderr[-1]` on an
     unreachable remote is `and the repository exists.` — a fragment identifying
-    nothing. Same reasoning, and the same choice, as `daily_0530._first_error_line`.
+    nothing. Same reasoning, and the same choice, as `daily_0530._first_error_line`
+    — including the MIDDLE elision: a tail cut keeps the path the reader already
+    knows and drops the words that name the cause, which under a deep checkout
+    path is the entire message.
     """
     for ln in ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines():
         ln = ln.strip()
         if ln:
-            return ln[:160]
+            if len(ln) <= CAUSE_LINE_CAP:
+                return ln
+            head = (CAUSE_LINE_CAP - len(_ELISION)) // 2
+            tail = CAUSE_LINE_CAP - len(_ELISION) - head
+            return f"{ln[:head]}{_ELISION}{ln[-tail:]}"
     return "no error text"
 
 

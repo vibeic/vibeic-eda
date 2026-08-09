@@ -141,6 +141,10 @@ def out(*a, cwd=None):
     return sh(*a, cwd=cwd).stdout.strip()
 
 
+CAUSE_LINE_CAP = 160          # how much of a cause line is reported
+_ELISION = " ... "            # marks where the middle was cut
+
+
 def _first_error_line(cp) -> str:
     """The line of a failed command's output that NAMES the cause.
 
@@ -156,11 +160,22 @@ def _first_error_line(cp) -> str:
     so the LAST line is `and the repository exists.` — a sentence fragment that
     identifies nothing. Reporting it publishes the least informative line git
     wrote. Take the first non-empty one.
+
+    A line too long to report whole loses its MIDDLE, never its tail. git
+    writes the subject first and the diagnosis last on that same line, so a
+    tail cut keeps the path -- which the reader already knows -- and drops the
+    only words this function exists to surface. Under a deep enough checkout
+    path the path IS the whole cap, and the function silently returns nothing
+    that names anything.
     """
     for ln in ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines():
         ln = ln.strip()
         if ln:
-            return ln[:160]
+            if len(ln) <= CAUSE_LINE_CAP:
+                return ln
+            head = (CAUSE_LINE_CAP - len(_ELISION)) // 2
+            tail = CAUSE_LINE_CAP - len(_ELISION) - head
+            return f"{ln[:head]}{_ELISION}{ln[-tail:]}"
     return "no error text"
 
 

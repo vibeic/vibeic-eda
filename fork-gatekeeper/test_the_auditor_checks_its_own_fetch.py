@@ -172,6 +172,25 @@ def test_the_unmeasured_row_names_the_cause_not_the_boilerplate(fleet):
     assert not row["note"].rstrip().endswith("and the repository exists."), row["note"]
 
 
+def test_the_cause_survives_a_line_too_long_to_report_whole():
+    """The cap must eat the MIDDLE of a long line, not the words naming the cause.
+
+    Same defect, same fix, as `daily_0530._first_error_line`. Pinned in both
+    places deliberately: the two copies are maintained by hand, so a change to
+    one that silently leaves the other tail-truncating has to fail somewhere.
+    """
+    mod = _load()
+    deep = "/very/deep/path/segment" * 9
+    line = f"fatal: '{deep}/gone' does not appear to be a git repository"
+    assert len(line) > 160, "fixture must exceed the cap to test anything"
+    cp = subprocess.CompletedProcess(["x"], 128, "", line + "\n")
+
+    got = mod._first_error_line(cp)
+    assert "does not appear to be a git repository" in got, got
+    assert got.startswith("fatal: '/very/deep"), got
+    assert len(got) <= 160, len(got)
+
+
 def test_a_fetch_that_exits_zero_but_refreshes_nothing_is_not_current(fleet):
     """rc=0 IS NOT ENOUGH, which is why this is not a one-line rc check.
 

@@ -222,6 +222,29 @@ def test_first_error_line_has_something_to_say_when_the_tool_said_nothing():
     assert D._first_error_line(cp) == "no error text"
 
 
+def test_the_cause_survives_a_line_too_long_to_report_whole():
+    """A long line must lose its MIDDLE, never the words that name the cause.
+
+    git writes the subject first and the diagnosis last on the same line:
+
+        fatal: '<path>' does not appear to be a git repository
+
+    so capping the tail keeps the path -- which the reader already knows --
+    and drops the only part this function exists to surface. A checkout under
+    a deep enough path made that the whole message. Found for real: the suite
+    failed under a 97-character basetemp because the cap ate the diagnosis.
+    """
+    deep = "/very/deep/path/segment" * 9        # comfortably past the cap
+    line = f"fatal: '{deep}/gone' does not appear to be a git repository"
+    assert len(line) > 160, "fixture must exceed the cap to test anything"
+    cp = subprocess.CompletedProcess(["x"], 128, "", line + "\n")
+
+    got = D._first_error_line(cp)
+    assert "does not appear to be a git repository" in got, got
+    assert got.startswith("fatal: '/very/deep"), got
+    assert len(got) <= 160, len(got)
+
+
 # ── 5. a hung command is answered, not waited on forever ─────────────────────
 def test_a_hung_command_returns_no_answer_rather_than_blocking():
     cp = D.sh("sleep", "30", timeout=1)
