@@ -147,6 +147,17 @@
           ],
           "why": "etc/Build.sh has defaulted to bazel since the 2026-07-29 daily merge, and the image is built with it, but our regression tests were still being written for CMake. Nothing compared the two target sets, so 27 of the fork's own tests -- including the proofs FIX_STATUS.md records for dpl, drt, fin, grt, ppl, psm, rsz and tap -- had stopped being reachable by the build that produces the binary, while the CMake run stayed green (vibe-ic#813). Registered here rather than in a program's own list so there is ONE declaration: daily_merge.py runs it before a merge is pushed, and check_fork_selftests.py runs the same command daily on the checked-out clone, which is the half a merge-triggered gate cannot reach -- all 27 arrived through our own patches, not an upstream merge.",
           "note": "Runs from a plain checkout in 0.15s: it parses src/*/test/CMakeLists.txt and src/*/**/BUILD and compares the two sets. It needs no bazel, no build and no PDK, which is what makes it safe to run in a merge worktree and on every tick."
+        },
+        {
+          "name": "severity-golden-parity",
+          "path": "etc/check_severity_golden_parity.py",
+          "cmd": [
+            "python3",
+            "etc/check_severity_golden_parity.py",
+            "."
+          ],
+          "why": "5549ae9a8a promoted DPL-0701 from logger_->warn to logger_->error and regenerated the goldens of the tests IT ADDED, leaving four upstream tests red for weeks -- dpl.{fragmented_row03,obstruction2,report_failures} and cts.array_no_blockages still recorded [WARNING DPL-0701]. Nothing noticed: a golden mismatch only surfaces under a full ctest, which the daily round does not run, so a fork patch could redden an upstream test and ship. The mismatch is visible in the source tree alone, which is what makes it checkable here at all.",
+          "note": "Static, no build, no PDK: 0.25s over 1403 goldens and 1631 emitted message ids, so it is safe in a merge worktree and on every tick. It matches on the message TEXT, not the id alone -- ODB-220 is both a logger_->error in dbPowerSwitch.cpp and, in eighteen goldens, the LEF parser's [WARNING ODB-0220] from lefMsgTable.h, which passes through no logger_-> call this scan can see. Keying on (module, id) alone reported all eighteen as defects on a correct tree. An id emitted at more than one severity is skipped rather than guessed at."
         }
       ]
     },
