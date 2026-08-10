@@ -29,16 +29,16 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ff43d02-979dbf
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:47e2b1e-f61441
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:15ccb68-df0ea5
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:c77a139-1b58cd
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:25e8bc3-0334b7d-fccd0f
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:7bb0908-09e392
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:907da31-86cd3f
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:e89f9b2-a3644f
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d31dcdb-db6ae8
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:66c632f-50fc93
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:8b0fcce-f36930
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:4302860-c57936
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
@@ -141,7 +141,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
-ARG COCOTB_REF=562d2400d70d3b77d87136e36eeda9d48c2de55c  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=ed5b9252a0f98df3b9ae033125e802afee7cd194  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
