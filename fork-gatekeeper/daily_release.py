@@ -547,7 +547,69 @@ def commit_release_record(eda_root: Path, version: str,
     if refused:
         note += (f"; {len(refused)} pin file(s) REFUSED, still uncommitted: "
                  + ", ".join(refused))
+
+    _pushed, _why = push_release_record(eda_root)
+    note += f"; {_why}"
     return True, note
+
+
+def push_release_record(eda_root: Path, branch: str = "main") -> Tuple[bool, str]:
+    """A release record nobody can read is not a record.
+
+    MEASURED 2026-08-12. The 05:30 round published `vibeic-eda:0.2.86` to the
+    registry at 06:19, committed the record plus the eight pin files it had
+    moved -- and nothing pushed it. `grep -n "git push" run_0530.sh
+    daily_0530.py daily_release.py` was EMPTY. The commit sat on the cron
+    host's checkout:
+
+        local  8a1f10c  release: record 0.2.86 as published
+        origin 7891724  (one commit behind)
+
+    Three things follow, and the first is what made it visible:
+
+      * THE PUBLIC PAGE INVENTS GAPS THAT DO NOT EXIST. `discover_forks` reads
+        each pin from GITHUB (`_gh_file`), not from this checkout, so it read
+        the pre-release ngspice pin b2e9c4067 while the repo already said
+        94d5ff8e1. Against the stale pin it reported "1 substantive commit of
+        ours past the pin, not shipped"; against the real one,
+        `rev-list 94d5ff8e..origin/master --not upstream/master` is 0. The
+        owner asked why the page did not say zero. It was right to ask.
+      * A FRESH CLONE REBUILDS SOMETHING OTHER THAN WHAT SHIPPED -- exactly the
+        failure `commit_release_record` exists to prevent. That fix made the
+        pins get COMMITTED; it did not make them get PUBLISHED, which is half
+        of it.
+      * The image version the page renders comes from GitHub's VERSION too, so
+        it lags the same way.
+
+    PUBLISHING AND RECORDING ARE ONE ACTION. By the time this runs the image is
+    in a registry and the decision is irrevocable; leaving the record behind
+    does not make anything safer, it only makes the repository disagree with
+    the world. Same shape as vibe-ic#754 ("publishing and anchoring are one
+    action"), one step further along the same path.
+
+    FAIL-SAFE ABOUT OTHER PEOPLE'S WORK. It refuses unless `origin/<branch>` is
+    an ancestor of HEAD, so it can never discard a commit that arrived while
+    the image was building -- a real window, since the build takes tens of
+    minutes. A refusal is reported, never silent: the caller prints it and the
+    record stays committed for a human to land.
+    """
+    rc, out, err = _sh(["git", "-C", str(eda_root), "fetch", "origin", branch],
+                       timeout=180)
+    if rc != 0:
+        return False, f"NOT PUSHED (fetch failed: {(err or out).strip()[:100]})"
+
+    rc, _, _ = _sh(["git", "-C", str(eda_root), "merge-base", "--is-ancestor",
+                    f"origin/{branch}", "HEAD"], timeout=60)
+    if rc != 0:
+        return False, (f"NOT PUSHED — origin/{branch} is not an ancestor of HEAD; "
+                       f"the remote moved while the image was building. The "
+                       f"record is committed; land it by hand.")
+
+    rc, out, err = _sh(["git", "-C", str(eda_root), "push", "origin", branch],
+                       timeout=900)
+    if rc != 0:
+        return False, f"NOT PUSHED (push failed: {(err or out).strip()[:200]})"
+    return True, "pushed"
 
 
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
