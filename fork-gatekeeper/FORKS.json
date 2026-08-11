@@ -168,7 +168,7 @@
     },
     {
       "tool": "OpenSTA",
-      "role": "static timing analysis — the signoff timing engine behind phase-3 STA (clean fork, no patches of ours yet)",
+      "role": "static timing analysis — the signoff timing engine behind phase-3 STA",
       "upstream": "The-OpenROAD-Project/OpenSTA"
     },
     {
