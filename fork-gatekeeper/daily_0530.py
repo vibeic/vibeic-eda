@@ -788,14 +788,37 @@ def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
     for fork, rep in sorted(report.items()):
         for c in rep.get("conflicted", []) or []:
             cases.append({**c, "fork": fork, "path": str(FORKS / fork)})
-    if not cases:
-        return {"cases": 0, "invoked": False}
 
     state_dir.mkdir(parents=True, exist_ok=True)
     pending = state_dir / "ai_decisions_pending.json"
+    brief_path = state_dir / "ai_decisions_brief.txt"
+
+    if not cases:
+        # THE ROUND THAT PROVES NOTHING IS PENDING MUST SAY SO.
+        #
+        # This used to `return` here, before the write -- so the one round that
+        # establishes the queue is empty was the one round that left yesterday's
+        # entries untouched. Measured 2026-08-12: the file still carried the
+        # OpenROAD/src/tap conflict from 08-11, whose merge (4ede5f5b17) was by
+        # then an ancestor of HEAD. Decided, resolved, pushed -- and still
+        # sitting in a file named `pending`, which is the file the next round
+        # hands to a decision-maker. Nothing else in the tree removes it.
+        #
+        # The history is not lost by this: `ai_decisions.log` is the record of
+        # what was decided and stays append-only. This is the WORK QUEUE, and a
+        # queue that cannot be emptied is not a queue.
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        pending.write_text("[]\n")
+        brief_path.write_text(
+            "No merge-vs-cherry-pick case is pending.\n\n"
+            f"The round of {stamp} walked every fork and found no conflicted "
+            "branch. Any case named here previously has been resolved -- see "
+            "ai_decisions.log for what was decided.\n")
+        return {"cases": 0, "invoked": False, "cleared": True}
+
     pending.write_text(json.dumps(cases, indent=2) + "\n")
     brief = _handoff_brief(cases)
-    (state_dir / "ai_decisions_brief.txt").write_text(brief)
+    brief_path.write_text(brief)
 
     if not apply:
         return {"cases": len(cases), "invoked": False,
