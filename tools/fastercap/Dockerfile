@@ -112,20 +112,56 @@ RUN mkdir -p /src \
 # symlink resolves to is the one that decides which binary users actually get,
 # so an assertion that only checks our own overlay path would pass on exactly
 # the failure it exists to catch.
+#
+# TWO THINGS WERE WRONG HERE UNTIL 2026-08-12, and they hid each other.
+#
+# 1. THE GATE COULD NOT FAIL. The line was
+#        "$BIN" -v 2>&1 | head -1;
+#    and a pipeline's status is its LAST command's, so `head` returned 0 no
+#    matter what the binary did. Under `set -e` that reads as an assertion and
+#    is not one: measured in image 0.2.84, both binaries exit 255 here and the
+#    build went green anyway.
+#
+# 2. `-v` WAS THE WRONG PROBE FOR A HEADLESS IMAGE. It routes through the GUI's
+#    about-box path, so in a container with no DISPLAY it dies before printing
+#    anything:
+#        $ FasterCap -v ; echo $?
+#        21:41:39: Error: Unable to initialize GTK+, is DISPLAY set properly?
+#        255
+#    Fixing only (1) would therefore have turned a silent gate into a red build
+#    on a tool that is in fact healthy — the capability users actually want is
+#    intact, and `-b` is where it lives:
+#        $ FasterCap -b ; echo $?
+#        Running FasterCap version 6.0.7
+#        Starting capacitance extraction with the following param...
+#        0
+#    So the probe now drives the SOLVER entry point, which is both the thing we
+#    ship FasterCap for and the thing that works without a display, and its
+#    status is captured BEFORE any pipe.
 RUN set -e; \
     for BIN in /foss/tools/fastercap/bin/FasterCap \
                /foss/tools/rftoolkit/bin/FasterCap; do \
       [ -x "$BIN" ] || { echo "FAIL: no FasterCap at $BIN"; \
                          find /foss/tools -name 'FasterCap*' | head -20; exit 1; }; \
-      "$BIN" -v 2>&1 | head -1; \
+      "$BIN" -b > /tmp/fastercap-probe.out 2>&1 && rc=0 || rc=$?; \
+      [ "$rc" = 0 ] \
+        || { echo "FAIL: $BIN -b exited $rc — the headless solver entry point"; \
+             echo "      does not run in this image"; \
+             cat /tmp/fastercap-probe.out; exit 1; }; \
+      grep -q 'FasterCap version' /tmp/fastercap-probe.out \
+        || { echo "FAIL: $BIN -b printed no version banner — it started and"; \
+             echo "      said nothing, which is what a broken build looks like"; \
+             cat /tmp/fastercap-probe.out; exit 1; }; \
+      head -1 /tmp/fastercap-probe.out; \
       ldd "$BIN" | grep -qi wx \
         || { echo "FAIL: $BIN is not linked against wxWidgets -- the base image's"; \
              echo "      build is, and dropping it would ship a quieter tool under"; \
              echo "      the same name"; ldd "$BIN" | head -20; exit 1; }; \
     done; \
+    rm -f /tmp/fastercap-probe.out; \
     cmp -s /foss/tools/fastercap/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap \
       || { echo "FAIL: the two install paths hold DIFFERENT binaries"; exit 1; }; \
-    echo "fastercap: runs at both paths, wx-linked, identical"
+    echo "fastercap: headless solver runs at both paths, wx-linked, identical"
 
 RUN mkdir -p /vibeic/provenance \
  && printf '{"tool":"fastercap","repo":"%s","ref":"%s"}\n' \
