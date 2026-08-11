@@ -63,6 +63,12 @@ echo "=== pre-push gates — $(git -C "$ROOT" rev-parse --short HEAD) ==="
 # CHEAP TIER: ~1s total, measured. A pre-push check that costs a minute is one
 # people learn to skip, so the cost is stated rather than assumed.
 run "pins agree in all three places" python3 "$ROOT/tools/check_pins_agree.py"
+# Runs BEFORE the pin gates below on purpose: they all match
+# `ARG <NAME>_REF=[0-9a-f]{40}` with the SHA as part of the pattern, so a ref
+# written as a branch is not something they disagree with — it is something
+# they never see. Three such refs shipped the ASAP7 device-LVS data from a
+# moving `main` while all of them stayed green (2026-08-12).
+run "every ref names a commit"       python3 "$ROOT/tools/check_refs_are_pinned.py" --root "$ROOT"
 run "every clone is a vibeic fork"   python3 "$ROOT/tools/check_fork_only.py"
 run "README counts reproduce"        python3 "$ROOT/tools/check_doc_counts.py"
 run "fork presence claims hold"      python3 "$ROOT/tools/check_fork_presence_claims.py"

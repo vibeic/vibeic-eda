@@ -88,7 +88,7 @@ ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-5a25d9
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:e282983-42ffe6
-ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-416e37
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b7e7e5
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -247,20 +247,50 @@ RUN git init /orfs -q \
 #   programs/asap7_finfet_lvs.py (KLayout geometric FinFET extract + NetlistComparer).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS asap7-lvs-src
-ARG ASAP7SC_REF=main
-ARG ASAP7PDK_REF=main
-ARG ASAP7KL_REF=main
-RUN git clone --depth 1 --branch ${ASAP7SC_REF} --filter=blob:none --sparse \
-      https://github.com/vibeic/asap7sc7p5t_28.git /a7sc \
+# PINNED TO SHAs, and it took until 2026-08-12. These three were `=main` and
+# were cloned with `--branch ${REF}`, i.e. the image built from whatever those
+# branches happened to point at that morning. Two consequences, and the second
+# is why it survived:
+#
+#   * the LVS source-of-truth for a whole PDK was not reproducible — two builds
+#     of the same vibeic-eda commit could ship different golden CDL;
+#   * EVERY pin and fork gate passed green over it. `tools/check_fork_only.py`
+#     and `tools/check_pins_agree.py` both look for SHA-SHAPED ARG values, so a
+#     ref reading `main` is not a pin they disagree with, it is a pin they do
+#     not see. Measured before this change: `check_fork_only` counted 61
+#     references across 20 files and said "61 ours, 0 pending" while mentioning
+#     asap7 zero times.
+#
+# `--branch` accepts a branch or a tag and NOT a commit, so pinning requires
+# fetching the object directly. Verified against the real remotes before
+# committing: `git fetch --depth 1 --filter=blob:none origin <sha>` is accepted,
+# and sparse-checkout still applies, so this keeps the shallow blobless sparse
+# clone the stage was written for.
+ARG ASAP7SC_REF=9f95dae104ee3fd4708339b1188ec9dec6b3867c
+ARG ASAP7PDK_REF=58d72c9d291e186a77468586ab0c43d8a21eda6a
+ARG ASAP7KL_REF=ef77f080381cab3993428492a3dcb41044c3f518
+RUN git init -q /a7sc \
+ && git -C /a7sc remote add origin https://github.com/vibeic/asap7sc7p5t_28.git \
+ && git -C /a7sc fetch --depth 1 --filter=blob:none origin ${ASAP7SC_REF} \
+ && git -C /a7sc sparse-checkout init --cone \
  && git -C /a7sc sparse-checkout set CDL/LVS \
- && git clone --depth 1 --branch ${ASAP7PDK_REF} --filter=blob:none --sparse \
-      https://github.com/vibeic/asap7_pdk_r1p7.git /a7pdk \
+ && git -C /a7sc checkout -q FETCH_HEAD \
+ && git init -q /a7pdk \
+ && git -C /a7pdk remote add origin https://github.com/vibeic/asap7_pdk_r1p7.git \
+ && git -C /a7pdk fetch --depth 1 --filter=blob:none origin ${ASAP7PDK_REF} \
+ && git -C /a7pdk sparse-checkout init --cone \
  && git -C /a7pdk sparse-checkout set models/hspice \
- && git clone --depth 1 --branch ${ASAP7KL_REF} \
-      https://github.com/vibeic/ASAP7_for_KLayout.git /a7kl \
+ && git -C /a7pdk checkout -q FETCH_HEAD \
+ && git init -q /a7kl \
+ && git -C /a7kl remote add origin https://github.com/vibeic/ASAP7_for_KLayout.git \
+ && git -C /a7kl fetch --depth 1 origin ${ASAP7KL_REF} \
+ && git -C /a7kl checkout -q FETCH_HEAD \
  && test -f /a7sc/CDL/LVS/asap7sc7p5t_28_R.cdl \
  && test -f /a7pdk/models/hspice/7nm_TT_160803.pm \
- && test -f /a7kl/asap7.lyt
+ && test -f /a7kl/asap7.lyt \
+ && test "$(git -C /a7sc rev-parse HEAD)"  = "${ASAP7SC_REF}" \
+ && test "$(git -C /a7pdk rev-parse HEAD)" = "${ASAP7PDK_REF}" \
+ && test "$(git -C /a7kl rev-parse HEAD)"  = "${ASAP7KL_REF}"
 
 # ---------------------------------------------------------------------------
 # Stage 11 — ALIGN (analog place & route: device-level SPICE netlist -> placed +
