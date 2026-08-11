@@ -54,7 +54,7 @@ variable "OPENROAD_RECIPE" { default = "ccc49b" }
 variable "YOSYS_RECIPE" { default = "20fb59" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "41eb29" }
-variable "LVS_RECIPE" { default = "fccd0f" }
+variable "LVS_RECIPE" { default = "223b54" }
 variable "FASTERCAP_RECIPE" { default = "b7e7e5" }
 variable "IVERILOG_RECIPE" { default = "94a664" }
 variable "KLAYOUT_RECIPE" { default = "a3644f" }
@@ -79,7 +79,7 @@ variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "94d5ff8e16024e119af347330640181f780b6c41" }
 variable "MAGIC_REF"       { default = "25e8bc39062f503ab26c20e09a4c94873b27156f" }
-variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
+variable "NETGEN_REF"      { default = "700b2baaebb020607c24a60814b3d0d28aa7160d" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
 # FasterCap checkout cannot configure. All three refs appear in the tag below, so
