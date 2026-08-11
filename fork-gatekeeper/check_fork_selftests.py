@@ -109,6 +109,60 @@ def declared(forks_json: Path | None = None) -> list[tuple[str, list[dict]]]:
     return out
 
 
+DEFAULT_LEDGER = Path(
+    os.environ.get("GK_STATE_DIR")
+    or os.path.expanduser("~/.cache/eda-fork-gatekeeper")) / "ledger"
+
+
+def coverage(forks_json: Path | None = None,
+             ledger: Path | None = None
+             ) -> tuple[list[tuple[str, int]], list[tuple[str, int]], list[str]]:
+    """Which patched forks have a declared check, and which have none.
+
+    Returns (gap, covered, unmeasurable):
+        gap           [(tool, ahead)] carrying OUR commits, declaring nothing
+        covered       [(tool, ahead)] carrying OUR commits, declaring something
+        unmeasurable  tools with no ledger row -- we cannot say either way
+
+    `ahead` is READ FROM THE LEDGER, not recomputed. `discover_forks` already
+    resolves each fork's upstream ref and counts, `check_ledger_is_fresh` already
+    guards that the answer is current, and a second implementation of "how many
+    commits are ours" is how two programs come to disagree about the same number
+    -- the defect vibeic-eda#29 was about, and the reason `declared()` above
+    reads FORKS.json rather than carrying its own list.
+
+    A fork with no ledger row is UNMEASURABLE, never zero. Treating a missing
+    measurement as "carries no patches" would make the coverage number improve
+    every time the ledger lost a row, which is precisely backwards.
+    """
+    f = forks_json or (HERE / "FORKS.json")
+    led = Path(ledger) if ledger is not None else DEFAULT_LEDGER
+    try:
+        data = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return [], [], []
+
+    gap: list[tuple[str, int]] = []
+    covered: list[tuple[str, int]] = []
+    unmeasurable: list[str] = []
+    for entry in data.get("forks", []):
+        tool = entry.get("tool", "")
+        if not tool:
+            continue
+        row = led / f"{tool}.json"
+        try:
+            ahead = json.loads(row.read_text()).get("ahead")
+        except (OSError, ValueError):
+            ahead = None
+        if ahead is None:
+            unmeasurable.append(tool)
+            continue
+        if ahead <= 0:
+            continue                      # nothing of ours to protect
+        (covered if entry.get("post_merge_check") else gap).append((tool, ahead))
+    return gap, covered, unmeasurable
+
+
 def check_fork(tool: str, checks: list[dict], forks_dir: Path,
                dm, log_dir: Path | None) -> list[dict]:
     clone = forks_dir / tool
@@ -165,6 +219,7 @@ def main(argv=None) -> int:
     ap.add_argument("--forks-dir", default=str(DEFAULT_FORKS_DIR))
     ap.add_argument("--tool", action="append", help="only these tools")
     ap.add_argument("--forks-json", help="override FORKS.json (tests)")
+    ap.add_argument("--ledger", help="ledger dir the coverage line reads")
     ap.add_argument("--json", help="write the full verdict here")
     ap.add_argument("--log-dir", help="write per-fork detail here")
     args = ap.parse_args(argv)
@@ -207,6 +262,30 @@ def main(argv=None) -> int:
     print(f"\nfork self-checks: {len(results)} declared, "
           f"{len(results) - len(failed) - len(unknown)} pass, "
           f"{len(failed)} FAIL, {len(unknown)} COULD-NOT-CHECK")
+
+    # THE DENOMINATOR. Without it the line above reads as a statement about the
+    # fleet, when it is a statement about the three checks that happen to exist.
+    # Measured 2026-08-12: one fork of twenty declared anything, and the three
+    # OpenROAD checks were each written AFTER a defect of their class had
+    # already shipped -- so the classes are known real and the rest of the fleet
+    # is unwatched. Reported, not folded into rc: see the module docstring.
+    gap, covered, unmeasurable = coverage(
+        Path(args.forks_json) if args.forks_json else None,
+        Path(args.ledger) if args.ledger else None)
+    if gap or covered or unmeasurable:
+        cov_n = sum(a for _, a in covered)
+        gap_n = sum(a for _, a in gap)
+        print(f"  coverage: {len(covered)} of {len(covered) + len(gap)} forks "
+              f"that carry our patches declare a check "
+              f"({cov_n} of {cov_n + gap_n} of our commits)")
+        if gap:
+            print(f"  NO DECLARED CHECK — {len(gap)} fork(s), {gap_n} of our "
+                  f"commits, nothing watches them:")
+            for tool, ahead in sorted(gap, key=lambda x: -x[1]):
+                print(f"      {tool:<18} {ahead:>4} of our commits")
+        if unmeasurable:
+            print(f"  coverage UNMEASURED for {len(unmeasurable)} fork(s) "
+                  f"(no ledger row): {', '.join(sorted(unmeasurable))}")
 
     if failed:
         print("\nFAIL: a fork's own declared check is red on the tree the image "
