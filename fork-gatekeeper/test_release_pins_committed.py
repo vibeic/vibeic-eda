@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,12 @@ _spec = importlib.util.spec_from_file_location(
 C = importlib.util.module_from_spec(_spec)
 sys.modules["check_release_pins_committed"] = C
 _spec.loader.exec_module(C)                                        # type: ignore
+
+_dspec = importlib.util.spec_from_file_location(
+    "daily_release_under_test", HERE / "daily_release.py")
+D = importlib.util.module_from_spec(_dspec)
+sys.modules["daily_release_under_test"] = D
+_dspec.loader.exec_module(D)                                       # type: ignore
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -352,3 +359,71 @@ def test_every_checker_in_this_directory_is_called_by_something():
     assert "check_release_pins_committed.py" in code, \
         "the reference above is in a comment only — the sweep test would " \
         "still flag this file as unwired"
+
+
+# --- the release path now closes the gap itself (vibeic-eda#71 -> #105) -----
+
+def _release_repo(tmp_path):
+    """A repo shaped like the release path leaves it: pin edited in the tree,
+    VERSION/RELEASED.json written, nothing committed yet."""
+    repo = tmp_path / "eda"
+    (repo / "tools" / "openroad").mkdir(parents=True)
+    (repo / "tools" / "openroad" / "Dockerfile").write_text(
+        f"ARG OPENROAD_REF={'a'*40}\n")
+    (repo / "docker-bake.hcl").write_text(
+        f'variable "OPENROAD_REF" {{ default = "{"a"*40}" }}\n')
+    (repo / "VERSION").write_text("0.0.1\n")
+    (repo / "RELEASED.json").write_text('{"version": "0.0.1"}\n')
+    for a in (["init", "-q"],
+              ["config", "user.name", "t"], ["config", "user.email", "t@t"],
+              ["add", "-A"], ["commit", "-qm", "base"]):
+        subprocess.run(["git", "-C", str(repo)] + a, check=True,
+                       capture_output=True)
+    # what a release run then does
+    (repo / "tools" / "openroad" / "Dockerfile").write_text(
+        f"ARG OPENROAD_REF={'b'*40}\n")
+    (repo / "VERSION").write_text("0.0.2\n")
+    (repo / "RELEASED.json").write_text('{"version": "0.0.2"}\n')
+    return repo
+
+
+def test_the_release_commit_carries_the_pins_it_moved(tmp_path):
+    """THE FIX. The pins the run moved land in the SAME commit as the record,
+    so a fresh clone rebuilds what that commit says shipped. Measured over
+    0.2.65->0.2.84 this was thirty consecutive follow-up commits."""
+    repo = _release_repo(tmp_path)
+    ok, note = D.commit_release_record(
+        repo, "0.0.2", ["tools/openroad/Dockerfile"])
+    assert ok, note
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                           capture_output=True, text=True).stdout
+    assert "tools/openroad/Dockerfile" not in dirty, \
+        f"the pin the release moved is still uncommitted:\n{dirty}"
+    assert "pin file" in note, note
+
+
+def test_a_pin_file_with_a_human_edit_is_refused_and_named(tmp_path):
+    """The old docstring's fear, kept and narrowed: a pin file carrying
+    anything other than pin lines is someone else's work and must not be swept
+    into an automated release commit. It is REFUSED and reported, never
+    silently included and never silently dropped."""
+    repo = _release_repo(tmp_path)
+    p = repo / "tools" / "openroad" / "Dockerfile"
+    p.write_text(p.read_text() + "RUN echo a-human-was-editing-this\n")
+
+    ok, note = D.commit_release_record(
+        repo, "0.0.2", ["tools/openroad/Dockerfile"])
+    assert ok, note                       # the RECORD still lands
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                           capture_output=True, text=True).stdout
+    assert "tools/openroad/Dockerfile" in dirty, \
+        "a pin file with a non-pin change was swept into the release commit"
+    assert "REFUSED" in note and "openroad" in note, note
+
+
+def test_it_still_never_uses_add_dash_A():
+    """Unchanged by the fix: explicit paths only."""
+    src = (HERE / "daily_release.py").read_text(encoding="utf-8")
+    seg = src[src.index("def commit_release_record"):]
+    seg = seg[:seg.index("\ndef ", 10)]
+    assert '"-A"' not in seg and '"--all"' not in seg

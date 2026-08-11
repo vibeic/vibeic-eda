@@ -414,7 +414,40 @@ def write_released_record(eda_root: Path, version: str,
     return rec
 
 
-def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
+#: A changed line in a pin file that is a PIN and nothing else. Anything a
+#: release run writes into these files matches one of these; anything that does
+#: not is a human's edit and is refused rather than swept into a release commit.
+_PIN_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"ARG\s+[A-Z0-9_]+_REF=[0-9a-f]{40}"                      # tools/*/Dockerfile
+    r"|ARG\s+IMG_[A-Z0-9_]+=\S+"                              # root Dockerfile tag
+    r"|variable\s+\"[A-Z0-9_]+_(?:REF|RECIPE)\"\s*\{.*\}"     # docker-bake.hcl
+    r")")
+
+
+def _diff_is_only_pins(eda_root: Path, rel: str) -> Tuple[bool, str]:
+    """Does `rel`'s working-tree diff contain pin lines and nothing else?
+
+    The question this answers is "is every change here one THIS PROGRAM makes",
+    not "did this program make them" — a stricter reading would need to diff
+    against a snapshot, and the looser one is what the refusal is for: keeping a
+    human's half-finished edit out of an automated release commit.
+    """
+    rc, out, err = _sh(["git", "-C", str(eda_root), "diff", "-U0", "--", rel],
+                       timeout=60)
+    if rc != 0:
+        return False, f"git diff failed: {(err or out).strip()[:60]}"
+    for line in out.splitlines():
+        if line[:1] not in ("+", "-") or line[:3] in ("+++", "---"):
+            continue
+        if not _PIN_LINE_RE.match(line[1:]):
+            return False, f"non-pin change: {line[1:].strip()[:48]}"
+    return True, ""
+
+
+def commit_release_record(eda_root: Path, version: str,
+                          pin_files: Optional[List[str]] = None
+                          ) -> Tuple[bool, str]:
     """Commit VERSION + RELEASED.json. vibeic-eda#71.
 
     THE PUBLISH HALF IS DURABLE AND THE RECORD HALF WAS NOT. `docker push` puts
@@ -429,10 +462,31 @@ def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
     longer reproduced, so `check_release_recorded` read "this pin set has never
     been released" about a pin set that had.
 
-    COMMITS ONLY THE TWO RECORD FILES, by explicit path. A release run's tree
-    also holds the pin edits it made; those are a separate decision that goes
-    through review, and sweeping them in would publish an unreviewed pin change
-    under a release commit. Never `-A`.
+    PUBLISHING AND PIN-RECORDING ARE ONE ACTION — the same shape as vibe-ic#754
+    ("publishing and anchoring are one action"), one step earlier in the same
+    path.
+
+    This used to commit ONLY the two record files, on the reasoning that "a
+    release run's tree also holds the pin edits it made; those are a separate
+    decision that goes through review". Measured over 0.2.65 -> 0.2.84, that
+    review never once changed anything: THIRTY consecutive follow-up commits,
+    every one of them recording exactly the refs the image was built from,
+    because by the time this function runs there IS no other correct value —
+    `rewrite_pin` wrote those refs, the image was built from them, an 11-tool
+    smoke test passed on it, and `docker push` put it in a registry. The
+    decision is forty minutes old and irrevocable; what was left was the
+    bookkeeping, and leaving it out meant a fresh clone rebuilt something other
+    than what this very commit's RELEASED.json claims shipped.
+
+    So the pin files THIS RUN MOVED are committed here too, by explicit path,
+    from the list the program already keeps (`rewrite_pin` returns the files it
+    changed). Never `-A`.
+
+    The old docstring's fear is real and is KEPT, narrowed to what it is
+    actually about: sweeping in an edit nobody reviewed. A pin file whose
+    working-tree diff contains anything other than pin-shaped lines (a ref, a
+    recipe digest, an IMG tag) is REFUSED and named, because that is someone
+    else's uncommitted work and a release commit is not where it belongs.
 
     Does not push: whether the record reaches origin is the caller's call, and a
     failed push must not look like a failed release. Returns (committed, note)
@@ -448,6 +502,18 @@ def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
     present = [f for f in files if (eda_root / f).is_file()]
     if not present:
         return False, "neither VERSION nor RELEASED.json exists"
+
+    # The pin files this run moved, each admitted only if its diff is nothing
+    # but pin lines. `refused` is reported, never silently dropped: a pin left
+    # uncommitted is exactly the state check_release_pins_committed exists to
+    # catch, so the operator has to hear about it here rather than tomorrow.
+    admitted, refused = [], []
+    for rel in sorted(set(pin_files or [])):
+        if not (eda_root / rel).is_file():
+            continue
+        ok, why = _diff_is_only_pins(eda_root, rel)
+        (admitted if ok else refused).append(rel if ok else f"{rel} ({why})")
+    present += admitted
     rc, out, err = _sh(["git", "-C", str(eda_root), "status", "--porcelain",
                         "--"] + present, timeout=60)
     if rc != 0:
@@ -463,11 +529,25 @@ def commit_release_record(eda_root: Path, version: str) -> Tuple[bool, str]:
            f"Written by daily_release after the image was pushed. The publish is "
            f"durable (it is in a registry); this is the half that was not "
            f"(vibeic-eda#71).\n")
+    if admitted:
+        msg += ("\nThe pins this run moved are committed here too, so a fresh "
+                "clone rebuilds what this record says shipped:\n"
+                + "".join(f"  {f}\n" for f in admitted))
+    if refused:
+        msg += ("\nNOT committed — carries changes beyond the pin lines, which "
+                "are someone else's to review:\n"
+                + "".join(f"  {f}\n" for f in refused))
     rc, out, err = _sh(["git", "-C", str(eda_root), "commit", "-m", msg,
                         "--"] + present, timeout=120)
     if rc != 0:
         return False, f"git commit failed: {(err or out).strip()[:160]}"
-    return True, f"recorded {version} in a commit"
+    note = f"recorded {version} in a commit"
+    if admitted:
+        note += f" with {len(admitted)} pin file(s)"
+    if refused:
+        note += (f"; {len(refused)} pin file(s) REFUSED, still uncommitted: "
+                 + ", ".join(refused))
+    return True, note
 
 
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
@@ -948,12 +1028,21 @@ def main(argv=None) -> int:
         # yosys and verilator — "bake would publish a tag the composing
         # Dockerfile does not pull" — reported AFTER the release, by which point
         # the round had already failed to compose.
+        # The pin files THIS RUN wrote, accumulated as they are written so the
+        # record commit can name them by explicit path rather than re-derive
+        # "which files hold a pin" — a second list that would drift from the
+        # first. `rewrite_pin` already returns the paths it changed; the other
+        # two writers report WHAT moved, not where, and each owns one file.
+        pin_files: List[str] = [f for m in moved for f in (m.get("files") or [])]
+
         for s2 in write_recipe_vars(root, targets):
             print(f"  recipe changed (after pin move): {s2}")
+            pin_files.append("docker-bake.hcl")
 
         result["retagged"] = retag_images(root, refs_now, targets)
         for t in result["retagged"]:
             print(f"  retag {t}")
+            pin_files.append("Dockerfile")
 
         if not a.no_build:
             builder = preferred_builder()
@@ -1154,7 +1243,7 @@ def main(argv=None) -> int:
                         ["python3", str(root / "sync_image_version.py"),
                          "--set", new], cwd=str(root))
                     print(f"  docs: {'synced to ' + new if _rc == 0 else 'SYNC FAILED — ' + (_dout or '').strip()[-160:]}")
-                    _ok, _note = commit_release_record(root, new)
+                    _ok, _note = commit_release_record(root, new, pin_files)
                     print(f"  record: {_note}")
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
