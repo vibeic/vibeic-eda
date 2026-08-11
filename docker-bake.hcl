@@ -51,21 +51,21 @@ variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
 variable "OPENROAD_RECIPE" { default = "ccc49b" }
-variable "YOSYS_RECIPE" { default = "6aee4b" }
+variable "YOSYS_RECIPE" { default = "20fb59" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
-variable "NGSPICE_RECIPE" { default = "d5a2e9" }
+variable "NGSPICE_RECIPE" { default = "41eb29" }
 variable "LVS_RECIPE" { default = "fccd0f" }
 variable "FASTERCAP_RECIPE" { default = "b7e7e5" }
-variable "IVERILOG_RECIPE" { default = "86cd3f" }
+variable "IVERILOG_RECIPE" { default = "94a664" }
 variable "KLAYOUT_RECIPE" { default = "a3644f" }
-variable "VERILATOR_RECIPE" { default = "0eee18" }
+variable "VERILATOR_RECIPE" { default = "a54b3f" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
-variable "XSCHEM_RECIPE" { default = "36efe0" }
-variable "SLANG_RECIPE" { default = "c57936" }
-variable "XYCE_RECIPE" { default = "5a25d9" }
+variable "XSCHEM_RECIPE" { default = "df070e" }
+variable "SLANG_RECIPE" { default = "d4a8cf" }
+variable "XYCE_RECIPE" { default = "599c12" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
-variable "SV_ELAB_RECIPE" { default = "42ffe6" }
+variable "SV_ELAB_RECIPE" { default = "d3eb7b" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -74,10 +74,10 @@ variable "SV_ELAB_RECIPE" { default = "42ffe6" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "cf27a31e509df57e7ea0013f762ed32257420513" }
-variable "YOSYS_REF"       { default = "44a3235ffa7ea5682313e20bb3494bdfc2685770" }
+variable "YOSYS_REF"       { default = "436c9700de3896430a4094f262f1a96e8ccd48cd" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
-variable "NGSPICE_REF"     { default = "b2e9c4067ff0167cc84f82d24c153c11ca443635" }
+variable "NGSPICE_REF"     { default = "94d5ff8e16024e119af347330640181f780b6c41" }
 variable "MAGIC_REF"       { default = "25e8bc39062f503ab26c20e09a4c94873b27156f" }
 variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
@@ -87,16 +87,16 @@ variable "NETGEN_REF"      { default = "0334b7dfb1d6adce0a8079f5552f68982815d3d9
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "907da3156fc7ce8047e6180762a80f1467994277" }
+variable "IVERILOG_REF"    { default = "65dd66856c289fce2b896148011620d222374954" }
 variable "KLAYOUT_REF"     { default = "e89f9b272eb4dcf676029672bd7bc9aef6a961cb" }
-variable "VERILATOR_REF"   { default = "c09b302b19c67e116e1ce21a9d340e98fc457787" }
+variable "VERILATOR_REF"   { default = "48b0027d0764b9fd2efb39bbd17983e1bfa27025" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
-variable "XSCHEM_REF" { default = "8869a957ccad366b07bb0eb25ce60aa26aff6261" }
+variable "XSCHEM_REF" { default = "ecdac027f5a3ef167bf33ff6fb00d682e9fec584" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "43028607069b954beaf3f5afd5a73016957c0162" }
+variable "SLANG_REF" { default = "e222e7dc0250231312f14c37d47404a49df00fe2" }
 variable "XYCE_REF" { default = "24e13434180c40f32f16101f4e236819c9809f62" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
-variable "SV_ELAB_REF" { default = "e2829839afc62961d704123f30ed46e75477f33c" }
+variable "SV_ELAB_REF" { default = "27544445467056f7ebab5b9173a094f9942f19e2" }
 
 function "short" {
   params = [ref]

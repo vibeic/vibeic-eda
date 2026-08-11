@@ -30,16 +30,16 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:cf27a31-ccc49b
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:44a3235-6aee4b
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:436c970-20fb59
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:b2e9c40-d5a2e9
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:94d5ff8-41eb29
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:25e8bc3-0334b7d-fccd0f
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:907da31-86cd3f
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:65dd668-94a664
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:e89f9b2-a3644f
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:c09b302-0eee18
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:48b0027-a54b3f
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:8869a95-36efe0
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:4302860-c57936
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ecdac02-df070e
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e222e7d-d4a8cf
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -84,10 +84,10 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-a9f473
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-5a25d9
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-599c12
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:e282983-42ffe6
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:2754444-d3eb7b
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b7e7e5
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
@@ -182,7 +182,7 @@ RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb         
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=56496f3980fb6e9e58f10c8aea4a98949c0fe5f2  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=f9ec54a6de7b2bc69fd586015f6ebdab34eca69c  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
