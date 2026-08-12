@@ -150,13 +150,40 @@ def pins_at_rev(root: Path, rev: str) -> Dict[str, str]:
         if rc != 0:
             raise CouldNotTell(f"cannot read {path} at {rev}: "
                                f"{(err or text).strip()[:160]}")
+        # STRUCTURAL first: pair each ARG with the repo cloned in its own clone
+        # step, not by mangling the repo name into an ARG name. Name-mangling
+        # cannot pair a fork whose ARG is an abbreviation -- ASAP7SC_REF pins
+        # `asap7sc7p5t_28`, and no amount of case/underscore folding turns one
+        # into the other -- so all three asap7 forks read as `absent` at HEAD
+        # while RELEASED.json recorded them, i.e. this check reported an
+        # outstanding review that did not exist and would have gone on
+        # reporting it forever (vibeic-eda#104 finding 2, whose fix taught
+        # `check_pins_current` the same lesson and left this second consumer
+        # with its own stale copy of the pairing).
+        #
+        # Importing is safe here in a way it was not for check_pins_current:
+        # `parse_dockerfile_pins` takes TEXT, so this function keeps reading
+        # from `git show <rev>:<path>` and never touches the working tree,
+        # which is the entire point of this file.
+        structural: Dict[str, str] = {}
+        try:
+            import discover_forks
+            for tool, meta in (discover_forks.parse_dockerfile_pins(text) or {}).items():
+                repo, sha = meta.get("repo") or tool, meta.get("ref")
+                if isinstance(sha, str) and len(sha) == 40:
+                    structural[repo] = sha
+        except Exception:                                           # noqa: BLE001
+            structural = {}                       # fall through to name-pairing
+
         refs = dict(REF_RE.findall(text))
         repos = REPO_RE.findall(text)
         for repo in dict.fromkeys(repos):
-            key = repo.upper().replace("-", "_").replace(".", "_")
-            sha = refs.get(key)
+            sha = structural.get(repo)
+            if sha is None:
+                key = repo.upper().replace("-", "_").replace(".", "_")
+                sha = refs.get(key)
             if sha is None:                        # repo `OpenROAD` vs ARG `OPENROAD`
-                flat = key.replace("_", "")
+                flat = repo.upper().replace("-", "_").replace(".", "_").replace("_", "")
                 sha = next((v for k, v in refs.items()
                            if k.replace("_", "") == flat), None)
             if sha:
