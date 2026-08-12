@@ -342,7 +342,7 @@ RUN git init -q /a7sc \
 # ---------------------------------------------------------------------------
 FROM alpine/git AS align-src
 ARG ALIGN_PUBLIC_REF=e392ae4789eb49193a4865244d8cc31dbe1744b7  # pinned; branch master — vibeic fork is 0 commits ahead / 0 behind upstream ALIGN-analoglayout/ALIGN-public (align/__init__.py declares __version__ 0.9.8); forked so ALIGN is patchable in-tree, and BUILT FROM SOURCE below rather than pip-installed from PyPI
-ARG ALIGN_PDK_SKY130_REF=427b3b94242fdcf8009e418f6bbe14286fc71334  # pinned; branch main — carries our fix(mos): honour netlist channel length L instead of drawing every gate at 150nm, guarded by tests/test_channel_length.py (which ships its own negative control)
+ARG ALIGN_PDK_SKY130_REF=427b3b94242fdcf8009e418f6bbe14286fc71334  # pinned; branch main — carries TWO fixes of ours, both of which the build gate below runs the guards for: fix(mos) honour netlist channel length L instead of drawing every gate at 150nm (db6d7f1, guarded by tests/test_channel_length.py) and fix(mos) honour netlist width W instead of quantising it to a 210nm fin pitch (427b3b9, THIS pin, guarded by tests/test_drawn_width.py). Both files ship their own negative control.
 RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public     && git -C /align/ALIGN-public     checkout ${ALIGN_PUBLIC_REF} \
  && git clone https://github.com/vibeic/ALIGN-pdk-sky130.git /align/ALIGN-pdk-sky130 && git -C /align/ALIGN-pdk-sky130 checkout ${ALIGN_PDK_SKY130_REF} \
  && test -f /align/ALIGN-public/setup.py \
@@ -409,12 +409,28 @@ RUN unset PYTHONPATH \
       || { echo '=== ALIGN self-test FAILED — run.log follows (the build layer is about to be discarded, so it is printed here) ==='; \
            tail -120 /tmp/align-selftest/run.log; exit 1; }; } \
  && /foss/tools/align/bin/python -c 'import gdspy; lib=gdspy.GdsLibrary(infile="/tmp/align-selftest/FIVE_TRANSISTOR_OTA_0.gds"); cell=lib.top_level()[0]; ps=cell.get_polygons(by_spec=True); n=sum(len(v) for v in ps.values()); gates=sorted({round((p[:,0].max()-p[:,0].min())*1e9) for p in ps[(66,20)] if (p[:,1].max()-p[:,1].min()) >= (p[:,0].max()-p[:,0].min())}); print("ALIGN self-test: top cell %s, geometry polygons=%d, vertical poly 66/20 gate lengths(nm)=%s" % (cell.name, n, gates)); assert n > 0, "FAIL: ALIGN emitted a GDS with no geometry"; assert gates == [500], "FAIL: gates not drawn at the netlist L=500nm -> the sky130 PDK in this image is NOT our patched fork"' \
-# and the PDK fork's own regression guard, which ships a NEGATIVE CONTROL proving the
-# guard is capable of failing (revert the fix -> 3 of its 6 tests fail).
+# and the PDK fork's own regression guards, which ship their own NEGATIVE CONTROLS
+# proving they are capable of failing.
+#
+# `tests/`, NOT ONE FILE. This named tests/test_channel_length.py until 2026-08-12,
+# and the fork has no CI of its own, so nothing anywhere ran the OTHER file —
+# tests/test_drawn_width.py, 15 of the fork's 21 tests, and the guards for the W
+# fix, which is the commit this stage actually pins. A guard nobody runs is a
+# guard that is not armed. MEASURED, inside the shipped image, by reverting the W
+# fix in the PDK source and running both forms of this line:
+#
+#   $ patch -p1 -R < w_fix_SKY130_PDK.patch   # SKY130_PDK/gen_param.py, mos.py
+#   $ pytest -q tests/test_channel_length.py  -> 6 passed          OLD_GATE_RC=0
+#   $ pytest -q tests/                        -> 4 failed, 8 passed,
+#                                                9 errors           NEW_GATE_RC=1
+#
+# The image would have built GREEN with the W fix gone. Cost of arming it is the
+# 15 extra tests, ~200s, in a stage that is deliberately isolated so it rebuilds
+# only when an ALIGN pin or this recipe changes — not on every release.
  && cd /opt/align-src/ALIGN-pdk-sky130 \
- && env -u PYTHONPATH PATH=/foss/tools/align/bin:$PATH /foss/tools/align/bin/python -m pytest -q tests/test_channel_length.py \
+ && env -u PYTHONPATH PATH=/foss/tools/align/bin:$PATH /foss/tools/align/bin/python -m pytest -q tests/ \
  && rm -rf /tmp/align-selftest /opt/align-src/ALIGN-pdk-sky130/.pytest_cache \
- && echo "ALIGN OK: built from vibeic source; sky130 PDK honours netlist L; 6/6 channel-length guards pass"
+ && echo "ALIGN OK: built from vibeic source; sky130 PDK honours netlist L and W; 21/21 PDK guards pass"
 
 # ===========================================================================
 # Runtime: layer the patched tools onto the iic-osic-tools base.
