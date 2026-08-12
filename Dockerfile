@@ -35,7 +35,7 @@ ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:94d5ff8-41eb29
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:25e8bc3-700b2ba-223b54
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:65dd668-94a664
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:e89f9b2-a3644f
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:9a6d572-1b8ed1
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:48b0027-a54b3f
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ecdac02-df070e
@@ -165,7 +165,7 @@ ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced f
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
-ARG SBY_REF=1230919c27d6ce3f9d1a9d295e535d987a1fd6e3  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
+ARG SBY_REF=2c2f04e96154995677fb604d697dc894ac680a69  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone ${COCOTB_COVERAGE_REPO}  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone ${PYUVM_REPO}            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
