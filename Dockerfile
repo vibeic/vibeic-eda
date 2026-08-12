@@ -88,7 +88,7 @@ ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-599c12
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:2754444-d3eb7b
-ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b7e7e5
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is

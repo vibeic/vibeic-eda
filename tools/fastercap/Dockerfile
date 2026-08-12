@@ -81,9 +81,32 @@ RUN mkdir -p /src \
  # (wxNewId, ~wxArrayString), which is what a position bug looks like as
  # opposed to a missing-library one. CMAKE_CXX_STANDARD_LIBRARIES appends to
  # the END of every link line, which is where they have to be.
- && WXFLAGS="$(wx-config --cxxflags)" \
- && WXLIBS="$(wx-config --libs)" \
+ #
+ # HEADLESS, AND THE `base` wx COMPONENT TO MATCH. Upstream's README is explicit
+ # for exactly this environment — "Linux 64 bits headless: you **must** set the
+ # switch FASTFIELDSOLVERS_HEADLESS as ON, as in a headless Linux distro you have
+ # no drivers at all for video" — and the first version of this recipe did not,
+ # so it produced the GUI build. wxWidgets initialises its GUI before FasterCap
+ # parses argv, so in a container EVERY entry point except `-b` died at
+ # `Unable to initialize GTK+, is DISPLAY set properly?` with rc=255 and an
+ # empty stdout. Measured on the binary this recipe replaced (the base image's,
+ # /foss/tools/bin/FasterCap, 469 624 bytes) the same invocations answer
+ # normally: `-v` -> rc=74 with the banner and a named file error, `-h` -> rc=64
+ # with the usage text, no arguments -> rc=64 with "launched without enough
+ # arguments". So the base image, which carries a VNC desktop and could have
+ # shipped the GUI build, shipped the headless one; going headless here is a
+ # return to what users had, not a capability we are taking away. (Our headless
+ # rebuild is 469 624 bytes too.)
+ #
+ # `--libs base` / `--cxxflags base`, not the bare query. The bare form resolves
+ # to -lwx_gtk3u_core and friends, so the binary links GTK regardless of what
+ # cmake was told, and `--cxxflags base` is also where wx's own -DwxUSE_GUI=0
+ # comes from. Passing the switch without the components leaves the GUI
+ # libraries on the link line and the defect in place.
+ && WXFLAGS="$(wx-config --cxxflags base)" \
+ && WXLIBS="$(wx-config --libs base)" \
  && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DFASTFIELDSOLVERS_HEADLESS=ON \
       -DCMAKE_CXX_FLAGS="${WXFLAGS}" \
       -DCMAKE_CXX_STANDARD_LIBRARIES="${WXLIBS}" \
       -DCMAKE_INSTALL_PREFIX=/foss/tools/fastercap \
@@ -128,40 +151,88 @@ RUN mkdir -p /src \
 #        $ FasterCap -v ; echo $?
 #        21:41:39: Error: Unable to initialize GTK+, is DISPLAY set properly?
 #        255
-#    Fixing only (1) would therefore have turned a silent gate into a red build
-#    on a tool that is in fact healthy — the capability users actually want is
-#    intact, and `-b` is where it lives:
-#        $ FasterCap -b ; echo $?
-#        Running FasterCap version 6.0.7
-#        Starting capacitance extraction with the following param...
-#        0
-#    So the probe now drives the SOLVER entry point, which is both the thing we
-#    ship FasterCap for and the thing that works without a display, and its
-#    status is captured BEFORE any pipe.
+#    Fixing only (1) would therefore have turned a silent gate into a red build.
+#    The first repair moved the probe onto `-b`, the one entry point a GUI build
+#    still reaches without a display, and declared the tool healthy. That was the
+#    wrong conclusion, and it is repaired properly above: `-b` was not the only
+#    thing users touch, it was the only thing left working.
+#
+# 3. THE PROBE MUST ASSERT THE PROPERTY, NOT THE ONE SURVIVING PATH. What a
+#    headless image owes its users is that the tool STARTS without a display,
+#    whatever you type — so that is what is asserted here, on the plainest
+#    invocation there is (no arguments at all, which is what a doctor probe or a
+#    confused human runs). Upstream's own headless build answers it:
+#        $ FasterCap ; echo $?
+#        FasterCap version 6.0.7
+#        FasterCap launched without enough arguments! ...
+#        64
+#    A usage error with a name on it is a healthy tool; rc=255 and an empty
+#    stdout is not, and no exit code alone can tell those apart — hence the
+#    assertion is on the CONTENT (banner present, display error absent) with the
+#    status captured before any pipe.
+#
+# 4. AND THE SOLVER IS ASSERTED ON ITS VALUE. `FasterCap -b` with no input file
+#    is not a smoke test; it is the tool declining to work. (In the GUI build it
+#    even exited 0 while doing so, which is how it came to be used as a gate.)
+#    The probe below solves a real two-plate geometry and requires a capacitance
+#    matrix to come out, so the number-producing path is covered, not just the
+#    process-starts path.
+#
+# 5. LINKAGE, BOTH DIRECTIONS. wx must still be there (the base image's build is
+#    wx-linked, and dropping it would ship a quieter tool under the same name),
+#    and GTK must NOT be — that is the structural signature of the headless
+#    build, and naming it makes a future recipe that loses
+#    -DFASTFIELDSOLVERS_HEADLESS=ON fail with the cause printed rather than with
+#    a runtime GTK error to interpret. It is also the only form of this check
+#    that still holds if the builder ever has a DISPLAY of its own.
 RUN set -e; \
+    mkdir -p /tmp/fastercap-smoke; \
+    printf '0 lower plate\nQ g1 0.0 0.0 0.0  1.0 0.0 0.0  1.0 1.0 0.0  0.0 1.0 0.0\n' \
+      > /tmp/fastercap-smoke/plate1.txt; \
+    printf '0 upper plate\nQ g2 0.0 0.0 1.0  1.0 0.0 1.0  1.0 1.0 1.0  0.0 1.0 1.0\n' \
+      > /tmp/fastercap-smoke/plate2.txt; \
+    printf '0 two parallel plates\nC plate1.txt 1.0 0.0 0.0 0.0\nC plate2.txt 1.0 0.0 0.0 0.0\n' \
+      > /tmp/fastercap-smoke/two.lst; \
     for BIN in /foss/tools/fastercap/bin/FasterCap \
                /foss/tools/rftoolkit/bin/FasterCap; do \
       [ -x "$BIN" ] || { echo "FAIL: no FasterCap at $BIN"; \
                          find /foss/tools -name 'FasterCap*' | head -20; exit 1; }; \
-      "$BIN" -b > /tmp/fastercap-probe.out 2>&1 && rc=0 || rc=$?; \
+      "$BIN" < /dev/null > /tmp/fastercap-nodisplay.out 2>&1 && rc=0 || rc=$?; \
+      grep -q 'FasterCap version' /tmp/fastercap-nodisplay.out \
+        || { echo "FAIL: $BIN printed no version banner when run with no"; \
+             echo "      arguments (rc=$rc) — in a container with no DISPLAY this"; \
+             echo "      is indistinguishable from a broken install. Build the"; \
+             echo "      headless variant (-DFASTFIELDSOLVERS_HEADLESS=ON), which"; \
+             echo "      is what upstream's README requires for a headless Linux."; \
+             cat /tmp/fastercap-nodisplay.out; exit 1; }; \
+      ! grep -qiE 'unable to initialize|is DISPLAY set' /tmp/fastercap-nodisplay.out \
+        || { echo "FAIL: $BIN needs an X display to start (rc=$rc)"; \
+             cat /tmp/fastercap-nodisplay.out; exit 1; }; \
+      ( cd /tmp/fastercap-smoke && "$BIN" -b two.lst -a0.01 < /dev/null ) \
+        > /tmp/fastercap-solve.out 2>&1 && rc=0 || rc=$?; \
       [ "$rc" = 0 ] \
-        || { echo "FAIL: $BIN -b exited $rc — the headless solver entry point"; \
-             echo "      does not run in this image"; \
-             cat /tmp/fastercap-probe.out; exit 1; }; \
-      grep -q 'FasterCap version' /tmp/fastercap-probe.out \
-        || { echo "FAIL: $BIN -b printed no version banner — it started and"; \
-             echo "      said nothing, which is what a broken build looks like"; \
-             cat /tmp/fastercap-probe.out; exit 1; }; \
-      head -1 /tmp/fastercap-probe.out; \
+        || { echo "FAIL: $BIN -b exited $rc on the two-plate smoke geometry"; \
+             tail -30 /tmp/fastercap-solve.out; exit 1; }; \
+      grep -q 'Capacitance matrix is:' /tmp/fastercap-solve.out \
+        || { echo "FAIL: $BIN -b produced no capacitance matrix — it ran and"; \
+             echo "      extracted nothing, which is what a broken solver looks like"; \
+             tail -30 /tmp/fastercap-solve.out; exit 1; }; \
+      head -1 /tmp/fastercap-nodisplay.out; \
       ldd "$BIN" | grep -qi wx \
         || { echo "FAIL: $BIN is not linked against wxWidgets -- the base image's"; \
              echo "      build is, and dropping it would ship a quieter tool under"; \
              echo "      the same name"; ldd "$BIN" | head -20; exit 1; }; \
+      ! ldd "$BIN" | grep -qi gtk \
+        || { echo "FAIL: $BIN is linked against GTK — this is the GUI build, and"; \
+             echo "      in a container it dies at GUI init on every entry point"; \
+             echo "      except -b. Configure with -DFASTFIELDSOLVERS_HEADLESS=ON"; \
+             echo "      and wx-config's 'base' component."; \
+             ldd "$BIN" | grep -i -E 'wx|gtk'; exit 1; }; \
     done; \
-    rm -f /tmp/fastercap-probe.out; \
+    rm -rf /tmp/fastercap-nodisplay.out /tmp/fastercap-solve.out /tmp/fastercap-smoke; \
     cmp -s /foss/tools/fastercap/bin/FasterCap /foss/tools/rftoolkit/bin/FasterCap \
       || { echo "FAIL: the two install paths hold DIFFERENT binaries"; exit 1; }; \
-    echo "fastercap: headless solver runs at both paths, wx-linked, identical"
+    echo "fastercap: starts with no display, solves the two-plate geometry at both paths, wx-linked, no GTK, identical"
 
 RUN mkdir -p /vibeic/provenance \
  && printf '{"tool":"fastercap","repo":"%s","ref":"%s"}\n' \
