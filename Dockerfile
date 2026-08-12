@@ -32,10 +32,10 @@ ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:cf27a31-ccc49b
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4e78474-fcef15
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:583fa5f-86940a
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:e6e9d9b-91e2b9e-89d84c
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:5e6b340-c3c877
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ec84b22-832462
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:1d657c0-851642
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:794d65b-f8d9fd
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e4f8ea6-e50711
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ecdac02-df070e
@@ -84,7 +84,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-a9f473
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-599c12
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-0fc0d3
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:2754444-d3eb7b
@@ -142,11 +142,11 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=ed5b9252a0f98df3b9ae033125e802afee7cd194  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=3ffd5254973ced1875007607c787142e2512b749  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
-ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced from
+ARG PYUVM_REF=e24dd26486da457ecff71e9b0bb9fa42f80aad79  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
@@ -1450,8 +1450,18 @@ RUN /foss/tools/bin/eqy --help >/dev/null \
 #
 # Run as USER 1000 from the read-only /vibeic tree, because that is the user and
 # the layout a caller gets; each gate makes its own mktemp work directory.
-RUN /vibeic/tests/magic/test/run_all.sh \
- && echo "magic fork regression gates: all green against the shipped binary"
+#
+# `bash -lc`, not the default `/bin/sh -c`, for the same reason: a LOGIN shell is
+# what a caller gets, and this base configures its toolchain in
+# /etc/profile.d/iic-osic-tools-setup.sh -- PDK, PDKPATH and the /foss/tools/bin
+# PATH entry all appear only there. A non-login RUN leaves magic to fall back to
+# a default tech whose internal unit is not the one the grid gates hand-compute
+# against, and two of them then fail arithmetic that is fine in every shell a
+# user will ever open. Measured on the released 0.2.89 with the new magic
+# mounted at its own prefix: `bash -lc` 10/10 green, `bash -c` and `sh -c` both
+# 7 passed / 2 failed (def_mfggrid_snap, def_ndr_via_byrule) / 1 skipped -- so
+# the discriminator is the login shell, not the shell and not the binary.
+RUN ["/bin/bash", "-lc", "/vibeic/tests/magic/test/run_all.sh && echo 'magic fork regression gates: all green against the shipped binary'"]
 
 RUN n=0; for f in /foss/tools/bin/*; do \
       [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink "$f")"; n=$((n+1)); }; \
