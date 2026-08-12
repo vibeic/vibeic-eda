@@ -41,13 +41,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Tools whose pin is written in the ROOT Dockerfile rather than in a
-#: `tools/<tool>/Dockerfile`: the stage-8 verification toolchain is cloned by
-#: SHA in the `tb-src` stage and pip/make-installed in the runtime, so it has no
-#: per-tool artefact directory. Named explicitly rather than inferred from "does
-#: `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name would
-#: fall through to the root Dockerfile, find no such ARG, and compare the image
-#: against the empty string.
-STAGE8 = {"cocotb", "cocotb-coverage", "pyuvm", "sby"}
+#: `tools/<tool>/Dockerfile`: source stages in the composing file, cloned by SHA
+#: and installed or copied straight into the runtime, so they have no per-tool
+#: artefact directory. The stage-8 verification toolchain comes from `tb-src`;
+#: `asap7-lvs` is the ASAP7 golden CDL / hspice models / KLayout tech from
+#: `asap7-lvs-src` (vibeic-eda#104). Named explicitly rather than inferred from
+#: "does `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name
+#: would fall through to the root Dockerfile, find no such ARG, and compare the
+#: image against the empty string.
+ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs"}
 
 #: tool -> the ARG that its provenance must report, in `pin_file(tool)`.
 #: Multi-source artefacts report the first; the second is checked via the tag.
@@ -62,13 +64,14 @@ PRIMARY = {
     "fastercap": "FASTERCAP_REF",
     "cocotb": "COCOTB_REF", "cocotb-coverage": "COCOTB_COVERAGE_REF",
     "pyuvm": "PYUVM_REF", "sby": "SBY_REF",
+    "asap7-lvs": "ASAP7SC_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
 
 
 def pin_file(tool: str) -> Path:
     """The Dockerfile the tool's `PRIMARY` ARG is written in."""
-    return ROOT / "Dockerfile" if tool in STAGE8 else ROOT / "tools" / tool / "Dockerfile"
+    return ROOT / "Dockerfile" if tool in ROOT_PINNED else ROOT / "tools" / tool / "Dockerfile"
 
 # The dated exceptions are shared with check_fork_only, deliberately. If this
 # check applied the rule more strictly than the one that gates the source, a
@@ -81,6 +84,36 @@ from check_fork_only import pending as _pending  # noqa: E402
 def run(*cmd) -> tuple[int, str]:
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def pinned_forks() -> dict:
+    """Every vibeic fork the build clones at a pinned commit — the denominator.
+
+    Read from `check_pins_current.pin_sites`, which is the same reader the
+    release record uses, so this cannot drift away from what `pins_fingerprint`
+    covers.
+    """
+    sys.path.insert(0, str(ROOT / "fork-gatekeeper"))
+    from check_pins_current import pin_sites          # noqa: E402
+    return {repo: site["ref"] for repo, site in pin_sites(ROOT).items()}
+
+
+def covered_forks(record: dict) -> set:
+    """The forks ONE provenance record makes a statement about.
+
+    `repo` is the artefact's primary source. `also` is the optional map a
+    multi-source stage uses to name the rest, so a record can cover more than one
+    fork without the checker having to know which stage built what.
+    """
+    out = set()
+    repo = record.get("repo") or ""
+    m = re.search(r"github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", repo, re.I)
+    if m:
+        out.add(m.group(1))
+    also = record.get("also")
+    if isinstance(also, dict):
+        out |= set(also)
+    return out
 
 
 def main(argv) -> int:
@@ -107,6 +140,7 @@ def main(argv) -> int:
 
     PENDING = _pending()
     bad, deferred, seen = [], [], 0
+    covered: set = set()
     try:
         for tool, key in PRIMARY.items():
             want = ARG.findall(pin_file(tool).read_text())
@@ -125,6 +159,7 @@ def main(argv) -> int:
             except Exception:
                 bad.append(f"{tool}: provenance is not JSON: {body[:120]!r}")
                 continue
+            covered |= covered_forks(got)
             repo, ref = got.get("repo", ""), got.get("ref", "")
             if not re.match(r"https://github\.com/vibeic/", repo, re.I):
                 slug = re.sub(r"^https://github\.com/", "", repo, flags=re.I)
@@ -164,6 +199,33 @@ def main(argv) -> int:
             print("  " + d)
     print("check_image_provenance: %d/%d tools in %s are at the pinned commit, "
           "%d from a vibeic/ repo" % (seen, len(PRIMARY), image, seen - len(deferred)))
+
+    # AND THE DENOMINATOR, STATED (vibeic-eda#104 finding 2). `19/19` was true
+    # and read as "every fork we ship". It is 19 of the records that exist, and
+    # a fork with no record is not a FAIL here — it is absent from both sides of
+    # the fraction, which is why asap7sc7p5t_28 could be unpinned, unrecorded and
+    # unmentioned while this printed a confident PASS over it. The set that
+    # matters is the forks the build CLONES, so that is what is divided into, and
+    # the ones no record speaks for are NAMED rather than silently excluded.
+    #
+    # Not an error: a missing record is a gap in what the image records, and
+    # failing here would only invite the record to be written without being
+    # checked. It is printed on every run so it cannot go unnoticed, and the
+    # remedy is a record from the stage that clones it, exactly as `asap7-lvs`
+    # now does.
+    try:
+        pins = pinned_forks()
+    except Exception as exc:                      # never turn a PASS into a crash
+        print(f"  (could not compute the fork denominator: {exc})")
+        return 0
+    unspoken = sorted(set(pins) - covered)
+    print("check_image_provenance: %d of %d pinned fork(s) are named by a record "
+          "in the image" % (len(pins) - len(unspoken), len(pins)))
+    if unspoken:
+        print("  NOT CHECKED — no provenance record in the image speaks for "
+              "these, so nothing here verifies what commit they carry:")
+        for repo in unspoken:
+            print(f"    {repo}")
     return 0
 
 

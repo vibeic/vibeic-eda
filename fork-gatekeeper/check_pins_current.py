@@ -128,35 +128,59 @@ def tree_basis(eda_root: Path) -> dict:
             "behind_basis": behind_basis}
 
 
-def pinned_refs(eda_root: Path) -> Dict[str, str]:
-    """fork repo -> pinned SHA, over every Dockerfile that clones a vibeic fork.
+def pin_sites(eda_root: Path) -> Dict[str, Dict[str, str]]:
+    """fork repo -> {'ref': sha, 'arg': 'ASAP7SC_REF'}, over every Dockerfile.
 
-    Pairs `ARG <TOOL>_REF=<sha>` with the `github.com/vibeic/<repo>` it feeds, by
-    NAME rather than position: `tools/lvs/Dockerfile` builds magic AND netgen
-    from one file, so a first-match parse silently drops one of them. My first
-    pass at this in shell dropped eight of fourteen tools by name-matching alone,
-    which is the under-report this file is written against.
+    ONE READER FOR ONE FACT (vibeic-eda#104 finding 2). Which `ARG <X>_REF` pins
+    which clone was, until now, answered here and in `daily_release.ref_arg_names`
+    by MANGLING THE NAME: upper-case the repo, swap `-`/`.` for `_`, look for an
+    ARG of that name, then retry with the underscores removed. That rule holds
+    only where somebody happened to name the ARG after the repo, and it fails
+    silently — not with an error, but by returning a smaller set:
+
+        asap7sc7p5t_28    -> ASAP7SC7P5T_28  != ASAP7SC_REF
+        asap7_pdk_r1p7    -> ASAP7_PDK_R1P7  != ASAP7PDK_REF
+        ASAP7_for_KLayout -> ASAP7_FOR_KLAYOUT != ASAP7KL_REF
+
+    Three forks we own, all cloned by the build, all absent from the pin set —
+    so absent from `RELEASED.json`'s `pins`, so outside `pins_fingerprint`, so
+    two images built on either side of a change to the ASAP7 golden CDL carried
+    an identical release record. Every pin gate passed, over a set that did not
+    contain them.
+
+    `discover_forks.parse_dockerfile_pins` already answers this correctly, and
+    has since vibeic-eda#54: it pairs by the clone's SYNTAX — `--branch ${X_REF}`
+    before the URL, `checkout ${X_REF}` after it, `git -C <dir> checkout ${X_REF}`
+    for the multi-clone RUN — and `test_discover_forks_versions` pins the exact
+    three-clones-in-one-RUN case above. Two readers of one fact is how they came
+    to disagree; this delegates rather than re-deriving.
+
+    Only clone-driven pins are returned. `parse_dockerfile_pins` also reports
+    ARG-ONLY entries (`open_pdks`, whose artefact is prebuilt and merely asserted
+    at build time) under `pinned_via`; those are not fork checkouts and are not
+    what this function has ever meant.
     """
-    pins: Dict[str, str] = {}
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import discover_forks as _df
+
+    out: Dict[str, Dict[str, str]] = {}
     files = sorted((eda_root / "tools").glob("*/Dockerfile"))
     if (eda_root / "Dockerfile").is_file():
         files.append(eda_root / "Dockerfile")
     for df in files:
         text = df.read_text(errors="replace")
-        refs = dict(re.findall(r"^ARG\s+([A-Z0-9_]+)_REF=([0-9a-f]{40})",
-                               text, re.M))
-        repos = re.findall(
-            r"github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?[\s\"'\\]", text)
-        for repo in dict.fromkeys(repos):
-            key = repo.upper().replace("-", "_").replace(".", "_")
-            sha = refs.get(key)
-            if sha is None:                    # repo `OpenROAD` vs ARG `OPENROAD`
-                flat = key.replace("_", "")
-                sha = next((v for k, v in refs.items()
-                            if k.replace("_", "") == flat), None)
-            if sha:
-                pins[repo] = sha
-    return pins
+        for meta in _df.parse_dockerfile_pins(text).values():
+            if meta.get("pinned_via") is not None:
+                continue                      # declared-and-asserted, never cloned
+            if not re.fullmatch(r"[0-9a-f]{40}", meta.get("ref") or ""):
+                continue                      # a pin is a commit
+            out.setdefault(meta["repo"], {"ref": meta["ref"], "arg": meta["arg"]})
+    return out
+
+
+def pinned_refs(eda_root: Path) -> Dict[str, str]:
+    """fork repo -> pinned SHA, over every Dockerfile that clones a vibeic fork."""
+    return {repo: site["ref"] for repo, site in pin_sites(eda_root).items()}
 
 
 def _branches(repo: str) -> List[Tuple[str, str]]:

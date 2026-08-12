@@ -325,6 +325,23 @@ RUN git init -q /a7sc \
  && test "$(git -C /a7sc rev-parse HEAD)"  = "${ASAP7SC_REF}" \
  && test "$(git -C /a7pdk rev-parse HEAD)" = "${ASAP7PDK_REF}" \
  && test "$(git -C /a7kl rev-parse HEAD)"  = "${ASAP7KL_REF}"
+# AND THE IMAGE MUST SAY WHAT IT CARRIES (vibeic-eda#104 finding 2). The three
+# `rev-parse` assertions above run at BUILD time and then vanish with the stage.
+# Nothing in the shipped image recorded which commit these trees came from, so
+# `check_image_provenance` — the one check that reads the IMAGE rather than the
+# source — had no file to open for them and reported a confident `19/19` over a
+# set they were not in. That is the ASAP7 golden CDL: the netlist
+# `programs/asap7_finfet_lvs.py` compares every extracted ASAP7 layout against.
+#
+# Same shape as every other stage's record, and the same shape the checker reads.
+# One record per ARTEFACT naming its primary source, which is the convention
+# `lvs.json` (magic + netgen) and `fastercap.json` (three sibling repos) already
+# set; the other two refs are asserted immediately above and travel with it.
+RUN mkdir -p /vibeic/provenance \
+ && printf '{"tool":"asap7-lvs","repo":"%s","ref":"%s","also":{"asap7_pdk_r1p7":"%s","ASAP7_for_KLayout":"%s"}}\n' \
+      "https://github.com/vibeic/asap7sc7p5t_28.git" "${ASAP7SC_REF}" \
+      "${ASAP7PDK_REF}" "${ASAP7KL_REF}" \
+      > /vibeic/provenance/asap7-lvs.json
 
 # ---------------------------------------------------------------------------
 # Stage 11 — ALIGN (analog place & route: device-level SPICE netlist -> placed +
@@ -484,6 +501,10 @@ COPY --from=tb-src /vibeic/provenance/cocotb.json /vibeic/provenance/cocotb.json
 COPY --from=tb-src /vibeic/provenance/cocotb-coverage.json /vibeic/provenance/cocotb-coverage.json
 COPY --from=tb-src /vibeic/provenance/pyuvm.json /vibeic/provenance/pyuvm.json
 COPY --from=tb-src /vibeic/provenance/sby.json /vibeic/provenance/sby.json
+# The ASAP7 golden-CDL / model / KLayout-tech trees. Also a source stage in this
+# file rather than an `eda-tool-*` artefact, and until vibeic-eda#104 the only
+# fork content in the image that recorded nothing at all.
+COPY --from=asap7-lvs-src /vibeic/provenance/asap7-lvs.json /vibeic/provenance/asap7-lvs.json
 
 FROM ${BASE_IMAGE}
 

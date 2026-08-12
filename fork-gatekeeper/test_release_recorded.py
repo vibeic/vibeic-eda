@@ -47,7 +47,8 @@ def _tree(tmp_path: Path, version="0.2.53") -> Path:
     (root / "tools" / "yosys").mkdir(parents=True)
     (root / "tools" / "yosys" / "Dockerfile").write_text(
         "ARG YOSYS_REF=" + "a" * 40 + "\n"
-        "RUN git clone https://github.com/vibeic/yosys.git /y\n")
+        "RUN git clone https://github.com/vibeic/yosys.git /y"
+        " && git -C /y checkout ${YOSYS_REF}\n")
     (root / "Dockerfile").write_text(
         "ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:aaaaaaa\n"
         "FROM ${IMG_YOSYS} AS img-yosys\n")

@@ -58,6 +58,7 @@ from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
+                                pin_sites,
                                 pinned_refs)
 
 RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
@@ -202,30 +203,18 @@ def _gh_tip(repo: str, branch: str) -> str:
 
 
 def ref_arg_names(eda_root: Path) -> Dict[str, str]:
-    """fork repo -> the `ARG <NAME>_REF` that pins it.
+    """fork repo -> the `ARG <NAME>_REF` that pins it, without the `_REF` suffix.
 
-    Matched by name, not by position: `tools/lvs/Dockerfile` pins magic AND
-    netgen, and a first-match parse silently drops one of them.
+    Reads the SAME pairing `pinned_refs` reads (vibeic-eda#104 finding 2). This
+    used to mangle the repo name into an ARG name and look it up, which is a
+    different rule from the one the pin set is built with — so the two could, and
+    did, return different sets. Three asap7 forks resolved here to `None`, and
+    `refs_now`/`refs_all` below drop anything `args_of` cannot name, which is how
+    a fork could be pinned in a Dockerfile and still be missing from every
+    artefact tag and every release record computed from it.
     """
-    out: Dict[str, str] = {}
-    files = sorted((eda_root / "tools").glob("*/Dockerfile"))
-    if (eda_root / "Dockerfile").is_file():
-        files.append(eda_root / "Dockerfile")
-    for df in files:
-        text = df.read_text(errors="replace")
-        names = re.findall(r"^ARG\s+([A-Z0-9_]+)_REF=[0-9a-f]{40}", text, re.M)
-        repos = re.findall(
-            r"github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?[\s\"'\\]", text)
-        for repo in dict.fromkeys(repos):
-            key = repo.upper().replace("-", "_").replace(".", "_")
-            if key in names:
-                out[repo] = key
-                continue
-            flat = key.replace("_", "")
-            hit = next((n for n in names if n.replace("_", "") == flat), None)
-            if hit:
-                out[repo] = hit
-    return out
+    return {repo: site["arg"][:-len("_REF")]
+            for repo, site in pin_sites(eda_root).items()}
 
 
 def bake_targets(eda_root: Path) -> Dict[str, List[str]]:

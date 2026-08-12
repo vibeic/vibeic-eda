@@ -46,14 +46,16 @@ def _tree(tmp_path: Path) -> Path:
     (root / "tools" / "yosys" / "Dockerfile").write_text(
         "ARG YOSYS_REPO=https://github.com/vibeic/yosys.git\n"
         "ARG YOSYS_REF=" + "a" * 40 + "  # branch vibeic/integration\n"
-        'RUN git clone "${YOSYS_REPO}" /y\n'
+        'RUN git clone "${YOSYS_REPO}" /y && git -C /y checkout ${YOSYS_REF}\n'
         "# github.com/vibeic/yosys \n")
     # one Dockerfile, TWO repos — a first-match parse silently drops one
     (root / "tools" / "lvs" / "Dockerfile").write_text(
         "ARG MAGIC_REF=" + "b" * 40 + "\n"
         "ARG NETGEN_REF=" + "c" * 40 + "\n"
         'RUN git clone https://github.com/vibeic/magic.git /m \\\n'
-        ' && git clone https://github.com/vibeic/netgen.git /n\n')
+        ' && git -C /m checkout ${MAGIC_REF} \\\n'
+        ' && git clone https://github.com/vibeic/netgen.git /n \\\n'
+        ' && git -C /n checkout ${NETGEN_REF}\n')
     (root / "Dockerfile").write_text(
         "ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:aaaaaaa\n"
         "ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:bbbbbbb-ccccccc\n"
