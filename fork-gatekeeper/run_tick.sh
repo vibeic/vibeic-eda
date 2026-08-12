@@ -657,6 +657,38 @@ else
     selftest_rc=2
 fi
 
+# --- IS A TEST WE WROTE REACHABLE BY ANY BUILD? (2026-08-12 fleet audit) ------
+# The audit found the SAME defect in five forks independently, each by hand:
+# magic 9, netgen 13, ngspice 12, klayout 25, OpenSTA 4 test entry points that no
+# build system can reach — and sby's 33, which are now wired in (2c2f04e) and are
+# the worked example. `make test` returning 0 on an inert suite is not a neutral
+# non-signal, it is a green one, so a post-merge check spelled `make test` would
+# report health on a fork whose entire regression suite runs nothing.
+#
+# Fleet-wide rather than per-fork BY DESIGN: one shape found six times is a
+# program, not a thing each fork must remember. It is static and needs no build,
+# which is what makes it affordable here every day.
+#
+# Non-fatal to the tick on its own — the known backlog is waived BY NAME in
+# TEST_REACH_WAIVERS.json, so rc=1 means a NEW orphan appeared or a waiver
+# outlived its truth, and both of those are worth a loud line rather than a
+# silent one.
+REACH_OUT="${LOG_DIR}/tests-reachable.txt"
+reach_rc=0
+if [ -f "${DIR}/check_tests_are_reachable.py" ]; then
+    python3 "${DIR}/check_tests_are_reachable.py" \
+        --json "${LOG_DIR}/tests-reachable.json" > "${REACH_OUT}" 2>&1
+    reach_rc=$?
+    grep -E "^test reachability:|^  (FAIL|COULD-NOT-CHECK) |^      [a-zA-Z]" "${REACH_OUT}" \
+        | head -40 | sed 's/^/[reach] /' | tee -a "${LOG}" || true
+    [ "${reach_rc}" = "1" ] && log "[reach] a test of ours is reachable by NO build, and is not waived by name"
+    [ "${reach_rc}" = "2" ] && log "[reach] the question could not be put for at least one fork — not a pass"
+else
+    echo "MISSING: ${DIR}/check_tests_are_reachable.py" > "${REACH_OUT}"
+    log "[reach] nothing was checked, which is not a clean result"
+    reach_rc=2
+fi
+
 log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1

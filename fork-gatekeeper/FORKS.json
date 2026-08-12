@@ -158,6 +158,16 @@
           ],
           "why": "5549ae9a8a promoted DPL-0701 from logger_->warn to logger_->error and regenerated the goldens of the tests IT ADDED, leaving four upstream tests red for weeks -- dpl.{fragmented_row03,obstruction2,report_failures} and cts.array_no_blockages still recorded [WARNING DPL-0701]. Nothing noticed: a golden mismatch only surfaces under a full ctest, which the daily round does not run, so a fork patch could redden an upstream test and ship. The mismatch is visible in the source tree alone, which is what makes it checkable here at all.",
           "note": "Static, no build, no PDK: 0.25s over 1403 goldens and 1631 emitted message ids, so it is safe in a merge worktree and on every tick. It matches on the message TEXT, not the id alone -- ODB-220 is both a logger_->error in dbPowerSwitch.cpp and, in eighteen goldens, the LEF parser's [WARNING ODB-0220] from lefMsgTable.h, which passes through no logger_-> call this scan can see. Keying on (module, id) alone reported all eighteen as defects on a correct tree. An id emitted at more than one severity is skipped rather than guessed at."
+        },
+        {
+          "name": "rcx-process-converter-unit",
+          "path": "src/rcx/rule_scripts/test_lef_stack_to_rcx_process.py",
+          "cmd": [
+            "python3",
+            "src/rcx/rule_scripts/test_lef_stack_to_rcx_process.py"
+          ],
+          "why": "Our LEF+dielectric -> OpenRCX process-file converter (523a1f3066) shipped with a unit test that NOTHING ran: the 2026-08-12 fleet reachability audit found it named in exactly one place, a sibling README, and in no build file. It is the only coverage the converter has, and the converter is what produces the extraction rules for a custom PDK -- so a regression in it would surface as wrong parasitics rather than as a failing test.",
+          "note": "Pure Python, no OpenROAD binary, no PDK, no build: it fabricates a synthetic 2-metal LEF and ITF stack with hand-chosen numbers and asserts the emitted process file carries the right resistivity (RPERSQ*thickness), geometry and epsilon. Runs in under a second, which is what makes it safe in a merge worktree and on every tick. Measured 2026-08-12: exit 0, 'PASS: lef_stack_to_rcx_process converter unit test'."
         }
       ]
     },

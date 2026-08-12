@@ -1,0 +1,142 @@
+{
+  "_comment": [
+    "Files this gate excuses TODAY, each BY NAME and with the issue that tracks it.",
+    "",
+    "Measured 2026-08-12 by the fleet audit: five forks had independently grown the",
+    "same defect -- tests we wrote that no build system can reach -- and each was",
+    "found by hand. The gate is introduced with the backlog it found, because a gate",
+    "that cannot be turned on until its backlog is empty never gets turned on.",
+    "",
+    "IT IS A LIST OF NAMES AND NEVER A COUNT. A count would let a new orphan hide",
+    "behind a fixed one; naming them means the gate fails the moment one MORE",
+    "appears. And an entry whose file becomes reachable is itself a failure, so a",
+    "waiver cannot quietly outlive its truth -- delete it in the commit that wires",
+    "the file in.",
+    "",
+    "sby is deliberately absent: it carried 33 of these until 2c2f04e wired them in.",
+    "That commit is the worked example of what every entry here needs."
+  ],
+  "OpenSTA": {
+    "issue": "vibeic-eda#108",
+    "why": "4 C++ oracle gates: never compiled, never run.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "test/crosstalk_eco_gate.cc",
+      "test/multi_scenario_merge_gate.cc",
+      "test/propagated_noise_gate.cc",
+      "test/whatif_eco_gate.cc"
+    ]
+  },
+  "Trilinos": {
+    "issue": "vibeic-eda#107",
+    "why": "NOT OURS, despite what `git diff --diff-filter=A` says. Both arrived in 4a5263655ee ('Restore the seven Epetra-stack packages Xyce requires'): upstream DELETED those packages and we restored them, so git reports every restored file as added by us. They are upstream's own example/benchmark helpers, at upstream's own level of wiring, and inventing a runner for them would be us maintaining a test upstream does not. Verified 2026-08-12: `git cat-file -e upstream/master:<path>` fails for both, and the adding commit is the restore.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "packages/epetra/example/petra_howle/rectMatrixTest.cc",
+      "packages/epetra/test/EpetraBenchmarkTest/generateTarFile"
+    ]
+  },
+  "klayout": {
+    "issue": "vibeic-eda#113",
+    "why": "1 C++ unit test + 24 shell harnesses; the only build the fork's CI runs cannot see them.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "caa/tests/run_caa_test.sh",
+      "cmp-gradient/tests/run_cmp_gradient_test.sh",
+      "gds-antenna/tests/run_antenna_tests.sh",
+      "gds-antenna/tests/run_diode_relief_test.sh",
+      "lvs-recon/tests/run_lvs_recon_test.sh",
+      "metal-fill/tests/run_cheese_test.sh",
+      "metal-fill/tests/run_fill_dummy_datatype_test.sh",
+      "metal-fill/tests/run_fill_tests.sh",
+      "mp-color/tests/run_mp_color_test.sh",
+      "pattern-match/tests/run_pattern_match_test.sh",
+      "perc-latchup/tests/run_perc_latchup_test.sh",
+      "plugin-wiring/tests/run_vendored_sync_test.sh",
+      "svrf-drc/tests/run_antenna_engine_test.sh",
+      "svrf-drc/tests/run_critarea_engine_test.sh",
+      "svrf-drc/tests/run_densgrad_engine_test.sh",
+      "svrf-drc/tests/run_dfm_engine_test.sh",
+      "svrf-drc/tests/run_engine_parity.sh",
+      "svrf-drc/tests/run_erc_engine_test.sh",
+      "svrf-drc/tests/run_label_engine_test.sh",
+      "svrf-drc/tests/run_mask_engine_test.sh",
+      "svrf-drc/tests/run_parse_parity.sh",
+      "svrf-drc/tests/run_property_engine_test.sh",
+      "svrf-drc/tests/run_rve_engine_test.sh",
+      "svrf-drc/tests/run_vspace_engine_test.sh",
+      "svrf-drc/tests/run_waiver_engine_test.sh"
+    ]
+  },
+  "magic": {
+    "issue": "vibeic-eda#105",
+    "why": "9 regression gates + their generators; the audit measured that nothing runs them after a merge.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "test/def_mfggrid_snap/mk_def.py",
+      "test/def_mfggrid_snap/run.sh",
+      "test/def_ndr_via_byrule/mk_via_def.py",
+      "test/def_ndr_via_byrule/run.sh",
+      "test/gds_foundry_layers/read_layers.py",
+      "test/gds_foundry_layers/run.sh",
+      "test/gds_mfggrid_snap/read_sref.py",
+      "test/gds_mfggrid_snap/run.sh",
+      "test/lef_extract_tech/run.sh",
+      "test/lvs_bridge_tech_multimetal/run.sh",
+      "test/lvs_layermap_autodiscover/gen_foundry_gds.py",
+      "test/lvs_layermap_autodiscover/run.sh",
+      "test/lvs_zero_width_route/run.sh",
+      "test/spef_output/run.sh"
+    ]
+  },
+  "netgen": {
+    "issue": "vibeic-eda#112",
+    "why": "13 suites, ~1,300 lines of FAIL->PASS proof; `make test` exits 0 having run nothing.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "test/blackbox_vacuous_match/run.sh",
+      "test/connectivity_global_match/run.sh",
+      "test/device_filter/run.sh",
+      "test/erc_floating_welltie/run.sh",
+      "test/flatten_prohibit_crash/run.sh",
+      "test/liberty_pgpin_globals/run.sh",
+      "test/lvs_json_report/run.sh",
+      "test/lvs_json_report/validate.py",
+      "test/lvs_open_localization/run.sh",
+      "test/lvs_partition_debug/run.sh",
+      "test/lvs_plain_mode_verdict/run.sh",
+      "test/lvs_property_ranking/run.sh",
+      "test/lvs_short_localization/run.sh",
+      "test/pin_swap_localization/run.sh",
+      "test/property_global_asymmetry/run.sh"
+    ]
+  },
+  "ngspice": {
+    "issue": "vibeic-eda#110",
+    "why": "the 12 vibeic_proofs gates, the fork's only regression coverage for its 17 patches.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "vibeic_proofs/check_enh11.sh",
+      "vibeic_proofs/check_enh16.sh",
+      "vibeic_proofs/check_enh20_53_27_62.sh",
+      "vibeic_proofs/check_enh23.sh",
+      "vibeic_proofs/check_enh24_26_28.sh",
+      "vibeic_proofs/check_enh29_33.sh",
+      "vibeic_proofs/check_enh37.sh",
+      "vibeic_proofs/check_enh3_4_6.sh",
+      "vibeic_proofs/check_enh68.sh",
+      "vibeic_proofs/check_enhPLL1.sh",
+      "vibeic_proofs/check_enhRESID.sh",
+      "vibeic_proofs/check_issue95_mcdoc.sh"
+    ]
+  },
+  "yosys": {
+    "issue": "vibeic-eda#111",
+    "why": "two shell tests in dirs whose Makefile globs *.ys and therefore never collects *.sh.",
+    "measured_on": "2026-08-12",
+    "files": [
+      "tests/techmap/merge_liberty.sh",
+      "tests/various/read_activity_err.sh"
+    ]
+  }
+}
