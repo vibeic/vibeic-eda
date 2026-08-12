@@ -90,8 +90,14 @@ DEFAULT_FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-
 
 #: Files that constitute a fork's build / CI / test-runner surface.
 RUNNER = re.compile(
-    r"^(Makefile|CMakeLists\.txt|BUILD|meson\.build|setup\.py|pyproject\.toml"
-    r"|configure\.ac|Makefile\.am|conftest\.py|run_all\.sh)$"
+    # Makefile.in is the CHECKED-IN source for an autotools project (configure
+    # only substitutes @VARS@ into it), so a gate invoked there is genuinely
+    # reachable. Omitting it made this checker report a false FAIL against
+    # magic, whose test/check_gate_registration.py is wired at Makefile.in:204 --
+    # i.e. it accused a fork of exactly the defect the fork had just fixed.
+    r"^(Makefile|GNUmakefile|CMakeLists\.txt|BUILD|meson\.build|setup\.py"
+    r"|pyproject\.toml|configure\.ac|Makefile\.am|Makefile\.in|conftest\.py"
+    r"|run_all\.sh)$"
     r"|\.(mk|bazel|bzl|yml|yaml|list|cmake)$"
     r"|runtests")
 
