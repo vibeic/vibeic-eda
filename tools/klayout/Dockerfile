@@ -79,6 +79,48 @@ RUN git clone "${KLAYOUT_REPO}" /klayout \
  && test -e /klayout/bld/libklayout_lvs.so \
  && test -d /klayout/bld/pymod \
  && echo "klayout pruned to $(du -sm /klayout/bld | cut -f1) MB; binary, engines and pymod intact"
+
+# STAGE THE STANDALONE SIGN-OFF ENGINES (vibeic/klayout#113 finding 3).
+#
+# `-build /klayout/bld` is build.sh's OUTPUT directory and build.sh installs no
+# repo-root Python, so the twelve standalone engine entry points the fork adds --
+# antenna_check.py, xcheck_router.py, metal_fill.py, metal_cheese.py, caa.py,
+# cmp_gradient.py, lvs_recon.py, mp_color.py, pattern_match.py, perc_latchup.py,
+# gds_antenna_deck_check.py, metal_fill_emit.py -- were in `git log` and in NO
+# shipped artefact. Measured on the released 0.2.89, built from this same fork
+# ref: all twelve `<<NOT PRESENT>>`, and $VIBEIC_KLAYOUT_TOOLS unset. (The C++
+# ports of some of these ops inside dbSVRFEngine DO ship, through the `svrfdrc`
+# buddy in /klayout/bld; what did not ship is the standalone Python.)
+#
+# The list is READ FROM THE FORK, not written here: plugin-wiring/SHIPPED_ENGINES.json
+# is the fork's own declaration, and the fork's own gate
+# (vibeic-tests/tests/run_shipped_engines_test.sh) fails if an engine directory
+# appears in the tree undeclared, or if a directory declared ship=true is not in
+# the built image. A hard-coded list here would go stale the first time the fork
+# adds an engine -- which is exactly how these twelve accumulated.
+#
+# LANDING ORDER: this needs KLAYOUT_REF to be at or after the fork commit that
+# adds plugin-wiring/SHIPPED_ENGINES.json. The step fails loudly ("the fork
+# checkout has no ...") rather than silently staging nothing, which is the right
+# way round, but it does mean the fork commit lands first and the ref moves with
+# it.
+RUN set -eu; \
+    m=/klayout/plugin-wiring/SHIPPED_ENGINES.json; \
+    test -f "$m" || { echo "FAIL: the fork checkout has no $m"; exit 1; }; \
+    root="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["install_root"])' "$m")"; \
+    dirs="$(python3 -c 'import json,sys;m=json.load(open(sys.argv[1]));print(" ".join(e["dir"] for e in m["engines"] if e.get("ship")))' "$m")"; \
+    entries="$(python3 -c 'import json,sys;m=json.load(open(sys.argv[1]));print("\n".join(e["dir"]+"/"+x for e in m["engines"] if e.get("ship") for x in e.get("entry") or []))' "$m")"; \
+    test -n "$dirs" || { echo "FAIL: SHIPPED_ENGINES.json declares nothing to ship"; exit 1; }; \
+    mkdir -p "$root"; \
+    for d in $dirs; do \
+      test -d "/klayout/$d" || { echo "FAIL: SHIPPED_ENGINES.json names $d, which this checkout does not have"; exit 1; }; \
+      cp -a "/klayout/$d" "$root/$d"; \
+    done; \
+    for f in $entries; do \
+      test -f "$root/$f" || { echo "FAIL: $f is declared ship=true and was not staged"; exit 1; }; \
+    done; \
+    find "$root" -name '__pycache__' -type d -prune -exec rm -rf {} + ; \
+    echo "staged $(printf '%s\n' $entries | wc -l) sign-off engine entry point(s) into $root"
 # ---------------------------------------------------------------------------
 # Stage 6b — vibeic/verilator. Previously NOT layered: the note here read "no honest
 #   fix warranted on v5.051 — nothing to layer", which was true at the time. It is no
@@ -104,4 +146,5 @@ RUN mkdir -p /vibeic/provenance \
 # ---------------------------------------------------------------------------
 FROM scratch
 COPY --from=build /klayout/bld /klayout/bld
+COPY --from=build /klayout/tools /klayout/tools
 COPY --from=build /vibeic/provenance/klayout.json /vibeic/provenance/klayout.json

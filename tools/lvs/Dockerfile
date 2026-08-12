@@ -53,3 +53,20 @@ FROM scratch
 COPY --from=build /foss/tools/magic /foss/tools/magic
 COPY --from=build /foss/tools/netgen /foss/tools/netgen
 COPY --from=build /vibeic/provenance/lvs.json /vibeic/provenance/lvs.json
+# The fork's own regression gates travel WITH the tool they test.
+#
+# vibeic/magic carries ten FAIL->PASS gates under test/ for its LEF/DEF/GDS/
+# extraction patches and, until this line, nothing anywhere ran them: not this
+# Dockerfile, not FORKS.json, not a workflow (measured 2026-08-12 -- the fork's
+# nine workflows have 0 runs, total). A suite nobody invokes is documentation.
+#
+# They are NOT run in the build stage above, and that is deliberate: this stage
+# is bare ubuntu:24.04 with no PDK, and measured there the suite exits 1 with
+# def_mfggrid_snap and def_ndr_via_byrule FAILING -- not skipping -- because
+# without a foundry tech they fall back to a generated bridge tech whose
+# internal unit is 0.001 um instead of 0.0005 um, and the gates' hand-computed
+# grid arithmetic stops holding. That is a red gate for a reason that is not a
+# defect, which is the failure mode OpenROAD's `find_dup_ids.sh` note in
+# FORKS.json already records. So the gates ship as DATA here and are RUN by the
+# composing image, which is the only place magic and the PDKs coexist.
+COPY --from=build /magic/test /vibeic/tests/magic/test

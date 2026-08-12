@@ -42,7 +42,34 @@
     {
       "tool": "cocotb",
       "role": "Python cosim testbench",
-      "upstream": "cocotb/cocotb"
+      "upstream": "cocotb/cocotb",
+      "post_merge_check": [
+        {
+          "name": "module-reachability",
+          "path": "tests/pytest/test_module_reachability.py",
+          "cmd": [
+            "python3",
+            "-m",
+            "pytest",
+            "tests/pytest/test_module_reachability.py",
+            "-q",
+            "-p",
+            "no:cacheprovider"
+          ],
+          "why": "Our only divergence from upstream, the parallel regression dispatcher of 297211d3, shipped for weeks as src/cocotb_tools/_regression.py -- packaged, installed and present in ghcr.io/vibeic/vibeic-eda:latest, and named by exactly one file in the whole image: its own unit test. The fork paid the daily merge cost for a capability no shipped entry point could reach, and nothing caught it because the module's own test passed. This check requires every module under src/ to be referenced from non-test code (an import from another shipped module, a docs page, or packaging/build metadata), which is what tells an unreachable module apart from a working one.",
+          "note": "Pure filesystem + AST scan, 0.4s, no build, no simulator, no cocotb import -- safe in a merge worktree and on every tick. Measured 2026-08-12: stock upstream 14db0175 passes (no false positives across the whole upstream tree), fork HEAD ed5b9252 fails naming cocotb_tools._regression. Run the file by name, not the whole tests/pytest directory: the rest of that suite needs a built cocotb (cocotb.simulator) and cannot run in a plain checkout."
+        },
+        {
+          "name": "pinned-ruff-clean",
+          "path": "tools/run_pinned_ruff.py",
+          "cmd": [
+            "python3",
+            "tools/run_pinned_ruff.py"
+          ],
+          "why": "Lint in cocotb is declared only as a pre-commit hook, so it runs only where pre-commit is installed and wired to git -- never in a merge worktree. Measured 2026-08-12 with the exact linter the repo pins (astral-sh/ruff-pre-commit v0.15.21): stock upstream 14db0175 gives 'All checks passed!', our fork HEAD ed5b9252 gives 'Found 9 errors.' and every one of the 9 was in the two files our own patch added. The ruff hook runs with --fix --exit-non-zero-on-fix followed by a local `git diff --exit-code` hook, so it does not merely warn: it rewrites our files and then fails.",
+          "note": "The script reads the pinned ruff version out of .pre-commit-config.yaml, so it cannot drift from the hook, and resolves the binary as $RUFF -> matching ruff on PATH -> `uvx ruff@<pinned>`. If no pinned ruff can be obtained it exits 2 with an explicit message instead of passing quietly. Runs `ruff check .` and `ruff format --check .` from the repo root in a few seconds; needs no build and no simulator."
+        }
+      ]
     },
     {
       "tool": "cocotb-coverage",
@@ -93,7 +120,60 @@
     {
       "tool": "klayout",
       "role": "DRC / layout-edit / GDS streamout / extraction",
-      "upstream": "KLayout/klayout"
+      "upstream": "KLayout/klayout",
+      "post_merge_check": [
+        {
+          "name": "build-registration",
+          "path": "vibeic-tests/check_build_registration.py",
+          "cmd": [
+            "python3",
+            "vibeic-tests/check_build_registration.py"
+          ],
+          "why": "The image builds with qmake; the fork's own CI built Python wheels. The fork's largest patch -- the native SVRF DRC engine, 6,673 lines over 23 commits -- reaches the shipped binary through ONE line of registration, `SOURCES = ... dbSVRFEngine.cc` in src/buddies/src/bd/bd.pro, a file upstream edits too. src/plugins/tools/svrf_drc/svrf_drc.pro is a deliberately EMPTY subdirs project (it exists only so the tools.pro $$files() auto-glob accepts the folder), so nothing else names those files. Lose that line to a merge and the tree still configures, still builds and still ships -- with the engine gone -- and setup.py never sees it either, because it globs src/*/**/pysetup.toml and svrf_drc has none. Same shape as this fleet's OpenROAD test-registration-parity: registered in one build system while a different one is what runs (vibeic/klayout#113 finding 1).",
+          "note": "Static, no build, no container, no PDK: 0.09s over the .pro/.pri graph. It asserts (a) every source in vibeic-tests/FORK_SOURCES.json exists, (b) its `built_by` project names it, (c) that project is reachable from src/klayout.pro through SUBDIRS -- including the $$files() globs the plugin tree uses -- and (d), when the upstream ref resolves (it does in a merge worktree and in the gatekeeper clones), that the manifest still covers every source the fork ADDS under src/ and every TEST() it adds. Proven red 2026-08-12 five ways: dropping dbSVRFEngine.cc from bd.pro's SOURCES, removing `bd` from src.pro's SUBDIRS, and removing either kind of entry from the manifest. Where the upstream ref cannot be resolved (a bare CI checkout) the drift half reports a NAMED skip and (a)-(c) still decide the exit code."
+        },
+        {
+          "name": "suite-list",
+          "path": "vibeic-tests/check_suite_list.sh",
+          "cmd": [
+            "bash",
+            "vibeic-tests/check_suite_list.sh"
+          ],
+          "why": "The fork carries 29 hand-written FAIL->PASS harnesses for the features it adds on top of upstream KLayout, and every one of them was reachable from no build system: .github/workflows/build.yml builds wheels and runs no test, and the repo-root `make test` is macOS-only. They are now invoked by vibeic-tests/run_all.sh, which names them in a literal list -- and a list is the thing that goes stale, one harness at a time, exactly as these 29 did (vibeic/klayout#113 finding 2).",
+          "note": "Pure git + text, no build: it diffs `git ls-files '*/tests/run_*.sh'` against `run_all.sh --list` and fails naming any harness the runner would never invoke. Measured 2026-08-12: PASS check_suite_list (29/29)."
+        },
+        {
+          "name": "vendored-plugin-sync",
+          "path": "plugin-wiring/vendored_sync_check.py",
+          "cmd": [
+            "python3",
+            "plugin-wiring/vendored_sync_check.py"
+          ],
+          "why": "gds-antenna/ and metal-fill/ are vendored VERBATIM into the vibe-ic plugin, and each plugin copy carries a PROVENANCE.md naming the fork commit it was taken from. That is a falsifiable claim and nothing was falsifying it: metal-fill/metal_fill.py sat three commits behind its own vendored copy while the line still named the commit at which they had last been equal, so performing the documented maintenance action ('fix them in the fork and re-vendor') would have silently reverted the dummy-vs-drawn datatype separation and the manufacturing-grid snap. The fork's hermetic self-test passes 8/8 against a throw-away repo; nothing ran the checker against the REAL pair (vibeic/klayout#113 finding 4).",
+          "note": "git + byte compare, no build, about a second. With no --plugin-programs it auto-discovers ~/vibe-ic/vibe-ic-marketplace/plugins/vibe-ic/programs, which exists on the gatekeeper host, so the merge worktree needs none of its own. Exit 3 means NO plugin checkout was found -- deliberately not 0, and this mechanism treats every non-zero as do-not-publish, which is the intended reading: a provenance claim nobody could check is not a provenance claim that held. Measured red on the real pair 2026-08-12 (rc=1, 'metal_fill/PROVENANCE.md claims commit 9d2ef8578, but the vendored bytes are NOT the fork content at that commit') and green after the plugin-side one-line fix."
+        },
+        {
+          "name": "deep-split-line",
+          "path": "vibeic-tests/tests/run_deep_split_line_test.sh",
+          "cmd": [
+            "bash",
+            "vibeic-tests/tests/run_deep_split_line_test.sh",
+            "--require"
+          ],
+          "why": "a5a7a2d6b fixed two-layer checks reporting a DeepShapeStore complexity-reduction cut line as a real polygon edge -- one-sided FALSE enclosure/overlap/separation errors, 8 -> 0 on a real sky130A sign-off. Its only guard was a TEST() in src/db/unit_tests/dbDeepRegionTests.cc, i.e. qmake-only, and the shipped image deletes ut_runner and the *.ut libraries, so nothing in the pipeline could answer whether the fix still fires. An upstream merge could neutralise override_distance() and every mechanism we owned would stay green (vibeic/klayout#113 finding 6).",
+          "note": "Needs only a KLayout Python binding, which the published image has, so it runs with no build: about 5s through docker. PROVEN TO DISCRIMINATE rather than assumed to -- on a -without-qt 0.30.10 build of this tree, reverting the one-character fix and rebuilding libklayout_db alone flips it (fix present: FLAT n=6 DEEP n=6 EQUAL=True; reverted: DEEP n=7, EXTRA (1065,1310;1215,1310)/(1065,1235;1215,1235)). The baseline is 0.30.10, NOT the base image's stock 0.30.9: the same probe is green on 0.30.9 because the defect arrived with upstream's own 2026-07-19 two-layer deep rework, so a release-to-release comparison proves nothing and the control reverts the patch on this source instead. `--require` makes 'no binding reachable' a FAILURE here; without it (run_all.sh, a developer box) it is an honest named skip. The probe also asserts the DeepShapeStore really split the polygon, so it cannot become a vacuous pass if a reduction heuristic changes."
+        },
+        {
+          "name": "shipped-signoff-engines",
+          "path": "vibeic-tests/tests/run_shipped_engines_test.sh",
+          "cmd": [
+            "bash",
+            "vibeic-tests/tests/run_shipped_engines_test.sh"
+          ],
+          "why": "Twelve standalone sign-off engine entry points the fork adds shipped in NO artefact: tools/klayout/Dockerfile's publish stage is `FROM scratch` + `COPY --from=build /klayout/bld`, and /klayout/bld is build.sh's output directory -- build.sh installs no repo-root Python. Measured on the released 0.2.89, built from this fork's HEAD: all twelve absent and $VIBEIC_KLAYOUT_TOOLS unset, so six of them were reachable by nothing at all (vibeic/klayout#113 finding 3).",
+          "note": "Two halves. The TREE half is static and always runs: every directory in plugin-wiring/SHIPPED_ENGINES.json must exist with its declared entry points, and no engine-shaped directory (own tests/ plus its own *.py) may be UNDECLARED -- that is what stops the next engine from accumulating unshipped. The IMAGE half runs when an EDA image is reachable and asserts every ship=true entry point is inside it under a SET $VIBEIC_KLAYOUT_TOOLS; with no image it reports a named partial skip and the tree half still decides the verdict, so the suite is never vacuous. The image half is PROVENANCE-GATED so it cannot go permanently false-red: an image built before the declaration existed cannot honour it, so the harness reads /vibeic/provenance/klayout.json and an older ref produces a NAMED skip naming the rebuild that would answer the question. Measured all three states 2026-08-12: published 0.2.89 (ref 1d657c0b7) -> named SKIP, tree half decides; the same image with its provenance rewritten to a ref that DOES carry the declaration and the engines still absent -> FAIL naming all twelve; an image built with the tools/klayout/Dockerfile staging step -> PASS. Note the landing order this implies: the fork commit lands first, then the tool image is rebuilt from it, and only then can this half judge anything."
+        }
+      ]
     },
     {
       "tool": "LinAlgebra",
@@ -103,7 +183,20 @@
     {
       "tool": "magic",
       "role": "DRC / layout-edit / extraction",
-      "upstream": "RTimothyEdwards/magic"
+      "upstream": "RTimothyEdwards/magic",
+      "post_merge_check": [
+        {
+          "name": "gate-registration",
+          "path": "test/check_gate_registration.py",
+          "cmd": [
+            "python3",
+            "test/check_gate_registration.py",
+            "."
+          ],
+          "why": "vibeic/magic carries ten FAIL->PASS regression gates under test/ and for a month NOTHING ran them -- not the Makefile (`test` is also a DIRECTORY there, so `make test` matched it as an up-to-date file target and exited 0 having run nothing), not this file, not a workflow (the fork's nine workflows have 0 runs, total). The gates now run in the composed image (Dockerfile, \"THE MAGIC GATES\"), which is the only place magic and the PDKs coexist -- but that is IMAGE-BUILD time, and an unregistered gate has to be caught at MERGE time, because after the merge the only thing that notices is the next person to go looking. An unregistered gate is invisible to the suite itself: it produces no PASS, no FAIL and no SKIP, and the summary still reads \"FAILED: 0\".",
+          "note": "Static: it parses test/run_all.sh, the test/ directory listing and Makefile.in, and starts no process -- no build, no magic, no PDK, ~0.02s -- which is what makes it safe in a merge worktree and on every tick. It fails when a gate directory is not in the runner's GATES array, when a declaration does not resolve to an executable, when a gate declares a requirement token the runner does not know (unknown tokens are silently ignored, so the gate would run without the precondition it asked for), and when `make test` stops reaching the runner. Measured 2026-08-12: exit 0 on a clean tree; exit 1 for each of those four mutations."
+        }
+      ]
     },
     {
       "tool": "netgen",
@@ -113,7 +206,30 @@
     {
       "tool": "ngspice",
       "role": "analog / mixed-signal SPICE",
-      "upstream": "danchitnis/ngspice-sf-mirror"
+      "upstream": "danchitnis/ngspice-sf-mirror",
+      "post_merge_check": [
+        {
+          "name": "vibeic-proofs-registration-parity",
+          "path": "vibeic_proofs/check_registration.py",
+          "cmd": [
+            "python3",
+            "vibeic_proofs/check_registration.py",
+            "."
+          ],
+          "why": "The fork's thirteen vibeic_proofs gates are the ONLY regression coverage its seventeen patches have, and twice now a gate has existed on disk while no build system named it. First: twelve check_*.sh sat inert for five weeks while `make check` reported 58/58 passed, which is how the control-mode .param regression (vibeic-eda#110 finding 1) shipped and stayed shipped. Second, in the very commit that fixed that: 583fa5f93 added the Makefile.am, the suite runner and the vibeic-check target, and in the same commit added check_issue110_paramname.sh plus eight proof110_*.sp and declared none of them -- so `make vibeic-check` exited 2 and ZERO of the thirteen ran. This script sees both: it compares $(VIBEIC_GATES) and $(VIBEIC_FIXTURES) against the directory, and checks the chain above them (configure.ac AC_CONFIG_FILES, top-level SUBDIRS, TESTS) which the suite structurally cannot check about itself -- break any of those and `make check` runs upstream's decks, exits 0, and the suite that would have objected is never started.",
+          "note": "Static, no build, no PDK, no ngspice binary: measured 0 s on the merged tree, which is what makes it safe on every merge. Exit 0 clean, 1 something on disk is named nowhere, 2 a file it must read is missing (never a pass). NEGATIVE CONTROLS, all run 2026-08-12: on the tree as shipped (583fa5f93) it exits 1 and names check_issue110_paramname.sh and the eight proof110_*.sp; and one leg at a time on a mutated copy -- SUBDIRS without vibeic_proofs, configure.ac without vibeic_proofs/Makefile, TESTS emptied -- each turns it red naming the break. It does NOT run the gates; the entry below does that."
+        },
+        {
+          "name": "vibeic-proofs-suite",
+          "path": "vibeic_proofs/build_and_check.sh",
+          "cmd": [
+            "sh",
+            "vibeic_proofs/build_and_check.sh"
+          ],
+          "why": "Registration parity says the gates are still reachable; this says they still pass. An upstream merge lands in src/frontend, src/spicelib/parser and src/spicelib/analysis -- the same files all seventeen of our patches live in -- and until this entry existed the daily 05:30 merge published ngspice having verified nothing whatever about them. It builds the merged tree with the image's own configure flags and runs run_vibeic_suite.sh against the binary that build produced, so the thing under test is the thing the merge would ship.",
+          "note": "NOT `make vibeic-check` directly: a merge worktree is a fresh checkout with no configure and no Makefile, so make exits with \"No rule to make target 'vibeic-check'\" -- measured -- and that failure would say nothing about our patches. The script does autogen.sh + configure --with-ngshared=no --enable-xspice --enable-openmp --disable-debug + make -j$(nproc) + make vibeic-check, logs to a mktemp dir rather than into the worktree it was handed, and refuses (exit 2, never 0) when autoconf/automake/libtool/make/cc are not on PATH. Exit 1 = a gate failed, exit 2 = it could not put the question; automake collapses both into make's own Error 2, so the script recovers the distinction from what the suite printed. MEASURED 2026-08-12 in a fresh worktree on a 32-core host: 166 s end-to-end, rc=0, 13 of 13 gates PASS. NEGATIVE CONTROLS on the same host: against the tree as shipped (583fa5f93) it exits 2 -- 'NO RESULT -- the suite could not put the question' -- so this entry would have blocked that publish; and against HEAD with the cktop.c fix reverted it exits 1 with check_enh3_4_6 naming the regression. COST: this is by far the most expensive check in this file, and it needs the autotools toolchain on the host that runs it (present here; the 166 s is well inside GK_POST_MERGE_TIMEOUT=1800). It is declared second because the cheap static check above is the one that catches the failure that actually recurs."
+        }
+      ]
     },
     {
       "tool": "open_pdks",
@@ -184,7 +300,29 @@
     {
       "tool": "pyuvm",
       "role": "UVM in Python",
-      "upstream": "pyuvm/pyuvm"
+      "upstream": "pyuvm/pyuvm",
+      "post_merge_check": [
+        {
+          "name": "asyncio-primitive-scope",
+          "path": "tests/pytests/test_asyncio_primitive_scope.py",
+          "cmd": [
+            "python3",
+            "tests/pytests/test_asyncio_primitive_scope.py"
+          ],
+          "why": "Our two RAL test modules (f691bf4, 57bdc4a) built asyncio.Lock() in synchronous fixture/builder scope. That works on Python 3.10+ and raises 'RuntimeError: There is no current event loop in thread MainThread' on Python 3.9 -- pyproject's declared requires-python floor and 5 of the 9 CI matrix rows -- because asyncio.run() leaves set_event_loop(None) behind. Measured at 488fda1: python:3.9-slim gave '15 failed, 719 passed, 1 xfailed, 6 errors' on OUR tree while upstream/master (e607888) gave '607 passed, 7 xfailed' on the same command and image. Nobody saw it: the fork has never run a workflow (actions/runs total_count = 0) and the daily round runs no suite (vibeic-eda#109 finding 1).",
+          "note": "The check is version-INDEPENDENT on purpose: it is an AST scan, so it goes red on any interpreter, including the 3.12 a developer runs locally where the underlying RuntimeError does not reproduce. It imports only ast/pathlib, never pyuvm or cocotb, so it runs in a bare merge worktree with nothing installed. The same file is also collected by 'make pytests' as a parametrised test over every tests/**/*.py, and carries its own planted-violation negative control (test_the_guard_detects_a_planted_violation)."
+        },
+        {
+          "name": "reg-predicates-are-wired",
+          "path": "tests/pytests/test_reg_predicates_are_wired.py",
+          "cmd": [
+            "python3",
+            "tests/pytests/test_reg_predicates_are_wired.py"
+          ],
+          "why": "uvm_reg_field.is_indv_accessible() -- four of this fork's thirteen content-bearing commits (f691bf4, 8e866ef, e5340c3, b3a4d47) -- had ZERO callers in pyuvm/ at 488fda1, so both of its answers emitted byte-identical bus traffic and the twenty tests asserting its verdict were green throughout. It is wired now (uvm_reg_field.do_write/do_read route on it), and the way that wiring gets lost is an upstream merge that restructures do_write and takes the routing with it -- textually clean, nothing asking for a decision. uvm_reg.do_write already carries an in-tree comment about exactly that happening to this fork's backdoor door dispatch (vibeic-eda#109 finding 2).",
+          "note": "A CALLER CENSUS, not an assertion on a return value: no test of what the predicate ANSWERS can detect that nothing asks it, which is precisely how the inertness survived twenty tests. ast + pathlib only, no pyuvm import, so it runs in a bare merge worktree; 'make pytests' also collects it, and it carries its own negative control (test_the_guard_detects_a_name_with_no_caller). Extend WIRED_PREDICATES in that file when the fork implements another decision predicate."
+        }
+      ]
     },
     {
       "tool": "sby",
@@ -209,7 +347,30 @@
     {
       "tool": "Trilinos",
       "role": "Xyce's build dependency — Xyce cannot be configured or linked without it. Statically linked into eda-tool-xyce, not shipped as its own artefact, which is why it has no IMG_ pin of its own. Mirrored 2026-07-31 (clone+push) after the recorded reason for leaving it upstream — that a whole-history push fails at this size — did not survive testing: the 1.8 GB push went through.",
-      "upstream": "trilinos/Trilinos"
+      "upstream": "trilinos/Trilinos",
+      "post_merge_check": [
+        {
+          "name": "unreferenced-subdirectories",
+          "path": "commonTools/vibeic/check_subdirectory_registration.py",
+          "cmd": [
+            "python3",
+            "commonTools/vibeic/check_subdirectory_registration.py",
+            "."
+          ],
+          "why": "Our fork exists to `git revert` upstream's Epetra-removal commits. That works only when the removal was ONE commit. c338a21ceb1 reverted c6019304237 and restored 228 files under packages/anasazi/epetra/, but a DIFFERENT upstream commit -- 9315f218c82, months later -- had already deleted `IF (Anasazi_ENABLE_Epetra) ADD_SUBDIRECTORY(epetra) ENDIF()` from packages/anasazi/CMakeLists.txt, and a third, 47dbfa522f5, had dropped Epetra/EpetraExt from packages/anasazi/cmake/Dependencies.cmake. The revert applied cleanly, the tree configured cleanly with ZERO CMake warnings, and `make anasaziepetra` answered 'No rule to make target' -- measured at 00d5b10aa18 with a real TriBITS configure and -DAnasazi_ENABLE_Epetra=ON. The sibling half of the same restore, Belos, built fine, because upstream had removed ITS subdirectory line inside the commit we reverted. Nothing in this fork's toolchain said a word: this fork declared no post_merge_check at all before today (vibeic-eda#107). Upstream's Epetra-removal campaign is ongoing, so the two-commit removal is a generator, not an incident.",
+          "note": "Pure text plus `git`, no build, no MPI, no BLAS, no PDK: 0.85s over 1782 directories at 00d5b10aa18, which is what makes it safe in a merge worktree and on every tick. The baseline is UPSTREAM, not our previous tip -- only directories this fork ADDS are examined, so upstream's own dead corners never make it amber -- and an unreachable directory is only reported when upstream had it WIRED IN at the last commit that still carried it, which is what separates a half-finished revert from a dead corner we restored faithfully. It needs the `upstream` remote daily_merge.py already configures and fetches; if that ref does not resolve it exits 2 rather than 0, because measuring nothing is not measuring clean. Measured 2026-08-12: rc=1 naming packages/anasazi/epetra before the fix, rc=0 after."
+        },
+        {
+          "name": "unreferenced-subdirectories-selftest",
+          "path": "commonTools/vibeic/test_check_subdirectory_registration.py",
+          "cmd": [
+            "python3",
+            "commonTools/vibeic/test_check_subdirectory_registration.py"
+          ],
+          "why": "The gate above is the only coverage the invariant has, and a gate nobody has seen RED proves nothing. This builds throwaway git repos reproducing the four situations it must tell apart -- half-finished revert (RED), finished revert (GREEN), a corner upstream itself never wired (GREEN), a directory we authored and never wired (RED) -- plus the unresolvable-baseline case (rc=2). Registered here rather than left in the tree because vibeic-eda#107's own class is 'a patch nothing runs'.",
+          "note": "No network, no build, no Trilinos sources: ~0.4s. Both mutations tried on 2026-08-12 were killed -- making declares() always succeed, and making the no-baseline path return 0 -- so it is a real negative control, not a smoke test."
+        }
+      ]
     },
     {
       "tool": "verilator",

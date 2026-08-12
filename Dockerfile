@@ -598,6 +598,9 @@ COPY --from=img-ngspice /foss/tools/ngspice /foss/tools/ngspice
 # --- vibeic/magic + vibeic/netgen ---
 COPY --from=img-lvs /foss/tools/magic /foss/tools/magic
 COPY --from=img-lvs /foss/tools/netgen /foss/tools/netgen
+# magic's own regression gates, carried in the lvs artefact. Run near the end of
+# this stage, once the PDKs are staged -- see "THE MAGIC GATES" below.
+COPY --from=img-lvs /vibeic/tests/magic /vibeic/tests/magic
 # --- vibeic/iverilog ---
 COPY --from=img-iverilog /foss/tools/iverilog /foss/tools/iverilog
 # INSTALLED OVER the base image's verilator, which is the convention every
@@ -960,6 +963,30 @@ RUN mv /foss/tools/klayout /foss/tools/klayout-base \
     done \
  && LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/klayout/klayout -v | grep -q 0.30.10 \
  && echo "klayout swap OK: /foss/tools/klayout is the vibeic build; base kept at klayout-base"
+
+# --- the fork's standalone sign-off engines (vibeic/klayout#113 finding 3) ---
+# Twelve engine entry points the klayout fork adds shipped in NO artefact: the
+# tool image's publish stage carried only /klayout/bld, which is build.sh's
+# output directory, and build.sh installs no repo-root Python. Measured on the
+# released 0.2.89 -- built from the same fork ref -- all twelve absent and
+# $VIBEIC_KLAYOUT_TOOLS unset, so `_klayout_launch.find_engine` in the plugin
+# had nothing to override the vendored copies with and six engines with no
+# vendored copy at all were unreachable by anything.
+#
+# The tool image now stages them (from the fork's own SHIPPED_ENGINES.json, not
+# from a list written here), and this is where they land and how they are found.
+COPY --from=img-klayout /klayout/tools /foss/tools/klayout-signoff-engines
+ENV VIBEIC_KLAYOUT_TOOLS=/foss/tools/klayout-signoff-engines
+# An env var pointing at nothing is worse than no env var: `find_engine` would
+# fall through to the vendored copy while every reader believed the fork engine
+# was running. So assert the destination is populated, in the image, at build
+# time -- and assert it by the two engines the flow actually calls today.
+RUN test -d "$VIBEIC_KLAYOUT_TOOLS" \
+ && test -f "$VIBEIC_KLAYOUT_TOOLS/metal-fill/metal_fill.py" \
+ && test -f "$VIBEIC_KLAYOUT_TOOLS/gds-antenna/antenna_check.py" \
+ && n=$(find "$VIBEIC_KLAYOUT_TOOLS" -name '*.py' | wc -l) \
+ && test "$n" -ge 12 \
+ && echo "klayout sign-off engines OK: $n script(s) under $VIBEIC_KLAYOUT_TOOLS"
 
 # --- vibeic verification toolchain (cocotb / cocotb-coverage / pyuvm / sby) ---
 # Editable-installed from the vibeic forks so an in-image Python patch is live; this
@@ -1398,6 +1425,33 @@ ENV VERILATOR_SOLVER="yices-smt2 --incremental"
 RUN /foss/tools/bin/eqy --help >/dev/null \
  && /foss/tools/bin/mcy --help >/dev/null \
  && echo "eqy and mcy run from /foss/tools/bin without a login shell"
+
+# THE MAGIC GATES -- the fork's own regression suite, run against the magic this
+# image actually ships, in the environment it ships it in.
+#
+# vibeic/magic carries ten FAIL->PASS gates for its LEF/DEF/GDS/extraction
+# patches. Measured 2026-08-12, NOTHING ran them: `magic` declares no
+# post_merge_check in FORKS.json, tools/lvs/Dockerfile ended at `make install`,
+# and the fork's nine GitHub workflows have 0 runs between them. The cost was
+# not theoretical -- on the tree the 0.2.89 image was built from, two of those
+# gates fail:
+#
+#   FAIL  ext2spice_hier_ports   'port makeall' changed a SUB-CELL's port list
+#   FAIL  gds_mfggrid_snap       AREF origin snapped, reference points were not
+#
+# i.e. this step, had it existed, would have refused to build the image that
+# shipped both defects. That is the entire argument for putting it here.
+#
+# HERE, and not in tools/lvs/Dockerfile: that build stage is bare ubuntu:24.04
+# with no PDK, and the suite exits 1 there for want of a foundry tech rather
+# than for any defect (two gates fall back to a generated bridge tech with a
+# different internal unit and their hand-computed arithmetic stops holding).
+# This stage is the only place magic, netgen, python3 and the PDKs coexist.
+#
+# Run as USER 1000 from the read-only /vibeic tree, because that is the user and
+# the layout a caller gets; each gate makes its own mktemp work directory.
+RUN /vibeic/tests/magic/test/run_all.sh \
+ && echo "magic fork regression gates: all green against the shipped binary"
 
 RUN n=0; for f in /foss/tools/bin/*; do \
       [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink "$f")"; n=$((n+1)); }; \
