@@ -141,8 +141,11 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 #   line the base ships until a real vibeic patch lands.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
+ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
 ARG COCOTB_REF=ed5b9252a0f98df3b9ae033125e802afee7cd194  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
+ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
 ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
@@ -161,11 +164,42 @@ ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced f
 #   patch is 57bdc4a "RAL: restore the back-door access tests that never reached
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
+ARG SBY_REPO=https://github.com/vibeic/sby.git
 ARG SBY_REF=1230919c27d6ce3f9d1a9d295e535d987a1fd6e3  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
-RUN git clone https://github.com/vibeic/cocotb.git           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
- && git clone https://github.com/vibeic/cocotb-coverage.git  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
- && git clone https://github.com/vibeic/pyuvm.git            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
- && git clone https://github.com/vibeic/sby.git              /tb/sby             && git -C /tb/sby             checkout ${SBY_REF}
+RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
+ && git clone ${COCOTB_COVERAGE_REPO}  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
+ && git clone ${PYUVM_REPO}            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
+ && git clone ${SBY_REPO}              /tb/sby             && git -C /tb/sby             checkout ${SBY_REF}
+
+# Record every pin this artefact was built from — the same
+# `{"tool","repo","ref"}` shape, and the same reasoning, as the fifteen
+# `tools/<tool>/Dockerfile` stages (vibeic-eda#117 finding 5).
+#
+# These four were the hole in that reasoning. Every compiled tool records its
+# commit INSIDE the artefact, because a tag can be moved and a file in a layer
+# cannot — and these four are not compiled artefacts, they are source trees
+# cloned here by SHA and pip/make-installed in the runtime stage below. That
+# made them look like they needed no record, when in fact it left the pin as the
+# ONLY claim about what shipped: a pin is a line in a file, and the whole point
+# of `tools/check_image_provenance.py` is that a line in a file is not evidence
+# about an image. A wrong or stale `sby` in the image was undetectable — it
+# answers `--version`, it passes the #13 sby/yices smoke below, and nothing
+# anywhere compared the commit it was built from with the commit SBY_REF names.
+#
+# Written to /vibeic/provenance, deliberately NOT under /tb: the runtime stage
+# does `COPY --from=tb-src /tb /opt/vibeic-forks`, and a record placed under /tb
+# would be installed alongside the source instead of collected with the others.
+# Same REPO ARGs the clone above uses, so the record cannot certify a repo the
+# clone did not use.
+RUN mkdir -p /vibeic/provenance \
+ && printf '{"tool":"cocotb","repo":"%s","ref":"%s"}\n' \
+      "${COCOTB_REPO}" "${COCOTB_REF}" > /vibeic/provenance/cocotb.json \
+ && printf '{"tool":"cocotb-coverage","repo":"%s","ref":"%s"}\n' \
+      "${COCOTB_COVERAGE_REPO}" "${COCOTB_COVERAGE_REF}" > /vibeic/provenance/cocotb-coverage.json \
+ && printf '{"tool":"pyuvm","repo":"%s","ref":"%s"}\n' \
+      "${PYUVM_REPO}" "${PYUVM_REF}" > /vibeic/provenance/pyuvm.json \
+ && printf '{"tool":"sby","repo":"%s","ref":"%s"}\n' \
+      "${SBY_REPO}" "${SBY_REF}" > /vibeic/provenance/sby.json
 
 # ---------------------------------------------------------------------------
 # Stage 9 — NanGate45 / FreePDK45 Open Cell Library (Si2, Apache-2.0).
@@ -397,8 +431,8 @@ RUN unset PYTHONPATH \
 
 # ── provenance collector ────────────────────────────────────────────────────
 # vibeic-eda#77. Each tool used to COPY its own `/vibeic/provenance/<tool>.json`
-# into the final image, and every COPY is a LAYER: 15 layers to carry 15 tiny
-# JSON files into one directory.
+# into the final image, and every COPY is a LAYER: one layer per tool — 15 at
+# the time, 19 now — to carry that many tiny JSON files into one directory.
 #
 # overlay2 stops at 128 stacked layers and 0.2.61 measured 127 — `docker pull`
 # already failed on 2 of 5 fleet hosts with `failed to register layer: max depth
@@ -427,10 +461,17 @@ COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
+# The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
+# a source stage in this file — but the record it carries is the same shape and
+# is read by the same checker (vibeic-eda#117 finding 5).
+COPY --from=tb-src /vibeic/provenance/cocotb.json /vibeic/provenance/cocotb.json
+COPY --from=tb-src /vibeic/provenance/cocotb-coverage.json /vibeic/provenance/cocotb-coverage.json
+COPY --from=tb-src /vibeic/provenance/pyuvm.json /vibeic/provenance/pyuvm.json
+COPY --from=tb-src /vibeic/provenance/sby.json /vibeic/provenance/sby.json
 
 FROM ${BASE_IMAGE}
 
-# vibeic-eda#77 — one layer for all 15 tool provenance records.
+# vibeic-eda#77 — one layer for all 19 tool provenance records.
 COPY --from=provenance /vibeic/provenance /vibeic/provenance
 LABEL org.opencontainers.image.title="vibeic-eda"
 LABEL org.opencontainers.image.description="Forked+enhanced OSS EDA toolchain (vibeic): iic-osic-tools base + vibeic/* patched EDA-tool forks with gatekeeper-verified FAIL->PASS proofs (see FIX_STATUS.md)."

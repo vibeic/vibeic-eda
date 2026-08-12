@@ -13,13 +13,21 @@ the image actually CONTAINS, and the difference is the whole reason it exists:
     ours. Nothing about that failure is visible from outside.
 
 So each tool records its repo and commit in `/vibeic/provenance/<tool>.json`
-during its own build, and this asserts the composed image carries exactly the
-eight expected files, each naming a `vibeic/` repo, each at the commit its pin
-names.
+during its own build, and this asserts the composed image carries every one of
+those files, each naming a `vibeic/` repo, each at the commit its pin names.
+
+A THIRD failure, which is this check's own (vibeic-eda#117 finding 5): a tool
+the map below does not name is not checked, and says so nowhere. Measured on
+3187811 — the stage-8 verification toolchain (cocotb, cocotb-coverage, pyuvm,
+sby) wrote no record at all, and `fastercap` wrote one the image carried and
+this file never opened. Five tools, a confident PASS, nothing behind it for any
+of them. `fork-gatekeeper/test_image_provenance_covers_every_tool.py` now
+requires the map, the emitters and the collector stage to name one set, so
+adding a tool to one of the three and not the others fails by name.
 
 Usage:  check_image_provenance.py <image>
 
-Exit: 0 all eight agree, 1 a disagreement, 2 the image could not be inspected
+Exit: 0 all agree, 1 a disagreement, 2 the image could not be inspected
 (which is not a pass).
 """
 from __future__ import annotations
@@ -32,7 +40,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: tool -> the ARG in tools/<tool>/Dockerfile that its provenance must report.
+#: Tools whose pin is written in the ROOT Dockerfile rather than in a
+#: `tools/<tool>/Dockerfile`: the stage-8 verification toolchain is cloned by
+#: SHA in the `tb-src` stage and pip/make-installed in the runtime, so it has no
+#: per-tool artefact directory. Named explicitly rather than inferred from "does
+#: `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name would
+#: fall through to the root Dockerfile, find no such ARG, and compare the image
+#: against the empty string.
+STAGE8 = {"cocotb", "cocotb-coverage", "pyuvm", "sby"}
+
+#: tool -> the ARG that its provenance must report, in `pin_file(tool)`.
 #: Multi-source artefacts report the first; the second is checked via the tag.
 PRIMARY = {
     "openroad": "OPENROAD_REF", "yosys": "YOSYS_REF",
@@ -42,8 +59,16 @@ PRIMARY = {
     "gtkwave": "GTKWAVE_REF", "xschem": "XSCHEM_REF",
     "slang": "SLANG_REF", "xyce": "XYCE_REF",
     "yices2": "YICES2_REF", "sv-elab": "SV_ELAB_REF",
+    "fastercap": "FASTERCAP_REF",
+    "cocotb": "COCOTB_REF", "cocotb-coverage": "COCOTB_COVERAGE_REF",
+    "pyuvm": "PYUVM_REF", "sby": "SBY_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
+
+
+def pin_file(tool: str) -> Path:
+    """The Dockerfile the tool's `PRIMARY` ARG is written in."""
+    return ROOT / "Dockerfile" if tool in STAGE8 else ROOT / "tools" / tool / "Dockerfile"
 
 # The dated exceptions are shared with check_fork_only, deliberately. If this
 # check applied the rule more strictly than the one that gates the source, a
@@ -84,7 +109,7 @@ def main(argv) -> int:
     bad, deferred, seen = [], [], 0
     try:
         for tool, key in PRIMARY.items():
-            want = ARG.findall((ROOT / "tools" / tool / "Dockerfile").read_text())
+            want = ARG.findall(pin_file(tool).read_text())
             want = dict(want).get(key, "").split("#")[0].strip()
             rc, body = run("docker", "exec", cid, "cat",
                            f"/vibeic/provenance/{tool}.json")

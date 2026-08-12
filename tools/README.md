@@ -135,14 +135,28 @@ has the same caveat.
 4. An `IMG_<NAME>` pin plus the `FROM ... AS img-<name>` alias in `Dockerfile`.
    (BuildKit does not expand variables in `COPY --from=`, hence the alias.)
 5. An entry in fork-gatekeeper's `FORKS.json` so the 05:30 cron tracks upstream.
+6. A `/vibeic/provenance/<name>.json` written by the build, a `COPY` of it into
+   the `provenance` collector stage, and the tool in
+   `check_image_provenance.py`'s `PRIMARY`. **All three** — a record nobody
+   gathers never reaches the image, and a record nobody reads is carried and
+   never opened. Both had happened (vibeic-eda#117 finding 5) and both printed
+   a confident PASS.
 
-6. Nothing, for the counts in the root `README.md` — `check_doc_counts.py` will
+7. Nothing, for the counts in the root `README.md` — `check_doc_counts.py` will
    tell you which ones moved and by how much. Update the stated numbers, never
    the commands, unless the command itself is what got the answer wrong.
 
 `check_fork_only.py` fails the build if the source is not ours;
-`check_pins_agree.py` fails it if you miss step 3 or 4; `check_doc_counts.py`
-fails it if you miss step 6.
+`check_pins_agree.py` fails it if you miss step 3 or 4;
+`fork-gatekeeper/test_image_provenance_covers_every_tool.py` fails it if you do
+part of step 6 and not the rest; `check_doc_counts.py` fails it if you miss
+step 7.
+
+A tool with no `tools/<name>/Dockerfile` — cloned by SHA in the composing
+Dockerfile and installed from source, as the stage-8 verification toolchain is —
+skips steps 2-4 and still owes step 6. That exemption is what left `sby`
+unverifiable: the pin was the only claim about what shipped, and a pin is a line
+in a file.
 
 ## PENDING_FORKS.json
 
