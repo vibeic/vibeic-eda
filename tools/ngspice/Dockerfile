@@ -20,7 +20,7 @@ FROM ubuntu:24.04 AS build
 # Pinned to a commit, never a branch: a branch would make the image's contents
 # depend on when it was built.
 ARG NGSPICE_REPO=https://github.com/vibeic/ngspice.git
-ARG NGSPICE_REF=94d5ff8e16024e119af347330640181f780b6c41  # branch master -- vibeic/batch-honesty-integration is merged into master, and master tip IS this commit (0 SHA diff, measured).
+ARG NGSPICE_REF=583fa5f93b45356cd232263af7516eacf7e817dd  # branch master -- vibeic/batch-honesty-integration is merged into master, and master tip IS this commit (0 SHA diff, measured).
 # AC (5.5x), #68 hardened DSPF, w4/w5. `make check` 54/54 at this SHA.
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

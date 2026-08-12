@@ -51,14 +51,14 @@ variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
 variable "OPENROAD_RECIPE" { default = "ccc49b" }
-variable "YOSYS_RECIPE" { default = "20fb59" }
+variable "YOSYS_RECIPE" { default = "fcef15" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
-variable "NGSPICE_RECIPE" { default = "41eb29" }
-variable "LVS_RECIPE" { default = "223b54" }
+variable "NGSPICE_RECIPE" { default = "86940a" }
+variable "LVS_RECIPE" { default = "fdd36c" }
 variable "FASTERCAP_RECIPE" { default = "b7e7e5" }
-variable "IVERILOG_RECIPE" { default = "94a664" }
-variable "KLAYOUT_RECIPE" { default = "1b8ed1" }
-variable "VERILATOR_RECIPE" { default = "a54b3f" }
+variable "IVERILOG_RECIPE" { default = "832462" }
+variable "KLAYOUT_RECIPE" { default = "f3a776" }
+variable "VERILATOR_RECIPE" { default = "e50711" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
 variable "XSCHEM_RECIPE" { default = "df070e" }
 variable "SLANG_RECIPE" { default = "d4a8cf" }
@@ -74,12 +74,12 @@ variable "SV_ELAB_RECIPE" { default = "d3eb7b" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "cf27a31e509df57e7ea0013f762ed32257420513" }
-variable "YOSYS_REF"       { default = "436c9700de3896430a4094f262f1a96e8ccd48cd" }
+variable "YOSYS_REF"       { default = "4e7847448a8ccc9d123292d235549919369e5fb8" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
-variable "NGSPICE_REF"     { default = "94d5ff8e16024e119af347330640181f780b6c41" }
-variable "MAGIC_REF"       { default = "25e8bc39062f503ab26c20e09a4c94873b27156f" }
-variable "NETGEN_REF"      { default = "700b2baaebb020607c24a60814b3d0d28aa7160d" }
+variable "NGSPICE_REF"     { default = "583fa5f93b45356cd232263af7516eacf7e817dd" }
+variable "MAGIC_REF"       { default = "e6e9d9bd0020bc55f066a4379e1ac1886c3674b9" }
+variable "NETGEN_REF"      { default = "91e2b9e29da0d204dbe2851d49687e50aaa6336d" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
 # FasterCap checkout cannot configure. All three refs appear in the tag below, so
@@ -87,9 +87,9 @@ variable "NETGEN_REF"      { default = "700b2baaebb020607c24a60814b3d0d28aa7160d
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "65dd66856c289fce2b896148011620d222374954" }
-variable "KLAYOUT_REF"     { default = "9a6d57257e1653ff181252537a4b6288eb713d6a" }
-variable "VERILATOR_REF"   { default = "48b0027d0764b9fd2efb39bbd17983e1bfa27025" }
+variable "IVERILOG_REF"    { default = "ec84b2266a0225e2e24eb5bb66f2b3ce7099f9bf" }
+variable "KLAYOUT_REF"     { default = "1d657c0b7fbfc11b80464b02632834b241d6afb1" }
+variable "VERILATOR_REF"   { default = "e4f8ea64bcb8d64548a14e934763a7c969d71b6a" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
 variable "XSCHEM_REF" { default = "ecdac027f5a3ef167bf33ff6fb00d682e9fec584" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }

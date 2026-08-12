@@ -30,13 +30,13 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:cf27a31-ccc49b
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:436c970-20fb59
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4e78474-fcef15
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:94d5ff8-41eb29
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:25e8bc3-700b2ba-223b54
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:65dd668-94a664
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:9a6d572-1b8ed1
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:48b0027-a54b3f
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:583fa5f-86940a
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:e6e9d9b-91e2b9e-fdd36c
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ec84b22-832462
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:1d657c0-f3a776
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e4f8ea6-e50711
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ecdac02-df070e
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e222e7d-d4a8cf
@@ -144,7 +144,7 @@ FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
 ARG COCOTB_REF=ed5b9252a0f98df3b9ae033125e802afee7cd194  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
-ARG COCOTB_COVERAGE_REF=12fd8c62e24c5af61e611969bf5577ff03e10ece  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
+ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
 ARG PYUVM_REF=488fda1eee4418144de14699472909fbc0151dd8  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
