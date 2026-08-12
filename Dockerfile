@@ -29,17 +29,17 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:cf27a31-ccc49b
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4e78474-fcef15
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:1c764c8-fe9fb0
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:94ca69b-5ca68c
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
-ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:5e6b340-c3c877
+ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ec84b22-832462
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:794d65b-f8d9fd
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e4f8ea6-e50711
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:c7035ba-1d866a
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ecdac02-df070e
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e222e7d-d4a8cf
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e3291f8-d13e6c
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -87,7 +87,7 @@ ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-0fc0d3
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:2754444-d3eb7b
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:ce38835-06cea9
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned

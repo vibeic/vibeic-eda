@@ -42,7 +42,7 @@ FROM ubuntu:24.04 AS build
 # "ARG names can not be blank". Bisected — a `foo = bar` inside the comment is
 # fatal, `foo=bar` is not.
 ARG YOSYS_REPO=https://github.com/vibeic/yosys.git
-ARG YOSYS_REF=4e7847448a8ccc9d123292d235549919369e5fb8
+ARG YOSYS_REF=94ca69bc33f53f0ed56b2ecd91ec8a3f01c234ba
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
       libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \

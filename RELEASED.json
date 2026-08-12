@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.2.91",
-  "pins_fingerprint": "b9bc10efab32",
+  "version": "0.2.92",
+  "pins_fingerprint": "9fb847180678",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "cf27a31e509df57e7ea0013f762ed32257420513",
+    "OpenROAD": "1c764c835a25f36b3b2cbe153400d8f539fb8145",
     "OpenROAD-flow-scripts": "f9ec54a6de7b2bc69fd586015f6ebdab34eca69c",
     "Trilinos": "a2a04154254f94bd96fee2cd0e8deeaaf049a377",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
@@ -27,15 +27,15 @@
     "klayout": "794d65bc77c21d82135ff6f07b48d2645aa2b031",
     "magic": "02e5d4ac00e9702cdc679b1cd76a4be96e2a9454",
     "netgen": "b7941fafb91317b6a5845d9e9765cea278aa31c3",
-    "ngspice": "5e6b340e9e717750fa10663dda6c1eb231086470",
+    "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
     "pyuvm": "e24dd26486da457ecff71e9b0bb9fa42f80aad79",
     "sby": "2c2f04e96154995677fb604d697dc894ac680a69",
-    "slang": "e222e7dc0250231312f14c37d47404a49df00fe2",
-    "sv-elab": "27544445467056f7ebab5b9173a094f9942f19e2",
+    "slang": "e3291f8fe002c22d625732b928877b73688d8e07",
+    "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "6662fa5da71f87797598060f17728b284b99a9fc",
-    "verilator": "e4f8ea64bcb8d64548a14e934763a7c969d71b6a",
+    "verilator": "c7035ba81c2dfc61c4665c5b3ae1d22eee0c4525",
     "xschem": "ecdac027f5a3ef167bf33ff6fb00d682e9fec584",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "4e7847448a8ccc9d123292d235549919369e5fb8"
+    "yosys": "94ca69bc33f53f0ed56b2ecd91ec8a3f01c234ba"
   }
 }
