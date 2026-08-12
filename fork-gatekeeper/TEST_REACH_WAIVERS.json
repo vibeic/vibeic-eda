@@ -68,27 +68,6 @@
       "svrf-drc/tests/run_waiver_engine_test.sh"
     ]
   },
-  "magic": {
-    "issue": "vibeic-eda#105",
-    "why": "9 regression gates + their generators; the audit measured that nothing runs them after a merge.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "test/def_mfggrid_snap/mk_def.py",
-      "test/def_mfggrid_snap/run.sh",
-      "test/def_ndr_via_byrule/mk_via_def.py",
-      "test/def_ndr_via_byrule/run.sh",
-      "test/gds_foundry_layers/read_layers.py",
-      "test/gds_foundry_layers/run.sh",
-      "test/gds_mfggrid_snap/read_sref.py",
-      "test/gds_mfggrid_snap/run.sh",
-      "test/lef_extract_tech/run.sh",
-      "test/lvs_bridge_tech_multimetal/run.sh",
-      "test/lvs_layermap_autodiscover/gen_foundry_gds.py",
-      "test/lvs_layermap_autodiscover/run.sh",
-      "test/lvs_zero_width_route/run.sh",
-      "test/spef_output/run.sh"
-    ]
-  },
   "ngspice": {
     "issue": "vibeic-eda#110",
     "why": "the 12 vibeic_proofs gates, the fork's only regression coverage for its 17 patches.",
