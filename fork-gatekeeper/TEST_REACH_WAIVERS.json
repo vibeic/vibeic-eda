@@ -89,28 +89,6 @@
       "test/spef_output/run.sh"
     ]
   },
-  "netgen": {
-    "issue": "vibeic-eda#112",
-    "why": "13 suites, ~1,300 lines of FAIL->PASS proof; `make test` exits 0 having run nothing.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "test/blackbox_vacuous_match/run.sh",
-      "test/connectivity_global_match/run.sh",
-      "test/device_filter/run.sh",
-      "test/erc_floating_welltie/run.sh",
-      "test/flatten_prohibit_crash/run.sh",
-      "test/liberty_pgpin_globals/run.sh",
-      "test/lvs_json_report/run.sh",
-      "test/lvs_json_report/validate.py",
-      "test/lvs_open_localization/run.sh",
-      "test/lvs_partition_debug/run.sh",
-      "test/lvs_plain_mode_verdict/run.sh",
-      "test/lvs_property_ranking/run.sh",
-      "test/lvs_short_localization/run.sh",
-      "test/pin_swap_localization/run.sh",
-      "test/property_global_asymmetry/run.sh"
-    ]
-  },
   "ngspice": {
     "issue": "vibeic-eda#110",
     "why": "the 12 vibeic_proofs gates, the fork's only regression coverage for its 17 patches.",
