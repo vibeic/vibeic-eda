@@ -24,24 +24,5 @@
       "packages/epetra/example/petra_howle/rectMatrixTest.cc",
       "packages/epetra/test/EpetraBenchmarkTest/generateTarFile"
     ]
-  },
-  "ngspice": {
-    "issue": "vibeic-eda#110",
-    "why": "the 12 vibeic_proofs gates, the fork's only regression coverage for its 17 patches.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "vibeic_proofs/check_enh11.sh",
-      "vibeic_proofs/check_enh16.sh",
-      "vibeic_proofs/check_enh20_53_27_62.sh",
-      "vibeic_proofs/check_enh23.sh",
-      "vibeic_proofs/check_enh24_26_28.sh",
-      "vibeic_proofs/check_enh29_33.sh",
-      "vibeic_proofs/check_enh37.sh",
-      "vibeic_proofs/check_enh3_4_6.sh",
-      "vibeic_proofs/check_enh68.sh",
-      "vibeic_proofs/check_enhPLL1.sh",
-      "vibeic_proofs/check_enhRESID.sh",
-      "vibeic_proofs/check_issue95_mcdoc.sh"
-    ]
   }
 }
