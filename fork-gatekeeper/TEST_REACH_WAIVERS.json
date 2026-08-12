@@ -107,14 +107,5 @@
       "vibeic_proofs/check_enhRESID.sh",
       "vibeic_proofs/check_issue95_mcdoc.sh"
     ]
-  },
-  "yosys": {
-    "issue": "vibeic-eda#111",
-    "why": "two shell tests in dirs whose Makefile globs *.ys and therefore never collects *.sh.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "tests/techmap/merge_liberty.sh",
-      "tests/various/read_activity_err.sh"
-    ]
   }
 }

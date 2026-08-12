@@ -199,3 +199,27 @@ def test_the_declared_surface_cannot_manufacture_a_pass(tmp_path):
     declared = M.declared_checks("T", fj)
     assert "it_runs.py" not in declared, (
         "a declaration of a DIFFERENT check must not excuse this file")
+
+
+def test_a_generator_beside_the_test_counts_as_collection():
+    """yosys's two shell tests were a FALSE POSITIVE of this gate's.
+
+    `tests/Makefile` runs `cd $* && python3 generate_mk.py` per directory, and
+    both techmap/ and various/ generate_mk.py pass `--bash`, which globs `*.sh`.
+    Generating the Makefiles proves the collection is real:
+    `grep -c "^merge_liberty.sh:" techmap/Makefile` and
+    `grep -c "^read_activity_err.sh:" various/Makefile` are each 1.
+
+    Both halves of the rule are required and this pins both: a generator the
+    surface never names generates nothing, and a name in the surface that is not
+    beside the test says nothing about the test.
+    """
+    clone = _fork("yosys")
+    state, orphans, meta = M.unreachable(clone)
+    assert state == M.PASS, (state, orphans)
+    assert meta.get("entry_points", 0) >= 2, meta
+
+    assert M.GENERATOR.match("generate_mk.py")
+    assert not M.GENERATOR.match("helper.py")
+    # a generator that exists but is NOT named in the surface must not count
+    assert M.generated_dir(clone, "tests/techmap", "") is False

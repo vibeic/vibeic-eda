@@ -209,6 +209,35 @@ def surface(clone: Path) -> tuple[str, int]:
     return "\n".join(text), n
 
 
+#: Scripts that GENERATE a directory's build file. A test sitting beside one is
+#: collected by a glob rather than named, which is the same shape as pytest's
+#: convention one level in.
+#:
+#: MEASURED 2026-08-12, and it was a false positive of mine. yosys's two shell
+#: tests were reported unreachable; in fact `tests/Makefile` runs
+#: `cd $* && python3 generate_mk.py` per directory, and BOTH
+#: techmap/generate_mk.py and various/generate_mk.py pass `--bash`, which globs
+#: `*.sh`. Generating the Makefiles proves it: `grep -c "^merge_liberty.sh:"`
+#: and `"^read_activity_err.sh:"` are each 1. They were collected all along.
+GENERATOR = re.compile(r"^(generate_mk|gen_tests?_makefile|configure|autogen)\.(py|sh)$")
+
+
+def generated_dir(clone: Path, parent: str, blob: str) -> bool:
+    """Does a generator live in this directory, and is it named in the surface?
+
+    Both halves are required. A generator the surface never invokes generates
+    nothing, and a name in the surface that is not beside the test says nothing
+    about the test.
+    """
+    d = clone / parent
+    if not d.is_dir():
+        return False
+    for child in d.iterdir():
+        if child.is_file() and GENERATOR.match(child.name) and child.name in blob:
+            return True
+    return False
+
+
 def unreachable(clone: Path, declared: str = "") -> tuple[str, list[str], dict]:
     up = upstream_ref(clone)
     if up is None:
@@ -231,6 +260,8 @@ def unreachable(clone: Path, declared: str = "") -> tuple[str, list[str], dict]:
             continue
         if runs_pytest and PYTEST_COLLECTED.match(os.path.basename(f)):
             continue                      # collected by convention — see the note above
+        if parent and generated_dir(clone, parent, blob):
+            continue                      # a generator in the surface builds this dir
         orphans.append(f)
     state = FAIL if orphans else PASS
     return state, orphans, {"upstream": up, "entry_points": len(eps), "surface": nfiles}
