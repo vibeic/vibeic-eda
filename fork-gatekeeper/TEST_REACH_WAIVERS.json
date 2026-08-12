@@ -16,17 +16,6 @@
     "sby is deliberately absent: it carried 33 of these until 2c2f04e wired them in.",
     "That commit is the worked example of what every entry here needs."
   ],
-  "OpenSTA": {
-    "issue": "vibeic-eda#108",
-    "why": "4 C++ oracle gates: never compiled, never run.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "test/crosstalk_eco_gate.cc",
-      "test/multi_scenario_merge_gate.cc",
-      "test/propagated_noise_gate.cc",
-      "test/whatif_eco_gate.cc"
-    ]
-  },
   "Trilinos": {
     "issue": "vibeic-eda#107",
     "why": "NOT OURS, despite what `git diff --diff-filter=A` says. Both arrived in 4a5263655ee ('Restore the seven Epetra-stack packages Xyce requires'): upstream DELETED those packages and we restored them, so git reports every restored file as added by us. They are upstream's own example/benchmark helpers, at upstream's own level of wiring, and inventing a runner for them would be us maintaining a test upstream does not. Verified 2026-08-12: `git cat-file -e upstream/master:<path>` fails for both, and the adding commit is the restore.",
