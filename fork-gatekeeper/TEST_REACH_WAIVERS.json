@@ -36,38 +36,6 @@
       "packages/epetra/test/EpetraBenchmarkTest/generateTarFile"
     ]
   },
-  "klayout": {
-    "issue": "vibeic-eda#113",
-    "why": "1 C++ unit test + 24 shell harnesses; the only build the fork's CI runs cannot see them.",
-    "measured_on": "2026-08-12",
-    "files": [
-      "caa/tests/run_caa_test.sh",
-      "cmp-gradient/tests/run_cmp_gradient_test.sh",
-      "gds-antenna/tests/run_antenna_tests.sh",
-      "gds-antenna/tests/run_diode_relief_test.sh",
-      "lvs-recon/tests/run_lvs_recon_test.sh",
-      "metal-fill/tests/run_cheese_test.sh",
-      "metal-fill/tests/run_fill_dummy_datatype_test.sh",
-      "metal-fill/tests/run_fill_tests.sh",
-      "mp-color/tests/run_mp_color_test.sh",
-      "pattern-match/tests/run_pattern_match_test.sh",
-      "perc-latchup/tests/run_perc_latchup_test.sh",
-      "plugin-wiring/tests/run_vendored_sync_test.sh",
-      "svrf-drc/tests/run_antenna_engine_test.sh",
-      "svrf-drc/tests/run_critarea_engine_test.sh",
-      "svrf-drc/tests/run_densgrad_engine_test.sh",
-      "svrf-drc/tests/run_dfm_engine_test.sh",
-      "svrf-drc/tests/run_engine_parity.sh",
-      "svrf-drc/tests/run_erc_engine_test.sh",
-      "svrf-drc/tests/run_label_engine_test.sh",
-      "svrf-drc/tests/run_mask_engine_test.sh",
-      "svrf-drc/tests/run_parse_parity.sh",
-      "svrf-drc/tests/run_property_engine_test.sh",
-      "svrf-drc/tests/run_rve_engine_test.sh",
-      "svrf-drc/tests/run_vspace_engine_test.sh",
-      "svrf-drc/tests/run_waiver_engine_test.sh"
-    ]
-  },
   "ngspice": {
     "issue": "vibeic-eda#110",
     "why": "the 12 vibeic_proofs gates, the fork's only regression coverage for its 17 patches.",
