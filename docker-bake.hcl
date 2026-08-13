@@ -51,7 +51,7 @@ variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
 variable "OPENROAD_RECIPE" { default = "139ab7" }
-variable "YOSYS_RECIPE" { default = "5ca68c" }
+variable "YOSYS_RECIPE" { default = "8fc2a0" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "19b4e7" }
@@ -74,7 +74,7 @@ variable "SV_ELAB_RECIPE" { default = "06cea9" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "1f62062f8795d19dbc46673a8eaf6d718b74cf4d" }
-variable "YOSYS_REF"       { default = "94ca69bc33f53f0ed56b2ecd91ec8a3f01c234ba" }
+variable "YOSYS_REF"       { default = "cdc5805c932203fc67caf0ed5db788bdb9e285cb" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
