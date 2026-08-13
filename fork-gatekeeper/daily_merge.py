@@ -235,8 +235,30 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         # 127 is this module's own "could not run it at all" (see `_sh`), and it
         # is not distinguishable from a program that genuinely exits 127. Both
         # block, so the ambiguity costs nothing; the detail says which we saw.
-        rows.append({"name": name, "ok": rc == 0, "rc": rc,
-                     "detail": _salient(out, err) if rc != 0 else "clean"})
+        #
+        # `advisory` — a check that does NOT read the merged tree cannot tell us
+        # anything about the merge, so it is not entitled to block the publish.
+        # klayout's `vendored-plugin-sync` is the case that forced this: it
+        # compares the fork against a vibe-ic PLUGIN checkout located by
+        # `~/vibe-ic/...` hints, i.e. ANOTHER REPO'S WORKING COPY on this host.
+        # Merging upstream into klayout cannot make that copy more or less
+        # stale, and on a host with no plugin checkout the script exits SKIP=3,
+        # which is non-zero — so wired as a hard gate it blocks klayout's
+        # upstream sync FOREVER, on every host, for a defect in a different
+        # repository. Measured 2026-08-13: `klayout upstream: already current;
+        # BLOCKED by post-merge check: vendored-plugin-sync rc=1 — NOT pushed`.
+        #
+        # An advisory check still RUNS, still reports, and is still red in the
+        # round's self-check summary and on the page. The only thing it loses is
+        # the veto over publishing this fork. It must never be used to quiet a
+        # check that DOES read the merged tree — that is the whole gate.
+        advisory = bool(chk.get("advisory"))
+        rows.append({"name": name, "ok": rc == 0 or advisory, "rc": rc,
+                     "advisory": advisory,
+                     "detail": ("clean" if rc == 0 else
+                                ("ADVISORY (does not read the merged tree; "
+                                 "reported, not blocking) " if advisory else "")
+                                + (_salient(out, err) if rc != 0 else ""))})
     return rows
 
 

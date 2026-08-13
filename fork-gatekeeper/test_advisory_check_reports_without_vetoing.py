@@ -1,0 +1,92 @@
+"""An `advisory` post-merge check reports but does not veto the publish.
+
+WHY THE CONCEPT EXISTS. A post-merge check earns its veto by reading the MERGED
+TREE: if it fails, this merge is one the program is not entitled to publish.
+klayout's `vendored-plugin-sync` does not read the merged tree at all -- it
+compares the fork against a vibe-ic PLUGIN checkout located through
+`~/vibe-ic/...` hints, i.e. another repository's working copy on whatever host
+runs the round. Merging upstream into klayout cannot make that copy more or less
+stale, and on a host with no plugin checkout the script exits SKIP=3, which is
+non-zero. Wired as a hard gate it therefore blocked klayout's upstream sync
+permanently, everywhere, for a defect living in a different repository.
+
+Measured 2026-08-13, the 05:30 round:
+    klayout  upstream: already current; BLOCKED by post-merge check:
+             vendored-plugin-sync rc=1 ... -- NOT pushed
+and after marking it advisory, on the same state:
+    klayout  ALREADY_CURRENT  level with upstream/master        0 need a human
+
+THE LINE THIS PINS. `advisory` must never quiet a check that DOES read the
+merged tree -- that is the entire gate. So the test below asserts BOTH halves:
+an advisory check stops blocking, AND a normal failing check still blocks.
+"""
+import json
+import pathlib
+import sys
+
+import pytest
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import daily_merge as M                                    # noqa: E402
+
+
+@pytest.fixture
+def failing_tree(tmp_path):
+    s = tmp_path / "chk.sh"
+    s.write_text("#!/bin/sh\nexit 1\n")
+    s.chmod(0o755)
+    return tmp_path
+
+
+def _row(wt, **extra):
+    chk = {"name": "c", "path": "chk.sh", "cmd": ["sh", "chk.sh"], **extra}
+    return M.run_post_merge_checks(wt, [chk])[0]
+
+
+def test_a_normal_failing_check_still_blocks(failing_tree):
+    r = _row(failing_tree)
+    assert r["ok"] is False, "the gate is gone: a failing check no longer blocks"
+    assert r["rc"] != 0
+
+
+def test_an_advisory_failing_check_does_not_block(failing_tree):
+    r = _row(failing_tree, advisory=True)
+    assert r["ok"] is True, "an advisory check still vetoes the publish"
+
+
+def test_advisory_does_not_hide_the_real_result(failing_tree):
+    """The point is to drop the veto, NOT to make the red disappear: the round's
+    summary and the page must still show it."""
+    r = _row(failing_tree, advisory=True)
+    assert r["rc"] != 0, "advisory masked the real exit code"
+    assert r["advisory"] is True
+    assert "ADVISORY" in r["detail"], r["detail"]
+    assert r["detail"] != "clean"
+
+
+def test_absent_script_still_blocks_even_when_advisory(tmp_path):
+    """MISSING is decided before the command runs, and it stays a block: a
+    declaration naming a path no revision carries is a typo, not a waiver."""
+    r = _row(tmp_path, advisory=True)
+    assert r["ok"] is False, "a missing script became a pass via advisory"
+    assert "MISSING" in r["detail"]
+
+
+def test_only_the_cross_repo_check_is_advisory_in_forks_json():
+    """A guard on the concept itself: if a second check ever becomes advisory,
+    that is a decision someone must make deliberately, not inherit."""
+    d = json.loads((HERE / "FORKS.json").read_text())
+    adv = [(f.get("tool"), c.get("name"))
+           for f in d["forks"]
+           for c in (f.get("post_merge_check") or [])
+           if c.get("advisory")]
+    assert adv == [("klayout", "vendored-plugin-sync")], (
+        "the advisory set changed; each entry must be justified by NOT reading "
+        f"the merged tree: {adv}")
+    for f in d["forks"]:
+        for c in f.get("post_merge_check") or []:
+            if c.get("advisory"):
+                assert c.get("why_advisory"), (
+                    f"{f['tool']}:{c['name']} is advisory with no why_advisory")
