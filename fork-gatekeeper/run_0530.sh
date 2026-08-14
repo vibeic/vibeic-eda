@@ -141,6 +141,7 @@ fi
 # RELEASE lag, which need opposite fixes). Both mistakes produced a reassuring
 # answer. A measurement that has to be remembered is not a measurement.
 python3 "${DIR}/fork_gap_report.py" \
+    --merge-evidence "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/daily_0530.json" \
     --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" >> "${LOG}" 2>&1
 GAP=$?
 echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
@@ -176,7 +177,9 @@ SYNC_LAG=$(python3 -c "
 import json,sys
 try:
     d=json.load(open('${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json'))
-    print(d.get('q1_sync_lag') if d.get('q1_sync_lag') is not None else 'unmeasured')
+    v=d.get('q1_sync_lag_at_merge')
+    if v is None: v=d.get('q1_sync_lag')
+    print(v if v is not None else 'unmeasured')
 except Exception:
     print('unmeasured')
 " 2>/dev/null)
@@ -184,10 +187,10 @@ if [ "${SYNC_LAG}" = "unmeasured" ]; then
     echo "[$(date -Is)] CONVERGENCE: sync lag COULD NOT BE MEASURED (fork_gap_report exit ${GAP}) — that is not zero, and the round is not clean" >> "${LOG}"
     GAP_FATAL=1
 elif [ "${SYNC_LAG}" -ne 0 ] 2>/dev/null; then
-    echo "[$(date -Is)] CONVERGENCE: FAILED — ${SYNC_LAG} commit(s) still behind upstream after the round. Merging upstream into our line is this round's primary duty; it did not happen." >> "${LOG}"
+    echo "[$(date -Is)] CONVERGENCE: FAILED — ${SYNC_LAG} commit(s) this round SAW upstream and did not take. Merging upstream into our line is this round's primary duty; it did not happen. (Measured against each fork's upstream_evidence.tip_seen — the tip its own fetch resolved before merging — NOT a fresh fetch, which moves during the ~1h release phase. The live drift is q1_sync_lag in fork_gap.json and is reported there, not here.)" >> "${LOG}"
     GAP_FATAL=1
 else
-    echo "[$(date -Is)] CONVERGENCE: sync lag 0 — every fork is level with upstream" >> "${LOG}"
+    echo "[$(date -Is)] CONVERGENCE: sync lag 0 — every fork took everything this round saw upstream" >> "${LOG}"
     GAP_FATAL=0
 fi
 

@@ -595,7 +595,8 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
         f"against {dflt}")
 
 
-def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
+def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
+            merge_evidence: Optional[dict] = None) -> dict:
     pins = pins_from_dockerfiles(repo)
     assertions = assertions_from_dockerfiles(repo)
     rows: List[dict] = []
@@ -612,7 +613,8 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
                "pin_source": "ARG", "pin_disagreement": None,
                "ahead": led.get("ahead"), "pin": None, "kind": "pin",
                "asserted_contents": None,
-               "sync_lag": None, "release_lag": None, "image_behind": None,
+               "sync_lag": None, "sync_lag_at_merge": None,
+               "release_lag": None, "image_behind": None,
                "tip_state": None, "tip_note": None,
                "note": None}
 
@@ -708,6 +710,38 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         tip = verdict.ref
         row["tip"] = tip
         row["sync_lag"] = count(clone, tip, up)
+        # SYNC LAG AT MERGE TIME — the round's OWN goalpost, not a moving one.
+        #
+        # `sync_lag` above answers "how far behind upstream are we RIGHT NOW",
+        # which is the honest daily-drift number and stays as it is. It is the
+        # wrong question to fail a round on: the merge runs at 05:31 and this is
+        # measured at ~06:35, because the release phase (build + push a 31 GB
+        # image) sits between them. Upstream commits inside that hour and the
+        # round is judged against commits that did not exist when it merged.
+        #
+        # Measured 2026-08-14: ORFS fetched ef52564bf at 05:31, merged it, and
+        # our master CONTAINS it; the 06:34 fetch saw da37dce1c (+4). cocotb the
+        # same (+3). The round reported "7 commit(s) still behind ... it did not
+        # happen" about a merge that provably DID happen. On days upstream
+        # happened to be quiet in that window the same code reported 0 — so the
+        # verdict was a race, not a measurement.
+        #
+        # `tip_seen` is what daily_0530's own fetch resolved before merging, so
+        # comparing against it asks the question the verdict claims to ask: did
+        # THIS round take what it saw? A fork the round genuinely failed to
+        # merge still counts here, because its tip_seen is still not an ancestor
+        # of our tip — the gate keeps its teeth.
+        ev = (merge_evidence or {}).get(row["tool"]) or {}
+        seen = ((ev.get("upstream_evidence") or {}).get("tip_seen")
+                if isinstance(ev, dict) else None)
+        if seen:
+            row["sync_lag_at_merge"] = count(clone, tip, seen)
+            row["merge_ref_seen"] = seen
+        else:
+            # No evidence for this fork in this round: fall back to the live
+            # number rather than silently scoring it 0.
+            row["sync_lag_at_merge"] = row["sync_lag"]
+            row["merge_ref_seen"] = None
         if row["pin"]:
             row["release_lag"] = count(clone, row["pin"], tip)
             row["image_behind"] = count(clone, row["pin"], up)
@@ -749,6 +783,8 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool) -> dict:
         "q1_image_behind_upstream": sum(r["image_behind"] for r in measurable),
         "q1_forks_behind": len([r for r in measurable if r["image_behind"]]),
         "q1_sync_lag": sum(r["sync_lag"] or 0 for r in measurable),
+        "q1_sync_lag_at_merge": sum(r.get("sync_lag_at_merge") or 0
+                                    for r in measurable),
         "q1_release_lag": sum(r["release_lag"] or 0 for r in measurable),
         "q1_unmeasured": [r["tool"] for r in unmeasured],
         "q2_forks_not_built_from_ours": [r["tool"] for r in not_built],
@@ -863,11 +899,28 @@ def main(argv=None) -> int:
                     default=Path.home() / ".cache/eda-fork-gatekeeper/ledger")
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--json", type=Path, default=None)
+    ap.add_argument("--merge-evidence", type=Path, default=None,
+                    help="daily_0530.json from THIS round. Its per-fork "
+                         "upstream_evidence.tip_seen is the upstream each fork "
+                         "was actually merged to, which is what "
+                         "q1_sync_lag_at_merge is measured against. Without it "
+                         "that field falls back to the live lag, so a missing "
+                         "file cannot silently score the round clean.")
     a = ap.parse_args(argv)
 
     if not a.ledger.is_dir():
         print("fork_gap_report: rc=2 NOT MEASURED — no ledger"); return 2
-    rep = analyse(a.repo, a.forks_root, a.ledger, not a.no_fetch)
+    mev = None
+    if a.merge_evidence:
+        try:
+            mev = json.loads(a.merge_evidence.read_text())
+        except Exception as exc:                                   # noqa: BLE001
+            # NOT fatal, and NOT silent: without it every row falls back to the
+            # live lag, which is the stricter direction.
+            print(f"fork_gap_report: could not read --merge-evidence "
+                  f"{a.merge_evidence} ({exc}); sync_lag_at_merge falls back "
+                  f"to the live lag")
+    rep = analyse(a.repo, a.forks_root, a.ledger, not a.no_fetch, mev)
     if a.json:
         a.json.parent.mkdir(parents=True, exist_ok=True)
         a.json.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
