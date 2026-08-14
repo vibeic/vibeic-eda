@@ -19,7 +19,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG KLAYOUT_REPO=https://github.com/vibeic/klayout.git
-ARG KLAYOUT_REF=794d65bc77c21d82135ff6f07b48d2645aa2b031  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
+ARG KLAYOUT_REF=08cf213ad18e737b4aa7995d2de580110524203f  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \

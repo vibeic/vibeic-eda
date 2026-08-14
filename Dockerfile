@@ -29,14 +29,14 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:7ee2601-c225b9
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:cdc5805-8fc2a0
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:b910385-5028f9
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:728adeb-fa9b7c
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ec84b22-832462
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:794d65b-f8d9fd
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:3607197-a53415
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:08cf213-cbbc4b
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:facca91-5091a4
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:064c923-6a8301
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e3291f8-d13e6c
@@ -142,7 +142,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=8f4557fbc442c785eac9a8c9170fd1143d3038ce  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=77b89e60f4346d1b8c4d3eb5e7cd37c0f6af07c2  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
@@ -216,7 +216,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=da37dce1cef69bb75efbc2dc18ed95a29651295b  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=bf79f4422621e1b4d3ea01cb2cb309f7e818117f  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
