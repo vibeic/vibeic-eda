@@ -64,9 +64,11 @@
           "path": "tools/run_pinned_ruff.py",
           "cmd": [
             "python3",
-            "tools/run_pinned_ruff.py"
+            "tools/run_pinned_ruff.py",
+            "--upstream",
+            "upstream/master"
           ],
-          "why": "Lint in cocotb is declared only as a pre-commit hook, so it runs only where pre-commit is installed and wired to git -- never in a merge worktree. Measured 2026-08-12 with the exact linter the repo pins (astral-sh/ruff-pre-commit v0.15.21): stock upstream 14db0175 gives 'All checks passed!', our fork HEAD ed5b9252 gives 'Found 9 errors.' and every one of the 9 was in the two files our own patch added. The ruff hook runs with --fix --exit-non-zero-on-fix followed by a local `git diff --exit-code` hook, so it does not merely warn: it rewrites our files and then fails.",
+          "why": "Lint in cocotb is declared only as a pre-commit hook, so it runs only where pre-commit is installed and wired to git -- never in a merge worktree. Measured 2026-08-12 with the exact linter the repo pins (astral-sh/ruff-pre-commit v0.15.21): stock upstream 14db0175 gives 'All checks passed!', our fork HEAD ed5b9252 gives 'Found 9 errors.' and every one of the 9 was in the two files our own patch added. The ruff hook runs with --fix --exit-non-zero-on-fix followed by a local `git diff --exit-code` hook, so it does not merely warn: it rewrites our files and then fails. Measured DIFFERENTIALLY against upstream/master: upstream widened its own ruff rule set on 2026-08-14 and its tree now carries violations we do not own and cannot fix here. An absolute gate would block this fork's upstream sync forever on somebody else's lint debt; this asks only what THIS FORK adds.",
           "note": "The script reads the pinned ruff version out of .pre-commit-config.yaml, so it cannot drift from the hook, and resolves the binary as $RUFF -> matching ruff on PATH -> `uvx ruff@<pinned>`. If no pinned ruff can be obtained it exits 2 with an explicit message instead of passing quietly. Runs `ruff check .` and `ruff format --check .` from the repo root in a few seconds; needs no build and no simulator."
         }
       ]
