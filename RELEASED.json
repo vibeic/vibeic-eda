@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.1",
-  "pins_fingerprint": "6c74ab5dca86",
+  "version": "0.3.2",
+  "pins_fingerprint": "2bdb95eb129b",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "3bf15a279a7c5822247a3d8411f314c96563a443",
+    "OpenROAD": "20844d66624e237f39f82feb423f3671a0288cc5",
     "OpenROAD-flow-scripts": "fb8b859a309d14f52be6a813e9c9716a2b44ef05",
     "Trilinos": "a2a04154254f94bd96fee2cd0e8deeaaf049a377",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
@@ -28,14 +28,14 @@
     "magic": "02e5d4ac00e9702cdc679b1cd76a4be96e2a9454",
     "netgen": "b7941fafb91317b6a5845d9e9765cea278aa31c3",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
-    "pyuvm": "e24dd26486da457ecff71e9b0bb9fa42f80aad79",
+    "pyuvm": "663f0852c7b7990b89b40cc7709fbf690415cef1",
     "sby": "2c2f04e96154995677fb604d697dc894ac680a69",
     "slang": "e3291f8fe002c22d625732b928877b73688d8e07",
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "6662fa5da71f87797598060f17728b284b99a9fc",
-    "verilator": "bac833ce75ba6ed041b9288eb660416a04fb520a",
+    "verilator": "5f1e2d815b9f8668962b886b33f458cd947aff73",
     "xschem": "064c923caccfe0a043512aafbc1e418c4e8b04e4",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "728adeb94589e380f2d9c28aa66fda02881b0571"
+    "yosys": "798e7fdc276f11c913725e9985221538189e2c38"
   }
 }
