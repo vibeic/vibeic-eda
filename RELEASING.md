@@ -58,12 +58,18 @@ any artefact whose pin moved (skipping the rest — that skip is what makes a
 one-pin release cheap), then `build-and-push` composes. Before either, the
 **version-sync guard** refuses to build if `VERSION` ≠ the release tag.
 
-Two checks run after the push, and they answer different questions. The smoke
+Two checks run before the push, and they answer different questions. The smoke
 test drives a **bare `docker exec` (no login shell)**, so a regression of on-PATH
 tool resolution fails the release — but it can only prove the tools RUN. Drop a
 `COPY` and the base image's own copy answers every one of those commands.
 `tools/check_image_provenance.py` reads the provenance each artefact carries and
 asserts the image contains the commits the pins name.
+
+The compose is loaded locally before either registry tag moves. It must pass
+`tools/check_image_depth.py` (at most 125 filesystem layers), the runtime smoke,
+and the provenance check; only then does `release.sh` push the version and
+`latest` tags. This order is load-bearing: an over-depth image can build, run
+locally, and push successfully while every fresh `docker pull` fails.
 
 ## Checklist
 

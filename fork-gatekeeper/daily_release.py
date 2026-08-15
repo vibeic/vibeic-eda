@@ -1227,6 +1227,21 @@ def main(argv=None) -> int:
                 return RC_NEEDS_HUMAN
             result["registry_composed"] = True
 
+            # A LOCAL build can be runnable and still be impossible to PULL.
+            # 0.3.0 composed, passed every tool smoke and pushed with 126 layers;
+            # Docker's pull graph accepts at most 125. Check the exact candidate
+            # BEFORE a version tag becomes durable in the registry. Failure to
+            # measure is a refusal too: unknown depth is not a pullable image.
+            depth_cmd = ["python3", str(root / "tools/check_image_depth.py"), tag]
+            drc, dout, derr = _sh(depth_cmd, cwd=root, timeout=120)
+            if drc != 0:
+                _sh(["docker", "rmi", tag])
+                print(f"[FAIL] composed image is not publishable; the tag was "
+                      f"removed and NO version was cut:\n{(derr or dout).strip()}",
+                      file=sys.stderr)
+                return RC_NEEDS_HUMAN
+            print(f"  depth: {dout.strip()}")
+
             # SMOKE BEFORE THE VERSION IS REAL. A tag is a claim, and cutting one
             # over an image whose tools have never been started makes the claim
             # on nothing. The tag is removed on failure, so a bad image cannot be

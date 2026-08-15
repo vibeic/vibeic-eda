@@ -1418,14 +1418,6 @@ ENV VERILATOR_SOLVER="yices-smt2 --incremental"
 # and `schematic2layout` was not on PATH at all -- six venvs ship in this image and
 # only ciel was reachable, via exactly the kind of shim added here.
 
-# eqy and mcy through the LINK in /foss/tools/bin, which is how anyone invokes
-# them, and in a NON-LOGIN shell, which is what `docker exec` gives. Verifying
-# via the real path under a login shell — my first two attempts — passes on an
-# image where both would fail for a user.
-RUN /foss/tools/bin/eqy --help >/dev/null \
- && /foss/tools/bin/mcy --help >/dev/null \
- && echo "eqy and mcy run from /foss/tools/bin without a login shell"
-
 # THE MAGIC GATES -- the fork's own regression suite, run against the magic this
 # image actually ships, in the environment it ships it in.
 #
@@ -1463,12 +1455,6 @@ RUN /foss/tools/bin/eqy --help >/dev/null \
 # the discriminator is the login shell, not the shell and not the binary.
 RUN ["/bin/bash", "-lc", "/vibeic/tests/magic/test/run_all.sh && echo 'magic fork regression gates: all green against the shipped binary'"]
 
-RUN n=0; for f in /foss/tools/bin/*; do \
-      [ -L "$f" ] && [ ! -e "$f" ] && { echo "DANGLING $f -> $(readlink "$f")"; n=$((n+1)); }; \
-    done; \
-    [ "$n" = "0" ] || { echo "refusing to ship $n dangling symlink(s)"; exit 1; }; \
-    echo "no dangling symlinks in /foss/tools/bin"
-
 # THE PLUGIN BUILDER MUST BUILD A PLUGIN, not merely exist.
 #
 # tools/xyce/Dockerfile already asserts `buildxyceplugin.sh` is present and
@@ -1480,7 +1466,28 @@ RUN n=0; for f in /foss/tools/bin/*; do \
 #
 # So build one here, from a Verilog-A resistor written inline, and require the
 # .so to exist. Ohm's law is not being tested; the toolchain is.
+#
+# These three delivery checks deliberately share one filesystem layer. The
+# 0.3.0 image reached 126 layers, one beyond Docker's 125-layer pull limit: the
+# image built and pushed here, but a fresh consumer could not pull it. Keeping
+# checks separate in the source is useful; making each one a layer is not.
+#
+# eqy and mcy are checked through the LINK in /foss/tools/bin, which is how
+# anyone invokes them, and in a NON-LOGIN shell, which is what `docker exec`
+# gives. The dangling-link scan still runs after every install. The Xyce probe
+# cleans its temporary output, so combining them changes no shipped bytes.
 RUN set -e; \
+    /foss/tools/bin/eqy --help >/dev/null; \
+    /foss/tools/bin/mcy --help >/dev/null; \
+    echo "eqy and mcy run from /foss/tools/bin without a login shell"; \
+    n=0; \
+    for f in /foss/tools/bin/*; do \
+      if [ -L "$f" ] && [ ! -e "$f" ]; then \
+        echo "DANGLING $f -> $(readlink "$f")"; n=$((n+1)); \
+      fi; \
+    done; \
+    [ "$n" = "0" ] || { echo "refusing to ship $n dangling symlink(s)"; exit 1; }; \
+    echo "no dangling symlinks in /foss/tools/bin"; \
     d=$(mktemp -d); cd "$d"; \
     printf '`include "disciplines.vams"\nmodule vgate(p,n);\n  inout p,n; electrical p,n;\n  parameter real r = 1000 from (0:inf);\n  analog begin I(p,n) <+ V(p,n)/r; end\nendmodule\n' > vgate.va; \
     buildxyceplugin -o vgate vgate.va . > build.log 2>&1 || true; \
@@ -1545,12 +1552,10 @@ COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
 # BLOCKS the build if any tool cannot be probed or written: "not known to be
 # correct" is not a pass. The script's own first draft reported success for four
 # writes that had all failed with EACCES, so it now reads the file back.
-COPY tools/refresh_versions_manifest.sh /vibeic/refresh_versions_manifest.sh
-COPY tools/tool_version_probes.tsv /vibeic/tool_version_probes.tsv
+COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv /vibeic/
 USER root
-RUN bash /vibeic/refresh_versions_manifest.sh /vibeic/tool_version_probes.tsv
-
 RUN set -e; \
+    bash /vibeic/refresh_versions_manifest.sh /vibeic/tool_version_probes.tsv; \
     python3 /vibeic/pdk/pdk_local_mods.py verify \
         --root /foss/pdks/ciel \
         --baseline /vibeic/pdk/volume-as-delivered.sha256 \
