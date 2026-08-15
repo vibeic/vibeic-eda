@@ -153,31 +153,36 @@ jobs:
 
       # Composes from the artefacts `tools` published; compiles nothing. The
       # cache args are what the pre-split workflow was missing entirely.
-      - name: Compose and push
+      # Load one local release candidate first. A locally-built image can push
+      # successfully and still be impossible for a fresh consumer to pull when
+      # its parent graph exceeds Docker's 125-layer limit (0.3.0 had 126). The
+      # version and latest tags move only after depth, smoke and provenance pass.
+      - name: Compose release candidate
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: ${{ env.PLATFORMS }}
-          push: true
+          load: true
+          push: false
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-            vibeic/${{ env.IMAGE }}:latest
-            ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-            ghcr.io/vibeic/${{ env.IMAGE }}:latest
+          tags: ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
           labels: |
             org.opencontainers.image.title=vibeic-eda
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
             org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Smoke test the pushed image (bare docker exec — no login shell)
+      - name: Refuse an image too deep for Docker to pull
         run: |
-          IMG=vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-          docker pull "$IMG"
+          python3 tools/check_image_depth.py \
+            ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+
+      - name: Smoke test the release candidate (bare docker exec — no login shell)
+        run: |
+          IMG=ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
           C=$(docker run -d "$IMG" --skip sleep infinity)
           # Bare (non-login) exec must resolve every tool — this is the 0.2.12 PATH fix.
           docker exec "$C" yosys --version
@@ -196,4 +201,9 @@ jobs:
       - name: The image contains what the pins say it does
         run: |
           python3 tools/check_image_provenance.py \
-            vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+
+      - name: Publish the verified candidate
+        run: |
+          SRC_IMAGE=ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }} \
+            ./release.sh ${{ steps.ver.outputs.version }}

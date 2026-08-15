@@ -19,6 +19,12 @@ docker image inspect "${SRC}" >/dev/null 2>&1 || {
   exit 1
 }
 
+# A local image can build, run and push with a graph deeper than Docker accepts
+# on pull. 0.3.0 did (126 layers against the 125-layer limit), so this refusal
+# must happen before either the version tag or `latest` is moved.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${SCRIPT_DIR}/tools/check_image_depth.py" "${SRC}"
+
 TAGS=(
   "vibeic/vibeic-eda:${VER}"
   "vibeic/vibeic-eda:latest"
