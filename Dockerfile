@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # vibeic-eda — composed from per-tool artefacts, not compiled here.
 #
 # Each tool is built ONCE as `ghcr.io/vibeic/eda-tool-<name>:<commit-sha>` (see
@@ -886,7 +887,6 @@ RUN rm -rf /foss/tools/slang-yosys-plugin
 
 # --- vibeic/klayout (parallel streamout install; base klayout untouched) ---
 # build.sh emits the Qt-less db-lib + pymod + db_plugins/liblefdef.so into its -build dir.
-COPY --from=img-klayout /klayout/bld /foss/tools/klayout-vibeic
 
 # Provenance: what each artefact was actually built from, carried INSIDE the
 # image. The tag says what was asked for; these say what arrived, and a tag can
@@ -922,9 +922,11 @@ RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin
 #
 # The Swift runtime libraries come with it — the base image has no libswiftCore /
 # libFoundation / libdispatch, so the binary alone would not start.
-COPY --from=img-fault /foss/tools/fault/bin/fault /foss/tools/fault/bin/fault
-COPY --from=img-fault /foss/tools/fault/lib/ /foss/tools/fault/lib/
-RUN ln -sf /foss/tools/fault/bin/fault /foss/tools/bin/fault \
+RUN --mount=type=bind,from=img-fault,source=/foss/tools/fault,target=/tmp/vibeic-fault,ro \
+    mkdir -p /foss/tools/fault/bin /foss/tools/fault/lib \
+ && cp -a /tmp/vibeic-fault/bin/fault /foss/tools/fault/bin/fault \
+ && cp -a /tmp/vibeic-fault/lib/. /foss/tools/fault/lib/ \
+ && ln -sf /foss/tools/fault/bin/fault /foss/tools/bin/fault \
  && printf '/foss/tools/fault/lib\n' > /etc/ld.so.conf.d/vibeic-fault.conf \
  && ldconfig
 
@@ -953,7 +955,9 @@ RUN ln -sf /foss/tools/fault/bin/fault /foss/tools/bin/fault \
 # removing it rather than a vague "just in case": once a full sign-off run
 # (DRC + LVS on a real PDK) passes on a swapped image, it is insurance nobody
 # needs and the 207 MB should go. Until then it is one `ln -sfn` from a hotfix.
-RUN mv /foss/tools/klayout /foss/tools/klayout-base \
+RUN --mount=type=bind,from=img-klayout,source=/klayout/bld,target=/tmp/vibeic-klayout,ro \
+    cp -a /tmp/vibeic-klayout /foss/tools/klayout-vibeic \
+ && mv /foss/tools/klayout /foss/tools/klayout-base \
  && ln -s /foss/tools/klayout-vibeic /foss/tools/klayout \
  && test "$(readlink -f /foss/tools/klayout)" = /foss/tools/klayout-vibeic \
  && for b in klayout strm2gds strm2cif strm2dxf strm2txt strmcmp strm2mag \
@@ -975,13 +979,14 @@ RUN mv /foss/tools/klayout /foss/tools/klayout-base \
 #
 # The tool image now stages them (from the fork's own SHIPPED_ENGINES.json, not
 # from a list written here), and this is where they land and how they are found.
-COPY --from=img-klayout /klayout/tools /foss/tools/klayout-signoff-engines
 ENV VIBEIC_KLAYOUT_TOOLS=/foss/tools/klayout-signoff-engines
 # An env var pointing at nothing is worse than no env var: `find_engine` would
 # fall through to the vendored copy while every reader believed the fork engine
 # was running. So assert the destination is populated, in the image, at build
 # time -- and assert it by the two engines the flow actually calls today.
-RUN test -d "$VIBEIC_KLAYOUT_TOOLS" \
+RUN --mount=type=bind,from=img-klayout,source=/klayout/tools,target=/tmp/vibeic-klayout-tools,ro \
+    cp -a /tmp/vibeic-klayout-tools "$VIBEIC_KLAYOUT_TOOLS" \
+ && test -d "$VIBEIC_KLAYOUT_TOOLS" \
  && test -f "$VIBEIC_KLAYOUT_TOOLS/metal-fill/metal_fill.py" \
  && test -f "$VIBEIC_KLAYOUT_TOOLS/gds-antenna/antenna_check.py" \
  && n=$(find "$VIBEIC_KLAYOUT_TOOLS" -name '*.py' | wc -l) \
@@ -1082,8 +1087,8 @@ RUN set -eu; export PATH=/foss/tools/bin:$PATH; d=$(mktemp -d); cd "$d"; \
 # (rect-pin variant the router uses), staged under the canonical NangateOpenCellLibrary.lef
 # name the resolvers reference; the CDL source netlist is kept for structural LVS (no
 # KLayout LVS deck ships — see the registry entry's lvs_deck=null).
-COPY --from=nangate45-src /orfs/flow/platforms/nangate45 /tmp/ng45
-RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
+RUN --mount=type=bind,from=nangate45-src,source=/orfs/flow/platforms/nangate45,target=/tmp/ng45,ro \
+    NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
  && mkdir -p "$NG"/lib "$NG"/techlef "$NG"/lef "$NG"/gds \
       /foss/pdks/nangate45/libs.tech/klayout/drc \
       /foss/pdks/nangate45/libs.tech/cdl \
@@ -1094,7 +1099,6 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
  && cp /tmp/ng45/drc/FreePDK45.lydrc  /foss/pdks/nangate45/libs.tech/klayout/drc/ \
  && cp /tmp/ng45/cdl/NangateOpenCellLibrary.cdl /foss/pdks/nangate45/libs.tech/cdl/ \
  && chmod -R a+rX /foss/pdks/nangate45 \
- && rm -rf /tmp/ng45 \
  && test -f "$NG"/lib/NangateOpenCellLibrary_typical.lib \
  && test -f "$NG"/techlef/NangateOpenCellLibrary.tech.lef \
  && test -f "$NG"/lef/NangateOpenCellLibrary.lef \
@@ -1155,8 +1159,8 @@ RUN NG=/foss/pdks/nangate45/libs.ref/NangateOpenCellLibrary \
 #   shift by 6; 212 -> 212 masters; detailed_route 0 violations and 0 unrouted
 #   signal nets on both; and the routed DEF is BYTE-IDENTICAL,
 #   sha256 43906192d1bb9471873481cd6667ef657473f2621f68995b08f08c6d2220e2e3.
-COPY --from=nangate45-src /orfs/flow/platforms/asap7 /tmp/asap7
-RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
+RUN --mount=type=bind,from=nangate45-src,source=/orfs/flow/platforms/asap7,target=/tmp/asap7,ro \
+    A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && mkdir -p "$A7"/lib "$A7"/techlef "$A7"/lef "$A7"/gds \
       /foss/pdks/asap7/libs.tech/klayout/drc \
       /foss/pdks/asap7/libs.tech/librelane \
@@ -1172,7 +1176,6 @@ RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
  && cp /tmp/asap7/rcx_patterns.rules  /foss/pdks/asap7/libs.tech/librelane/rules.openrcx.asap7.nom \
  && cp /tmp/asap7/setRC.tcl           /foss/pdks/asap7/libs.tech/librelane/setRC.asap7.tcl \
  && chmod -R a+rX /foss/pdks/asap7 \
- && rm -rf /tmp/asap7 \
  && test -f "$A7"/lib/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib \
  && test -f "$A7"/lib/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib \
  && test -f "$A7"/lib/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib \
@@ -1194,10 +1197,10 @@ RUN A7=/foss/pdks/asap7/libs.ref/asap7sc7p5t \
 #                                        FinFET extraction in asap7_finfet_lvs.py)
 #   All four CDL VT flavors are staged (R is the flavor matching the staged R GDS +
 #   the pdk_registry `cdl_netlist` pointer; L/SL/SRAM kept for completeness).
-COPY --from=asap7-lvs-src /a7sc/CDL/LVS /tmp/a7cdl
-COPY --from=asap7-lvs-src /a7pdk/models/hspice /tmp/a7hspice
-COPY --from=asap7-lvs-src /a7kl /tmp/a7kl
-RUN A7T=/foss/pdks/asap7/libs.tech \
+RUN --mount=type=bind,from=asap7-lvs-src,source=/a7sc/CDL/LVS,target=/tmp/a7cdl,ro \
+    --mount=type=bind,from=asap7-lvs-src,source=/a7pdk/models/hspice,target=/tmp/a7hspice,ro \
+    --mount=type=bind,from=asap7-lvs-src,source=/a7kl,target=/tmp/a7kl,ro \
+    A7T=/foss/pdks/asap7/libs.tech \
  && mkdir -p "$A7T"/cdl "$A7T"/hspice "$A7T"/klayout/lvs \
  && cp /tmp/a7cdl/asap7sc7p5t_28_L.cdl    "$A7T"/cdl/ \
  && cp /tmp/a7cdl/asap7sc7p5t_28_R.cdl    "$A7T"/cdl/ \
@@ -1209,7 +1212,6 @@ RUN A7T=/foss/pdks/asap7/libs.tech \
  && cp /tmp/a7kl/asap7.lyt "$A7T"/klayout/lvs/ \
  && cp /tmp/a7kl/asap7.lyp "$A7T"/klayout/lvs/ \
  && chmod -R a+rX "$A7T"/cdl "$A7T"/hspice "$A7T"/klayout/lvs \
- && rm -rf /tmp/a7cdl /tmp/a7hspice /tmp/a7kl \
  && grep -q "BSD 3-Clause" "$A7T"/cdl/asap7sc7p5t_28_R.cdl \
  && grep -q "BSD 3-Clause" "$A7T"/hspice/7nm_TT_160803.pm \
  && test -f "$A7T"/cdl/asap7sc7p5t_28_R.cdl \
@@ -1252,20 +1254,27 @@ RUN A7T=/foss/pdks/asap7/libs.tech \
 # Built and self-tested in the `align-build` stage above; taken here as bytes.
 # The venv, the source trees and the two wrappers are all that survive — the
 # ~1.4 GB `_skbuild` intermediates and the compilers never enter this image.
-COPY --from=align-build /foss/tools/align /foss/tools/align
-COPY --from=align-build /opt/align-src /opt/align-src
-COPY --from=align-build /foss/tools/bin/align-schematic2layout /foss/tools/bin/align-python /foss/tools/bin/
-# Placed HERE, immediately after the COPY and BEFORE `USER 1000`, because
+# Kept as one filesystem layer for one independently cached artefact. Bind mounts
+# expose the three build-stage trees without committing three temporary layers.
+# Placed HERE, immediately after the copy and BEFORE `USER 1000`, because
 # /foss/tools/bin is root-owned: the first attempt sat below the USER switch
 # and died `ln: Permission denied`. Same shape as the other two placement
 # mistakes in this change -- the command was right, the layer was not.
-RUN ln -sf /foss/tools/bin/align-schematic2layout /foss/tools/bin/schematic2layout \
+RUN --mount=type=bind,from=align-build,source=/foss/tools/align,target=/tmp/vibeic-align,ro \
+    --mount=type=bind,from=align-build,source=/opt/align-src,target=/tmp/vibeic-align-src,ro \
+    --mount=type=bind,from=align-build,source=/foss/tools/bin,target=/tmp/vibeic-align-bin,ro \
+    cp -a /tmp/vibeic-align /foss/tools/align \
+ && cp -a /tmp/vibeic-align-src /opt/align-src \
+ && cp -a /tmp/vibeic-align-bin/align-schematic2layout /tmp/vibeic-align-bin/align-python /foss/tools/bin/ \
+ && ln -sf /foss/tools/bin/align-schematic2layout /foss/tools/bin/schematic2layout \
  && /foss/tools/bin/schematic2layout --help > /tmp/s2l.log 2>&1; rc=$?; \
     test $rc -eq 0 || { echo "FATAL: schematic2layout --help rc=$rc"; tail -3 /tmp/s2l.log; exit 1; }; \
     grep -q 'usage: schematic2layout' /tmp/s2l.log \
       || { echo "FATAL: no usage banner"; tail -3 /tmp/s2l.log; exit 1; }; \
     rm -f /tmp/s2l.log; \
-    echo "ALIGN reachable as bare 'schematic2layout' on a non-login shell"
+    echo "ALIGN reachable as bare 'schematic2layout' on a non-login shell"; \
+    mkdir -p /foss/designs/LOG; \
+    chown -R 1000:1000 /foss/designs /foss/tools/align/Viewer
 # A SYMLINK TO THE WRAPPER THAT ALREADY EXISTS, not a second wrapper.
 #
 # The align-build stage above already authors /foss/tools/bin/align-schematic2layout
@@ -1290,7 +1299,6 @@ ENV ALIGN_HOME=/foss/tools/align \
 # `import align` as uid 1000 died with EACCES. The image shipped with ALIGN
 # broken and the check that broke it reported a pass — see the note on the
 # verification itself.
-RUN mkdir -p /foss/designs/LOG && chown -R 1000:1000 /foss/designs \
 # ALIGN WRITES INTO ITS OWN INSTALL PREFIX, and until now no user could.
 # `align-schematic2layout` writes each block's JSON to
 # /foss/tools/align/Viewer/INPUT before placement, and that tree was created by
@@ -1303,8 +1311,6 @@ RUN mkdir -p /foss/designs/LOG && chown -R 1000:1000 /foss/designs \
 # Reproduced identically on 0.2.41 and 0.2.43, so it is long-standing rather
 # than new. It survived because the build's self-test runs as root, where the
 # permission does not apply — the tool was verified in an identity no user has.
- && chown -R 1000:1000 /foss/tools/align/Viewer
-
 # restore the base's non-root runtime user
 USER 1000
 

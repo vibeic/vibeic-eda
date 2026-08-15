@@ -58,7 +58,8 @@ def _fleet(tmp_path: Path, cap: str | None) -> tuple[Path, dict]:
     (root / "RELEASED.json").write_text('{"version": "0.0.1-test"}\n')
 
     # Everything whose status the tick folds into its own exit code.
-    for name in ("check_fork_only.py", "check_pins_agree.py", "check_doc_counts.py",
+    for name in ("check_fork_only.py", "check_pins_agree.py",
+                 "check_dockerfile_layer_budget.py", "check_doc_counts.py",
                  "check_fork_presence_claims.py"):
         _stub(root / "tools" / name, OK)
     for name in ("daily_merge.py", "daily_release.py", "check_our_commits_ship.py",

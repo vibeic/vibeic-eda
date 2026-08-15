@@ -55,6 +55,7 @@ jobs:
         run: |
           python3 tools/check_fork_only.py
           python3 tools/check_pins_agree.py
+          python3 tools/check_dockerfile_layer_budget.py
 
       - uses: docker/setup-buildx-action@v3
 

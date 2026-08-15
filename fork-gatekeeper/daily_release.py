@@ -860,14 +860,22 @@ def main(argv=None) -> int:
     # any workflow in this repo, ever. So the gate produced no verdict, the
     # dry-run said "nothing to do", and the disagreement was found by running it
     # by hand. A gate wired to a rail that never moves is the #693 shape.
-    _agree = subprocess.run([sys.executable, str(root / "tools" / "check_pins_agree.py")],
-                            capture_output=True, text=True)
-    if _agree.returncode != 0:
-        sys.stdout.write(_agree.stdout)
-        sys.stderr.write(_agree.stderr)
-        print("[REFUSED] the pins disagree with themselves; a release cut here "
-              "ships something other than what it says.", file=sys.stderr)
-        return RC_NEEDS_HUMAN
+    source_guards = (
+        ("check_pins_agree.py",
+         "the pins disagree with themselves; a release cut here ships something "
+         "other than what it says."),
+        ("check_dockerfile_layer_budget.py",
+         "the Dockerfile has spent the image's pull-depth reserve; compact the "
+         "source layout before composing another release."),
+    )
+    for guard, refusal in source_guards:
+        checked = subprocess.run([sys.executable, str(root / "tools" / guard)],
+                                 capture_output=True, text=True)
+        if checked.returncode != 0:
+            sys.stdout.write(checked.stdout)
+            sys.stderr.write(checked.stderr)
+            print(f"[REFUSED] {refusal}", file=sys.stderr)
+            return RC_NEEDS_HUMAN
 
     pins = pinned_refs(root)
     args_of = ref_arg_names(root)

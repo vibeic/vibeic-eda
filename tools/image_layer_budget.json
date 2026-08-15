@@ -1,0 +1,5 @@
+{
+  "base_image": "hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a",
+  "base_layers": 57,
+  "max_total_layers": 110
+}
