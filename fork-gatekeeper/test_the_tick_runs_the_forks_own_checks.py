@@ -338,7 +338,8 @@ def _tick_fleet(tmp_path: Path, selftest_body: str):
     shutil.copy2(TICK, dirp / "run_tick.sh")
     (root / "RELEASED.json").write_text('{"version": "0.0.1-test"}\n')
     for name in ("check_fork_only.py", "check_pins_agree.py",
-                 "check_doc_counts.py", "check_fork_presence_claims.py"):
+                 "check_dockerfile_layer_budget.py", "check_doc_counts.py",
+                 "check_fork_presence_claims.py"):
         _stub(root / "tools" / name, _OK_STUB)
     for name in ("daily_merge.py", "daily_release.py",
                  "check_our_commits_ship.py", "check_no_capability_lost.py",

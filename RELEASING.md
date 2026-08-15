@@ -58,7 +58,7 @@ any artefact whose pin moved (skipping the rest — that skip is what makes a
 one-pin release cheap), then `build-and-push` composes. Before either, the
 **version-sync guard** refuses to build if `VERSION` ≠ the release tag.
 
-Two checks run before the push, and they answer different questions. The smoke
+Two runtime checks run before the push, and they answer different questions. The smoke
 test drives a **bare `docker exec` (no login shell)**, so a regression of on-PATH
 tool resolution fails the release — but it can only prove the tools RUN. Drop a
 `COPY` and the base image's own copy answers every one of those commands.
@@ -66,6 +66,13 @@ tool resolution fails the release — but it can only prove the tools RUN. Drop 
 asserts the image contains the commits the pins name.
 
 The compose is loaded locally before either registry tag moves. The release path
+runs the millisecond-scale `tools/check_dockerfile_layer_budget.py` before the
+build: the pinned base is measured at 57 layers and the final stage may spend at
+most 53 more, keeping the source prediction at or below 110. A base digest move
+must update its measured count in `tools/image_layer_budget.json`; another
+`RUN`, `COPY`, or `ADD` that spends the remaining reserve fails the fast gate.
+
+After composition, the release path
 runs `tools/check_image_depth.py --compact`: a candidate above 125 filesystem
 layers is flattened automatically, its runtime configuration is restored and
 compared field-for-field for the supported Docker runtime contract, and its
@@ -87,7 +94,9 @@ run locally, and push successfully while every fresh `docker pull` fails.
 2. `python3 tools/check_fork_only.py` — the source must be a `vibeic/` fork
    (owner rule, 2026-07-29). A genuinely un-forkable source goes in
    `tools/PENDING_FORKS.json` with an expiry, never a bare exception.
-3. `./sync_image_version.py --bump patch` (or `--set X.Y.Z`).
-4. `git commit -am "X.Y.Z — <what changed>"`.
-5. Build + `./release.sh X.Y.Z` (or push tag `vX.Y.Z`).
-6. `git tag vX.Y.Z && git push --tags` (if you didn't tag-trigger).
+3. `python3 tools/check_dockerfile_layer_budget.py` — keep the predicted image
+   at or below the 110-layer working budget.
+4. `./sync_image_version.py --bump patch` (or `--set X.Y.Z`).
+5. `git commit -am "X.Y.Z — <what changed>"`.
+6. Build + `./release.sh X.Y.Z` (or push tag `vX.Y.Z`).
+7. `git tag vX.Y.Z && git push --tags` (if you didn't tag-trigger).

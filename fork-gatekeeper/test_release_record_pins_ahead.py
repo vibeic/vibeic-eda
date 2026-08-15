@@ -83,6 +83,12 @@ def test_the_same_pin_set_with_a_wrong_fingerprint_still_FAILS(tmp_path):
         pass
     try:
         d = json.loads(orig)
+        # This fixture asserts the recorded CURRENT release is corrupt.  A
+        # recipe-only release legitimately advances VERSION before the new tag
+        # is published, so inheriting the previous record's version turns this
+        # into the normal mid-release case and no longer exercises the branch
+        # named by the test.
+        d["version"] = (_ROOT / "VERSION").read_text().strip()
         d["pins"] = DR.pinned_refs(_ROOT)          # identical to the tree
         d["pins_fingerprint"] = "deadbeefcafe"     # but unreproducible
         p.write_text(json.dumps(d, indent=2) + "\n")

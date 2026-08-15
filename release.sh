@@ -12,6 +12,11 @@ set -euo pipefail
 
 VER="${1:?usage: ./release.sh <version>  e.g. ./release.sh 0.2.5}"
 SRC="${SRC_IMAGE:-vibeic/vibeic-eda:${VER}}"     # local source tag (override with SRC_IMAGE=)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Fail in milliseconds if the source has already spent the safety reserve.
+# The measured candidate check below is still authoritative for what gets pushed.
+python3 "${SCRIPT_DIR}/tools/check_dockerfile_layer_budget.py"
 
 echo "==> source image: ${SRC}"
 docker image inspect "${SRC}" >/dev/null 2>&1 || {
@@ -22,7 +27,6 @@ docker image inspect "${SRC}" >/dev/null 2>&1 || {
 # A local image can build, run and push with a graph deeper than Docker accepts
 # on pull. 0.3.0 did (126 layers against the 125-layer limit), so repair and
 # re-measure it before either the version tag or `latest` is moved.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python3 "${SCRIPT_DIR}/tools/check_image_depth.py" --compact "${SRC}"
 
 TAGS=(

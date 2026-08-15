@@ -35,6 +35,9 @@ jobs:
       - name: A tool's commit must say the same thing in all three places
         run: python3 tools/check_pins_agree.py
 
+      - name: The composed image must keep its pull-depth reserve
+        run: python3 tools/check_dockerfile_layer_budget.py
+
       # Offline on purpose. The README's two GitHub rows need a token this job
       # does not need for anything else, and they report as UNVERIFIED here
       # rather than passing; the 05:30 tick runs the same checker with --online.

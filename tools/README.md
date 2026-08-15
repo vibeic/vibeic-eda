@@ -66,12 +66,13 @@ docker buildx bake eda-local    # the release image, from tools built right now
 without pushing first) and also its limit. A green `eda-local` says the
 composition works; it says nothing about what a release would contain.
 
-## The five checks, and what each one cannot see
+## The six checks, and what each one cannot see
 
 | check | asserts | blind to |
 |---|---|---|
 | `check_fork_only.py` | every source and artefact is `vibeic/` | the base image's own ~35 tools, which we do not fork |
 | `check_pins_agree.py` | the three places a pin is written say the same thing | whether that commit exists |
+| `check_dockerfile_layer_budget.py` | pinned base layers + final-stage filesystem instructions stay ≤110 | the actual built image; `check_image_depth.py` measures that before push |
 | `check_image_provenance.py` | the **built image** contains the pinned commits | tools the base supplies |
 | `check_doc_counts.py` | every count in `README.md` still reproduces from the repo | whether the *sentence* around the number means what it says |
 | `release.yml` smoke test | the tools run | *whose build* they came from |
@@ -102,15 +103,16 @@ just the colour of the run.
 
 ## Where the checks actually run
 
-`.github/workflows/fork-only.yml` runs `check_fork_only.py` and
-`check_pins_agree.py` on every push and PR — but measured 2026-07-29, **no
+`.github/workflows/fork-only.yml` runs the cheap source guards, including
+`check_dockerfile_layer_budget.py`, on every push and PR — but measured
+2026-07-29, **no
 workflow has ever executed on this repo**: `actions/runs` reports `total_count:
 0`, for every workflow including the pre-existing `image-version-sync`, while
 `actions/permissions` reports Actions enabled.
 
 So until that is resolved, the workflow is registered and does not fire. What
 actually enforces the rule is the **05:30 fork-gatekeeper tick**, which runs the
-three repo-only checks against the checked-out repo and logs the verdict; a
+repo-only source guards against the checked-out repo and logs the verdict; a
 failure sets the tick's exit code without gating the upstream tracking it also
 does.
 

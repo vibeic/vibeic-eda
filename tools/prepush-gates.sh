@@ -69,6 +69,7 @@ run "pins agree in all three places" python3 "$ROOT/tools/check_pins_agree.py"
 # they never see. Three such refs shipped the ASAP7 device-LVS data from a
 # moving `main` while all of them stayed green (2026-08-12).
 run "every ref names a commit"       python3 "$ROOT/tools/check_refs_are_pinned.py" --root "$ROOT"
+run "image keeps 15-layer reserve"   python3 "$ROOT/tools/check_dockerfile_layer_budget.py"
 run "every clone is a vibeic fork"   python3 "$ROOT/tools/check_fork_only.py"
 run "README counts reproduce"        python3 "$ROOT/tools/check_doc_counts.py"
 run "fork presence claims hold"      python3 "$ROOT/tools/check_fork_presence_claims.py"
