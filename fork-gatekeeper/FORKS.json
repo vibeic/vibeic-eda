@@ -379,7 +379,19 @@
     {
       "tool": "verilator",
       "role": "RTL simulation (lint / fast sim)",
-      "upstream": "verilator/verilator"
+      "upstream": "verilator/verilator",
+      "post_merge_check": [
+        {
+          "name": "vibeic-patches-intact",
+          "path": "vibeic-guards/check_vibeic_patches_intact.py",
+          "cmd": [
+            "python3",
+            "vibeic-guards/check_vibeic_patches_intact.py"
+          ],
+          "why": "verilator declared NO post-merge check, so a daily upstream merge could clobber one of its correctness fixes and the round would report success -- a clean merge is a statement about text, not about meaning. Measured 2026-08-15: the merge took four upstream commits and d6b206cc7 edited test_regress/driver.py, the exact file carrying our solver-probe fix. It survived, but only a person reading the diff established that. Guards: the solver probe must still ASK the configured solver (regressing to the hard-coded z3/cvc5/cvc4 list makes every constraint test SKIP silently on the image we ship, which is how the pow2 defect shipped); V3Randomize.cpp must still carry the width-correct pow2 lowering (without it randomize() returned 4 for 8**6); and this fork must remain a superset of upstream.",
+          "note": "Text and structure only, no build: a merge gate that takes twenty minutes to compile is one that gets bypassed. The expensive proof stays in the image's behavioural verification after the build. Measured three states in a throwaway worktree: intact PASS, VERILATOR_SOLVER removed FAIL naming the consequence, restored PASS."
+        }
+      ]
     },
     {
       "tool": "xschem",
