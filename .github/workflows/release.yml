@@ -175,9 +175,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Refuse an image too deep for Docker to pull
+      - name: Keep the image within Docker's pullable layer depth
         run: |
-          python3 tools/check_image_depth.py \
+          python3 tools/check_image_depth.py --compact \
             ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
 
       - name: Smoke test the release candidate (bare docker exec — no login shell)

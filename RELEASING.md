@@ -65,11 +65,14 @@ tool resolution fails the release — but it can only prove the tools RUN. Drop 
 `tools/check_image_provenance.py` reads the provenance each artefact carries and
 asserts the image contains the commits the pins name.
 
-The compose is loaded locally before either registry tag moves. It must pass
-`tools/check_image_depth.py` (at most 125 filesystem layers), the runtime smoke,
-and the provenance check; only then does `release.sh` push the version and
-`latest` tags. This order is load-bearing: an over-depth image can build, run
-locally, and push successfully while every fresh `docker pull` fails.
+The compose is loaded locally before either registry tag moves. The release path
+runs `tools/check_image_depth.py --compact`: a candidate above 125 filesystem
+layers is flattened automatically, its runtime configuration is restored and
+compared field-for-field for the supported Docker runtime contract, and its
+depth is measured again. The resulting candidate must then pass the runtime
+smoke and provenance check; only afterward does `release.sh` push the version
+and `latest` tags. This order is load-bearing: an over-depth image can build,
+run locally, and push successfully while every fresh `docker pull` fails.
 
 ## Checklist
 

@@ -1232,11 +1232,20 @@ def main(argv=None) -> int:
             # Docker's pull graph accepts at most 125. Check the exact candidate
             # BEFORE a version tag becomes durable in the registry. Failure to
             # measure is a refusal too: unknown depth is not a pullable image.
-            depth_cmd = ["python3", str(root / "tools/check_image_depth.py"), tag]
-            drc, dout, derr = _sh(depth_cmd, cwd=root, timeout=120)
+            depth_cmd = [
+                "python3", str(root / "tools/check_image_depth.py"),
+                "--compact", tag,
+            ]
+            # A 31 GB image can take minutes to stream through export/import.
+            # The old 120 s probe deadline was enough to count layers but would
+            # kill the automatic repair it now invokes. Give it the same bound
+            # as a full tool rebuild; the checker has its own 2 h inner bound.
+            drc, dout, derr = _sh(
+                depth_cmd, cwd=root, timeout=TOOL_BUILD_TIMEOUT,
+            )
             if drc != 0:
                 _sh(["docker", "rmi", tag])
-                print(f"[FAIL] composed image is not publishable; the tag was "
+                print(f"[FAIL] composed image could not be made publishable; the tag was "
                       f"removed and NO version was cut:\n{(derr or dout).strip()}",
                       file=sys.stderr)
                 return RC_NEEDS_HUMAN
