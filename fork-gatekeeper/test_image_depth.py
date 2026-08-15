@@ -39,10 +39,72 @@ def test_depth_over_limit_is_refused(monkeypatch, capsys):
     assert "Compact the Dockerfile and rebuild" in err
 
 
+def test_depth_over_limit_is_compacted_when_release_requests_it(monkeypatch, capsys):
+    _docker(monkeypatch, count="126")
+    calls = []
+
+    def compact(image, limit):
+        calls.append((image, limit))
+        return 2
+
+    monkeypatch.setattr(DEPTH, "compact_image", compact)
+    assert DEPTH.main(["--compact", "candidate:tag"]) == 0
+    assert calls == [("candidate:tag", 125)]
+    assert "126 -> 2/125 pullable layers" in capsys.readouterr().out
+
+
+def test_failed_compaction_is_a_refusal_and_keeps_the_reason(monkeypatch, capsys):
+    _docker(monkeypatch, count="126")
+
+    def compact(_image, _limit):
+        raise DEPTH.CompactionError("metadata changed")
+
+    monkeypatch.setattr(DEPTH, "compact_image", compact)
+    assert DEPTH.main(["--compact", "candidate:tag"]) == 2
+    err = capsys.readouterr().err
+    assert "automatic compaction failed" in err
+    assert "metadata changed" in err
+
+
 def test_unmeasurable_depth_is_not_a_pass(monkeypatch, capsys):
     _docker(monkeypatch, rc=1, stderr="daemon unavailable")
     assert DEPTH.main(["candidate:tag"]) == 2
     assert "cannot prove image depth" in capsys.readouterr().err
+
+
+def test_compaction_rejects_config_it_cannot_preserve_losslessly():
+    for key, value in (
+        ("Volumes", {"/data": {}}),
+        ("Healthcheck", {"Test": ["CMD", "true"]}),
+        ("StopSignal", "SIGQUIT"),
+        ("Shell", ["/bin/bash", "-c"]),
+    ):
+        try:
+            DEPTH._config_changes({key: value})
+        except DEPTH.CompactionError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"{key} was silently discarded")
+
+
+def test_compaction_restores_the_release_images_runtime_contract():
+    config = {
+        "User": "1000",
+        "Env": ["PATH=/bin", "WITH_SPACE=one two"],
+        "Entrypoint": ["/entrypoint"],
+        "Cmd": ["--wait"],
+        "WorkingDir": "/foss/designs",
+        "ExposedPorts": {"80/tcp": {}, "5901/tcp": {}},
+        "Labels": {"org.opencontainers.image.title": "vibeic eda"},
+    }
+    changes = DEPTH._config_changes(config)
+    assert "USER 1000" in changes
+    assert 'ENV WITH_SPACE="one two"' in changes
+    assert 'ENTRYPOINT ["/entrypoint"]' in changes
+    assert 'CMD ["--wait"]' in changes
+    assert 'WORKDIR "/foss/designs"' in changes
+    assert "EXPOSE 80/tcp" in changes
+    assert 'LABEL "org.opencontainers.image.title"="vibeic eda"' in changes
 
 
 def test_every_release_path_checks_depth_before_it_pushes():
@@ -51,16 +113,20 @@ def test_every_release_path_checks_depth_before_it_pushes():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
 
     assert "tools/check_image_depth.py" in manual
+    assert 'check_image_depth.py" --compact' in manual
     assert manual.index("tools/check_image_depth.py") < manual.index('docker push "${t}"')
 
     compose_tail = daily[daily.index('result["registry_composed"] = True') :]
     assert "tools/check_image_depth.py" in compose_tail
+    assert '"--compact", tag' in compose_tail
+    assert "timeout=TOOL_BUILD_TIMEOUT" in compose_tail
     assert compose_tail.index("tools/check_image_depth.py") < compose_tail.index(
         '["docker", "push", tag]'
     )
 
     assert "load: true" in workflow
     assert "push: true" not in workflow[workflow.index("build-and-push:") :]
+    assert "check_image_depth.py --compact" in workflow
     assert workflow.index("tools/check_image_depth.py") < workflow.index(
         "SRC_IMAGE=ghcr.io/vibeic/"
     )
