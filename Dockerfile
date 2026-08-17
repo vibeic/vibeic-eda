@@ -35,9 +35,9 @@ ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:798e7fd-b42b6c
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ec84b22-832462
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:2f0c084-605aa9
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:08cf213-cbbc4b
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:5f1e2d8-03719f
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:0955025-9337a7
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:064c923-6a8301
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e3291f8-d13e6c
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-a9f473
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-0fc0d3
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:24e1343-b2fce0
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:05178c0-04c594
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:ce38835-06cea9
