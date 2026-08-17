@@ -178,6 +178,34 @@ def test_ll_separates_late_upstream_drift_from_a_failed_round():
         "single compose attempt; no retry needed"
 
 
+def test_ll_keeps_a_failed_consumer_anchor_as_a_delivery_outcome(tmp_path):
+    """A registry publish is real, but it is not the whole delivery when the
+    consumer repo still points at the preceding immutable tag."""
+    release = {
+        "status": "published", "version": {"to": "0.3.4"},
+        "compose_attempts": [{"exit_code": 0}],
+        "anchor_pr": {
+            "ok": False,
+            "note": "branch push failed: benchmark gate could not run",
+        },
+    }
+    record = LL.make_record(
+        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 0)
+    assert record["schema_version"] == 2
+    assert record["convergence"]["round_converged"] is True
+    assert record["release"]["delivery_complete"] is False
+    assert record["release"]["anchor_pr"] == release["anchor_pr"]
+    assert record["lesson"]["trigger"] == "anchor_pr"
+    assert record["lesson"]["outcome"] == \
+        "published_with_anchor_pr_blocked"
+
+    LL.retain(record, tmp_path)
+    narrow = json.loads(
+        (tmp_path / "release-ll" / "index.jsonl").read_text().splitlines()[0])
+    assert narrow["anchor_pr_ok"] is False
+    assert narrow["delivery_complete"] is False
+
+
 def test_0530_captures_ll_after_gap_and_makes_capture_failure_fatal():
     src = (HERE / "run_0530.sh").read_text()
     assert src.index("fork_gap_report.py") < src.index("capture_release_ll.py")
