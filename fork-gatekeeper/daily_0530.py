@@ -567,8 +567,235 @@ def _branches_an_image_pin_depends_on(g, eda_root=None):
     return keep
 
 
+def _automatic_merge_tree_proof(g, commit):
+    """Prove one merge commit added no hand-authored merge-only content.
+
+    ``git cherry`` does not describe merge commits.  Treating every merge as
+    unique would strand ordinary maintenance branches forever, while ignoring
+    every merge can discard conflict-resolution content that exists only in
+    the merge commit.  Recreate an ordinary two-parent merge from its recorded
+    parents and require the resulting tree to be byte-for-byte the committed
+    tree.  A conflict, octopus merge, missing object, older git without
+    ``merge-tree --write-tree``, or any different tree is NORECORD.
+
+    ``merge-tree`` writes only unreachable objects, never a ref or worktree.
+    That keeps this proof independent of the checked-out branch and means a
+    failed proof has nothing to abort or restore.
+    """
+    proof = {"commit": commit}
+    parents = sh(*g, "rev-list", "--parents", "-n", "1", commit)
+    proof["parents_rc"] = parents.returncode
+    words = (parents.stdout or "").strip().lower().split()
+    if (parents.returncode != 0
+            or len(words) != 3
+            or any(_FULL_OBJECT_ID.fullmatch(word) is None for word in words)
+            or words[0] != commit):
+        proof.update(
+            outcome="norecord", stage="merge_parents",
+            detail=("merge does not have one proven pair of parents"
+                    if parents.returncode == 0 else
+                    "could not read merge parents: "
+                    + _first_error_line(parents)),
+        )
+        return False, proof
+
+    recreated = sh(*g, "merge-tree", "--write-tree", "--no-messages",
+                   words[1], words[2])
+    proof["merge_tree_rc"] = recreated.returncode
+    recreated_words = (recreated.stdout or "").strip().lower().split()
+    if (recreated.returncode != 0
+            or len(recreated_words) != 1
+            or _FULL_OBJECT_ID.fullmatch(recreated_words[0]) is None):
+        proof.update(
+            outcome="norecord", stage="merge_tree_recreation",
+            detail=("parents do not form one clean, reproducible merge tree"
+                    if recreated.returncode == 0 else
+                    "could not recreate a clean automatic merge: "
+                    + _first_error_line(recreated)),
+        )
+        return False, proof
+
+    actual = sh(*g, "rev-parse", "--verify", "--quiet",
+                f"{commit}^{{tree}}")
+    proof["committed_tree_rc"] = actual.returncode
+    actual_tree = (actual.stdout or "").strip().lower()
+    if (actual.returncode != 0
+            or _FULL_OBJECT_ID.fullmatch(actual_tree) is None):
+        proof.update(
+            outcome="norecord", stage="committed_merge_tree",
+            detail=("could not read the committed merge tree: "
+                    + _first_error_line(actual)),
+        )
+        return False, proof
+    proof.update(recreated_tree=recreated_words[0], committed_tree=actual_tree)
+    if recreated_words[0] != actual_tree:
+        proof.update(
+            outcome="norecord", stage="merge_tree_equivalence",
+            detail=("the committed merge tree differs from a clean automatic "
+                    "merge of its parents; merge-only content is unmeasured"),
+        )
+        return False, proof
+
+    proof.update(outcome="complete", method="automatic_merge_tree")
+    return True, proof
+
+
+def _authoritative_origin_mainline(g, local_main):
+    """Resolve the freshly fetched fork line corresponding to local main.
+
+    Normally a local ``main`` tracks ``origin/main`` (and likewise for
+    ``master``), so the exact-name ref is the least surprising answer.  Some
+    old fork clones retain the other conventional local name after the GitHub
+    default was renamed, however.  If the exact remote ref is absent, ask the
+    remote for its CURRENT HEAD symref and require the freshly fetched tracking
+    ref to equal the SHA the remote reports.  A cached ``origin/HEAD`` is not
+    evidence: ordinary fetches do not refresh that symref when a default branch
+    changes.  Ambiguity, a race, or a missing object stays NORECORD.
+
+    The extra request runs only for the exceptional mismatched-name clone, not
+    for every fork.  Its elapsed deadline can produce only NORECORD; it never
+    decides that branch work is absent or carried.
+    """
+    evidence = {"local_main": local_main, "candidates": []}
+
+    def resolved_tip(ref):
+        result = sh(*g, "rev-parse", "--verify", "--quiet",
+                    f"{ref}^{{commit}}")
+        value = (result.stdout or "").strip().lower()
+        evidence["candidates"].append({
+            "ref": ref, "rc": result.returncode,
+            "tip": value if _FULL_OBJECT_ID.fullmatch(value) else None,
+        })
+        return (value if result.returncode == 0
+                and _FULL_OBJECT_ID.fullmatch(value) is not None else None)
+
+    exact = f"origin/{local_main}"
+    if resolved_tip(exact):
+        evidence.update(outcome="complete", method="matching_remote_name",
+                        ref=exact)
+        return exact, evidence
+
+    remote_head = sh(*g, "ls-remote", "--symref", "origin", "HEAD",
+                     timeout=LS_REMOTE_TIMEOUT_S)
+    evidence["remote_head_rc"] = remote_head.returncode
+    symbolic_targets = []
+    head_tips = []
+    for line in (remote_head.stdout or "").splitlines():
+        fields = line.strip().split()
+        if len(fields) == 3 and fields[0] == "ref:" and fields[2] == "HEAD":
+            symbolic_targets.append(fields[1])
+        elif (len(fields) == 2 and fields[1] == "HEAD"
+              and _FULL_OBJECT_ID.fullmatch(fields[0].lower())):
+            head_tips.append(fields[0].lower())
+    if (remote_head.returncode == 0 and len(symbolic_targets) == 1
+            and len(head_tips) == 1
+            and symbolic_targets[0].startswith("refs/heads/")):
+        branch = symbolic_targets[0].removeprefix("refs/heads/")
+        remote_ref = f"origin/{branch}"
+        fetched_tip = resolved_tip(remote_ref)
+        evidence.update(remote_head_ref=symbolic_targets[0],
+                        remote_head_tip=head_tips[0])
+        if fetched_tip == head_tips[0]:
+            evidence.update(outcome="complete", method="live_remote_head",
+                            ref=remote_ref)
+            return remote_ref, evidence
+
+    evidence.update(
+        outcome="norecord", stage="origin_mainline",
+        detail=("the freshly fetched origin has no unambiguous mainline "
+                f"corresponding to local {local_main}"),
+    )
+    return None, evidence
+
+
+def _branch_work_against(g, target, branch):
+    """Return branch commits whose patches are absent from one mainline.
+
+    ``[]`` is an affirmative answer: the branch tip is already an ancestor of
+    ``target``, or every non-merge patch on it is equivalent there. ``None`` is
+    NORECORD.  In particular, a failed or malformed ``git cherry`` must never
+    turn into the reassuring empty list that the old ``out()`` call produced.
+
+    ``git cherry`` deliberately ignores merge commits.  Its empty output is
+    therefore not enough when a non-ancestral merge commit remains in the
+    range: such a merge can carry conflict-resolution content of its own.  That
+    shape stays unmeasured and cannot authorize skipping the branch or handing
+    a manufactured conflict to AI.
+    """
+    evidence = {"target": target, "branch": branch}
+    ancestor = sh(*g, "merge-base", "--is-ancestor", branch, target)
+    evidence["ancestry_rc"] = ancestor.returncode
+    if ancestor.returncode == 0:
+        evidence.update(outcome="complete", method="ancestry",
+                        outstanding_count=0)
+        return [], evidence
+    if ancestor.returncode != 1:
+        evidence.update(
+            outcome="norecord", stage="ancestry",
+            detail=("could not compare branch ancestry: "
+                    + _first_error_line(ancestor)),
+        )
+        return None, evidence
+
+    unique, cherry, why = _cherry_probe(g, target, branch)
+    evidence["cherry_rc"] = cherry.returncode
+    if unique is None:
+        evidence.update(
+            outcome="norecord", stage="git_cherry",
+            detail=why or "git cherry formed no valid answer",
+        )
+        return None, evidence
+    if unique:
+        evidence.update(outcome="complete", method="outstanding_patches",
+                        outstanding_count=len(unique))
+        return unique, evidence
+
+    # No unique non-merge patches.  Prove that the non-ancestral range did not
+    # disappear merely because git-cherry omits merge commits.
+    merges = sh(*g, "rev-list", "--merges", f"{target}..{branch}")
+    evidence["merge_scan_rc"] = merges.returncode
+    merge_ids = [line.strip().lower()
+                 for line in (merges.stdout or "").splitlines()
+                 if line.strip()]
+    if merges.returncode != 0:
+        evidence.update(
+            outcome="norecord", stage="merge_commit_scan",
+            detail=("could not inspect non-ancestral merge commits: "
+                    + _first_error_line(merges)),
+        )
+        return None, evidence
+    if any(_FULL_OBJECT_ID.fullmatch(commit) is None for commit in merge_ids):
+        evidence.update(
+            outcome="norecord", stage="merge_commit_scan",
+            detail="git rev-list returned malformed merge-commit evidence",
+        )
+        return None, evidence
+    merge_proofs = []
+    for commit in merge_ids:
+        proven, proof = _automatic_merge_tree_proof(g, commit)
+        merge_proofs.append(proof)
+        if not proven:
+            evidence.update(
+                outcome="norecord", stage=proof.get("stage"),
+                detail=proof.get(
+                    "detail", "merge-only content could not be measured"),
+                merge_proofs=merge_proofs,
+            )
+            return None, evidence
+
+    evidence.update(
+        outcome="complete",
+        method=("patch_equivalence_with_automatic_merges"
+                if merge_proofs else "patch_equivalence"),
+        outstanding_count=0,
+    )
+    if merge_proofs:
+        evidence["merge_proofs"] = merge_proofs
+    return [], evidence
+
+
 def step2_ours(g, main, rep):
-    """Our branches -> master, by patch equivalence."""
+    """Our branches -> master, against local and authoritative remote lines."""
     brs = _fork_branches(g, main)
     if brs is None:
         # NOT `[]`. An unanswerable question rendered as "this fork has no
@@ -593,19 +820,123 @@ def step2_ours(g, main, rep):
         rep["needs_human"] = True
         return
     merged, conflicted, empty = [], [], []
+    remote_main = None
+    remote_main_evidence = None
     for b in brs:
-        cherry = out(*g, "cherry", main, b)
-        new = [l.split()[1] for l in cherry.splitlines() if l.startswith("+")]
+        checks = []
+        local_unique, local_check = _branch_work_against(g, main, b)
+        checks.append(local_check)
+        if local_unique == []:
+            empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": main, "checks": checks,
+            })
+            continue
+
+        # `_fork_branches` refreshed origin immediately before returning this
+        # list.  Its mainline ref is therefore the authoritative fork state for
+        # this round, while the checked-out local main may predate a merge that
+        # already delivered the branch.  Measured on iverilog: local master was
+        # 93b302f, origin/master was 5d87083, and source tip 14d106f was already
+        # its ancestor. Comparing only to local manufactured a two-commit
+        # conflict and an unnecessary AI case; the same-tree repair later
+        # adopted the remote and proved that work had been present all along.
+        if remote_main_evidence is None:
+            remote_main, remote_main_evidence = (
+                _authoritative_origin_mainline(g, main))
+            rep["ours_remote_mainline"] = remote_main_evidence
+        if remote_main is None:
+            remote_unique = None
+            remote_check = dict(remote_main_evidence)
+            remote_check["target"] = None
+            remote_check["branch"] = b
+        else:
+            remote_unique, remote_check = _branch_work_against(
+                g, remote_main, b)
+            remote_check["mainline_selection"] = remote_main_evidence
+        checks.append(remote_check)
+        if remote_unique == []:
+            empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": remote_main, "checks": checks,
+            })
+            continue
+
+        if local_unique is None or remote_unique is None:
+            failed = next(check for check in checks
+                          if check.get("outcome") != "complete")
+            rep.setdefault("merge_unmeasurable", []).append({
+                "branch": b,
+                "commits": None,
+                "outcome": "unmeasurable",
+                "rc": (failed.get("cherry_rc")
+                       if failed.get("stage") == "git_cherry"
+                       else failed.get("ancestry_rc")
+                       if failed.get("stage") == "ancestry"
+                       else failed.get("merge_scan_rc")),
+                "stage": failed.get("stage"),
+                "detail": failed.get("detail"),
+                "comparisons": checks,
+            })
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "norecord", "checks": checks,
+            })
+            rep["needs_human"] = True
+            continue
+
+        # A patch carried by either mainline is not truly stranded branch work.
+        # Only commits absent from BOTH are candidates for consolidation.
+        remote_absent = set(remote_unique)
+        new = [commit for commit in local_unique if commit in remote_absent]
         if not new:
             empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": f"{main} or {remote_main}", "checks": checks,
+            })
             continue
         # only OUR commits are a reason to merge; an unmerged upstream commit
         # on a stale branch is not work, it is history.
-        mine = [s for s in new if any(o in out(*g, "log", "-1", "--format=%an", s).lower()
-                                      for o in OURS)]
+        mine = []
+        author_unknown = None
+        for commit in new:
+            author = sh(*g, "log", "-1", "--format=%an", commit)
+            author_name = (author.stdout or "").strip().lower()
+            if author.returncode != 0 or not author_name:
+                author_unknown = {
+                    "commit": commit, "rc": author.returncode,
+                    "detail": (_first_error_line(author)
+                               if author.returncode else
+                               "git log returned an empty author"),
+                }
+                break
+            if any(owner in author_name for owner in OURS):
+                mine.append(commit)
+        if author_unknown is not None:
+            rep.setdefault("merge_unmeasurable", []).append({
+                "branch": b, "commits": None, "outcome": "unmeasurable",
+                "rc": author_unknown["rc"], "stage": "commit_author",
+                "detail": author_unknown["detail"],
+                "commit": author_unknown["commit"],
+                "comparisons": checks,
+            })
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "norecord", "checks": checks,
+            })
+            rep["needs_human"] = True
+            continue
         if not mine:
             empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "no_owned_work", "checks": checks,
+            })
             continue
+        rep.setdefault("ours_branch_evidence", []).append({
+            "branch": b, "outcome": "outstanding",
+            "commits": len(mine), "checks": checks,
+        })
         r = sh(*g, "merge", "--no-edit", "-m",
                f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b,
                progress=True)
