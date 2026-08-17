@@ -43,6 +43,7 @@ def test_dns_failure_retries_until_success_without_changing_the_command(tmp_path
     assert slept == [1, 2]
     assert len(calls) == 3 and all(c[0] == cmd for c in calls)
     assert all(c[1]["stream"] and c[1]["env"] == R.BUILD_ENV for c in calls)
+    assert all(c[1]["stall_grace"] == R.BUILD_STALL_GRACE_S for c in calls)
 
 
 def test_deterministic_compose_failure_gets_one_retry_not_five(tmp_path):
@@ -58,6 +59,26 @@ def test_deterministic_compose_failure_gets_one_retry_not_five(tmp_path):
     assert rc == 1
     assert len(calls) == len(history) == 2
     assert all(h["category"] is None for h in history)
+
+
+def test_progress_stall_is_named_and_not_a_network_retry_class():
+    assert R.transient_failure_category("WATCHDOG_STALLED: flat") == \
+        "progress_stall"
+    assert "progress_stall" not in R._EXTENDED_RETRY_CATEGORIES
+
+    release = {
+        "status": "failed",
+        "failure": {"stage": "compose", "category": "progress_stall",
+                    "retryable": False},
+        "compose_attempts": [
+            {"exit_code": R.watchdog.RC_STALLED,
+             "category": "progress_stall"},
+        ],
+    }
+    record = LL.make_record(
+        release, _gap(), "2026-08-17T05:30:00+08:00", 1)
+    assert record["lesson"]["trigger"] == "progress_stall"
+    assert record["lesson"]["outcome"] == "blocked_non_transient"
 
 
 def test_streaming_command_keeps_a_classifiable_tail(capsys):

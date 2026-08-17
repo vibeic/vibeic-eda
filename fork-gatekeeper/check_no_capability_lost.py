@@ -45,13 +45,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
 
+from capability_smoke import run_container_probe
+
 RC_OK, RC_LOST, RC_NOTHING = 0, 1, 2
+PROBE_STALL_GRACE_S = float(
+    os.environ.get("GK_CAPABILITY_LOST_STALL_GRACE", "300")
+)
 
 #: Prefixes our composing image removes or writes over. Read from the Dockerfile
 #: where possible; this is the fallback for the ones expressed as a bare COPY.
@@ -59,12 +64,22 @@ _FALLBACK_PREFIXES = ("yosys", "ngspice", "magic", "netgen", "iverilog",
                       "verilator", "klayout")
 
 
-def _sh(cmd, timeout=600):
+def _sh(cmd, timeout=None):
+    """Run this module's Docker arm with a renewable container-aware lease.
+
+    ``timeout`` remains in the compatibility signature for tests/older callers,
+    but is deliberately ignored. The two commands in this module are finite
+    Docker probes; output or CPU in the actual container renews their lease and
+    total runtime is not a capability verdict.
+    """
+    del timeout
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
-    except Exception as exc:                                   # noqa: BLE001
-        return 1, "", str(exc)
+        image = cmd[cmd.index("bash") + 1]
+        script = cmd[-1]
+    except (ValueError, IndexError):
+        return 127, "", "unsupported probe command"
+    run = run_container_probe(image, script, PROBE_STALL_GRACE_S)
+    return run.rc, run.output, ""
 
 
 def base_image(dockerfile: Path) -> str:
@@ -190,12 +205,27 @@ def main(argv=None) -> int:
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
 
+    def record_not_checked(error: str, *, base: str = "",
+                           prefixes: Optional[List[str]] = None,
+                           commands: Optional[int] = None) -> None:
+        """Replace any prior green record when this run produced no answer."""
+        if not a.json:
+            return
+        Path(a.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.json).write_text(json.dumps(
+            {"program": "check_no_capability_lost", "base": base,
+             "image": a.image, "prefixes": prefixes or [],
+             "commands": commands, "lost": None, "status": "not_checked",
+             "error": error}, indent=2) + "\n", encoding="utf-8")
+
     df = Path(a.dockerfile)
     if not df.is_file():
+        record_not_checked(f"no Dockerfile at {df}")
         print(f"[NOT CHECKED] no Dockerfile at {df}", file=sys.stderr)
         return RC_NOTHING
     base = base_image(df)
     if not base:
+        record_not_checked("Dockerfile names no ARG BASE_IMAGE")
         print("[NOT CHECKED] the Dockerfile names no ARG BASE_IMAGE, so there is "
               "nothing to compare against — not a pass", file=sys.stderr)
         return RC_NOTHING
@@ -203,6 +233,8 @@ def main(argv=None) -> int:
     prefixes = replaced_prefixes(df)
     names = command_names(base, prefixes)
     if not names:
+        record_not_checked(f"could not list commands from {base}", base=base,
+                           prefixes=prefixes, commands=None)
         print(f"[NOT CHECKED] listed no commands under {len(prefixes)} prefix(es) "
               f"in {base} — nothing was compared", file=sys.stderr)
         return RC_NOTHING
@@ -213,14 +245,8 @@ def main(argv=None) -> int:
         # file in place, and a consumer reading a stale `"lost": []` sees a pass
         # that nothing produced today — the same substitution of an old answer
         # for a missing one that this branch exists to refuse.
-        if a.json:
-            Path(a.json).parent.mkdir(parents=True, exist_ok=True)
-            Path(a.json).write_text(json.dumps(
-                {"program": "check_no_capability_lost", "base": base,
-                 "image": a.image, "prefixes": prefixes,
-                 "commands": len(names), "lost": None,
-                 "error": f"could not probe {a.image}"}, indent=2) + "\n",
-                encoding="utf-8")
+        record_not_checked(f"could not probe {a.image}", base=base,
+                           prefixes=prefixes, commands=len(names))
         print(f"[NOT CHECKED] could not probe {a.image} — {len(names)} command(s) "
               f"were listed from the base and NONE of them were compared. This is "
               f"not a pass.", file=sys.stderr)

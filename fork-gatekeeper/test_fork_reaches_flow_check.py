@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
+
+import json
 
 import fork_reaches_flow_check as F
 
@@ -127,3 +130,90 @@ def test_ihp_open_pdk_none_result_is_suppressed_like_sv_elab():
     'path == NONE' branch -- neither produces a finding."""
     for tool in ("sv-elab", "ihp-open-pdk"):
         assert tool in F._NO_COMMAND, tool
+
+
+# --- progress-supervised probes: incomplete work is not origin drift
+
+def test_docker_probe_uses_activity_lease_without_a_total_ceiling(monkeypatch):
+    seen = {}
+
+    def run(image, script, stall_after):
+        seen.update(image=image, script=script, stall_after=stall_after)
+        return SimpleNamespace(rc=0, output="answer", outcome="natural")
+
+    monkeypatch.setattr(F, "run_container_probe", run)
+    got = F._sh(["docker", "run", "--rm", "--entrypoint", "bash",
+                 "example:image", "-lc", "real-work"])
+
+    assert got == F.ProbeRun(0, "answer", "", "natural")
+    assert seen == {"image": "example:image", "script": "real-work",
+                    "stall_after": F.PROBE_STALL_GRACE_S}
+
+
+def test_stalled_path_probe_is_unknown_not_not_ours(tmp_path, monkeypatch):
+    df = _write_dockerfile(tmp_path, """\
+        FROM scratch
+        COPY --from=img-yosys /y /foss/tools/yosys
+        """)
+    monkeypatch.setattr(
+        F, "_sh",
+        lambda *args, **kwargs: F.ProbeRun(199, "", "flat lease", "stalled"))
+
+    rows = F.check("img", df)
+
+    assert len(rows) == 1 and rows[0]["not_checked"] is True
+    assert rows[0]["probe_outcome"] == "stalled"
+    assert not rows[0].get("we_build_it")
+
+
+def test_failed_source_probe_rc_does_not_fabricate_source_absence(
+        tmp_path, monkeypatch):
+    df = _write_dockerfile(tmp_path, """\
+        FROM scratch
+        COPY --from=img-yosys /y /foss/tools/yosys
+        """)
+
+    def run(cmd, timeout=None):
+        del timeout
+        if "command -v" in cmd[-1]:
+            return 0, "sby /usr/local/bin/sby /usr/local/bin/sby\n", ""
+        return F.ProbeRun(73, "", "source probe failed", "natural")
+
+    monkeypatch.setattr(F, "_sh", run)
+    sby = [row for row in F.check("img", df) if row["tool"] == "sby"]
+
+    assert sby and all(row.get("not_checked") for row in sby)
+    assert not [row for row in sby if row.get("we_build_it")]
+
+
+def test_provenance_probe_failure_is_norecord_not_drift(monkeypatch):
+    monkeypatch.setattr(
+        F, "_sh",
+        lambda *args, **kwargs: F.ProbeRun(
+            127, "", "image unavailable", "launch_error"))
+
+    rows = F.provenance_drift("img", {"yosys": "a" * 40})
+
+    assert len(rows) == 1 and rows[0]["not_checked"] is True
+    assert rows[0]["probe_outcome"] == "launch_error"
+    assert "image unavailable" in rows[0]["problem"]
+
+
+def test_unknown_path_probe_makes_main_norecord_and_retains_json(
+        tmp_path, monkeypatch):
+    df = _write_dockerfile(tmp_path, """\
+        FROM scratch
+        COPY --from=img-yosys /y /foss/tools/yosys
+        """)
+    unknown = {"tool": "yosys", "not_checked": True,
+               "probe_outcome": "stalled", "probe_rc": 199,
+               "problem": "PATH probe made no progress"}
+    monkeypatch.setattr(F, "check", lambda image, dockerfile: [unknown])
+    monkeypatch.setattr(F, "provenance_drift", lambda image, pins: [])
+    monkeypatch.setattr(F, "flow_tools", lambda dockerfile: ("yosys",))
+    report = tmp_path / "reach.json"
+
+    rc = F.main(["img", "--dockerfile", str(df), "--json", str(report)])
+
+    assert rc == F.RC_NOTHING
+    assert json.loads(report.read_text(encoding="utf-8"))["findings"] == [unknown]

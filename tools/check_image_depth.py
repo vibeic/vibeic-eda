@@ -12,17 +12,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import uuid
+from pathlib import Path
 from typing import Any, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fork-gatekeeper"))
+import progress_watchdog as watchdog  # noqa: E402
 
 
 DEFAULT_MAX_LAYERS = 125
+DEFAULT_COMPACTION_STALL_GRACE_S = 1800.0
+DEFAULT_COMPACTION_POLL_S = 5.0
 
 
 class CompactionError(RuntimeError):
     """The candidate could not be compacted without changing its contract."""
+
+
+class CompactionStalled(CompactionError):
+    """The byte/command progress lease expired; no image verdict was formed."""
 
 
 def _run(args: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -130,39 +144,131 @@ def _checked(args: list[str], *, timeout: int = 120) -> str:
     return proc.stdout.strip()
 
 
-def _export_import(container: str, target: str, platform: str, *, timeout: int) -> None:
-    """Stream a container's merged rootfs into one new image layer."""
-    exporter = subprocess.Popen(
-        ["docker", "container", "export", container],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert exporter.stdout is not None
-    importer = subprocess.Popen(
-        ["docker", "image", "import", "--platform", platform, "-", target],
-        stdin=exporter.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    exporter.stdout.close()
-    try:
-        import_out, import_err = importer.communicate(timeout=timeout)
-        export_err = exporter.stderr.read() if exporter.stderr else b""
-        export_rc = exporter.wait(timeout=30)
-    except subprocess.TimeoutExpired as exc:
-        importer.kill()
-        exporter.kill()
-        importer.wait()
-        exporter.wait()
-        raise CompactionError(f"filesystem compaction exceeded {timeout}s") from exc
-    if export_rc != 0 or importer.returncode != 0:
-        detail = (export_err + b"\n" + import_err + b"\n" + import_out).decode(
-            errors="replace"
-        ).strip()
-        raise CompactionError(f"filesystem compaction failed: {detail}")
+class _Pipeline:
+    """The export and import processes as one waitable supervision subject."""
+
+    def __init__(self, exporter, importer) -> None:
+        self.exporter = exporter
+        self.importer = importer
+
+    def poll(self):
+        export_rc = self.exporter.poll()
+        import_rc = self.importer.poll()
+        if export_rc is None or import_rc is None:
+            return None
+        return import_rc if import_rc != 0 else export_rc
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            rc = self.poll()
+            if rc is not None:
+                return rc
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("docker export | docker import", timeout)
+            time.sleep(0.02)
 
 
-def compact_image(image: str, max_layers: int, *, timeout: int = 7200) -> int:
+def _kill_pipeline(pipeline: _Pipeline, reason: str) -> None:
+    watchdog.terminate_process_group(pipeline.importer, reason)
+    watchdog.terminate_process_group(pipeline.exporter, reason)
+
+
+def _export_import(
+    container: str,
+    target: str,
+    platform: str,
+    *,
+    stall_grace_s: float,
+    poll_s: float = DEFAULT_COMPACTION_POLL_S,
+) -> None:
+    """Stream rootfs into one layer, leasing on bytes actually transferred."""
+    with (tempfile.TemporaryFile() as export_err_file,
+          tempfile.TemporaryFile() as import_out_file,
+          tempfile.TemporaryFile() as import_err_file):
+        exporter = subprocess.Popen(
+            ["docker", "container", "export", container],
+            stdout=subprocess.PIPE, stderr=export_err_file,
+            start_new_session=True,
+        )
+        importer = subprocess.Popen(
+            ["docker", "image", "import", "--platform", platform, "-", target],
+            stdin=subprocess.PIPE, stdout=import_out_file, stderr=import_err_file,
+            start_new_session=True,
+        )
+        assert exporter.stdout is not None and importer.stdin is not None
+        transferred = 0
+        pump_error: list[str] = []
+
+        def pump() -> None:
+            nonlocal transferred
+            try:
+                while True:
+                    # os.read returns the bytes currently available; buffered
+                    # ``read(1 MiB)`` may wait for the whole request or EOF and
+                    # would hide a slowly advancing 31 GB stream from the lease.
+                    chunk = os.read(exporter.stdout.fileno(), 1024 * 1024)
+                    if not chunk:
+                        break
+                    # Count bytes as the kernel accepts them, not only after a
+                    # whole 1 MiB Python write returns. A slow but healthy
+                    # importer can otherwise move pipe-sized pieces for an
+                    # entire grace window while this counter appears flat.
+                    pending = memoryview(chunk)
+                    while pending:
+                        wrote = os.write(importer.stdin.fileno(), pending[:64 * 1024])
+                        if wrote <= 0:
+                            raise BrokenPipeError("docker import accepted zero bytes")
+                        transferred += wrote
+                        pending = pending[wrote:]
+            except (BrokenPipeError, OSError) as exc:
+                pump_error.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    importer.stdin.close()
+                except OSError:
+                    pass
+
+        thread = threading.Thread(target=pump, name="image-rootfs-pump", daemon=True)
+        thread.start()
+        pipeline = _Pipeline(exporter, importer)
+        meter = watchdog.ProgressMeter(size_fn=lambda: transferred)
+        outcome, _ = watchdog.supervise(
+            pipeline, meter.sample, _kill_pipeline,
+            poll_s=poll_s, stall_grace_s=stall_grace_s,
+        )
+        thread.join(timeout=10)
+        for proc in (exporter, importer):
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                watchdog.terminate_process_group(proc, "cleanup")
+
+        def read(file) -> bytes:
+            file.seek(0)
+            return file.read()
+
+        detail = b"\n".join((
+            read(export_err_file), read(import_err_file), read(import_out_file)
+        )).decode(errors="replace").strip()
+        if outcome == "stalled":
+            raise CompactionStalled(
+                "filesystem compaction stalled with no transferred rootfs bytes "
+                f"for > {stall_grace_s:g}s; total runtime was not bounded"
+            )
+        if pump_error or exporter.returncode != 0 or importer.returncode != 0:
+            extra = "; ".join(pump_error)
+            raise CompactionError(
+                "filesystem compaction failed: " + (detail or extra or "no diagnostic")
+            )
+
+
+def compact_image(
+    image: str,
+    max_layers: int,
+    *,
+    stall_grace_s: float = DEFAULT_COMPACTION_STALL_GRACE_S,
+) -> int:
     """Flatten ``image``, preserve its runtime contract, then retag it."""
     original_config, platform = image_details(image)
     changes = _config_changes(original_config)
@@ -177,7 +283,10 @@ def compact_image(image: str, max_layers: int, *, timeout: int = 7200) -> int:
             "docker", "container", "create", "--name", export_container,
             "--entrypoint", "/bin/true", image,
         ])
-        _export_import(export_container, raw_tag, platform, timeout=timeout)
+        _export_import(
+            export_container, raw_tag, platform,
+            stall_grace_s=stall_grace_s,
+        )
         _checked([
             "docker", "container", "create", "--name", config_container,
             raw_tag, "/bin/true",
@@ -186,7 +295,14 @@ def compact_image(image: str, max_layers: int, *, timeout: int = 7200) -> int:
         for change in changes:
             commit.extend(["--change", change])
         commit.extend([config_container, configured_tag])
-        _checked(commit, timeout=timeout)
+        committed = watchdog.run_supervised(
+            commit, stall_grace_s=stall_grace_s,
+            process_tree_cpu_progress=True,
+        )
+        if committed.rc != 0:
+            detail = (committed.err or committed.out).strip()
+            error = CompactionStalled if committed.stalled else CompactionError
+            raise error(f"docker container commit failed: {detail}")
 
         compacted_config, _ = image_details(configured_tag)
         before = _runtime_contract(original_config)
@@ -237,9 +353,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="automatically flatten and retag an over-depth local candidate",
     )
+    parser.add_argument(
+        "--stall-grace",
+        type=float,
+        default=DEFAULT_COMPACTION_STALL_GRACE_S,
+        help="seconds with zero transferred bytes before compaction is stalled; "
+             "this is not a total runtime limit",
+    )
     args = parser.parse_args(argv)
     if args.max_layers < 1:
         parser.error("--max-layers must be positive")
+    if args.stall_grace <= 0:
+        parser.error("--stall-grace must be positive")
 
     try:
         count = layer_count(args.image)
@@ -250,7 +375,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if count > args.max_layers:
         if args.compact:
             try:
-                compacted = compact_image(args.image, args.max_layers)
+                compacted = compact_image(
+                    args.image, args.max_layers,
+                    stall_grace_s=args.stall_grace,
+                )
+            except CompactionStalled as exc:
+                print(
+                    f"[STALLED] automatic compaction made no forward progress "
+                    f"for {args.image}: {exc}",
+                    file=sys.stderr,
+                )
+                return watchdog.RC_STALLED
             except (CompactionError, RuntimeError, subprocess.SubprocessError) as exc:
                 print(
                     f"[REFUSED] automatic compaction failed for {args.image}: {exc}",

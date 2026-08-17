@@ -191,16 +191,21 @@ def check_fork(tool: str, checks: list[dict], forks_dir: Path,
     # as the pre-push gate, so the two call sites cannot drift into disagreeing
     # about what "clean" means.
     for row, decl in zip(dm.run_post_merge_checks(clone, checks), checks):
-        if row["ok"]:
-            state = PASS
-        elif row["rc"] in (-1, 127):
-            # daily_merge's own codes: -1 malformed or absent, 127 could-not-run.
+        if row.get("outcome") != "natural":
+            # Missing/malformed/unstarted/stalled means no result, not a fork
+            # defect. Advisory removes a completed finding's veto; it cannot
+            # manufacture a record when the command never completed.
             state = UNKNOWN
+        elif row["ok"]:
+            state = PASS
         else:
             state = FAIL
         rows.append({
             "tool": tool, "name": row["name"], "state": state, "rc": row["rc"],
             "head": head,
+            "outcome": row.get("outcome"),
+            "elapsed_seconds": row.get("elapsed_seconds"),
+            "progress_basis": row.get("progress_basis"),
             "reason": "" if state == PASS else row["detail"],
             "why": decl.get("why", "") if isinstance(decl, dict) else "",
         })

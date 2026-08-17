@@ -173,6 +173,13 @@ def test_every_checker_in_this_directory_is_called_by_something():
         callers.append((f.name, f.read_text(errors="replace")))
     for f in sorted((TICK.parent.parent / "tools").glob("*.py")):
         callers.append((f.name, f.read_text(errors="replace")))
+    # Release-only gates are invoked by the version-tag workflow, not the daily
+    # tick.  It is still a real production rail and must count as wiring; omitting
+    # it made the sweep accuse two actually-invoked three-state adapters of being
+    # dead code.
+    workflows = TICK.parent.parent / ".github" / "workflows"
+    for f in sorted(workflows.glob("*.yml")) + sorted(workflows.glob("*.yaml")):
+        callers.append((f.name, f.read_text(errors="replace")))
     assert callers, "found no caller files — the sweep examined nothing"
 
     #: Modules that are libraries or entry points rather than gates. Each is a

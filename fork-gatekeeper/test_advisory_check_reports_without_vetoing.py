@@ -74,6 +74,32 @@ def test_absent_script_still_blocks_even_when_advisory(tmp_path):
     assert "MISSING" in r["detail"]
 
 
+def test_advisory_cannot_turn_a_stall_into_a_completed_record(tmp_path,
+                                                              monkeypatch):
+    """Dropping a veto is not permission to forge PASS from no completion."""
+    import check_fork_selftests as S
+
+    clone = tmp_path / "tool"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "chk.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(S.subprocess, "run", lambda *a, **k: type(
+        "CP", (), {"stdout": "abc123\n"})())
+
+    class DM:
+        @staticmethod
+        def run_post_merge_checks(_clone, _checks):
+            return [{"name": "c", "ok": True, "rc": 199,
+                     "advisory": True, "outcome": "stalled",
+                     "elapsed_seconds": 30, "detail": "ADVISORY stalled"}]
+
+    rows = S.check_fork(
+        "tool", [{"name": "c", "path": "chk.sh", "cmd": ["sh", "chk.sh"],
+                  "advisory": True}],
+        tmp_path, DM, None,
+    )
+    assert rows[0]["state"] == S.UNKNOWN
+
+
 def test_only_the_cross_repo_check_is_advisory_in_forks_json():
     """A guard on the concept itself: if a second check ever becomes advisory,
     that is a decision someone must make deliberately, not inherit."""

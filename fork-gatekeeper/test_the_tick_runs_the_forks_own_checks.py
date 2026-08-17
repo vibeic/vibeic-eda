@@ -36,6 +36,9 @@ HERE = Path(__file__).resolve().parent
 TICK = HERE / "run_tick.sh"
 DRIVER = HERE / "check_fork_selftests.py"
 DAILY_MERGE = HERE / "daily_merge.py"
+WATCHDOG = HERE / "progress_watchdog.py"
+SEMANTIC_PYTEST = HERE / "semantic_pytest_gate.py"
+PYTEST_PLUGIN = HERE / "_pytest_progress_plugin.py"
 
 STUB = '''#!/usr/bin/env python3
 """Stub that verifies the INVOCATION CONTRACT, then obeys a control file."""
@@ -69,11 +72,10 @@ CHECKERS = {           # basename -> argv[1:] the fixture FORKS.json declares
 # ------------------------------------------------------------------ slicing
 
 def _slice_block(src: str) -> str:
-    start = src.index('SELFTEST_OUT="${LOG_DIR}/fork-selftests.txt"')
-    rest = src[start:]
-    end = re.search(r"^fi$", rest, re.M)
-    assert end, "the fork-selftest block in run_tick.sh has no closing `fi`"
-    return rest[: end.end()]
+    start = src.index("SELFTEST_ARGS=()")
+    marker = "# --- END PRE-RELEASE SELFTEST"
+    end = src.index(marker, start)
+    return src[start:end]
 
 
 def _slice_exit_aggregation(src: str) -> str:
@@ -129,6 +131,12 @@ def _tick_dir(tmp_path: Path, *, with_driver: bool = True,
     if with_driver:
         shutil.copy2(DRIVER, d / "check_fork_selftests.py")
     shutil.copy2(DAILY_MERGE, d / "daily_merge.py")
+    # daily_merge and its pytest-specific arm are one deployable bundle. A
+    # fixture that omits the shared primitive would test a deployment shape the
+    # real runner is not allowed to have.
+    shutil.copy2(WATCHDOG, d / "progress_watchdog.py")
+    shutil.copy2(SEMANTIC_PYTEST, d / "semantic_pytest_gate.py")
+    shutil.copy2(PYTEST_PLUGIN, d / "_pytest_progress_plugin.py")
     checks = [
         {"name": "parity", "path": "etc/stub_parity.py",
          "cmd": ["python3", "etc/stub_parity.py", "."], "why": "the 813 gap"},
@@ -210,6 +218,68 @@ def test_a_missing_driver_is_not_a_pass_either(tmp_path):
                        _block_env(_tick_dir(tmp_path, with_driver=False), forks))
     assert "SELFTEST_RC=2" in cp.stdout, cp.stdout + cp.stderr
     assert "nothing was checked" in cp.stdout
+
+
+def _reuse_fixture(tmp_path: Path, merge_rows: list[dict]) -> tuple[Path, Path]:
+    """A runner fixture that records which tools the daily fallback was asked
+    to check. daily_merge's own result is supplied separately."""
+    tick_dir = tmp_path / "reuse-dir"
+    tick_dir.mkdir()
+    (tick_dir / "FORKS.json").write_text(json.dumps({"forks": [
+        {"tool": "Changed", "post_merge_check": [
+            {"name": "changed-check", "path": "check.py",
+             "cmd": ["python3", "check.py"]}]},
+        {"tool": "Level", "post_merge_check": [
+            {"name": "level-check", "path": "check.py",
+             "cmd": ["python3", "check.py"]}]},
+    ]}), encoding="utf-8")
+    marker = tmp_path / "selftest-argv.json"
+    _stub(tick_dir / "check_fork_selftests.py", r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ["SELFTEST_ARGV_MARKER"]).write_text(json.dumps(sys.argv[1:]))
+print("fork self-checks: selected checks pass")
+''')
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    (state / "daily-merge.json").write_text(json.dumps({
+        "program": "daily_merge", "forks": merge_rows,
+    }), encoding="utf-8")
+    return tick_dir, marker
+
+
+def test_green_post_merge_evidence_is_reused_not_run_twice(tmp_path):
+    tick_dir, marker = _reuse_fixture(tmp_path, [
+        {"repo": "Changed", "state": "MERGED", "checks": [{
+            "name": "changed-check", "ok": True, "rc": 0,
+            "outcome": "natural",
+        }]},
+        {"repo": "Level", "state": "ALREADY_CURRENT", "checks": []},
+    ])
+    cp = _run_fragment(
+        _slice_block(TICK.read_text()), tmp_path,
+        f'DIR="{tick_dir}"\nexport SELFTEST_ARGV_MARKER="{marker}"')
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    argv = json.loads(marker.read_text())
+    assert argv.count("--tool") == 1 and "Level" in argv, argv
+    assert "Changed" not in argv, (
+        "the expensive Changed check already passed on the candidate worktree")
+    assert "reused 1 green check" in cp.stdout
+
+
+def test_incomplete_merge_evidence_is_rerun_not_reused(tmp_path):
+    tick_dir, marker = _reuse_fixture(tmp_path, [
+        # State alone is insufficient: no complete natural check record exists.
+        {"repo": "Changed", "state": "MERGED", "checks": []},
+        {"repo": "Level", "state": "ALREADY_CURRENT", "checks": []},
+    ])
+    cp = _run_fragment(
+        _slice_block(TICK.read_text()), tmp_path,
+        f'DIR="{tick_dir}"\nexport SELFTEST_ARGV_MARKER="{marker}"')
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    argv = json.loads(marker.read_text())
+    assert argv.count("--tool") == 2
+    assert "Changed" in argv and "Level" in argv, argv
 
 
 @pytest.mark.parametrize("rc_in,want", [(0, 0), (1, 8), (2, 8)])
@@ -323,6 +393,12 @@ def test_the_merge_gate_cannot_reach_a_day_with_no_upstream_commits():
 # tick that fell over for an unrelated reason.
 
 _OK_STUB = "#!/usr/bin/env python3\nimport sys\nprint('stub ok')\nsys.exit(0)\n"
+_RELEASE_STUB = r"""#!/usr/bin/env python3
+import os
+from pathlib import Path
+Path(os.environ["RELEASE_MARKER"]).write_text("invoked\n")
+print("release stub ok")
+"""
 
 
 def _stub(path: Path, body: str):
@@ -341,15 +417,17 @@ def _tick_fleet(tmp_path: Path, selftest_body: str):
                  "check_dockerfile_layer_budget.py", "check_doc_counts.py",
                  "check_fork_presence_claims.py"):
         _stub(root / "tools" / name, _OK_STUB)
-    for name in ("daily_merge.py", "daily_release.py",
-                 "check_our_commits_ship.py", "check_no_capability_lost.py",
+    for name in ("daily_merge.py", "check_our_commits_ship.py",
+                 "check_no_capability_lost.py",
                  "gatekeeper.py"):
         _stub(dirp / name, _OK_STUB)
+    _stub(dirp / "daily_release.py", _RELEASE_STUB)
     _stub(dirp / "check_fork_selftests.py", selftest_body)
     _stub(home / ".local" / "bin" / "gh",
           '#!/usr/bin/env bash\n[ "$1" = auth ] && echo gho_stubtoken\nexit 0\n')
     env = dict(os.environ)
-    env.update(HOME=str(home), GK_STATE_DIR=str(tmp_path / "state"))
+    env.update(HOME=str(home), GK_STATE_DIR=str(tmp_path / "state"),
+               RELEASE_MARKER=str(tmp_path / "release-invoked"))
     return dirp / "run_tick.sh", env
 
 
@@ -369,6 +447,8 @@ def test_the_whole_tick_exits_zero_when_the_forks_checks_are_clean(tmp_path):
     fell over somewhere else."""
     p = _run_tick(tmp_path, _OK_STUB)
     assert p.returncode == 0, f"stubbed-green tick exited {p.returncode}\n{p.stdout[-2500:]}"
+    assert (tmp_path / "release-invoked").read_text() == "invoked\n", (
+        "the green pre-release gate did not invoke daily_release")
 
 
 @pytest.mark.parametrize("rc,label", [(1, "a fork check is RED"),
@@ -381,6 +461,8 @@ def test_the_whole_tick_goes_red_when_a_forks_check_does(tmp_path, rc, label):
     assert p.returncode == 8, (
         f"{label}: tick exited {p.returncode}, expected 8\n{p.stdout[-2500:]}")
     assert "[selftest]" in p.stdout
+    assert not (tmp_path / "release-invoked").exists(), (
+        f"{label} still invoked daily_release")
 
 
 def test_the_whole_tick_goes_red_when_the_driver_is_absent(tmp_path):
@@ -391,6 +473,36 @@ def test_the_whole_tick_goes_red_when_the_driver_is_absent(tmp_path):
                        text=True, timeout=900)
     assert p.returncode == 8, f"{p.returncode}\n{p.stdout[-2500:]}"
     assert "nothing was checked" in p.stdout
+    assert not (tmp_path / "release-invoked").exists(), (
+        "a missing (NORECORD) selftest driver still invoked daily_release")
+
+
+def test_a_red_source_guard_blocks_release_but_not_the_round_report(tmp_path):
+    """Source integrity authorizes delivery, while the rest of the tick still
+    runs so the morning report is not lost with the release."""
+    script, env = _tick_fleet(tmp_path, _OK_STUB)
+    _stub(script.parent.parent / "tools" / "check_pins_agree.py",
+          _exiting(1, "pin disagreement"))
+    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                       text=True, timeout=900)
+    assert p.returncode == 3, f"{p.returncode}\n{p.stdout[-2500:]}"
+    assert "[blocking] REFUSE daily_release" in p.stdout
+    assert "[done] gatekeeper tick exit 3" in p.stdout, (
+        "the reporting half of the round did not finish")
+    assert not (tmp_path / "release-invoked").exists(), (
+        "a red source guard still invoked daily_release")
+
+
+def test_a_non_clean_merge_round_cannot_release_a_partial_fleet(tmp_path):
+    script, env = _tick_fleet(tmp_path, _OK_STUB)
+    _stub(script.parent / "daily_merge.py",
+          _exiting(1, "POST_MERGE_CHECK_UNMEASURABLE"))
+    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                       text=True, timeout=900)
+    assert p.returncode == 4, f"{p.returncode}\n{p.stdout[-2500:]}"
+    assert "[blocking] REFUSE daily_release" in p.stdout
+    assert not (tmp_path / "release-invoked").exists(), (
+        "a partial/non-clean merge round still invoked daily_release")
 
 
 def _dm():

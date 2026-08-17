@@ -80,6 +80,39 @@ def _tree(tmp_path: Path) -> Path:
     return root
 
 
+def test_smoke_stall_is_norecord_not_a_tool_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "SMOKE", {"chatty": "while :; do echo x; done"})
+    calls = []
+
+    def supervised(image, command, grace):
+        calls.append((image, command, grace))
+        return type("Execution", (), {
+            "rc": R.watchdog.RC_STALLED,
+            "output": "WATCHDOG_STALLED",
+            "outcome": "stalled",
+        })()
+
+    monkeypatch.setattr(R, "run_container_probe", supervised)
+    bad = R.smoke_image("candidate:test")
+
+    assert bad[0]["outcome"] == "stalled"
+    assert bad[0]["rc"] == R.watchdog.RC_STALLED
+    assert calls == [("candidate:test", "while :; do echo x; done",
+                      R.SMOKE_STALL_GRACE_S)]
+
+
+def test_smoke_natural_nonzero_is_a_real_tool_failure(monkeypatch):
+    monkeypatch.setattr(R, "SMOKE", {"broken": "false"})
+    monkeypatch.setattr(R, "run_container_probe", lambda *a, **k: type(
+        "Execution", (), {"rc": 9, "output": "real diagnostic",
+                           "outcome": "natural"})())
+    bad = R.smoke_image("candidate:test")
+    assert bad == [{
+        "tool": "broken", "cmd": "false", "err": "real diagnostic",
+        "outcome": "natural_failure", "rc": 9,
+    }]
+
+
 def test_two_repos_in_one_dockerfile_are_both_found(tmp_path):
     """`tools/lvs` pins magic AND netgen; a first-match parse loses one."""
     root = _tree(tmp_path)
@@ -134,6 +167,244 @@ def test_version_rolls_the_minor_at_99(tmp_path, monkeypatch):
     root = _tree(tmp_path)
     monkeypatch.setattr(R, "_existing_versions", lambda _r: [(0, 2, 99)])
     assert R.peek_version(root)[1] == "0.3.0"
+
+
+def test_docker_images_timeout_is_unknown_not_an_empty_version_set(
+        tmp_path, monkeypatch):
+    """An unreadable inventory must not recycle VERSION+1."""
+    import pytest
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(R, "_sh", lambda *a, **k: (
+        1, "", "OPERATIONAL_TIMEOUT after 120s",
+    ))
+
+    with pytest.raises(R.ReleaseMeasurementUnknown) as raised:
+        R._existing_versions(root)
+
+    assert raised.value.category == "existing_versions_unmeasurable"
+
+
+def test_registry_timeout_is_not_artefact_absence(tmp_path, monkeypatch):
+    """Only a registry not-found answer may trigger an immutable rebuild."""
+    import pytest
+
+    root = _tree(tmp_path)
+
+    def answer(cmd, **_kwargs):
+        if cmd[1:3] == ["image", "inspect"]:
+            return 1, "", "Error response from daemon: No such image"
+        if cmd[1:3] == ["manifest", "inspect"]:
+            return 1, "", "OPERATIONAL_TIMEOUT after 180s"
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(R, "_sh", answer)
+    with pytest.raises(R.ReleaseMeasurementUnknown) as raised:
+        R.missing_artefacts(
+            root, {"YOSYS_REF": "a" * 40}, {"yosys": ["YOSYS_REF"]},
+        )
+
+    assert raised.value.category == "registry_artefact_state_unmeasurable"
+    assert "OPERATIONAL_TIMEOUT" in raised.value.detail
+
+
+def test_only_explicit_manifest_not_found_is_a_missing_artefact(
+        tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+
+    def answer(cmd, **_kwargs):
+        if cmd[1:3] == ["image", "inspect"]:
+            return 1, "", "Error response from daemon: No such image"
+        if cmd[1:3] == ["manifest", "inspect"]:
+            return 1, "", "no such manifest: manifest unknown"
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(R, "_sh", answer)
+    missing = R.missing_artefacts(
+        root, {"YOSYS_REF": "a" * 40}, {"yosys": ["YOSYS_REF"]},
+    )
+    assert missing == {
+        "yosys": R.artefact_tag(
+            root, "yosys", ["YOSYS_REF"], {"YOSYS_REF": "a" * 40},
+        ),
+    }
+
+
+def test_remote_existing_candidate_is_skipped_not_reissued(
+        tmp_path, monkeypatch):
+    """A remote-only 0.3.0 forces selection onward even if local has none."""
+    root = _tree(tmp_path)
+    (root / "VERSION").write_text("0.2.99\n")
+    asked = []
+
+    def registry(ref):
+        asked.append(ref)
+        if ref.endswith(":0.3.0"):
+            return R.PresenceMeasurement(
+                R.Presence.PRESENT, ref, "registry", "existing manifest",
+            )
+        return R.PresenceMeasurement(
+            R.Presence.ABSENT, ref, "registry", "manifest unknown",
+        )
+
+    monkeypatch.setattr(R, "_probe_remote_manifest", registry)
+    old, new, occupied = R.select_publish_version(root, [])
+
+    assert (old, new) == ("0.2.99", "0.3.1")
+    assert occupied == ["0.3.0"]
+    assert asked == [
+        "ghcr.io/vibeic/vibeic-eda:0.3.0",  # image-version:history — fixture
+        "ghcr.io/vibeic/vibeic-eda:0.3.1",  # image-version:history — fixture
+    ]
+
+
+def test_main_composes_the_measured_free_tag_not_remote_existing_candidate(
+        tmp_path, monkeypatch):
+    """Selection is wired into compose; it is not a disconnected helper."""
+    from types import SimpleNamespace
+
+    root = _tree(tmp_path)
+    (root / "VERSION").write_text("0.2.99\n")
+    monkeypatch.setattr(
+        R.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(R, "pinned_refs", lambda _root: {"yosys": "a" * 40})
+    monkeypatch.setattr(R, "ref_arg_names", lambda _root: {"yosys": "YOSYS"})
+    monkeypatch.setattr(R, "bake_targets", lambda _root: {
+        "yosys": ["YOSYS_REF"],
+    })
+    monkeypatch.setattr(R, "check_one", lambda *_a: {"verdict": "CURRENT"})
+    monkeypatch.setattr(R, "released_record", lambda _root: {})
+    monkeypatch.setattr(R, "missing_artefacts", lambda *_a: {})
+    monkeypatch.setattr(R, "_existing_versions", lambda _root: [])
+    monkeypatch.setattr(R, "write_recipe_vars", lambda *_a: [])
+    monkeypatch.setattr(R, "retag_images", lambda *_a: [])
+    monkeypatch.setattr(R, "preferred_builder", lambda: None)
+    monkeypatch.setattr(R, "log_limit_effective", lambda *_a: True)
+
+    def registry(ref):
+        state = (R.Presence.PRESENT if ref.endswith(":0.3.0")
+                 else R.Presence.ABSENT)
+        return R.PresenceMeasurement(state, ref, "registry", state.value)
+
+    monkeypatch.setattr(R, "_probe_remote_manifest", registry)
+    composed = []
+
+    def stop_at_compose(command, _root):
+        composed.append(command)
+        return 1, "deterministic fixture stop", [{
+            "category": "compose_failed", "summary": "fixture stop",
+        }]
+
+    monkeypatch.setattr(R, "compose_with_retries", stop_at_compose)
+    record = tmp_path / "release.json"
+    rc = R.main(["--eda-root", str(root), "--json", str(record)])
+    result = json.loads(record.read_text())
+
+    assert rc == R.RC_NEEDS_HUMAN
+    assert result["occupied_version_candidates"] == ["0.3.0"]
+    assert result["version_candidate"]["to"] == "0.3.1"
+    command_text = " ".join(composed[0])
+    assert "eda.tags=ghcr.io/vibeic/vibeic-eda:0.3.1" in command_text  # image-version:history — fixture
+    assert "eda.tags=ghcr.io/vibeic/vibeic-eda:0.3.0" not in command_text  # image-version:history — fixture
+
+
+def test_unknown_candidate_registry_state_blocks_selection(
+        tmp_path, monkeypatch):
+    import pytest
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(R, "_probe_remote_manifest", lambda ref:
+                        R.PresenceMeasurement(
+                            R.Presence.UNKNOWN, ref, "registry",
+                            "unauthorized: token service unavailable",
+                        ))
+
+    with pytest.raises(R.ReleaseMeasurementUnknown) as raised:
+        R.select_publish_version(root, [])
+    assert raised.value.category == "candidate_tag_state_unmeasurable"
+
+
+def test_unmeasured_existing_versions_stops_main_before_first_writer(
+        tmp_path, monkeypatch):
+    """The typed UNKNOWN is retained and no release tree mutation starts."""
+    from types import SimpleNamespace
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(
+        R.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(R, "pinned_refs", lambda _root: {"yosys": "a" * 40})
+    monkeypatch.setattr(R, "ref_arg_names", lambda _root: {"yosys": "YOSYS"})
+    monkeypatch.setattr(R, "bake_targets", lambda _root: {
+        "yosys": ["YOSYS_REF"],
+    })
+    monkeypatch.setattr(R, "check_one", lambda *_a: {"verdict": "CURRENT"})
+    monkeypatch.setattr(R, "released_record", lambda _root: {})
+    monkeypatch.setattr(R, "missing_artefacts", lambda *_a: {})
+    monkeypatch.setattr(R, "_existing_versions", lambda _root: (_ for _ in ())
+                        .throw(R.ReleaseMeasurementUnknown(
+                            stage="version_discovery",
+                            category="existing_versions_unmeasurable",
+                            subject="local vibeic-eda version tags",
+                            detail="OPERATIONAL_TIMEOUT after 120s",
+                        )))
+    writes = []
+    monkeypatch.setattr(R, "write_recipe_vars",
+                        lambda *_a: writes.append("recipe") or [])
+
+    record = tmp_path / "release.json"
+    rc = R.main(["--eda-root", str(root), "--json", str(record)])
+    result = json.loads(record.read_text())
+
+    assert rc == R.RC_NEEDS_HUMAN
+    assert result["status"] == "unmeasured"
+    assert result["failure"]["category"] == "existing_versions_unmeasurable"
+    assert result["unmeasured"][0]["detail"] == "OPERATIONAL_TIMEOUT after 120s"
+    assert writes == []
+
+
+def test_unmeasured_artefact_registry_state_is_retained_and_not_rebuilt(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(
+        R.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(R, "pinned_refs", lambda _root: {"yosys": "a" * 40})
+    monkeypatch.setattr(R, "ref_arg_names", lambda _root: {"yosys": "YOSYS"})
+    monkeypatch.setattr(R, "bake_targets", lambda _root: {
+        "yosys": ["YOSYS_REF"],
+    })
+    monkeypatch.setattr(R, "check_one", lambda *_a: {"verdict": "CURRENT"})
+    monkeypatch.setattr(R, "released_record", lambda _root: {})
+    monkeypatch.setattr(R, "missing_artefacts", lambda *_a: (_ for _ in ())
+                        .throw(R.ReleaseMeasurementUnknown(
+                            stage="artefact_discovery",
+                            category="registry_artefact_state_unmeasurable",
+                            subject="ghcr.io/vibeic/eda-tool-yosys:test",
+                            detail="registry presence unmeasured: TLS timeout",
+                        )))
+    actions = []
+    monkeypatch.setattr(R, "write_recipe_vars",
+                        lambda *_a: actions.append("recipe") or [])
+    monkeypatch.setattr(R, "_existing_versions",
+                        lambda *_a: actions.append("versions") or [])
+
+    record = tmp_path / "release.json"
+    rc = R.main(["--eda-root", str(root), "--json", str(record)])
+    result = json.loads(record.read_text())
+
+    assert rc == R.RC_NEEDS_HUMAN
+    assert result["status"] == "unmeasured"
+    assert result["failure"]["category"] == \
+        "registry_artefact_state_unmeasurable"
+    assert result["unmeasured"][0]["subject"].endswith("yosys:test")
+    assert actions == [], "an UNKNOWN registry answer reached a release action"
 
 
 def test_fingerprint_is_stable_and_moves_with_any_pin(tmp_path):
@@ -293,25 +564,19 @@ def test_branch_is_ours_is_none_when_it_cannot_tell(monkeypatch):
     assert R.branch_is_ours("x", "master") is None
 
 
-# --- vibeic-eda#26: a wedged build must become a failure, and its log must survive
+# --- long builds are supervised by progress, never by elapsed runtime
 
 
-def test_a_build_that_never_exits_is_reported_as_a_timeout(monkeypatch):
-    """The wedge has cost four manual interventions. `subprocess` already knew.
-
-    Four times a compose sat with buildx alive, no compiler running, no disk
-    write and no network, and four times the decision to stop it was mine to
-    make by hand. The deadline existed the whole time — it was two hours, and
-    nobody was watching for two hours.
-    """
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="docker buildx bake", timeout=5400)
-    monkeypatch.setattr(R.subprocess, "run", boom)
-    rc, out, err = R._sh(["docker", "buildx", "bake"], timeout=5400)
-    assert rc == 1
-    assert "TIMED OUT" in err and "5400" in err
-    # and it must be attributable, not just a failure
-    assert "#26" in err
+def test_a_build_with_flat_progress_is_reported_as_a_stall(monkeypatch):
+    monkeypatch.setattr(R, "BUILD_POLL_S", 0.03)
+    rc, out, err = R._sh(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stream=True, stall_grace=0.12,
+    )
+    assert rc == R.watchdog.RC_STALLED
+    assert "WATCHDOG_STALLED" in err
+    assert "total runtime" in err
+    assert "TIMED OUT" not in err
 
 
 def test_build_env_reaches_the_subprocess_and_keeps_the_inherited_environment(monkeypatch):
@@ -348,10 +613,10 @@ def test_no_env_leaves_the_environment_alone(monkeypatch):
     assert seen["env"] is None
 
 
-def test_every_buildx_invocation_is_bounded_and_carries_the_build_env():
+def test_every_buildx_invocation_has_a_progress_lease_and_build_env():
     """WIRING, which is where this class of fix leaks.
 
-    Adding the deadline to `_sh` does nothing for a call site that does not pass
+    Adding the lease to `_sh` does nothing for a call site that does not pass
     it, and the two bake calls are the only ones that matter. Stated limit: this
     reads the call sites rather than executing them — a real bake is not a unit
     test — so it can only catch an UNWIRED call, not a mis-wired one. The
@@ -362,7 +627,7 @@ def test_every_buildx_invocation_is_bounded_and_carries_the_build_env():
     # passes a variable is judged the same as the one that passes a literal.
     # `bake`, not `buildx`: the property is about BUILDS. `buildx inspect` is a
     # buildx call that needs neither a build environment nor an hours-long
-    # deadline, and an over-broad predicate that flags it would be trained away
+    # lease, and an over-broad predicate that flags it would be trained away
     # the first time it fired — which is how a gate stops meaning anything.
     bake_vars = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
                  for t in n.targets if isinstance(t, ast.Name)
@@ -382,14 +647,16 @@ def test_every_buildx_invocation_is_bounded_and_carries_the_build_env():
         kw = {k.arg: ast.dump(k.value) for k in c.keywords}
         assert "BUILD_ENV" in kw.get("env", ""), \
             f"a buildx call at line {c.lineno} passes no BUILD_ENV"
-        assert "TIMEOUT" in kw.get("timeout", ""), \
-            f"a buildx call at line {c.lineno} has no bounded deadline"
+        assert "STALL" in kw.get("stall_grace", ""), \
+            f"a buildx call at line {c.lineno} has no progress lease"
+        assert "timeout" not in kw, \
+            f"a buildx call at line {c.lineno} still has a runtime verdict"
 
 
-def test_the_deadlines_clear_the_measured_build_times():
-    """Set from measurement: composes run 13-20 min, tool builds longer."""
-    assert R.COMPOSE_TIMEOUT >= 20 * 60 * 2
-    assert R.TOOL_BUILD_TIMEOUT > R.COMPOSE_TIMEOUT
+def test_the_build_policy_has_no_total_runtime_ceiling():
+    assert R.BUILD_STALL_GRACE_S > 0
+    assert not hasattr(R, "COMPOSE_TIMEOUT")
+    assert not hasattr(R, "TOOL_BUILD_TIMEOUT")
 
 
 def test_the_log_limit_reports_that_the_docker_driver_cannot_honour_it(monkeypatch):
@@ -480,7 +747,8 @@ def test_a_branch_absent_upstream_is_conclusively_ours(monkeypatch):
     calls = iter([
         (0, "YosysHQ/yosys", ""),      # parent
         (1, "", "404"),                # compare fails
-        (1, "", "404"),                # upstream has no such branch
+        (1, "", "gh: Branch not found (HTTP 404)"),
+                                           # upstream has no such branch
         (0, "satfix-integration", ""),  # we do
     ])
     monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
@@ -515,7 +783,8 @@ def test_a_readable_tip_answers_even_when_the_branch_read_failed(monkeypatch):
         (0, "master", ""),    # upstream HAS the branch
         (1, "", "boom"),      # transient: could not read ours
         (0, "abc123", ""),    # ...but its tip reads fine
-        (1, "", "422"),       # and upstream has never seen that commit
+        (1, "", "gh: No commit found for SHA: abc123 (HTTP 422)"),
+                                # and upstream has never seen that commit
     ])
     monkeypatch.setattr(C, "_sh", lambda *a, **k: next(calls))
     assert C.branch_is_ours("yosys", "master") is True
@@ -650,7 +919,8 @@ def test_a_source_installed_tool_needs_its_source_tree_present(tmp_path,
     assert not [f for f in F.check("img", df) if f["tool"] == "sby"]
 
     monkeypatch.setattr(F, "_sh", _fake_docker({
-        "command -v": "sby /usr/local/bin/sby /usr/local/bin/sby\n"}))
+        "command -v": "sby /usr/local/bin/sby /usr/local/bin/sby\n",
+        "-d /opt/vibeic-forks/sby": "sby ABSENT\n"}))
     bad = [f for f in F.check("img", df) if f["tool"] == "sby"]
     assert bad and "did not come from us" in bad[0]["problem"]
 
@@ -697,6 +967,87 @@ def test_undecidable_ownership_keeps_the_finding_but_not_the_claim(monkeypatch):
     assert r["verdict"] == "STALE_UNDECIDED"
     assert "could not be determined" in r["detail"]
     assert "OURS" not in r["detail"]
+
+
+def test_unmeasured_ownership_stops_before_any_release_mutation(
+        tmp_path, monkeypatch):
+    """A tri-state predicate only helps if its caller refuses to ship None."""
+    from types import SimpleNamespace
+
+    root = _tree(tmp_path)
+    before = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*") if path.is_file()
+    }
+    monkeypatch.setattr(
+        R.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(R, "pinned_refs", lambda _root: {"yosys": "a" * 40})
+    monkeypatch.setattr(R, "ref_arg_names", lambda _root: {"yosys": "YOSYS"})
+    monkeypatch.setattr(R, "bake_targets", lambda _root: {"yosys": ["YOSYS_REF"]})
+    monkeypatch.setattr(R, "check_one", lambda repo, pin: {
+        "repo": repo, "pin": pin[:9], "branch": "vibeic/integration",
+        "verdict": "STALE", "behind": 1,
+        "detail": "branch is one commit past the pin",
+    })
+    monkeypatch.setattr(R, "_gh_tip", lambda *a: "b" * 40)
+    monkeypatch.setattr(R, "branch_is_ours", lambda *a: None)
+
+    writes = []
+    monkeypatch.setattr(R, "write_recipe_vars",
+                        lambda *a: writes.append("recipe") or [])
+    monkeypatch.setattr(R, "rewrite_pin",
+                        lambda *a: writes.append("pin") or [])
+    monkeypatch.setattr(R, "missing_artefacts",
+                        lambda *a: writes.append("registry") or [])
+
+    record = tmp_path / "release.json"
+    rc = R.main(["--eda-root", str(root), "--json", str(record)])
+
+    assert rc == R.RC_NEEDS_HUMAN
+    result = json.loads(record.read_text())
+    assert result["status"] == "unmeasured"
+    assert result["failure"]["category"] == "ownership_unmeasurable"
+    assert result["undecidable"][0]["branch_is_ours"] is None
+    assert writes == [], "an absent ownership measurement reached a writer"
+    assert before == {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*") if path.is_file()
+    }, "the release tree changed before ownership was measured"
+
+
+def test_unresolved_pin_stops_before_any_release_mutation(tmp_path, monkeypatch):
+    """A final red exit is too late once a recipe or registry has been changed."""
+    from types import SimpleNamespace
+
+    root = _tree(tmp_path)
+    monkeypatch.setattr(
+        R.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(R, "pinned_refs", lambda _root: {"yosys": "a" * 40})
+    monkeypatch.setattr(R, "ref_arg_names", lambda _root: {"yosys": "YOSYS"})
+    monkeypatch.setattr(R, "bake_targets", lambda _root: {"yosys": ["YOSYS_REF"]})
+    monkeypatch.setattr(R, "check_one", lambda repo, pin: {
+        "repo": repo, "pin": pin[:9], "verdict": "COMPARE_FAILED",
+        "detail": "branch lookup produced no complete response",
+    })
+    writes = []
+    monkeypatch.setattr(R, "write_recipe_vars",
+                        lambda *a: writes.append("recipe") or [])
+    monkeypatch.setattr(R, "missing_artefacts",
+                        lambda *a: writes.append("registry") or [])
+
+    record = tmp_path / "release.json"
+    rc = R.main(["--eda-root", str(root), "--json", str(record)])
+    result = json.loads(record.read_text())
+
+    assert rc == R.RC_NEEDS_HUMAN
+    assert result["status"] == "unmeasured"
+    assert result["failure"]["category"] == "pin_compare_unmeasurable"
+    assert result["unresolved"][0]["repo"] == "yosys"
+    assert writes == [], "an unresolved pin reached a release writer"
 
 
 def test_the_two_programs_share_one_implementation_of_the_question():

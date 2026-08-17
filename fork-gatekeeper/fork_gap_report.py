@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -74,6 +75,7 @@ import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79
 # ask a remote what a branch really points at, and a fourth copy of that rule is
 # how this same defect reached three files. See `fetch_confirms_current`.
 import discover_forks  # noqa: E402
+import progress_watchdog as watchdog  # noqa: E402
 
 ARG_RE = re.compile(r"ARG\s+([A-Z0-9_]*?)_REF\s*=\s*([0-9a-f]{7,40})")
 
@@ -82,13 +84,14 @@ ARG_RE = re.compile(r"ARG\s+([A-Z0-9_]*?)_REF\s*=\s*([0-9a-f]{7,40})")
 #: DISTINCT from any exit code the tool itself chose, exactly as `daily_0530`
 #: defines it, so "we never got an answer" cannot be read as "git said no".
 RC_NO_ANSWER = 124
-#: A fetch pulls objects and legitimately runs long. `daily_0530` and
-#: `daily_merge` both bound theirs at 1800; matched deliberately, so the three
-#: programs that fetch the same clones cannot disagree about how long is too long.
-FETCH_TIMEOUT_S = 1800
+FETCH_STALL_GRACE_S = float(
+    os.environ.get("GK_GAP_FETCH_STALL_GRACE", "300")
+)
+FETCH_PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "1"))
 
 
-def _run(repo: Path, *args: str, timeout: int = 60):
+def _run(repo: Path, *args: str, timeout: Optional[int] = 60,
+         progress: bool = False):
     """The CompletedProcess, so a caller that needs the EXIT STATUS can have it.
 
     `_git` below keeps its old signature and its old meaning; this exists because
@@ -97,6 +100,16 @@ def _run(repo: Path, *args: str, timeout: int = 60):
     that distinction away.
     """
     try:
+        if progress:
+            run = watchdog.run_supervised(
+                ["git", "-C", str(repo), *args],
+                stall_grace_s=FETCH_STALL_GRACE_S,
+                poll_s=FETCH_PROGRESS_POLL_S,
+                output_progress=True, process_tree_cpu_progress=True,
+            )
+            cp = subprocess.CompletedProcess(args, run.rc, run.out, run.err)
+            cp.supervision_outcome = run.outcome
+            return cp
         return subprocess.run(["git", "-C", str(repo), *args],
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -246,10 +259,12 @@ def fetch_confirms_current(clone: Path, up_ref: str, do_fetch: bool = True):
     branch = up_ref.split("/", 1)[1] if "/" in up_ref else up_ref
     before = _git(clone, "rev-parse", "-q", "--verify", up_ref)
 
-    fr = _run(clone, "fetch", "-q", "--all", timeout=FETCH_TIMEOUT_S)
+    fr = _run(clone, "fetch", "--progress", "--all", progress=True)
     if fr.returncode != 0:
-        what = ("no answer from" if fr.returncode == RC_NO_ANSWER
-                else f"FETCH FAILED (rc={fr.returncode}) —")
+        what = ("FETCH STALLED with no forward progress from"
+                if fr.returncode == watchdog.RC_STALLED else
+                "no answer from" if fr.returncode == RC_NO_ANSWER else
+                f"FETCH FAILED (rc={fr.returncode}) —")
         return False, (f"{what} upstream: tracking state is UNKNOWN, not "
                        f"current: {_first_error_line(fr)}")
 

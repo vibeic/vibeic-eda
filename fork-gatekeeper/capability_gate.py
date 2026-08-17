@@ -79,11 +79,17 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
-import subprocess
 import sys
 import tempfile
+from pathlib import Path
+
+_HERE_PATH = Path(__file__).resolve().parent
+if str(_HERE_PATH) not in sys.path:
+    sys.path.insert(0, str(_HERE_PATH))
+import progress_watchdog as W                                  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SMOKE = os.path.join(HERE, "capability_smoke.py")
@@ -91,6 +97,8 @@ WAIVERS = os.path.join(HERE, "capability_waivers.txt")
 VERSION_FILE = os.path.join(HERE, os.pardir, "VERSION")
 
 RC_OK, RC_FAIL, RC_NOIMAGE = 0, 1, 2
+DEFAULT_STALL_AFTER = 300.0
+_OUTER_CLEANUP_HEADROOM = 60.0
 
 #: The CLOSED set of fields a waiver entry may carry.  Closed rather than open
 #: for the same reason rule 3 exists: an unrecognised key is a typo, and a typo
@@ -286,7 +294,10 @@ def main() -> int:
     ap.add_argument("image", help="image to probe, e.g. " + _example_image())
     ap.add_argument("--waivers", default=WAIVERS)
     ap.add_argument("--json", metavar="FILE", help="keep the raw probe table here")
-    ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument(
+        "--stall-after", type=float, default=DEFAULT_STALL_AFTER,
+        help="per subject/control no-progress grace passed to the measurement; "
+             "healthy progress may run for any total duration")
     ap.add_argument(
         "--check-waivers", action="store_true",
         help="validate the waiver file's recorded decisions and exit, without "
@@ -315,22 +326,79 @@ def main() -> int:
               f"{'PASS' if good else 'FAIL'}")
         return RC_OK if good else RC_FAIL
 
+    if not math.isfinite(a.stall_after) or a.stall_after <= 0:
+        ap.error("--stall-after must be a positive finite number")
+
     tmp = a.json or os.path.join(tempfile.mkdtemp(prefix="capgate-"), "r.json")
 
-    proc = subprocess.run(
-        [sys.executable, SMOKE, a.image, "--json", tmp],
-        capture_output=True, text=True, timeout=a.timeout)
-    sys.stdout.write(proc.stdout)
-    if proc.stderr.strip():
-        sys.stderr.write(proc.stderr)
+    # A caller may reuse --json across runs.  Never let an interrupted smoke
+    # inherit yesterday's green table.
+    try:
+        Path(tmp).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"capability-gate: FAIL -- cannot clear stale probe table: {exc}",
+              file=sys.stderr)
+        return RC_NOIMAGE
 
-    if proc.returncode == RC_NOIMAGE or not os.path.exists(tmp):
+    # capability_smoke's trusted inner watchdog renews this outer lease through
+    # a private host journal.  Its subprocess output is captured inside that
+    # program, so a chatty wedged tool cannot manufacture outer progress.  The
+    # journal is orchestration/lifecycle progress: the inner lease remains the
+    # authority on workload progress and stops sampling when it stalls.  Outer
+    # headroom is strictly greater than inner grace plus bounded container/process
+    # cleanup; journal advances make this a renewable lease, not a runtime cap.
+    sweep_stall_after = max(
+        a.stall_after * 2,
+        a.stall_after + _OUTER_CLEANUP_HEADROOM,
+    )
+    with tempfile.TemporaryDirectory(prefix="capgate-progress-") as progress_dir:
+        progress_file = Path(progress_dir) / "events"
+        progress_file.touch(mode=0o600)
+
+        def progress_token():
+            try:
+                return float(progress_file.stat().st_size)
+            except OSError:
+                return None
+
+        proc = W.run_supervised(
+            [sys.executable, "-u", SMOKE, a.image, "--json", tmp,
+             "--stall-after", str(a.stall_after),
+             "--progress-file", str(progress_file)],
+            stall_grace_s=sweep_stall_after,
+            domain_progress_probe=progress_token,
+            # stdout and CPU are not capability-domain evidence.  The private
+            # journal is advanced by the trusted inner watchdog, never by the
+            # image under test, and is the outer lease's sole signal.
+            semantic_only=True,
+        )
+    sys.stdout.write(proc.out or "")
+    if (proc.err or "").strip():
+        sys.stderr.write(proc.err)
+
+    if proc.outcome != "natural":
+        label = "STALLED" if proc.outcome == "stalled" else "UNMEASURABLE"
+        print(f"\ncapability-gate: FAIL -- capability sweep {label} "
+              f"({proc.outcome}); no complete table was measured",
+              file=sys.stderr)
+        return RC_NOIMAGE
+
+    if proc.rc == RC_NOIMAGE or not os.path.exists(tmp):
         print(f"\ncapability-gate: FAIL -- {a.image} could not be probed at all; "
               f"nothing was measured, so nothing is proven", file=sys.stderr)
         return RC_NOIMAGE
 
-    with open(tmp, encoding="utf-8") as fh:
-        rows = json.load(fh)
+    try:
+        with open(tmp, encoding="utf-8") as fh:
+            rows = json.load(fh)
+        if not isinstance(rows, list):
+            raise ValueError("probe table is not a list")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"\ncapability-gate: FAIL -- probe table is UNMEASURABLE: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return RC_NOIMAGE
     seen = {r["capability"]: r["verdict"] for r in rows}
 
     unwaived_bad, stale, unknown = [], [], []
@@ -347,6 +415,7 @@ def main() -> int:
     print(f"\ncapability-gate on {a.image}")
     print(f"  probes            : {len(rows)}")
     print(f"  WORKS             : {sum(1 for v in seen.values() if v == 'WORKS')}")
+    print(f"  INCONCLUSIVE      : {sum(1 for v in seen.values() if v == 'INCONCLUSIVE')}")
     print(f"  waived (still red): {sum(1 for c, v in seen.items() if c in waived and v != 'WORKS')}")
     for cap in sorted(c for c, v in seen.items() if c in waived and v != "WORKS"):
         f = waived[cap]

@@ -61,10 +61,10 @@ export GK_MERGE_PR="${GK_MERGE_PR:-1}"
 # fires, and a rule enforced only there would be enforced nowhere.
 #
 # This tick already runs from the checked-out repo on a schedule, so it is the
-# one place the checks reliably execute. It does NOT gate the tick: upstream
-# tracking is useful whether or not a pin disagrees with itself, and coupling
-# them would mean one bad pin silently stops the fork monitoring too. It records
-# the verdict where the daily report can show it.
+# one place the checks reliably execute. It does NOT stop upstream tracking:
+# that remains useful even when a pin disagrees with itself. It DOES participate
+# in the explicit [blocking] release authorization below, after the merge survey
+# has completed, so a bad source declaration can never reach daily_release.
 GUARD_OUT="${LOG_DIR}/source-guards.txt"
 : > "${GUARD_OUT}"
 guard_rc=0
@@ -134,6 +134,10 @@ fi
 # happen is a SILENT skip, so both write their own log and a non-zero exit is
 # carried into the tick's exit code rather than discarded.
 MERGE_OUT="${LOG_DIR}/daily-merge.txt"
+merge_rc=0
+# Reuse below is permitted only from evidence produced by THIS invocation. A
+# crash or missing program must expose absence, not yesterday's green row.
+rm -f "${LOG_DIR}/daily-merge.json"
 if [ -f "${DIR}/daily_merge.py" ]; then
     log "[merge] merging all upstream commits into every fork"
     python3 "${DIR}/daily_merge.py" --json "${LOG_DIR}/daily-merge.json" \
@@ -148,8 +152,199 @@ else
     merge_rc=1
 fi
 
+# --- PRE-RELEASE BLOCKING GATE ------------------------------------------------
+#
+# Run the forks' declared checks ONCE, after daily_merge has updated the clone
+# tips and before daily_release is even invoked.  These are the same declarations
+# and runner used by daily_merge's merge-triggered checks; this daily pass covers
+# ALREADY_CURRENT forks and our own patches without introducing a second suite.
+#
+# THREE STATES. rc=2 is COULD-NOT-CHECK (including a stalled semantic pytest
+# progress lease), not a pass.  Both red and no-record block release.  The source
+# guards above are the other input to this authorization.  Neither condition
+# suppresses merge/reporting work: it suppresses only the irreversible delivery
+# path. A non-clean merge round participates too: a partial fleet update is
+# useful evidence for the report, but it is not authorization to cut an image.
+#
+# Do not run an expensive declaration twice.  A MERGED daily_merge row means
+# every declared check completed on the exact merged worktree and the push then
+# succeeded. Reuse that evidence; ask check_fork_selftests only about the tools
+# daily_merge could not cover (chiefly ALREADY_CURRENT forks). Any malformed or
+# incomplete reuse record fails open toward *running* the checks, never toward
+# passing them.
+SELFTEST_ARGS=()
+selftest_plan_rc=1
+selftest_reused_checks=0
+selftest_reused_tools=""
+if [ -f "${DIR}/FORKS.json" ] && [ -s "${LOG_DIR}/daily-merge.json" ]; then
+    SELFTEST_PLAN="$(python3 - "${DIR}/FORKS.json" \
+        "${LOG_DIR}/daily-merge.json" <<'PY'
+import json
+import sys
+
+registry = json.load(open(sys.argv[1], encoding="utf-8"))
+merge = json.load(open(sys.argv[2], encoding="utf-8"))
+if merge.get("program") != "daily_merge" or not isinstance(merge.get("forks"), list):
+    raise ValueError("not a complete daily_merge record")
+
+declared = {}
+for fork in registry.get("forks", []):
+    checks = fork.get("post_merge_check")
+    if checks:
+        if not isinstance(checks, list) or not fork.get("tool"):
+            raise ValueError("malformed post_merge_check declaration")
+        declared[fork["tool"]] = checks
+if not declared:
+    raise ValueError("no declared fork checks")
+
+rows = {}
+for row in merge["forks"]:
+    repo = row.get("repo") if isinstance(row, dict) else None
+    if not repo or repo in rows:
+        raise ValueError("missing or duplicate daily_merge repo row")
+    rows[repo] = row
+
+needed = []
+reused_tools = []
+reused_checks = 0
+for tool, declarations in declared.items():
+    row = rows.get(tool, {})
+    observed = row.get("checks") if isinstance(row, dict) else None
+    declared_names = [str(c.get("name") or c.get("path") or "unnamed")
+                      for c in declarations if isinstance(c, dict)]
+    observed_names = [str(c.get("name")) for c in observed] \
+        if isinstance(observed, list) else []
+    reusable = (
+        row.get("state") == "MERGED"
+        and len(declared_names) == len(declarations)
+        and observed_names == declared_names
+        and all(c.get("ok") is True and c.get("outcome") == "natural"
+                for c in observed)
+    )
+    if reusable:
+        reused_tools.append(tool)
+        reused_checks += len(observed)
+    else:
+        needed.append(tool)
+
+print(f"REUSED_CHECKS\t{reused_checks}")
+print("REUSED_TOOLS\t" + ",".join(reused_tools))
+for tool in needed:
+    print("TOOL\t" + tool)
+PY
+)"
+    selftest_plan_rc=$?
+    if [ "${selftest_plan_rc}" = "0" ]; then
+        while IFS=$'\t' read -r kind value; do
+            case "${kind}" in
+                REUSED_CHECKS) selftest_reused_checks="${value:-0}" ;;
+                REUSED_TOOLS)  selftest_reused_tools="${value:-}" ;;
+                TOOL)          SELFTEST_ARGS+=(--tool "${value}") ;;
+            esac
+        done <<< "${SELFTEST_PLAN}"
+    fi
+fi
+
+SELFTEST_OUT="${LOG_DIR}/fork-selftests.txt"
+selftest_rc=0
+# Same freshness rule: red/no-record today must not leave yesterday's complete
+# green sidecar for the LL/report consumer to mistake for current evidence.
+rm -f "${LOG_DIR}/fork-selftests.json"
+if [ -f "${DIR}/check_fork_selftests.py" ]; then
+    if [ "${selftest_plan_rc}" = "0" ] && [ "${#SELFTEST_ARGS[@]}" = "0" ]; then
+        printf '  PASS            reused %s daily_merge check(s)\n\nfork self-checks: %s declared, %s pass, 0 FAIL, 0 COULD-NOT-CHECK\n' \
+            "${selftest_reused_checks}" "${selftest_reused_checks}" \
+            "${selftest_reused_checks}" > "${SELFTEST_OUT}"
+        python3 - "${LOG_DIR}/fork-selftests.json" \
+            "${selftest_reused_checks}" "${selftest_reused_tools}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+count = int(sys.argv[2])
+Path(sys.argv[1]).write_text(json.dumps({
+    "declared": count,
+    "failed": 0,
+    "could_not_check": 0,
+    "results": [],
+    "reused_from_daily_merge": {
+        "checks": count,
+        "tools": [x for x in sys.argv[3].split(",") if x],
+    },
+}, indent=2) + "\n", encoding="utf-8")
+PY
+        selftest_rc=$?
+    else
+        SELFTEST_CMD=(python3 "${DIR}/check_fork_selftests.py"
+            --json "${LOG_DIR}/fork-selftests.json"
+            --log-dir "${LOG_DIR}")
+        if [ "${selftest_plan_rc}" = "0" ]; then
+            SELFTEST_CMD+=("${SELFTEST_ARGS[@]}")
+        fi
+        "${SELFTEST_CMD[@]}" > "${SELFTEST_OUT}" 2>&1
+        selftest_rc=$?
+    fi
+    if [ "${selftest_reused_checks}" != "0" ]; then
+        log "[selftest] reused ${selftest_reused_checks} green check(s) from daily_merge candidate worktrees (${selftest_reused_tools})"
+        # Keep the machine-readable denominator honest when this run combined
+        # fresh daily checks with reused candidate-worktree checks. The reused
+        # rows remain in daily-merge.json; this sidecar names that provenance
+        # rather than copying and subtly changing their schema.
+        if [ "${#SELFTEST_ARGS[@]}" != "0" ]; then
+            python3 - "${LOG_DIR}/fork-selftests.json" \
+                "${selftest_reused_checks}" "${selftest_reused_tools}" <<'PY' || \
+                log "[selftest] could not annotate reused evidence in fork-selftests.json"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+record = json.loads(path.read_text(encoding="utf-8"))
+count = int(sys.argv[2])
+record["declared"] = int(record.get("declared", 0)) + count
+record["reused_from_daily_merge"] = {
+    "checks": count,
+    "tools": [x for x in sys.argv[3].split(",") if x],
+    "record": "daily-merge.json",
+}
+path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+PY
+        fi
+    fi
+    grep -E "^  (PASS|FAIL|COULD-NOT-CHECK) |^      -> |^fork self-checks:" "${SELFTEST_OUT}" \
+        | sed 's/^/[selftest] /' | tee -a "${LOG}" || true
+    [ "${selftest_rc}" = "1" ] && log "[selftest] a fork's own check is RED; daily_release is blocked (vibe-ic#813)"
+    [ "${selftest_rc}" = "2" ] && log "[selftest] a registered fork check formed NO RECORD; daily_release is blocked (vibe-ic#813)"
+else
+    echo "MISSING: ${DIR}/check_fork_selftests.py — the forks' own checks were NOT run" > "${SELFTEST_OUT}"
+    log "[selftest] nothing was checked; daily_release is blocked"
+    selftest_rc=2
+fi
+# --- END PRE-RELEASE SELFTEST -------------------------------------------------
+
+blocking_rc=0
+[ "${guard_rc}" != "0" ] && blocking_rc=1
+[ "${merge_rc}" != "0" ] && blocking_rc=1
+[ "${selftest_rc}" != "0" ] && blocking_rc=1
+
 RELEASE_OUT="${LOG_DIR}/daily-release.txt"
-if [ -f "${DIR}/daily_release.py" ]; then
+if [ "${blocking_rc}" != "0" ]; then
+    # Do not leave yesterday's successful sidecar looking like evidence from a
+    # release that was never authorized today.
+    rm -f "${LOG_DIR}/daily-release.json"
+    echo "BLOCKED: source guards, daily merge, or fork self-checks are not green; daily_release was not invoked" \
+        > "${RELEASE_OUT}"
+    log "[blocking] REFUSE daily_release — source guards, daily merge, and fork self-checks must all be green"
+    # This is not a daily_release failure: no release was attempted.  The
+    # originating guard/selftest rc is folded into the final tick status below,
+    # preserving the useful diagnosis instead of replacing it with rc=5.
+    release_rc=0
+elif [ -f "${DIR}/daily_release.py" ]; then
+    log "[blocking] PASS — source guards, daily merge, and fork self-checks authorize candidate construction"
+    # The check_no_capability_lost block later in this file observes a released
+    # image. Moving it here would test yesterday's tag and falsely call that
+    # candidate evidence. The exact candidate's authority remains inside
+    # daily_release: depth and every tool smoke must pass before docker push.
     log "[release] moving pins to their fork tips, rebuilding what changed"
     python3 "${DIR}/daily_release.py" --json "${LOG_DIR}/daily-release.json" \
         > "${RELEASE_OUT}" 2>&1
@@ -595,66 +790,6 @@ else
     echo "MISSING: ${DIR}/oracle_map.py — whether our commits broke an existing test was NOT asked" > "${ORACLE_OUT}"
     log "[oracle] nothing was checked, which is not a clean result"
     oracle_rc=2
-fi
-
-# --- THE FORKS' OWN CHECKS, RUN ON THE CLONES THE IMAGE IS BUILT FROM (vibe-ic#813) ---
-#
-# Every check above is OURS, about the fleet. This one runs checks the FORKS
-# declare about themselves, in `FORKS.json` under `post_merge_check`.
-#
-# NOT A SECOND MECHANISM. vibeic-eda#89 owns that declaration and runs it in the
-# merge worktree before the push, which is strictly stronger than reporting
-# afterwards — a failing check leaves the fork at its previous tip and publishes
-# nothing. This adds no declaration and no second judgement: the driver imports
-# `daily_merge.run_post_merge_checks` rather than reimplementing it.
-#
-# What it adds is the half that gate CANNOT reach, visible in daily_merge.py:
-#
-#     if behind == 0:
-#         res.update(state="ALREADY_CURRENT", ...)
-#         return res          # <- returns BEFORE run_post_merge_checks
-#
-# The checks are MERGE-TRIGGERED. On a day upstream is level, nothing runs. That
-# is not hypothetical: all 27 unwired tests in vibe-ic#813 arrived through OUR
-# OWN patches, not an upstream merge, so #89's gate would have caught none of
-# them. Two questions, two call sites:
-#
-#   daily_merge.py  "may this MERGE be published?"           blocks the push
-#   here            "is the tree we BUILD FROM clean today,  fails the tick
-#                    however it got that way?"
-#
-# HERE and not in a pre-push hook, for the rest: a hook is one machine's word,
-# lives in .git/hooks, does not travel with a clone, and `--no-verify` bypasses
-# it. This tick runs unconditionally on a machine nobody edited. Measured cost
-# for OpenROAD's two declared checks: 0.15s + 0.3s.
-#
-# THREE STATES. rc=2 is COULD-NOT-CHECK (clone absent, checker absent from the
-# tree, malformed declaration, could not execute, timed out) and it fails the
-# tick just like a red result, because the oracle lives inside the tree it
-# audits: a merge that deleted it produces no output at all, which is precisely
-# how this class of defect has hidden every previous time. Absence is not a pass.
-# #89 collapses those two into one "do not publish" verdict, which is right when
-# the only decision is push-or-not; here the verdict is a REPORT, and "the fork
-# dropped the checker" and "the checker found something" need different actions.
-SELFTEST_OUT="${LOG_DIR}/fork-selftests.txt"
-selftest_rc=0
-if [ -f "${DIR}/check_fork_selftests.py" ]; then
-    python3 "${DIR}/check_fork_selftests.py" \
-        --json "${LOG_DIR}/fork-selftests.json" \
-        --log-dir "${LOG_DIR}" > "${SELFTEST_OUT}" 2>&1
-    selftest_rc=$?
-    # The `-> ` lines are the REASONS, and for COULD-NOT-CHECK the reason is the
-    # whole information: "the clone is absent" and "the fork dropped the
-    # checker" need different actions. A filter that showed only the verdict
-    # would log the word and nothing anyone could act on.
-    grep -E "^  (PASS|FAIL|COULD-NOT-CHECK) |^      -> |^fork self-checks:" "${SELFTEST_OUT}" \
-        | sed 's/^/[selftest] /' | tee -a "${LOG}" || true
-    [ "${selftest_rc}" = "1" ] && log "[selftest] a fork's own check is RED and the image is built from that tree (vibe-ic#813)"
-    [ "${selftest_rc}" = "2" ] && log "[selftest] a registered fork check COULD NOT RUN — that is not a pass; see ${SELFTEST_OUT}"
-else
-    echo "MISSING: ${DIR}/check_fork_selftests.py — the forks' own checks were NOT run" > "${SELFTEST_OUT}"
-    log "[selftest] nothing was checked, which is not a clean result"
-    selftest_rc=2
 fi
 
 # --- IS A TEST WE WROTE REACHABLE BY ANY BUILD? (2026-08-12 fleet audit) ------

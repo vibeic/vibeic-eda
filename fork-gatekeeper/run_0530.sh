@@ -32,9 +32,11 @@ ROUND_AT="$(date -Is)"
   echo "════════ ${ROUND_AT} 05:30 round ════════"
 } >> "${LOG}"
 
-# Step 1-4 + the AI half. --ai-timeout is generous: the gatekeeper may have to
-# read real code across several forks, and this call BLOCKS on purpose.
-python3 "${DIR}/daily_0530.py" --apply --ai-timeout 5400 \
+# Step 1-4 + the AI half.  The gatekeeper may read real code across several
+# forks, so elapsed runtime is not a verdict.  This is a ZERO-PROGRESS grace:
+# stream-json/tool activity renews it, and a progressing turn runs to completion.
+python3 "${DIR}/daily_0530.py" --apply \
+        --ai-stall-grace "${GK_AI_STALL_GRACE:-5400}" \
         --json "${GK_STATE_DIR}/daily_0530.json" >> "${LOG}" 2>&1
 SIX=$?
 echo "[$(date -Is)] daily_0530 exit ${SIX}" >> "${LOG}"
@@ -75,14 +77,61 @@ echo "[$(date -Is)] check_round_code_is_current exit ${CODE}" >> "${LOG}"
 # is useful even from code whose tests are red, and blocking it would trade a
 # correctness-reporting problem for a synchronisation one. What it does block is
 # putting today's date on numbers produced by logic that fails its own tests.
-python3 -m pytest -q "${DIR}" >> "${LOG}" 2>&1
+PYTEST_STAMP="$(date +%Y-%m-%dT%H%M%S%z)"
+PYTEST_RETAINED="${GK_STATE_DIR}/rounds/${PYTEST_STAMP}/semantic_pytest.json"
+mkdir -p "$(dirname "${PYTEST_RETAINED}")"
+python3 "${DIR}/semantic_pytest_gate.py" \
+    --junit "${GK_STATE_DIR}/fork-gatekeeper.junit.xml" \
+    --json "${GK_STATE_DIR}/semantic_pytest.json" \
+    --json "${PYTEST_RETAINED}" \
+    --cwd "${DIR}/.." \
+    --stall-grace "${GK_PYTEST_STALL_GRACE:-300}" \
+    -- python3 -m pytest -q "${DIR}" >> "${LOG}" 2>&1
 TESTS=$?
 echo "[$(date -Is)] fork-gatekeeper tests exit ${TESTS}" >> "${LOG}"
 
 # Step 5 — build + verify + publish, and the plugin-repo gatekeeper tick.
-"${DIR}/run_tick.sh" >> "${GK_STATE_DIR}/cron.log" 2>&1
-TICK=$?
-echo "[$(date -Is)] run_tick exit ${TICK}" >> "${LOG}"
+#
+# A red suite and NORECORD are different evidence, but both mean there is no
+# green record authorising a publish. Likewise, code already proved stale must
+# not ship. Keep the merge half above useful; fail closed only at this release
+# boundary. TICK=2 means NOT CHECKED — it is never forged into a successful
+# run_tick result.
+TICK_STATE="ran"
+if [ "${TESTS}" -ne 0 ]; then
+    TICK=2
+    if [ "${TESTS}" -eq 1 ]; then
+        TICK_STATE="not_checked_pytest_red"
+        TEST_KIND="RED"
+    else
+        TICK_STATE="not_checked_pytest_norecord"
+        TEST_OUTCOME="$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("outcome") or "unknown")
+except Exception:
+    print("missing")
+' "${PYTEST_RETAINED}" 2>/dev/null)"
+        TEST_KIND="NORECORD (outcome=${TEST_OUTCOME})"
+    fi
+    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — semantic pytest ${TEST_KIND}; no release was authorised" >> "${LOG}"
+    echo "[$(date -Is)] run_tick NOT CHECKED — semantic pytest ${TEST_KIND}; see ${PYTEST_RETAINED}" >> "${GK_STATE_DIR}/cron.log"
+elif [ "${CODE}" -ne 0 ]; then
+    TICK=2
+    if [ "${CODE}" -eq 1 ]; then
+        TICK_STATE="not_checked_stale_round_code"
+        CODE_KIND="this checkout is superseded"
+    else
+        TICK_STATE="not_checked_round_code_norecord"
+        CODE_KIND="code currency produced NORECORD (rc=${CODE})"
+    fi
+    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — ${CODE_KIND}; no release was authorised" >> "${LOG}"
+    echo "[$(date -Is)] run_tick NOT CHECKED — ${CODE_KIND}" >> "${GK_STATE_DIR}/cron.log"
+else
+    "${DIR}/run_tick.sh" >> "${GK_STATE_DIR}/cron.log" 2>&1
+    TICK=$?
+    echo "[$(date -Is)] run_tick exit ${TICK}" >> "${LOG}"
+fi
 
 # Step 6 — refresh the fork ledger and REGENERATE the public page.
 #
@@ -98,12 +147,10 @@ python3 "${DIR}/discover_forks.py" >> "${LOG}" 2>&1
 DISC=$?
 echo "[$(date -Is)] discover_forks exit ${DISC}" >> "${LOG}"
 
-# `CODE` -eq 1 means a program that computes what we publish is superseded. A page
-# built from it carries today's date over yesterday's method, which is harder to
-# notice than yesterday's page — the same reasoning the ledger branch below already
-# encodes. rc=2 (could not tell) does NOT block: a transient fetch failure and a
-# proven-stale program are different risks, and only the second earns a dark page.
-if [ "${DISC}" -eq 0 ] && [ "${CODE}" -ne 1 ] && [ "${TESTS}" -eq 0 ]; then
+# Only CODE=0 proves the programs that compute this page are current. CODE=1
+# proves they are superseded; CODE=2 is NORECORD, not permission to publish.
+# Either condition keeps today's date off an unverified result.
+if [ "${DISC}" -eq 0 ] && [ "${CODE}" -eq 0 ] && [ "${TESTS}" -eq 0 ]; then
     python3 "${DIR}/build_page.py" --out /home/reyerchu/vibeic.ai/eda-forks.html >> "${LOG}" 2>&1
     PAGE=$?
     echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
@@ -118,9 +165,9 @@ else
     # healthy publish. A step that did not run reports that it did not run.
     PAGE=0
     if [ "${TESTS}" -ne 0 ]; then
-        echo "[$(date -Is)] build_page SKIPPED — the round's own tests fail; publishing would date-stamp numbers from logic that does not pass. See the pytest output above." >> "${LOG}"
-    elif [ "${CODE}" -eq 1 ]; then
-        echo "[$(date -Is)] build_page SKIPPED — this checkout runs superseded code; see check_round_code_is_current above" >> "${LOG}"
+        echo "[$(date -Is)] build_page SKIPPED — the round's own tests are red or produced NORECORD; publishing would date-stamp numbers from unverified logic. See semantic_pytest.json and the pytest output above." >> "${LOG}"
+    elif [ "${CODE}" -ne 0 ]; then
+        echo "[$(date -Is)] build_page SKIPPED — code currency is stale or NORECORD (rc=${CODE}); see check_round_code_is_current above" >> "${LOG}"
     else
         echo "[$(date -Is)] build_page SKIPPED — the ledger did not refresh" >> "${LOG}"
     fi
@@ -158,7 +205,9 @@ python3 "${DIR}/capture_release_ll.py" \
     --state-dir "${GK_STATE_DIR}" \
     --release-json "${GK_STATE_DIR}/daily-release.json" \
     --gap-json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" \
-    --round-at "${ROUND_AT}" --tick-exit "${TICK}" >> "${LOG}" 2>&1
+    --semantic-pytest-json "${PYTEST_RETAINED}" \
+    --round-at "${ROUND_AT}" --tick-exit "${TICK}" \
+    --tick-state "${TICK_STATE}" >> "${LOG}" 2>&1
 LL=$?
 echo "[$(date -Is)] capture_release_ll exit ${LL}" >> "${LOG}"
 
