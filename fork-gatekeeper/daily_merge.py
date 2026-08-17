@@ -30,8 +30,11 @@ resolution compiles. On conflict this ABORTS the merge, leaves the fork
 untouched, and reports the file list — that fork stays behind until a human
 resolves it, and the report says so rather than reporting success.
 
-It also never force-pushes, never touches a build branch it did not
-fast-forward, and never runs in the shared checkout's working tree.
+It never publishes a non-fast-forward candidate, never touches a build branch
+it did not start from, and never runs in the shared checkout's working tree.
+Every publication also carries an exact expected-old-tip lease: a concurrent
+advance *or rewind* of the remote branch rejects the push instead of being
+silently overwritten.
 
 POST-MERGE CHECKS (vibeic-eda#89)
 =================================
@@ -91,6 +94,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 import progress_watchdog as watchdog
 
@@ -191,6 +195,29 @@ def _declared_upstreams() -> Dict[str, str]:
 
 def _declared_upstream(repo: str) -> str:
     return _declared_upstreams().get(repo, "")
+
+
+def _declared_branch(repo: str) -> Optional[str]:
+    """The one build line this fork is declared to publish from.
+
+    A commit may be reachable from many branches.  Reachability therefore
+    proves that a branch *can* build the pin, not that it is the line we intend
+    to advance.  Keep that identity next to the fork's upstream declaration so
+    every consumer reads the same answer.
+    """
+    for entry in _forks_json().get("forks", []):
+        if not isinstance(entry, dict) or entry.get("tool") != repo:
+            continue
+        branch = entry.get("branch")
+        if not isinstance(branch, str) or not branch:
+            return None
+        if (branch != branch.strip() or any(ch.isspace() for ch in branch)
+                or branch.startswith("-") or branch.startswith("/")
+                or branch.endswith(("/", ".")) or ".." in branch
+                or any(ch in branch for ch in "~^:?*[\\")):
+            return None
+        return branch
+    return None
 
 
 #: How long a post-merge check may make ZERO observable progress.  This is not
@@ -500,50 +527,20 @@ def _branch_lookup_error(repo: str, rc: int, out: str, err: str) -> str:
 
 
 def branch_at_pin(repo: str, pin: str) -> BranchLookup:
-    """The branch whose tip IS the pin — asked of the fork, not inferred.
+    """Verify the declared build branch; never infer identity from ancestry.
 
-    An earlier version read `branch <name>` out of the pin's trailing comment.
-    That comment is not load-bearing and does not survive: `_bump_pin` rewrites
-    the pin with `sed` and the comment goes with it, which is exactly what
-    happened to yosys and ngspice in the 2026-07-29 merge. The parser then
-    reported 12 forks out of 14 and said nothing about the two it lost — a
-    fleet-wide merger that silently skips two tools is worse than one that
-    refuses to start.
+    Several branches may contain the image pin.  Comparing all of them and
+    selecting the first name that looks durable can therefore merge and push a
+    perfectly real commit onto the wrong line.  ``FORKS.json`` declares the one
+    line we publish.  The branch endpoint proves that line currently exists;
+    one compare then proves whether it contains the pin.
 
-    The fork itself knows. Ask it.
-
-    NO PIN -> the fork's default branch. A source we track without pinning (the
-    three PDK mirrors, and the data mirrors the build clones by URL) still has
-    an upstream worth merging from; it just has no commit of ours to locate.
-    Returning None for these is what kept them out of the survey entirely.
-
-    This returns a three-way observation.  ``absent`` is emitted only after a
-    complete, parseable API response.  A timeout, transport error, partial
-    pagination, or malformed response is ``unknown`` and must block landing;
-    it is never evidence that the branch does not exist.
+    A unique exact-tip match remains only as compatibility for synthetic/old
+    pinned registries with no declaration.  It never searches descendants:
+    zero or multiple exact matches are UNKNOWN, not permission to guess.
     """
-    if not pin:
-        rc, out, err = _sh(["gh", "api", f"repos/vibeic/{repo}",
-                            "--jq", ".default_branch"], timeout=120)
-        if rc != 0:
-            return BranchLookup(
-                BRANCH_UNKNOWN, detail=_branch_lookup_error(repo, rc, out, err),
-                rc=rc,
-            )
-        names = [line.strip() for line in out.splitlines() if line.strip()]
-        if len(names) != 1 or any(ch.isspace() for ch in names[0]):
-            return BranchLookup(
-                BRANCH_UNKNOWN,
-                detail=("GitHub default-branch lookup returned no single "
-                        "parseable branch name"),
-                rc=rc,
-            )
-        return BranchLookup(BRANCH_FOUND, branch=names[0],
-                            detail="GitHub confirmed the default branch", rc=rc)
-    # --paginate + per_page: the unpaginated endpoint returns the FIRST 30
-    # branches. Measured: that made four forks report NO_BRANCH_AT_PIN whose pin
-    # was in fact the exact tip of their build branch — a truncated list that
-    # reads as a missing branch, the same shape as vibeic-eda#15's fork count.
+    # --paginate + per_page is load-bearing. The unpaginated endpoint returns
+    # the first 30 branches, which previously made real build lines disappear.
     rc, out, err = _sh(["gh", "api", "--paginate",
                         f"repos/vibeic/{repo}/branches?per_page=100",
                         "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
@@ -553,41 +550,90 @@ def branch_at_pin(repo: str, pin: str) -> BranchLookup:
         )
 
     rows = [ln.split() for ln in out.splitlines() if ln.strip()]
-    if any(len(row) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40}", row[1])
-           for row in rows):
+    if (any(len(row) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40}", row[1])
+            for row in rows)
+            or len({row[0] for row in rows}) != len(rows)):
         return BranchLookup(
             BRANCH_UNKNOWN,
             detail="GitHub branch listing completed but its output was malformed",
             rc=rc,
         )
-    hits = [row[0] for row in rows if row[1].lower() == pin.lower()]
-    if not hits:
+
+    declared = _declared_branch(repo)
+    if not declared:
+        if not pin:
+            return BranchLookup(
+                BRANCH_UNKNOWN,
+                detail=(f"FORKS.json has no valid branch declaration for "
+                        f"unpinned source {repo}"),
+                rc=0,
+            )
+        exact = [row[0] for row in rows if row[1].lower() == pin.lower()]
+        if len(exact) == 1:
+            return BranchLookup(
+                BRANCH_FOUND, branch=exact[0],
+                detail=(f"compatibility fallback: the sole exact-tip branch "
+                        f"{exact[0]} is at pin {pin[:9]}; declare it in "
+                        "FORKS.json"),
+                rc=0,
+            )
+        why = ("no exact-tip branch" if not exact
+               else f"{len(exact)} exact-tip branches")
+        return BranchLookup(
+            BRANCH_UNKNOWN,
+            detail=(f"FORKS.json has no valid branch declaration for {repo}; "
+                    f"{why} at pin {pin[:9]}, so branch identity is unknowable"),
+            rc=0,
+        )
+
+    tips = {row[0]: row[1] for row in rows}
+    if declared not in tips:
         return BranchLookup(
             BRANCH_ABSENT,
-            detail=(f"GitHub authoritatively listed all fork branches; pin "
-                    f"{pin[:9]} is not the tip of any branch"),
-            rc=rc,
+            detail=(f"GitHub authoritatively listed every branch, but declared "
+                    f"build branch {declared!r} does not exist"),
+            rc=0,
         )
-    # SEVERAL branches can sit at one commit — a merge branch pushed today, a
-    # temporary fix branch, and the build branch all at the same tip. Picking the
-    # first is picking by luck of API ordering, and it picked
-    # `vibeic/daily-merge-2026-07-29` over the build branch on the first run.
-    # Prefer a durable name: not dated, not obviously temporary.
-    def durable(b: str) -> tuple:
-        return (bool(re.search(r"\d{4}-\d{2}-\d{2}", b)),      # dated -> last
-                bool(re.search(r"\b(fix|tmp|temp|wip|test)\b", b, re.I)),
-                # `integration` is this fleet's build-branch convention
-                # (openroad-integration, satfix-integration, klayout-signoff-int,
-                # batch-honesty-integration). Preferring the SHORTER name picked
-                # today's throwaway `vibeic/fin-bazel-fix` over
-                # `vibeic/openroad-integration` — same commit, so delivery was
-                # unaffected, but merging into it would have split the fork.
-                not re.search(r"int(egration)?$", b, re.I),
-                len(b))
-    branch = sorted(hits, key=durable)[0]
+    if not pin:
+        return BranchLookup(
+            BRANCH_FOUND, branch=declared,
+            detail=f"GitHub confirmed declared build branch {declared}", rc=0,
+        )
+
+    endpoint = (f"repos/vibeic/{repo}/compare/"
+                f"{quote(pin, safe='')}...{quote(declared, safe='')}")
+    crc, cout, cerr = _sh(["gh", "api", endpoint], timeout=120)
+    if crc != 0:
+        diagnostic = " ".join((cerr or cout).split())
+        return BranchLookup(
+            BRANCH_UNKNOWN,
+            detail=(f"compare pin...{declared} returned rc={crc}"
+                    + (f": {diagnostic[:220]}" if diagnostic else "")),
+            rc=crc,
+        )
+    try:
+        payload = json.loads(cout)
+    except (TypeError, ValueError):
+        payload = None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if status in {"ahead", "identical"}:
+        return BranchLookup(
+            BRANCH_FOUND, branch=declared,
+            detail=(f"GitHub compare confirmed declared build branch {declared} "
+                    f"contains pin {pin[:9]} (status={status})"),
+            rc=0,
+        )
+    if status in {"behind", "diverged"}:
+        return BranchLookup(
+            BRANCH_ABSENT,
+            detail=(f"GitHub compare confirmed declared build branch {declared} "
+                    f"does not contain pin {pin[:9]} (status={status})"),
+            rc=0,
+        )
     return BranchLookup(
-        BRANCH_FOUND, branch=branch,
-        detail=f"GitHub confirmed {branch} at pin {pin[:9]}", rc=rc,
+        BRANCH_UNKNOWN,
+        detail=f"compare pin...{declared} returned no valid status",
+        rc=0,
     )
 
 
@@ -601,11 +647,15 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
 
 
 def merge_one(repo: str, branch: str, dry: bool = False,
-              checks: Optional[List[dict]] = None) -> dict:
+              checks: Optional[List[dict]] = None,
+              expected_pin: str = "") -> dict:
     """Merge upstream's default branch into `branch`, in an isolated worktree.
 
     `checks` are the post-merge checks to run on the merged tree before pushing;
-    None means "look up what this fork declares in FORKS.json".
+    None means "look up what this fork declares in FORKS.json".  `expected_pin`
+    is the pin whose membership in the declared branch was proved during lookup;
+    it is re-proved after the fresh fetch so a force-move cannot redirect this
+    merge between observation and action.
     """
     src = FORKS_ROOT / repo
     if checks is None:
@@ -708,13 +758,6 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                     up = cand
                     break
 
-        rc, _, err = _sh(["git", "-C", str(src), "worktree", "add", "--detach",
-                          str(wt), f"origin/{branch}"], progress=True)
-        if rc != 0:
-            res.update(state=("WORKTREE_STALLED" if rc == watchdog.RC_STALLED
-                              else "WORKTREE_FAILED"), detail=err.strip()[:200])
-            return res
-
         # A SHALLOW clone cannot be counted and must not be merged. The shared
         # OpenROAD checkout is grafted at one commit, and `rev-list --count` over
         # it reported 42508 commits behind where GitHub's compare says 19. A
@@ -737,6 +780,102 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                            detail="clone is shallow and could not be deepened; "
                                   "any count or merge over it is meaningless")
                 return res
+
+        # Re-prove branch identity AFTER the fetch/deepen and BEFORE creating a
+        # candidate worktree. The API lookup and this action are separated by
+        # real time; a force-push in that window must stop the merge, not silently
+        # retarget it to whatever now happens to wear the declared branch name.
+        declared = _declared_branch(repo)
+        # Direct callers predating `expected_pin` have no lookup observation to
+        # re-prove. Keep their explicitly supplied branch working; production
+        # main always supplies the pin for pinned tools and got `branch` from the
+        # declaration-aware lookup above.
+        identity_branch = (declared or branch) if expected_pin else branch
+        identity = {
+            "declared_branch": declared,
+            "selected_branch": branch,
+            "expected_pin": expected_pin or None,
+        }
+        res["branch_identity"] = identity
+        if expected_pin and declared and branch != declared:
+            identity.update(outcome="changed", rc=1)
+            res.update(
+                state="BRANCH_IDENTITY_CHANGED",
+                detail=(f"lookup selected {branch!r}, but FORKS.json now declares "
+                        f"{declared!r}; nothing was merged or pushed"),
+            )
+            return res
+
+        # Freeze the freshly-fetched remote-tracking ref to one full object id.
+        # Everything below (pin proof, candidate base, and publication lease)
+        # consumes this same immutable observation.  Using origin/<branch>
+        # again later would reopen a race with another process fetching this
+        # shared checkout; a plain final push would additionally allow a remote
+        # rewind to be overwritten as an apparently-valid fast-forward.
+        origin_tracking_ref = f"refs/remotes/origin/{identity_branch}"
+        trc, tout, terr = _sh([
+            "git", "-C", str(src), "rev-parse", "--verify",
+            f"{origin_tracking_ref}^{{commit}}",
+        ])
+        tip_rows = [line.strip() for line in tout.splitlines() if line.strip()]
+        if (trc != 0 or len(tip_rows) != 1
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", tip_rows[0])):
+            identity.update(outcome="unmeasurable", tip_rc=trc)
+            diagnostic = " ".join((terr or tout).split())
+            res.update(
+                state="BRANCH_IDENTITY_UNMEASURABLE",
+                detail=(f"could not resolve fresh origin/{identity_branch} to "
+                        "exactly one full commit id; nothing was merged or pushed"
+                        + (f" (rc={trc}: {diagnostic[:220]})"
+                           if diagnostic else f" (rc={trc})")),
+            )
+            return res
+        observed_origin_tip = tip_rows[0].lower()
+        identity["observed_origin_tip"] = observed_origin_tip
+
+        if expected_pin:
+            if not re.fullmatch(r"[0-9a-fA-F]{40}", expected_pin):
+                identity.update(outcome="unmeasurable", rc=None)
+                res.update(
+                    state="BRANCH_IDENTITY_UNMEASURABLE",
+                    detail=(f"expected pin {expected_pin!r} is not a full commit "
+                            "id; nothing was merged or pushed"),
+                )
+                return res
+            irc, iout, ierr = _sh([
+                "git", "-C", str(src), "merge-base", "--is-ancestor",
+                expected_pin, observed_origin_tip,
+            ])
+            identity["rc"] = irc
+            if irc == 1:
+                identity["outcome"] = "changed"
+                res.update(
+                    state="BRANCH_IDENTITY_CHANGED",
+                    detail=(f"fresh origin/{identity_branch} no longer contains "
+                            f"expected pin {expected_pin[:9]}; the branch moved "
+                            "between lookup and merge, so nothing was pushed"),
+                )
+                return res
+            if irc != 0:
+                identity["outcome"] = "unmeasurable"
+                diagnostic = " ".join((ierr or iout).split())
+                res.update(
+                    state="BRANCH_IDENTITY_UNMEASURABLE",
+                    detail=(f"could not prove expected pin {expected_pin[:9]} "
+                            f"is still on origin/{identity_branch} (rc={irc})"
+                            + (f": {diagnostic[:220]}" if diagnostic else "")),
+                )
+                return res
+            identity["outcome"] = "confirmed"
+        else:
+            identity.update(outcome="not_applicable_unpinned", rc=0)
+
+        rc, _, err = _sh(["git", "-C", str(src), "worktree", "add", "--detach",
+                          str(wt), observed_origin_tip], progress=True)
+        if rc != 0:
+            res.update(state=("WORKTREE_STALLED" if rc == watchdog.RC_STALLED
+                              else "WORKTREE_FAILED"), detail=err.strip()[:200])
+            return res
 
         rc, out, _ = _sh(["git", "rev-list", "--count",
                           f"HEAD..upstream/{up}"], wt)
@@ -824,13 +963,76 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                                           for c in failed)[:400])
             return res
 
-        rc, _, err = _sh(
-            ["git", "push", "origin", f"HEAD:{branch}"], wt, progress=True,
+        publication = {
+            "mode": "explicit-force-with-lease-cas",
+            "ref": f"refs/heads/{identity_branch}",
+            "expected_old_tip": observed_origin_tip,
+            "outcome": "not_attempted",
+        }
+        res["publication"] = publication
+
+        # --force-with-lease supplies the remote compare-and-swap, but its
+        # "force" half must never become permission to publish a candidate
+        # which dropped the observed branch.  A post-merge checker is an
+        # executable program and could accidentally move HEAD; prove the
+        # fast-forward relation again at the last possible local moment.
+        arc, aout, aerr = _sh([
+            "git", "merge-base", "--is-ancestor", observed_origin_tip, "HEAD",
+        ], wt)
+        if arc != 0:
+            diagnostic = " ".join((aerr or aout).split())
+            candidate_changed = arc == 1
+            publication.update(
+                outcome="not_published",
+                classification=("needs_human" if candidate_changed else "unknown"),
+                rc=arc,
+                diagnostic=diagnostic[:220],
+            )
+            res.update(
+                state=("PUSH_CANDIDATE_NOT_FAST_FORWARD" if candidate_changed
+                       else "PUSH_CANDIDATE_UNMEASURABLE"),
+                detail=(f"candidate no longer proves a fast-forward from "
+                        f"observed origin/{identity_branch} "
+                        f"{observed_origin_tip[:12]} (rc={arc}); not pushed"
+                        + (f": {diagnostic[:200]}" if diagnostic else "")),
+            )
+            return res
+
+        rc, push_out, err = _sh(
+            ["git", "push", "--porcelain", "--progress",
+             f"--force-with-lease=refs/heads/{identity_branch}:"
+             f"{observed_origin_tip}",
+             "origin", f"HEAD:refs/heads/{identity_branch}"],
+            wt, progress=True,
         )
         if rc != 0:
-            res.update(state=("PUSH_STALLED" if rc == watchdog.RC_STALLED
-                              else "PUSH_FAILED"), detail=err.strip()[:200])
+            diagnostic = " ".join(
+                part for part in (push_out.strip(), err.strip()) if part
+            )
+            rejected = any(line.startswith("!\t")
+                           for line in push_out.splitlines())
+            publication.update(
+                outcome=("rejected" if rejected else "unknown"),
+                classification=("needs_human" if rejected else "unknown"),
+                rc=rc,
+                diagnostic=diagnostic[:220],
+            )
+            if rc == watchdog.RC_STALLED:
+                state = "PUSH_CAS_UNCONFIRMED"
+            elif rejected:
+                state = "PUSH_CAS_REJECTED"
+            else:
+                state = "PUSH_CAS_UNCONFIRMED"
+            res.update(
+                state=state,
+                detail=(f"CAS publication of refs/heads/{identity_branch} "
+                        f"against expected tip {observed_origin_tip[:12]} "
+                        f"was {publication['outcome']} (rc={rc}); never "
+                        "reported MERGED"
+                        + (f": {diagnostic[:200]}" if diagnostic else "")),
+            )
             return res
+        publication.update(outcome="published", classification="published", rc=0)
         res.update(state="MERGED",
                    detail=f"took {behind} upstream commit(s); {ours} of ours still ahead")
         return res
@@ -895,7 +1097,8 @@ def main(argv=None) -> int:
               file=sys.stderr)
 
     results = lookup_rows + [
-        merge_one(r, b, a.dry_run) for r, b in sorted(branches.items())
+        merge_one(r, b, a.dry_run, expected_pin=pins.get(r) or "")
+        for r, b in sorted(branches.items())
     ]
     merged = [r for r in results if r["state"] == "MERGED"]
     human = [r for r in results if r["state"] not in ("MERGED", "ALREADY_CURRENT",

@@ -6,41 +6,49 @@
   "forks": [
     {
       "tool": "ALIGN-pdk-sky130",
+      "branch": "main",
       "role": "ALIGN sky130 PDK — carries our channel-length (L) and width (W) sizing fixes; ships in the image since 0.2.27, and the build fails unless a layout generated at L=500nm measures 500nm",
       "upstream": "ALIGN-analoglayout/ALIGN-pdk-sky130"
     },
     {
       "tool": "ALIGN-public",
+      "branch": "master",
       "role": "analog place & route — SPICE netlist to GDS; ships in the image since 0.2.27 as the venv at /foss/tools/align, built from source rather than installed from PyPI",
       "upstream": "ALIGN-analoglayout/ALIGN-public"
     },
     {
       "tool": "ASAP7_for_KLayout",
+      "branch": "main",
       "role": "ASAP7 KLayout layer map — without it DRC reads the wrong layers",
       "upstream": "laurentc2/ASAP7_for_KLayout"
     },
     {
       "tool": "asap7_pdk_r1p7",
+      "branch": "main",
       "role": "ASAP7 7nm predictive PDK data — /foss/pdks/asap7",
       "upstream": "The-OpenROAD-Project/asap7_pdk_r1p7"
     },
     {
       "tool": "asap7sc7p5t_28",
+      "branch": "main",
       "role": "ASAP7 7.5-track standard cells — the library PnR places",
       "upstream": "The-OpenROAD-Project/asap7sc7p5t_28"
     },
     {
       "tool": "cadical",
+      "branch": "master",
       "role": "SAT solver — the other smtbmc backend; shipped alongside kissat",
       "upstream": "arminbiere/cadical"
     },
     {
       "tool": "ciel",
+      "branch": "main",
       "role": "PDK version manager — installs and pins the open PDKs",
       "upstream": "fossi-foundation/ciel"
     },
     {
       "tool": "cocotb",
+      "branch": "master",
       "role": "Python cosim testbench",
       "upstream": "cocotb/cocotb",
       "post_merge_check": [
@@ -75,52 +83,62 @@
     },
     {
       "tool": "cocotb-coverage",
+      "branch": "master",
       "role": "coverage for cocotb",
       "upstream": "mciepluc/cocotb-coverage"
     },
     {
       "tool": "FasterCap",
+      "branch": "master",
       "role": "3D/2D capacitance extraction field solver — fastercap_extract dispatches to it for parasitic extraction cross-checks. Mirrored 2026-07-31 (clone+push).",
       "upstream": "ediloren/FasterCap"
     },
     {
       "tool": "Fault",
+      "branch": "main",
       "role": "DFT/ATPG engine — `fault atpg` / `fault cut` / `fault chain` drive Phase-3 scan insertion and stuck-at coverage. Mirrored 2026-07-31 (clone+push; the fork API returns 403). Carries our fix for `chain --skip-synth` never creating the file `-o` asked for while still exiting EX_OK.",
       "upstream": "AUCOHL/Fault"
     },
     {
       "tool": "Geometry",
+      "branch": "master",
       "upstream": "ediloren/Geometry",
       "role": "FasterCap build-time sibling — `add_subdirectory(\"../Geometry\")`. Same story as LinAlgebra."
     },
     {
       "tool": "gtkwave",
+      "branch": "master",
       "role": "waveform viewer — the format reader behind every VCD/FST our cocotb and iverilog runs emit; a dump this cannot open is a failed measurement, not a passing one",
       "upstream": "gtkwave/gtkwave"
     },
     {
       "tool": "icsprout55-pdk",
+      "branch": "main",
       "role": "PREVIEW-only 55nm open PDK (ICsprout Integrated Circuit Co. + Zhejiang University IC school + ECOS Team/ICT-CAS) — PDK data for vibe-ic's icsprout55 target (/foss/pdks/icsprout55). Production tapeout explicitly prohibited by the PDK's own README pending its first engineering-batch tapeout (Dec 2025); ships no DRC/LVS rule decks or SPICE device models as of this mirror (upstream README's own Todo list).",
       "upstream": "openecos-projects/icsprout55-pdk",
       "not_built_from": "PREVIEW-only upstream, mirrored so the daily round WATCHES it, not so the image builds from it. Its own README prohibits production tapeout pending the first engineering-batch run, and as of this mirror it ships no DRC/LVS rule decks and no SPICE device models -- the files a Phase-3 signoff or an analog corner sweep would actually read. Pinning it would add a PDK the flow cannot consume and make the image claim a capability it does not have. Revisit when the upstream Todo list (rules, models, PDN, RC) lands."
     },
     {
       "tool": "IHP-Open-PDK",
+      "branch": "main",
       "role": "PDK data — /foss/pdks/ihp-sg13g2 and ihp-sg13cmos5l; the SG13G2 spm cell runs on it",
       "upstream": "IHP-GmbH/IHP-Open-PDK"
     },
     {
       "tool": "iverilog",
+      "branch": "master",
       "role": "RTL simulation",
       "upstream": "steveicarus/iverilog"
     },
     {
       "tool": "kissat",
+      "branch": "master",
       "role": "SAT solver — one of the two smtbmc backends behind sby",
       "upstream": "arminbiere/kissat"
     },
     {
       "tool": "klayout",
+      "branch": "master",
       "role": "DRC / layout-edit / GDS streamout / extraction",
       "upstream": "KLayout/klayout",
       "post_merge_check": [
@@ -181,11 +199,13 @@
     },
     {
       "tool": "LinAlgebra",
+      "branch": "master",
       "upstream": "ediloren/LinAlgebra",
       "role": "FasterCap build-time sibling — FasterCap's own CMakeLists does `add_subdirectory(\"../LinAlgebra\")`, so FasterCap cannot be built from our fork without it. Mirrored 2026-08-01 (clone+push; the fork API returned 403). Missing it is why the image kept consuming the base image's FasterCap: building from our fork was impossible and nobody had tried."
     },
     {
       "tool": "magic",
+      "branch": "master",
       "role": "DRC / layout-edit / extraction",
       "upstream": "RTimothyEdwards/magic",
       "post_merge_check": [
@@ -204,11 +224,13 @@
     },
     {
       "tool": "netgen",
+      "branch": "master",
       "role": "LVS",
       "upstream": "RTimothyEdwards/netgen"
     },
     {
       "tool": "ngspice",
+      "branch": "master",
       "role": "analog / mixed-signal SPICE",
       "upstream": "danchitnis/ngspice-sf-mirror",
       "post_merge_check": [
@@ -237,11 +259,13 @@
     },
     {
       "tool": "open_pdks",
+      "branch": "main",
       "role": "PDK installer — produces /foss/pdks/sky130A and gf180mcuD; every DRC and LVS run reads its libs.tech",
       "upstream": "fossi-foundation/open-pdks"
     },
     {
       "tool": "OpenROAD",
+      "branch": "master",
       "role": "place / route / CTS / resize / STA / PDN / antenna / IR-drop",
       "upstream": "The-OpenROAD-Project/OpenROAD",
       "post_merge_check": [
@@ -293,16 +317,19 @@
     },
     {
       "tool": "OpenROAD-flow-scripts",
+      "branch": "master",
       "role": "open PDK platform data, not a tool: 17 files sparse-checked out of flow/platforms/{nangate45,asap7} and re-staged into /foss/pdks/nangate45 (all 6 files) and /foss/pdks/asap7 (11 of 20). ZERO ORFS flow logic is consumed. Pinned by ARG OPENROAD_FLOW_SCRIPTS_REF in the composing Dockerfile; 66f174f8e14f7cdd178a1e1d37c915d28ac3e24d = upstream master at 2026-08-03, mirrored as branch vibeic-orfs-pin-20260801. We carry NO commits of our own here (git rev-list --count origin/master ^upstream/master = 0), so the fork is a pure mirror.",
       "upstream": "The-OpenROAD-Project/OpenROAD-flow-scripts"
     },
     {
       "tool": "OpenSTA",
+      "branch": "master",
       "role": "static timing analysis — the signoff timing engine behind phase-3 STA",
       "upstream": "The-OpenROAD-Project/OpenSTA"
     },
     {
       "tool": "pyuvm",
+      "branch": "master",
       "role": "UVM in Python",
       "upstream": "pyuvm/pyuvm",
       "post_merge_check": [
@@ -330,26 +357,31 @@
     },
     {
       "tool": "sby",
+      "branch": "main",
       "role": "formal (SymbiYosys)",
       "upstream": "YosysHQ/sby"
     },
     {
       "tool": "slang",
+      "branch": "master",
       "role": "SystemVerilog front end — yosys vendors it for the modern SV path, so an elaboration it rejects is an RTL our synthesis cannot read",
       "upstream": "MikePopoloski/slang"
     },
     {
       "tool": "sv-elab",
+      "branch": "master",
       "role": "yosys SystemVerilog plugin (upstream renamed povik/yosys-slang -> povik/sv-elab); the SV frontend the 0.4x->0.66 roadmap makes default",
       "upstream": "povik/sv-elab"
     },
     {
       "tool": "sv2v",
+      "branch": "master",
       "role": "SystemVerilog-to-Verilog conversion — invoked by reused_ip_rtl_consume when an ingested IP is SystemVerilog and the downstream tool is Verilog-only. Mirrored 2026-07-31 (clone+push).",
       "upstream": "zachjs/sv2v"
     },
     {
       "tool": "Trilinos",
+      "branch": "vibeic/xyce-trilinos-17.2-epetra-restored",
       "role": "Xyce's build dependency — Xyce cannot be configured or linked without it. Statically linked into eda-tool-xyce, not shipped as its own artefact, which is why it has no IMG_ pin of its own. Mirrored 2026-07-31 (clone+push) after the recorded reason for leaving it upstream — that a whole-history push fails at this size — did not survive testing: the 1.8 GB push went through.",
       "upstream": "trilinos/Trilinos",
       "post_merge_check": [
@@ -378,6 +410,7 @@
     },
     {
       "tool": "verilator",
+      "branch": "master",
       "role": "RTL simulation (lint / fast sim)",
       "upstream": "verilator/verilator",
       "post_merge_check": [
@@ -395,21 +428,25 @@
     },
     {
       "tool": "xschem",
+      "branch": "master",
       "role": "schematic capture and SPICE netlisting — the analog A1/A2 entry point; its netlist is what ngspice simulates",
       "upstream": "StefanSchippers/xschem"
     },
     {
       "tool": "Xyce",
+      "branch": "master",
       "role": "parallel SPICE — the second analog engine; a corner ngspice and Xyce disagree on is a result neither has established",
       "upstream": "Xyce/Xyce"
     },
     {
       "tool": "yices2",
+      "branch": "master",
       "role": "SMT solver — the default smtbmc engine for sby, so step-5 formal proofs resolve through it; #13 was a dangling link to exactly this",
       "upstream": "SRI-CSL/yices2"
     },
     {
       "tool": "yosys",
+      "branch": "main",
       "role": "synthesis / tech-mapping / optimization",
       "upstream": "YosysHQ/yosys"
     }

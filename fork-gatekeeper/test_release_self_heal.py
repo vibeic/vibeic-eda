@@ -138,8 +138,27 @@ def _gap(image=31, past=3):
             "q1_sync_lag": 0,
             "q1_release_lag": image,
             "q1_image_behind_upstream": image,
+            "q2_our_commits_stranded": 0,
             "q2_ours_past_the_pin": past,
             "q2_ours_past_the_pin_substantive": 0}
+
+
+def _fork_github_zero():
+    return {
+        "program": "fork_github_convergence", "schema_version": 1,
+        "started_at": "2026-08-17T06:02:00+08:00",
+        "completed_at": "2026-08-17T06:03:00+08:00",
+        "actor": "reyerchu", "expected_actor": "reyerchu",
+        "round": {
+            "round_at": "2026-08-17T05:30:00+08:00",
+            "schema_version": 1, "run_id": "a" * 64,
+            "started_at": "2026-08-17T05:30:01+08:00",
+            "finished_at": "2026-08-17T05:59:00+08:00",
+        },
+        "status": "converged",
+        "counts": {"items": 0, "issues": 0, "pull_requests": 0},
+        "items": [], "source_errors": [],
+    }
 
 
 def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
@@ -162,7 +181,8 @@ def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
                   compose_attempts=[{"exit_code": 1, "category": "dns"},
                                     {"exit_code": 0, "category": None}])
     second = LL.make_record(healed, _gap(0, 0),
-                            "2026-08-18T05:30:00+08:00", 0)
+                            "2026-08-18T05:30:00+08:00", 0,
+                            fork_github=_fork_github_zero())
     LL.retain(second, tmp_path)
     assert second["lesson"]["outcome"] == "self_healed_after_retry"
     assert second["convergence"]["converged"] is True
@@ -185,13 +205,16 @@ def test_ll_separates_late_upstream_drift_from_a_failed_round():
         "q1_sync_lag": 4,
         "q1_release_lag": 0,
         "q1_image_behind_upstream": 4,
+        "q2_our_commits_stranded": 0,
         "q2_ours_past_the_pin": 0,
         "q2_ours_past_the_pin_substantive": 0,
     }
     record = LL.make_record(
-        release, gap, "2026-08-17T09:12:00+08:00", 0)
+        release, gap, "2026-08-17T09:12:00+08:00", 0,
+        fork_github=_fork_github_zero())
     assert record["lesson"]["outcome"] == \
         "converged_at_boundary_with_late_upstream_drift"
+    assert record["convergence"]["delivery_round_converged"] is True
     assert record["convergence"]["round_converged"] is True
     assert record["convergence"]["converged"] is False
     assert record["convergence"]["live_sync_lag"] == 4
@@ -211,9 +234,11 @@ def test_ll_keeps_a_failed_consumer_anchor_as_a_delivery_outcome(tmp_path):
         },
     }
     record = LL.make_record(
-        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 0)
+        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 0,
+        fork_github=_fork_github_zero())
     assert record["schema_version"] == 2
-    assert record["convergence"]["round_converged"] is True
+    assert record["convergence"]["delivery_round_converged"] is True
+    assert record["convergence"]["round_converged"] is False
     assert record["release"]["anchor_pr"] == release["anchor_pr"]
     assert record["lesson"]["trigger"] == "anchor_pr"
     assert record["lesson"]["outcome"] == \
@@ -224,6 +249,27 @@ def test_ll_keeps_a_failed_consumer_anchor_as_a_delivery_outcome(tmp_path):
         (tmp_path / "release-ll" / "index.jsonl").read_text().splitlines()[0])
     assert narrow["anchor_pr_ok"] is False
     assert "delivery_complete" not in narrow
+
+
+def test_ll_never_calls_a_nonzero_tick_or_stranded_work_converged():
+    release = {"status": "published", "compose_attempts": [{"exit_code": 0}]}
+    nonzero = LL.make_record(
+        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 7,
+        fork_github=_fork_github_zero())
+    assert nonzero["convergence"]["delivery_converged"] is True
+    assert nonzero["convergence"]["converged"] is False
+    assert nonzero["convergence"]["tick_authorized"] is False
+    assert nonzero["lesson"]["outcome"] == \
+        "finished_with_nonzero_release_tick"
+
+    gap = _gap(0, 0)
+    gap["q2_our_commits_stranded"] = 1
+    stranded = LL.make_record(
+        release, gap, "2026-08-17T09:12:00+08:00", 0,
+        fork_github=_fork_github_zero())
+    assert stranded["convergence"]["delivery_converged"] is True
+    assert stranded["convergence"]["our_commits_stranded"] == 1
+    assert stranded["convergence"]["converged"] is False
 
 
 def test_0530_captures_ll_after_gap_and_makes_capture_failure_fatal():

@@ -1087,10 +1087,13 @@ def test_a_declared_source_without_a_pin_is_still_surveyed(tmp_path):
     assert "ciel" in b, "declared and never cloned still counts as tracked"
 
 
-def test_no_pin_falls_back_to_the_default_branch(monkeypatch):
+def test_no_pin_uses_the_declared_branch_after_proving_it_exists(monkeypatch):
     """Returning None for a pinless source is what kept them out entirely."""
     import daily_merge as M
-    monkeypatch.setattr(M, "_sh", lambda *a, **k: (0, "main\n", ""))
+    monkeypatch.setattr(
+        M, "_sh",
+        lambda *a, **k: (0, f"main {'a' * 40}\n", ""),
+    )
     assert M.branch_for("open_pdks", "") == "main"
 
 
