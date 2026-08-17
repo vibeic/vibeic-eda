@@ -44,7 +44,6 @@ jobs:
   # -------------------------------------------------------------------------
   tools:
     runs-on: [self-hosted, vibeic-builder]
-    timeout-minutes: 240
     permissions:
       contents: read
       packages: write
@@ -78,13 +77,20 @@ jobs:
           docker buildx bake -f docker-bake.hcl --print tools > /tmp/bake.json
           for T in $(python3 -c "import json;print(' '.join(json.load(open('/tmp/bake.json'))['target']))"); do
             TAG=$(python3 -c "import json;print(json.load(open('/tmp/bake.json'))['target']['$T']['tags'][0])")
-            if docker manifest inspect "$TAG" >/dev/null 2>&1; then
+            if python3 fork-gatekeeper/registry_presence.py "$TAG"; then
               echo "  $T: $TAG already published — pin did not move"
               SKIPPED=$((SKIPPED+1))
             else
-              echo "  $T: building $TAG"
-              docker buildx bake -f docker-bake.hcl --push "$T"
-              BUILT=$((BUILT+1))
+              PRESENCE_RC=$?
+              if [ "$PRESENCE_RC" -eq 1 ]; then
+                echo "  $T: building explicitly absent $TAG"
+                python3 fork-gatekeeper/progress_exec.py --stall-grace 1800 -- \
+                  docker buildx bake --progress=plain -f docker-bake.hcl --push "$T"
+                BUILT=$((BUILT+1))
+              else
+                echo "::error::registry state for $TAG is UNKNOWN; refusing to rebuild or overwrite it"
+                exit 2
+              fi
             fi
           done
           echo "tools: $BUILT built, $SKIPPED already published"
@@ -98,17 +104,25 @@ jobs:
       - name: Every pinned artefact resolves
         run: |
           set -euo pipefail
-          MISSING=0
+          MISSING=0; UNKNOWN=0
           for TAG in $(grep -oE 'ghcr\.io/vibeic/eda-tool-[a-z0-9-]+:[a-z0-9-]+' Dockerfile | sort -u); do
-            if docker manifest inspect "$TAG" >/dev/null 2>&1; then echo "  ok      $TAG"
-            else echo "  MISSING $TAG"; MISSING=$((MISSING+1)); fi
+            if python3 fork-gatekeeper/registry_presence.py "$TAG"; then
+              echo "  ok      $TAG"
+            else
+              PRESENCE_RC=$?
+              if [ "$PRESENCE_RC" -eq 1 ]; then
+                echo "  MISSING $TAG"; MISSING=$((MISSING+1))
+              else
+                echo "  UNKNOWN $TAG"; UNKNOWN=$((UNKNOWN+1))
+              fi
+            fi
           done
+          [ "$UNKNOWN" -eq 0 ] || { echo "::error::$UNKNOWN pinned artefact state(s) could not be measured"; exit 2; }
           [ "$MISSING" -eq 0 ] || { echo "::error::$MISSING pinned artefact(s) do not exist"; exit 1; }
 
   build-and-push:
     needs: tools
     runs-on: [self-hosted, vibeic-builder]
-    timeout-minutes: 240
     permissions:
       contents: read
       packages: write               # GHCR push via GITHUB_TOKEN
@@ -158,42 +172,29 @@ jobs:
       # successfully and still be impossible for a fresh consumer to pull when
       # its parent graph exceeds Docker's 125-layer limit (0.3.0 had 126). The
       # version and latest tags move only after depth, smoke and provenance pass.
-      - name: Compose release candidate
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ env.PLATFORMS }}
-          load: true
-          push: false
-          provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-          labels: |
-            org.opencontainers.image.title=vibeic-eda
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-            org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda
-            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Compose release candidate under a renewable progress lease
+        run: |
+          python3 fork-gatekeeper/progress_exec.py --stall-grace 1800 -- \
+            docker buildx build --progress=plain --platform "${PLATFORMS}" \
+              --load --provenance=false \
+              --cache-from type=gha --cache-to type=gha,mode=max \
+              --tag ghcr.io/vibeic/${IMAGE}:${{ steps.ver.outputs.version }} \
+              --label org.opencontainers.image.title=vibeic-eda \
+              --label org.opencontainers.image.version=${{ steps.ver.outputs.version }} \
+              --label org.opencontainers.image.source=https://github.com/vibeic/vibeic-eda \
+              --label org.opencontainers.image.revision=${{ github.sha }} \
+              --file ./Dockerfile .
 
       - name: Keep the image within Docker's pullable layer depth
         run: |
           python3 tools/check_image_depth.py --compact \
             ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
 
-      - name: Smoke test the release candidate (bare docker exec — no login shell)
+      - name: Smoke test the exact candidate with container-aware progress
         run: |
           IMG=ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
-          C=$(docker run -d "$IMG" --skip sleep infinity)
-          # Bare (non-login) exec must resolve every tool — this is the 0.2.12 PATH fix.
-          docker exec "$C" yosys --version
-          docker exec "$C" openroad -version
-          docker exec "$C" iverilog -V | head -1
-          docker exec "$C" netgen -batch quit
-          # Each tool carries the repo+commit that produced it. This asserts the
-          # composed image contains the artefact the pin NAMES — a tag says what
-          # was asked for, this says what arrived.
-          docker rm -f "$C"
+          python3 fork-gatekeeper/release_candidate_smoke.py "$IMG" \
+            --json /tmp/release-candidate-smoke.json
 
       # The smoke test above proves the tools RUN. It cannot tell whose build
       # they came from: drop a COPY and the base image's own copy answers every
@@ -207,4 +208,5 @@ jobs:
       - name: Publish the verified candidate
         run: |
           SRC_IMAGE=ghcr.io/vibeic/${{ env.IMAGE }}:${{ steps.ver.outputs.version }} \
-            ./release.sh ${{ steps.ver.outputs.version }}
+            python3 fork-gatekeeper/progress_exec.py --stall-grace 1800 -- \
+              ./release.sh ${{ steps.ver.outputs.version }}

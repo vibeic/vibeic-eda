@@ -51,13 +51,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
+from capability_smoke import run_container_probe
+
 RC_OK, RC_NOT_OURS, RC_NOTHING = 0, 1, 2
+PROBE_STALL_GRACE_S = float(
+    os.environ.get("GK_FORK_REACHES_FLOW_STALL_GRACE", "300")
+)
 
 #: Targets whose tag is composed from more than one binary, so the command name
 #: cannot be derived from the target name.
@@ -136,12 +142,64 @@ def flow_tools(dockerfile: Path) -> tuple:
     return tuple(dict.fromkeys(names))
 
 
-def _sh(cmd, timeout=600):
+@dataclass(frozen=True)
+class ProbeRun:
+    """Docker completion plus whether a complete measurement was possible."""
+
+    rc: int
+    out: str
+    err: str
+    outcome: str = "natural"
+
+    def __iter__(self):
+        yield self.rc
+        yield self.out
+        yield self.err
+
+    @property
+    def measurable(self) -> bool:
+        return self.outcome == "natural"
+
+
+def _as_run(value) -> ProbeRun:
+    """Normalise the historical tuple returned by test fixtures."""
+    if isinstance(value, ProbeRun):
+        return value
+    if hasattr(value, "outcome") and hasattr(value, "rc"):
+        return ProbeRun(int(value.rc), getattr(value, "output", ""),
+                        getattr(value, "err", ""), str(value.outcome))
+    rc, out, err = value
+    return ProbeRun(int(rc), out or "", err or "", "natural")
+
+
+def _sh(cmd, timeout=None):
+    """Run a Docker probe under a renewable activity lease, with no cap."""
+    del timeout  # compatibility only; elapsed time is not a verdict
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
+        bash_i = cmd.index("bash")
+        image, script = cmd[bash_i + 1], cmd[-1]
+    except (ValueError, IndexError):
+        return ProbeRun(127, "", "unsupported Docker probe command",
+                        "launch_error")
+    try:
+        got = run_container_probe(image, script, PROBE_STALL_GRACE_S)
     except Exception as exc:                                   # noqa: BLE001
-        return 1, "", str(exc)
+        return ProbeRun(127, "", f"{type(exc).__name__}: {exc}",
+                        "launch_error")
+    return ProbeRun(got.rc, got.output, "", got.outcome)
+
+
+def _not_checked(what: str, run: ProbeRun, *, tool: str = "*") -> dict:
+    detail = (run.err or run.out).strip().splitlines()
+    suffix = f": {detail[-1][:200]}" if detail else ""
+    state = "stalled" if run.outcome == "stalled" else "unmeasurable"
+    return {
+        "tool": tool,
+        "not_checked": True,
+        "probe_outcome": run.outcome,
+        "probe_rc": run.rc,
+        "problem": f"{what} was {state}{suffix}",
+    }
 
 
 def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
@@ -198,22 +256,35 @@ def provenance_drift(image: str, pins: Dict[str, str]) -> List[dict]:
     today's source against an older binary is how a stale image gets reported as
     a defect, and this function is only meaningful run against a FRESH image.
     """
-    rc, out, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
-                      "-lc", "cat /vibeic/provenance/*.json 2>/dev/null"])
-    if rc != 0 or not out.strip():
+    run = _as_run(_sh([
+        "docker", "run", "--rm", "--entrypoint", "bash", image, "-lc",
+        "set -- /vibeic/provenance/*.json; "
+        "if [ ! -e \"$1\" ]; then "
+        "printf '%s\\n' __VIBEIC_NO_PROVENANCE__; exit 0; fi; "
+        "cat \"$@\"",
+    ]))
+    if not run.measurable or run.rc != 0:
+        return [_not_checked("reading in-image provenance", run)]
+    if (not run.out.strip()
+            or run.out.strip() == "__VIBEIC_NO_PROVENANCE__"):
         # NOT CHECKED is its own state. Returning this as a drift row made
         # 0.2.31 — which predates provenance entirely — report "1 tool built
         # from a commit the pins no longer name", which is a finding about
         # nothing. A probe that found nothing must not look like a pass OR like
         # a finding.
         return [{"tool": "*", "not_checked": True,
+                 "probe_outcome": run.outcome, "probe_rc": run.rc,
                  "problem": "the image carries no provenance files — nothing "
                             "was compared, which is not a clean result"}]
     drift: List[dict] = []
-    for ln in out.splitlines():
+    malformed = 0
+    for ln in run.out.splitlines():
+        if not ln.strip() or ln.startswith("[INFO]"):
+            continue
         try:
             d = json.loads(ln)
         except ValueError:
+            malformed += 1
             continue
         tool, ref = d.get("tool", ""), d.get("ref", "")
         repo = (d.get("repo") or "").rstrip("/").removesuffix(".git").split("/")[-1]
@@ -224,6 +295,13 @@ def provenance_drift(image: str, pins: Dict[str, str]) -> List[dict]:
             drift.append({"tool": tool, "built_from": ref[:9], "pin": pin[:9],
                           "problem": "the image was built from a different "
                                      "commit than the pin now names"})
+    if malformed:
+        drift.append({
+            "tool": "*", "not_checked": True,
+            "probe_outcome": run.outcome, "probe_rc": run.rc,
+            "problem": f"{malformed} provenance record(s) were malformed; "
+                       "the comparison is incomplete",
+        })
     return drift
 
 
@@ -237,27 +315,58 @@ def check(image: str, dockerfile: Path) -> List[dict]:
         f'p=$(command -v {t} 2>/dev/null); '
         f'echo "{t} ${{p:-NONE}} $(readlink -f "$p" 2>/dev/null)"'
         for t in FLOW_TOOLS)
-    rc, out, err = _sh(["docker", "run", "--rm", "--entrypoint", "bash",
-                        image, "-lc", script])
-    if rc != 0 and not out.strip():
-        return [{"tool": "*", "problem": f"could not run {image}: "
-                                        f"{err.strip()[-200:]}"}]
+    paths = _as_run(_sh(["docker", "run", "--rm", "--entrypoint", "bash",
+                         image, "-lc", script]))
+    if not paths.measurable or paths.rc != 0:
+        return [_not_checked(f"resolving flow tools in {image}", paths)]
 
     # Which source trees of ours are present, for the tools installed by `make
     # install` rather than copied. Asked once, in the image, not assumed.
-    src_present = {}
+    src_present = set()
+    src_absent = set()
     if _INSTALLED_FROM_SOURCE:
-        probe = "; ".join(f'[ -d {p} ] && echo {t}'
-                          for t, p in _INSTALLED_FROM_SOURCE.items())
-        _, sout, _ = _sh(["docker", "run", "--rm", "--entrypoint", "bash",
-                          image, "-lc", probe])
-        src_present = {ln.strip() for ln in sout.splitlines() if ln.strip()}
+        probe = "; ".join(
+            f'if [ -d {p} ]; then echo "{t} PRESENT"; '
+            f'else echo "{t} ABSENT"; fi'
+            for t, p in _INSTALLED_FROM_SOURCE.items())
+        sources = _as_run(_sh([
+            "docker", "run", "--rm", "--entrypoint", "bash", image,
+            "-lc", probe,
+        ]))
+        if not sources.measurable or sources.rc != 0:
+            findings.extend(
+                _not_checked("checking source-installed tool provenance",
+                             sources, tool=tool)
+                for tool in sorted(_INSTALLED_FROM_SOURCE)
+            )
+        else:
+            for ln in sources.out.splitlines():
+                parts = ln.strip().split()
+                # The one-token form preserves old fixture compatibility.
+                if len(parts) == 1 and parts[0] in _INSTALLED_FROM_SOURCE:
+                    src_present.add(parts[0])
+                elif len(parts) == 2 and parts[0] in _INSTALLED_FROM_SOURCE:
+                    if parts[1] == "PRESENT":
+                        src_present.add(parts[0])
+                    elif parts[1] == "ABSENT":
+                        src_absent.add(parts[0])
+            answered = src_present | src_absent
+            for tool in sorted(set(_INSTALLED_FROM_SOURCE) - answered):
+                findings.append({
+                    "tool": tool, "not_checked": True,
+                    "probe_outcome": sources.outcome,
+                    "probe_rc": sources.rc,
+                    "problem": "source-tree presence probe returned no "
+                               "completion record for this tool",
+                })
 
-    for ln in out.splitlines():
+    answered_tools = set()
+    for ln in paths.out.splitlines():
         parts = ln.split()
         if len(parts) < 2 or parts[0] not in FLOW_TOOLS:
             continue
         tool, path = parts[0], parts[1]
+        answered_tools.add(tool)
         real = parts[2] if len(parts) > 2 else path
         if path == "NONE":
             if tool in _NO_COMMAND:
@@ -273,6 +382,11 @@ def check(image: str, dockerfile: Path) -> List[dict]:
         if tool in _INSTALLED_FROM_SOURCE:
             src = _INSTALLED_FROM_SOURCE[tool]
             if tool in src_present:
+                continue
+            if tool not in src_absent:
+                # A retained NOT CHECKED row above already explains why this
+                # source-tree fact is unavailable.  Do not fabricate a
+                # measured absence from that missing answer.
                 continue
             findings.append({
                 "tool": tool, "resolved": real,
@@ -292,6 +406,13 @@ def check(image: str, dockerfile: Path) -> List[dict]:
                         "we copy nothing for this tool — it is the base "
                         "image's, which may be intended"),
             "we_build_it": built,
+        })
+    for tool in sorted(set(FLOW_TOOLS) - answered_tools):
+        findings.append({
+            "tool": tool, "not_checked": True,
+            "probe_outcome": paths.outcome, "probe_rc": paths.rc,
+            "problem": "PATH-resolution probe returned no completion record "
+                       "for this tool",
         })
     return findings
 
@@ -316,11 +437,20 @@ def main(argv=None) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from check_pins_current import pinned_refs               # noqa: E402
     drift = provenance_drift(a.image, pinned_refs(df.parent))
-    ours_missing = [f for f in findings if f.get("we_build_it")]
+    unchecked_findings = [f for f in findings if f.get("not_checked")]
+    ours_missing = [f for f in findings
+                    if f.get("we_build_it") and not f.get("not_checked")]
 
     tools_checked = len(flow_tools(df))
-    print(f"fork_reaches_flow: {tools_checked} tool(s) checked in {a.image}, "
-          f"{tools_checked - len(findings)} resolve into our build, "
+    unknown_tools = {f.get("tool") for f in unchecked_findings}
+    measured_tools = (0 if "*" in unknown_tools else
+                      max(0, tools_checked - len(unknown_tools)))
+    finding_tools = {f.get("tool") for f in findings
+                     if not f.get("not_checked")}
+    resolved_ours = max(0, measured_tools - len(finding_tools))
+    print(f"fork_reaches_flow: {measured_tools}/{tools_checked} tool(s) "
+          f"measured in {a.image}, "
+          f"{resolved_ours} resolve into our build, "
           f"{len(ours_missing)} we build but do not run")
     for f in findings:
         print(f"  {f['tool']:<11} {str(f.get('resolved')):<44} {f['problem']}")
@@ -343,6 +473,9 @@ def main(argv=None) -> int:
     if unchecked:
         print(f"[NOT CHECKED] provenance: {unchecked[0]['problem']}",
               file=sys.stderr)
+    if unchecked_findings:
+        print(f"[NOT CHECKED] {len(unchecked_findings)} flow-origin probe(s) "
+              f"did not produce a complete measurement", file=sys.stderr)
     if real_drift:
         print(f"[{'FAIL' if a.strict else 'REPORT'}] {len(real_drift)} tool(s) "
               f"in the image were built from a commit the pins no longer name",
@@ -352,7 +485,10 @@ def main(argv=None) -> int:
         print(f"[{'FAIL' if a.strict else 'REPORT'}] {len(ours_missing)} tool(s) "
               f"are built, pinned, published and versioned, and the flow runs a "
               f"different build of them", file=sys.stderr)
-        return RC_NOT_OURS if a.strict else RC_OK
+    if a.strict and (ours_missing or real_drift):
+        return RC_NOT_OURS
+    if unchecked or unchecked_findings:
+        return RC_NOTHING
     return RC_OK
 
 

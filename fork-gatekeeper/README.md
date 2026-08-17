@@ -126,7 +126,17 @@ files, our commits on that branch with their subjects and touched files, and
 git's own message. Those land in `$GK_STATE_DIR/ai_decisions_pending.json` and
 `ai_decisions_brief.txt`, and the brief is passed straight to a `claude -p`
 turn. **That turn is the gatekeeper.** The call blocks — detaching it would end
-the process before the turn produced anything.
+the process before the turn produced anything. It has no total-runtime cutoff:
+Claude's stream-json/tool activity and process-tree CPU renew a forward-progress
+lease, so a long healthy decision can finish; a turn is stopped only after all
+progress signals stay flat for `--ai-stall-grace`.
+
+Process completion is not landing evidence. After the turn, the runner reads
+each fork's remote mainline and proves the captured source tip arrived by Git
+ancestry or patch equivalence. An rc=0 turn with no such postcondition, and any
+stalled turn, leaves that case in `ai_decisions_pending.json` and keeps the
+round actionable. Verified cases leave the queue immediately; the full stream
+and verification rows remain in `ai_decisions.log` / `daily_0530.json`.
 
 The brief is self-contained: a gatekeeper turn needs no prior knowledge of this
 document to do the job. It states the per-case evidence, asks for MERGE /
@@ -142,7 +152,7 @@ CHERRY-PICK / DECLINE with a reason, and carries the rules that bind the step:
 * repo artifacts are English only.
 
 `--no-ai` writes the brief without invoking, which is what a dry run does. A case
-nobody decided still exits 1; a case the gatekeeper decided is decided.
+without a verified published postcondition still exits 1.
 
 Exercised end-to-end against a synthetic conflicting fork (`GK_FORKS_DIR`
 overrides the forks root for exactly this reason — a step that only fires on a
@@ -193,7 +203,7 @@ The compose step classifies DNS, transport reset/timeout, and registry 429/5xx
 failures as transient. It retries the exact registry compose up to five times
 with `15, 45, 120, 300` second backoff. Tool artefacts have already been pushed
 at that point, so retries reuse them and BuildKit cache; they do not repeat tool
-builds. An unclassified failure and a 90-minute BuildKit wedge get only one
+builds. An unclassified failure and a BuildKit progress stall get only one
 defence-in-depth retry, keeping deterministic failures bounded.
 
 `daily-release.json` is schema-versioned and atomically replaced at the start
@@ -209,6 +219,14 @@ lag and retains:
 * `release-ll/rounds/<stamp>.json` — full evidence, 400 days by default
   (`GK_RELEASE_LL_KEEP_DAYS`);
 * `release-ll/index.jsonl` — narrow append-only outcome history, never pruned.
+
+The release tick runs only after code currency is proved (`CODE=0`) and the
+semantic pytest record is complete and green. A red record and NORECORD both
+block release, but remain distinct facts; a stalled suite is retained as
+`status=norecord, outcome=stalled`. On any such skip, LL records the tick as
+`not_checked` and never reads the live `daily-release.json`, which may still be
+yesterday's terminal record. Even when the tick did run, the release record's
+`started_at` must fall inside this 05:30 round before LL will accept it.
 
 The captured lesson is deterministic evidence — trigger, retry control,
 attempts, outcome, and final lag — not prose inferred from a log. Missing or

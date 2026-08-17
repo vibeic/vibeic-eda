@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import check_image_claims as K                                # noqa: E402
@@ -136,3 +137,91 @@ def test_no_declaration_refuses_rather_than_passing(monkeypatch):
     """An empty declaration compared nothing; that must not read as clean."""
     monkeypatch.setattr(K, "declared", lambda root=None: [])
     assert K.main(["img"]) == K.RC_NOTHING
+
+
+# --- progress-supervised probes: incomplete work is not an image finding
+
+def test_docker_probe_uses_activity_lease_without_a_total_ceiling(monkeypatch):
+    seen = {}
+
+    def run(image, script, stall_after):
+        seen.update(image=image, script=script, stall_after=stall_after)
+        return SimpleNamespace(rc=0, output="measured", outcome="natural")
+
+    monkeypatch.setattr(K, "run_container_probe", run)
+    got = K._sh(["docker", "run", "--rm", "--entrypoint", "bash",
+                 "example:image", "-lc", "real-work"])
+
+    assert got == K.ProbeRun(0, "measured", "", "natural")
+    assert seen == {"image": "example:image", "script": "real-work",
+                    "stall_after": K.PROBE_STALL_GRACE_S}
+
+
+def test_stalled_version_read_is_unknown_not_no_version(monkeypatch):
+    def run(cmd, timeout=None):
+        del timeout
+        if "ls -1 /foss/pdks" in cmd[-1]:
+            return K.ProbeRun(0, "sky130A\n", "", "natural")
+        return K.ProbeRun(199, "", "no progress", "stalled")
+
+    monkeypatch.setattr(K, "_sh", run)
+    rows = K.pdk_findings("img", DECL)
+
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "not_checked"
+    assert rows[0]["pdk"] == "sky130A"
+    assert rows[0]["probe_outcome"] == "stalled"
+    assert not [row for row in rows if row["kind"] == "no_version"]
+
+
+def test_failed_version_read_rc_is_unknown_not_no_version(monkeypatch):
+    """The old caller discarded this rc and emitted a false ``no_version``."""
+    def run(cmd, timeout=None):
+        del timeout
+        if "ls -1 /foss/pdks" in cmd[-1]:
+            return 0, "sky130A\n", ""
+        return 73, "", "container-side read failed"
+
+    monkeypatch.setattr(K, "_sh", run)
+    rows = K.pdk_findings("img", DECL)
+
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "not_checked"
+    assert rows[0]["probe_rc"] == 73
+    assert "container-side read failed" in rows[0]["problem"]
+
+
+def test_failed_tool_version_probe_is_retained_as_unknown(monkeypatch):
+    monkeypatch.setattr(K, "_TOOL_PROBE", {
+        "yosys": ("yosys --version", r"Yosys ([0-9.]+)")})
+
+    def run(cmd, timeout=None):
+        del timeout
+        script = cmd[-1]
+        if "/foss/pdks/versions.txt" in script:
+            return 0, "yosys 0.50\n", ""
+        return 0, "could not start\n__VIBEIC_PROBE_RC__127\n", ""
+
+    monkeypatch.setattr(K, "_sh", run)
+    rows = K.manifest_findings("img")
+
+    assert rows == [{
+        "kind": "not_checked", "tool": "yosys",
+        "probe_outcome": "natural", "probe_rc": 127,
+        "problem": "`yosys --version` exited 127; no version was measured",
+    }]
+
+
+def test_unknown_probe_makes_main_norecord_and_json_keeps_reason(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(K, "declared", lambda root=None: DECL)
+    unknown = {"kind": "not_checked", "pdk": "sky130A",
+               "probe_outcome": "launch_error", "probe_rc": 127,
+               "problem": "container never launched"}
+    monkeypatch.setattr(K, "pdk_findings", lambda image, decl: [unknown])
+    monkeypatch.setattr(K, "manifest_findings", lambda image: [])
+    report = tmp_path / "claims.json"
+
+    assert K.main(["img", "--json", str(report)]) == K.RC_NOTHING
+    saved = json.loads(report.read_text(encoding="utf-8"))
+    assert saved["pdks"] == [unknown]

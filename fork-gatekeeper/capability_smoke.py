@@ -83,13 +83,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
 import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Optional
 
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import progress_watchdog as W                                  # noqa: E402
+
 RC_OK, RC_BROKEN, RC_NOIMAGE = 0, 1, 2
+DEFAULT_STALL_AFTER = 300.0
+_DOCKER_CONTROL_TIMEOUT = 15
 
 
 # ── plumbing ──────────────────────────────────────────────────────────────────
@@ -132,12 +143,168 @@ def _example_image() -> str:
         return "ghcr.io/vibeic/vibeic-eda:<version>"
 
 
-def _run(image: str, script: str, timeout: int = 900) -> str:
-    p = subprocess.run(
-        ["docker", "run", "--rm", "--entrypoint", "bash", image, "-lc", script],
-        capture_output=True, text=True, timeout=timeout)
-    out = (p.stdout or "") + (p.stderr or "")
-    return "\n".join(ln for ln in out.splitlines() if not _NOISE.match(ln))
+@dataclass(frozen=True)
+class ProbeExecution:
+    """One container invocation, before a capability verdict is attempted.
+
+    ``outcome`` is deliberately separate from the tool output.  A natural exit
+    produced an answer which a Probe may judge; ``stalled`` and ``launch_error``
+    produced no complete measurement and must never be converted into BROKEN.
+    """
+
+    output: str
+    outcome: str
+    rc: int
+
+    @property
+    def measurable(self) -> bool:
+        return self.outcome == "natural"
+
+
+@dataclass(frozen=True)
+class _ProgressJournal:
+    """A private child-to-parent proof that the inner supervisor is advancing.
+
+    The outer capability gate must not use arbitrary child output as a lease:
+    a chatty wedged tool could then keep itself alive.  It also cannot wait only
+    for a completed arm, because a legitimately long arm has no total-runtime
+    ceiling.  The trusted smoke process therefore appends one record whenever
+    its *inner watchdog* takes a sample.  The gate observes only monotonically
+    increasing journal bytes; the container never sees this host path.
+    """
+
+    path: Optional[Path] = None
+
+    def advance(self, event: str) -> None:
+        if self.path is None:
+            return
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(event + "\n")
+        except OSError:
+            # The parent treats a journal which cannot advance as stalled.  A
+            # write failure is deliberately not a capability verdict.
+            pass
+
+
+def _container_cpu_probe(cid_file: Path, progress: _ProgressJournal):
+    """Return a probe for CPU consumed by the container's host process tree.
+
+    The ``docker run`` client is not the parent of work in the container.  Using
+    the watchdog's default host-client probe would therefore call a quiet
+    compiler stalled even while it was consuming CPU.  Docker exposes the
+    container init's host pid; once available, the shared monotonic process-tree
+    probe accounts for that pid and all transitive children.
+
+    ``docker inspect`` has a short operational deadline.  It is only a liveness
+    sensor: failure to read it contributes no progress and forms no capability
+    verdict.
+    """
+    tree = None
+
+    def sample(_proc) -> Optional[float]:
+        nonlocal tree
+        # This is a supervisor-domain event, not workload stdout.  It keeps the
+        # outer lease aligned with the inner lease while the inner watchdog is
+        # still sampling, including while it counts down a genuine stall.
+        progress.advance("inner-watchdog-sample")
+        if tree is not None:
+            return tree.sample()
+        try:
+            cid = cid_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not cid:
+            return None
+        try:
+            got = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Pid}}", cid],
+                capture_output=True, text=True,
+                timeout=_DOCKER_CONTROL_TIMEOUT,
+            )
+            pid = int(got.stdout.strip()) if got.returncode == 0 else 0
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        if pid <= 0:
+            return None
+        tree = W.HostProcessTreeCpuProbe(pid)
+        return tree.sample()
+
+    return sample
+
+
+def _container_killer(cid_file: Path, progress: _ProgressJournal):
+    """Kill the container as well as its docker client on a progress stall."""
+    def kill(proc, reason: str) -> None:
+        progress.advance("inner-cleanup-start")
+        try:
+            cid = cid_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            cid = ""
+        if cid:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", cid], capture_output=True,
+                    timeout=_DOCKER_CONTROL_TIMEOUT,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        progress.advance("inner-container-cleaned")
+        W.terminate_process_group(proc, reason)
+        progress.advance("inner-cleanup-complete")
+
+    return kill
+
+
+def _run(image: str, script: str,
+         stall_after: float = DEFAULT_STALL_AFTER,
+         progress: Optional[_ProgressJournal] = None) -> ProbeExecution:
+    """Run one probe with a renewable no-progress lease and no runtime cap."""
+    journal = progress or _ProgressJournal()
+    with tempfile.TemporaryDirectory(prefix="vibeic-capability-") as tmp:
+        cid_file = Path(tmp) / "container.cid"  # docker requires it not to exist
+        result = W.run_supervised(
+            ["docker", "run", "--rm", "--cidfile", str(cid_file),
+             "--entrypoint", "bash", image, "-lc", script],
+            stall_grace_s=stall_after,
+            cpu_probe=_container_cpu_probe(cid_file, journal),
+            kill=_container_killer(cid_file, journal),
+        )
+    combined = (result.out or "") + (result.err or "")
+    output = "\n".join(
+        ln for ln in combined.splitlines() if not _NOISE.match(ln))
+    return ProbeExecution(output=output, outcome=result.outcome, rc=result.rc)
+
+
+def run_container_probe(image: str, script: str,
+                        stall_after: float = DEFAULT_STALL_AFTER
+                        ) -> ProbeExecution:
+    """Public adapter for other gates that need the same Docker liveness.
+
+    The probe includes the container's host process tree rather than only the
+    quiet ``docker`` client and removes the container on a stall.  Its progress
+    signals are operational liveness only; callers still need their own
+    postcondition/verdict logic after a natural exit.
+    """
+    return _run(image, script, stall_after=stall_after)
+
+
+def _evaluate(execution: ProbeExecution,
+              check: Callable[[str], Optional[str]],
+              label: str) -> tuple[Optional[str], bool]:
+    """Return ``(reason, unmeasurable)`` for one subject/control arm."""
+    if not execution.measurable:
+        kind = "STALLED" if execution.outcome == "stalled" else "UNMEASURABLE"
+        return (f"{kind} ({execution.outcome}): "
+                f"{_first_err(execution.output)}"), True
+    try:
+        return check(execution.output), False
+    except Exception as exc:                                      # noqa: BLE001
+        # A broken evaluator says nothing about the image.  In particular it
+        # must not become BROKEN merely because the sibling control happened to
+        # pass; that would turn a harness defect into a capability finding.
+        return (f"UNMEASURABLE ({label} evaluator raised "
+                f"{type(exc).__name__}: {exc})"), True
 
 
 def _first_err(out: str) -> str:
@@ -509,53 +676,81 @@ def main() -> int:
     ap.add_argument("image", help="image to probe, e.g. " + _example_image())
     ap.add_argument("--json", metavar="FILE", help="write the full result table")
     ap.add_argument("--only", metavar="SUBSTR", help="run probes whose name matches")
-    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument(
+        "--stall-after", type=float, default=DEFAULT_STALL_AFTER,
+        help="mark one subject/control arm unmeasurable after this many seconds "
+             "with no output or container CPU progress; this is not a total "
+             "runtime limit")
+    ap.add_argument(
+        "--progress-file", type=Path, help=argparse.SUPPRESS,
+    )
     a = ap.parse_args()
+    if not math.isfinite(a.stall_after) or a.stall_after <= 0:
+        ap.error("--stall-after must be a positive finite number")
 
-    try:
-        if _run(a.image, "echo IMAGE_OK", timeout=180).find("IMAGE_OK") < 0:
-            raise RuntimeError
-    except Exception:
-        print(f"cannot run {a.image}", file=sys.stderr)
+    progress = _ProgressJournal(a.progress_file)
+    progress.advance("smoke-start")
+
+    preflight = _run(
+        a.image, "echo IMAGE_OK", stall_after=a.stall_after,
+        progress=progress,
+    )
+    if not preflight.measurable or "IMAGE_OK" not in preflight.output:
+        why = (f"{preflight.outcome}: {_first_err(preflight.output)}"
+               if not preflight.measurable else _first_err(preflight.output))
+        print(f"cannot run {a.image} -- UNMEASURABLE: {why}", file=sys.stderr)
         return RC_NOIMAGE
+    print(f"  progress  {'image/preflight':34s} "
+          f"subject={preflight.outcome}", flush=True)
 
     rows, broken = [], 0
     probes = [p for p in PROBES if not a.only or a.only in p.name]
     for p in probes:
-        try:
-            reason = p.check(_run(a.image, p.script, a.timeout))
-        except subprocess.TimeoutExpired:
-            reason = f"timed out after {a.timeout}s"
-        except Exception as exc:                                   # noqa: BLE001
-            reason = f"probe raised {type(exc).__name__}: {exc}"
+        subject = _run(a.image, p.script, a.stall_after, progress)
+        reason, subject_unmeasurable = _evaluate(
+            subject, p.check, "subject")
+        # This line is a human-visible boundary.  Outer liveness comes from the
+        # private inner-watchdog journal, not stdout, so child chatter cannot
+        # impersonate progress.
+        print(f"  progress  {p.name:34s} subject={subject.outcome}", flush=True)
 
-        try:
-            crea = p.control_check(_run(a.image, p.control, a.timeout))
-        except subprocess.TimeoutExpired:
-            crea = f"control timed out after {a.timeout}s"
-        except Exception as exc:                                   # noqa: BLE001
-            crea = f"control raised {type(exc).__name__}: {exc}"
+        control = _run(a.image, p.control, a.stall_after, progress)
+        crea, control_unmeasurable = _evaluate(
+            control, p.control_check, "control")
+        print(f"  progress  {p.name:34s} control={control.outcome}", flush=True)
 
         # A red control does not excuse a red subject, but it changes what the
         # red MEANS: it says the probe itself is not trustworthy here.  Saying so
         # is the difference between a finding and a guess, and it is why this
         # verdict exists instead of being folded into BROKEN.
-        if reason is None:
+        #
+        # A STALLED arm is even narrower: elapsed time supplied no capability
+        # answer at all.  It is therefore always INCONCLUSIVE, never BROKEN,
+        # even when its sibling completed green.
+        if subject_unmeasurable:
+            verdict = "INCONCLUSIVE"
+        elif reason is None:
             verdict = "WORKS"
-        elif crea is not None:
+        elif control_unmeasurable or crea is not None:
             verdict = "INCONCLUSIVE"
         else:
             verdict, broken = "BROKEN", broken + 1
 
         rows.append({"capability": p.name, "verdict": verdict,
-                     "reason": reason, "control": crea or "ok"})
+                     "reason": reason, "control": crea or "ok",
+                     "subject_outcome": subject.outcome,
+                     "control_outcome": control.outcome})
         mark = {"WORKS": "  ok   ", "BROKEN": " BROKEN",
                 "INCONCLUSIVE": " ????? "}[verdict]
-        print(f"{mark}  {p.name:34s} {reason or ''}")
+        print(f"{mark}  {p.name:34s} {reason or ''}", flush=True)
         if crea:
-            print(f"           control ALSO red: {crea}")
+            print(f"           control ALSO red: {crea}", flush=True)
 
-    print(f"\n{len(rows) - broken}/{len(rows)} capabilities run in {a.image}")
+    works = sum(1 for row in rows if row["verdict"] == "WORKS")
+    inconclusive = sum(1 for row in rows
+                       if row["verdict"] == "INCONCLUSIVE")
+    print(f"\n{works}/{len(rows)} capabilities WORK in {a.image}; "
+          f"{inconclusive} unmeasurable/inconclusive", flush=True)
     if a.json:
         with open(a.json, "w") as fh:
             json.dump(rows, fh, indent=2)

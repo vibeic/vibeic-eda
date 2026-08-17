@@ -62,12 +62,15 @@ host's gatekeeper AI, with the evidence attached: the conflicting files, our
 commits on that branch with their subjects and touched files, and git's own
 message. The gatekeeper decides MERGE vs CHERRY-PICK per case, resolves on the
 merits, and lands it. `--no-ai` writes the brief without invoking, which is what
-a dry run does. A case nobody decided is still `needs_human`; a case the
-gatekeeper decided is decided.
+a dry run does. A launched turn is not itself a completed decision: the case
+clears only after its captured source tip is proved present, by ancestry or
+patch equivalence, on the fork's published mainline.
 
-The invocation BLOCKS. Detaching it would end this process before the
-gatekeeper's turn produced anything, which is the exact failure that has already
-cost this campaign four rounds on one cell.
+The invocation BLOCKS under a forward-progress lease. Detaching it would end
+this process before the gatekeeper's turn produced anything, which is the exact
+failure that has already cost this campaign four rounds on one cell. Elapsed
+runtime is not a verdict: a progressing turn may run indefinitely; only a turn
+whose stream/tool/CPU signals all stay flat for the stall grace is stopped.
 
 Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
@@ -78,6 +81,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gk_state
+import progress_watchdog as watchdog
 import round_record
 # ONE mechanism, both mergers (vibeic-eda#89). This module and `daily_merge.py`
 # are two automatic paths from upstream onto a published branch, and this is the
@@ -94,40 +98,46 @@ EDA = Path("/home/reyerchu/vibeic-eda")
 OURS = ("reyer", "vibeic")
 
 
-#: `sh` never got an answer — the command was killed on the clock, or could not
+#: `sh` never got an answer to a deliberately short request/probe, or could not
 #: be launched. DISTINCT from any exit code the tool itself chose, so a caller
 #: can tell "we never got an answer" apart from "the tool answered non-zero".
 RC_NO_ANSWER = 124
-#: Ordinary git/gh calls here are local or single-request. Generous, because a
-#: bound that fires on a healthy call is worse than no bound at all.
-DEFAULT_TIMEOUT_S = 900
-#: A fetch pulls objects and is the one call here that legitimately runs long.
-#: `daily_merge` bounds its own fetches at 1800; matched deliberately, so the
-#: two halves of the same morning cannot disagree about how long is too long.
-FETCH_TIMEOUT_S = 1800
 #: A single-ref `ls-remote` is one request and no object transfer.
 LS_REMOTE_TIMEOUT_S = 120
+#: Fetch, merge, checkout and push are work, not request probes.  Their elapsed
+#: runtime is unbounded; only a period with no output and no process-tree CPU
+#: progress expires the lease.  The grace is deliberately configurable without
+#: becoming a claim about how long a healthy operation "should" take.
+GIT_STALL_GRACE_S = float(os.environ.get("GK_GIT_STALL_GRACE", "300"))
+GIT_PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "1"))
 
 
-def sh(*a, cwd=None, timeout=DEFAULT_TIMEOUT_S):
+def sh(*a, cwd=None, timeout=None, progress=False,
+       stall_grace=GIT_STALL_GRACE_S):
     """Run a command and return its CompletedProcess.
 
-    BOUNDED. This used to be unbounded, so one unreachable host held the whole
-    round — 35+ forks queued behind a single socket — for as long as the kernel
-    kept the connection alive. Measured against a black-holed address: still
-    running at 25 s, with nothing to stop it. `daily_merge` has always bounded
-    its own subprocesses; this file did not, so the two halves of the same
-    morning disagreed about whether a tool may hang forever.
-
-    A timeout RETURNS rc=RC_NO_ANSWER rather than raising. Every caller here
-    already branches on the return code, and an exception would take the round
-    out for every fork after this one — turning one hung fetch into a fleet-wide
-    outage. "We could not get an answer" is a state, and it belongs in the same
-    channel as every other answer.
+    Long work opts into a renewable progress lease.  It may run indefinitely
+    while output bytes or process-tree CPU advance; a flat lease returns the
+    distinct ``RC_STALLED`` state and is never rewritten as a git failure or a
+    merge conflict.  A wall-clock timeout is available only to explicitly short
+    request/probe calls such as ``ls-remote``.  Local metadata reads have no
+    elapsed-time verdict at all.
     """
     try:
-        return subprocess.run(a, capture_output=True, text=True, cwd=cwd,
-                              timeout=timeout)
+        if progress:
+            run = watchdog.run_supervised(
+                list(a), cwd=cwd, stall_grace_s=stall_grace,
+                poll_s=GIT_PROGRESS_POLL_S,
+                output_progress=True, process_tree_cpu_progress=True,
+            )
+            cp = subprocess.CompletedProcess(a, run.rc, run.out, run.err)
+            cp.supervision_outcome = run.outcome
+            cp.elapsed_seconds = run.elapsed_s
+            return cp
+        kwargs = {"capture_output": True, "text": True, "cwd": cwd}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return subprocess.run(a, **kwargs)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
             a, RC_NO_ANSWER, "",
@@ -266,11 +276,18 @@ def _fetch(g, remote, *extra):
     `ok=False` means the tracking state for `remote` is UNKNOWN — which is
     neither "current" nor "behind", and must not be rendered as either.
     """
-    fr = sh(*g, "fetch", remote, *extra, "--quiet", timeout=FETCH_TIMEOUT_S)
+    # ``--progress`` makes object transfer visible even under cron redirection.
+    # It is evidence for the renewable lease, not verdict evidence: a stall is
+    # UNKNOWN and never means the remote is current or the fetch failed.
+    fr = sh(*g, "fetch", remote, *extra, "--progress", progress=True)
     if fr.returncode == 0:
         return True, ""
-    what = ("no answer from" if fr.returncode == RC_NO_ANSWER
-            else f"FETCH FAILED (rc={fr.returncode}) —")
+    if fr.returncode == watchdog.RC_STALLED:
+        what = "FETCH STALLED with no forward progress from"
+    elif fr.returncode == RC_NO_ANSWER:
+        what = "no answer from"
+    else:
+        what = f"FETCH FAILED (rc={fr.returncode}) —"
     return False, (f"{what} {remote}: state is UNKNOWN, not current: "
                    f"{_first_error_line(fr)}")
 
@@ -328,6 +345,7 @@ def step1_upstream(g, main, rep):
     if not out(*g, "remote", "get-url", "upstream"):
         rep["upstream"] = "no upstream remote"
         ev["fetch"] = "no_upstream_remote"
+        rep["upstream_merge_outcome"] = "not_applicable"
         return
     # Snapshot BOTH candidate names before the fetch: which one this clone
     # tracks is not known until after, and on a first-ever fetch neither exists.
@@ -338,7 +356,10 @@ def step1_upstream(g, main, rep):
     ok, why = _fetch(g, "upstream")
     if not ok:
         rep["upstream"] = why
-        ev["fetch"] = "no_answer" if "no answer" in why else "failed"
+        ev["fetch"] = ("stalled" if "STALLED" in why else
+                       "no_answer" if "no answer" in why else "failed")
+        rep["upstream_merge_outcome"] = "unmeasurable"
+        rep["needs_human"] = True
         return
     ev["fetch"] = "ok"
     ref = ("upstream/main" if out(*g, "rev-parse", "--verify", "-q", "upstream/main")
@@ -349,6 +370,8 @@ def step1_upstream(g, main, rep):
     ev["tip_seen"] = ub or None
     if not ub:
         rep["upstream"] = "no upstream branch"
+        rep["upstream_merge_outcome"] = "unmeasurable"
+        rep["needs_human"] = True
         return
     if ub != pre.get(ref):
         # The ref MOVED. That is proof the fetch reached the remote, and it is
@@ -364,15 +387,19 @@ def step1_upstream(g, main, rep):
         ev["remote_tip"] = remote_sha
         if not ok:
             rep["upstream"] = why
+            rep["upstream_merge_outcome"] = "unmeasurable"
+            rep["needs_human"] = True
             return
         ev["confirmed_by"] = "ls_remote"
     behind = out(*g, "rev-list", "--count", f"{main}..{ub}")
     ev["behind"] = int(behind) if behind.isdigit() else None
     if behind == "0":
         rep["upstream"] = "already current"
+        rep["upstream_merge_outcome"] = "natural_success"
         return
     r = sh(*g, "merge", "--no-edit", "-m",
-           f"Merge upstream into {main} (daily 05:30)", ub)
+           f"Merge upstream into {main} (daily 05:30)", ub,
+           progress=True)
     if r.returncode:
         # Collect the evidence BEFORE aborting, and route it to the SAME AI step
         # that already handles our-branch conflicts. It did not reach that step
@@ -387,12 +414,30 @@ def step1_upstream(g, main, rep):
         # commits) and OpenROAD (4) both sat here.
         files = [l for l in out(*g, "diff", "--name-only",
                                 "--diff-filter=U").splitlines() if l.strip()]
+        if r.returncode == watchdog.RC_STALLED:
+            sh(*g, "merge", "--abort")
+            rep["upstream"] = (
+                f"MERGE STALLED taking {behind} upstream commit(s) — no "
+                "forward progress; outcome UNKNOWN, not a conflict")
+            rep["upstream_merge_outcome"] = "stalled"
+            rep["needs_human"] = True
+            return
+        if not files:
+            sh(*g, "merge", "--abort")
+            rep["upstream"] = (
+                f"MERGE FAILED taking {behind} upstream commit(s) "
+                f"(rc={r.returncode}): {_first_error_line(r)}")
+            rep["upstream_merge_outcome"] = "natural_failure"
+            rep["needs_human"] = True
+            return
         commits = [{"sha": s[:12],
                     "subject": out(*g, "log", "-1", "--format=%s", s),
                     "author": out(*g, "log", "-1", "--format=%an", s)}
                    for s in out(*g, "rev-list", f"{main}..{ub}").split()[:20]]
         sh(*g, "merge", "--abort")
         rep["upstream"] = f"CONFLICT taking {behind} upstream commit(s)"
+        rep["upstream_merge_outcome"] = "conflict"
+        rep["needs_human"] = True
         rep.setdefault("conflicted", []).append({
             "branch": ub,
             "direction": "upstream -> our mainline",
@@ -407,6 +452,7 @@ def step1_upstream(g, main, rep):
         })
     else:
         rep["upstream"] = f"merged {behind} upstream commit(s)"
+        rep["upstream_merge_outcome"] = "natural_success"
 
 
 def _fork_branches(g, main):
@@ -543,7 +589,8 @@ def step2_ours(g, main, rep):
             empty.append(b)
             continue
         r = sh(*g, "merge", "--no-edit", "-m",
-               f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b)
+               f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b,
+               progress=True)
         if r.returncode:
             # Collect the evidence a merge-vs-cherry-pick decision needs BEFORE
             # aborting, because aborting destroys it. The owner's standing rule
@@ -553,6 +600,22 @@ def step2_ours(g, main, rep):
             # only deferred it — and in practice nobody came back for it.
             files = [l for l in out(*g, "diff", "--name-only",
                                     "--diff-filter=U").splitlines() if l.strip()]
+            if r.returncode == watchdog.RC_STALLED or not files:
+                sh(*g, "merge", "--abort")
+                rep.setdefault("merge_unmeasurable", []).append({
+                    "branch": b,
+                    "commits": len(mine),
+                    "outcome": ("stalled" if
+                                r.returncode == watchdog.RC_STALLED
+                                else "natural_failure"),
+                    "rc": r.returncode,
+                    "detail": (
+                        "no forward progress; UNKNOWN, not a conflict"
+                        if r.returncode == watchdog.RC_STALLED
+                        else _first_error_line(r)),
+                })
+                rep["needs_human"] = True
+                continue
             commits = [{"sha": s[:12],
                         "subject": out(*g, "log", "-1", "--format=%s", s),
                         "author": out(*g, "log", "-1", "--format=%an", s),
@@ -696,8 +759,22 @@ def step4_prune(g, main, rep, apply):
             # `b` may be a remote-tracking name (origin/x) with no local ref.
             local = b.split("/", 1)[-1] if b.startswith("origin/") else b
             sh(*g, "branch", "-D", local)
-            if sh(*g, "push", "-q", "origin", "--delete", local).returncode == 0:
+            deleted = sh(*g, "push", "--progress", "origin", "--delete", local,
+                         progress=True)
+            if deleted.returncode == 0:
                 gone.append(b)
+            else:
+                rep.setdefault("prune_push_blocked", []).append({
+                    "branch": b,
+                    "outcome": ("stalled" if
+                                deleted.returncode == watchdog.RC_STALLED
+                                else "natural_failure"),
+                    "rc": deleted.returncode,
+                    "detail": (_first_error_line(deleted) if
+                               deleted.returncode != watchdog.RC_STALLED else
+                               "no forward progress; remote deletion UNKNOWN"),
+                })
+                rep["needs_human"] = True
         else:
             gone.append(b)
     rep["pruned"] = gone
@@ -775,7 +852,114 @@ def _handoff_brief(cases) -> str:
     return "\n".join(lines)
 
 
-def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
+def _verify_ai_case(case):
+    """Prove that one handed-off source tip reached the PUBLISHED mainline.
+
+    The AI process exiting zero is only a transport fact.  A MERGE or
+    CHERRY-PICK is complete when the fork's remote mainline carries the source
+    tip's commits (by ancestry or patch equivalence).  Read the remote tip
+    directly rather than trusting the shared checkout's current branch: the AI
+    may have used a temporary worktree, and a local commit that was never pushed
+    is exactly the incomplete landing this check must retain as pending.
+
+    DECLINE has no repository postcondition in the current protocol, so it is
+    deliberately left unverified.  A future structured decision record can add
+    that proof; prose or rc=0 cannot stand in for one today.
+    """
+    fork = str(case.get("fork") or "")
+    branch = str(case.get("branch") or "")
+    main = str(case.get("mainline") or "")
+    source_tip = str(case.get("source_tip") or "")
+    path = Path(str(case.get("path") or ""))
+    result = {"fork": fork, "branch": branch, "mainline": main,
+              "source_tip": source_tip or None, "verified": False,
+              "published_tip": None, "reason": ""}
+    if not (fork and branch and main and source_tip and path.is_dir()):
+        result["reason"] = (
+            "handoff lacks a readable repo, mainline, or captured source tip; "
+            "process completion cannot prove delivery")
+        return result
+
+    remote = sh("git", "-C", str(path), "ls-remote", "origin",
+                f"refs/heads/{main}", timeout=LS_REMOTE_TIMEOUT_S)
+    fields = (remote.stdout or "").split()
+    if remote.returncode != 0 or not fields:
+        result["reason"] = (
+            f"origin/{main} could not be read after the handoff: "
+            f"{_first_error_line(remote)}")
+        return result
+    published_tip = fields[0]
+    result["published_tip"] = published_tip
+
+    # The AI normally creates the published commit in this clone/worktree, so
+    # its object is locally available.  Do not hide a missing object behind an
+    # unbounded fetch here: inability to verify is an honest pending state.
+    present = sh("git", "-C", str(path), "cat-file", "-e",
+                 f"{published_tip}^{{commit}}")
+    if present.returncode != 0:
+        result["reason"] = (
+            f"origin/{main} is {published_tip[:12]}, but that object is not in "
+            "the checkout; delivery could not be verified without changing it")
+        return result
+
+    ancestor = sh("git", "-C", str(path), "merge-base", "--is-ancestor",
+                  source_tip, published_tip)
+    if ancestor.returncode == 0:
+        result.update(
+            verified=True,
+            reason="source tip is an ancestor of the published mainline",
+        )
+        return result
+
+    carried = sh("git", "-C", str(path), "cherry", published_tip, source_tip)
+    if carried.returncode != 0:
+        result["reason"] = (
+            "could not compare source content with the published mainline: "
+            + _first_error_line(carried))
+        return result
+    outstanding = [line for line in carried.stdout.splitlines()
+                   if line.lstrip().startswith("+")]
+    if outstanding:
+        result["reason"] = (
+            f"{len(outstanding)} source commit(s) remain absent from "
+            f"origin/{main}; the case is still pending")
+        return result
+    result.update(verified=True,
+                  reason=("source content is patch-equivalent on the "
+                          "published mainline"))
+    return result
+
+
+def _verify_ai_cases(cases):
+    return [_verify_ai_case(case) for case in cases]
+
+
+def _ai_stream_tail(out: str) -> str:
+    """The final result text from Claude's stream-json, or a bounded fallback."""
+    for line in reversed((out or "").splitlines()):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            value = event.get("structured_output", event.get("result", ""))
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, sort_keys=True)
+            return str(value).strip()[-600:]
+    return (out or "").strip()[-600:]
+
+
+def _ai_needs_attention(ai) -> bool:
+    """A launched process is not a completed landing without postconditions."""
+    if not ai.get("cases"):
+        return False
+    return bool(not ai.get("invoked")
+                or ai.get("outcome") != "natural"
+                or ai.get("rc") != 0
+                or not ai.get("verified"))
+
+
+def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
     """Hand every merge-vs-cherry-pick conflict to the gatekeeper AI.
 
     This is the step the owner singled out: "Merge 或者是 Cherry-pick 的話,
@@ -787,7 +971,16 @@ def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
     cases = []
     for fork, rep in sorted(report.items()):
         for c in rep.get("conflicted", []) or []:
-            cases.append({**c, "fork": fork, "path": str(FORKS / fork)})
+            path = FORKS / fork
+            branch = str(c.get("branch") or "")
+            tip = out("git", "-C", str(path), "rev-parse", "--verify", branch) \
+                if branch and path.is_dir() else ""
+            cases.append({**c, "fork": fork, "path": str(path),
+                          "mainline": rep.get("main"),
+                          # Capture the input before the AI can merge, prune, or
+                          # rename the branch.  Verification is against this
+                          # immutable commit, never whatever the ref means later.
+                          "source_tip": tip or None})
 
     state_dir.mkdir(parents=True, exist_ok=True)
     pending = state_dir / "ai_decisions_pending.json"
@@ -814,7 +1007,8 @@ def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
             f"The round of {stamp} walked every fork and found no conflicted "
             "branch. Any case named here previously has been resolved -- see "
             "ai_decisions.log for what was decided.\n")
-        return {"cases": 0, "invoked": False, "cleared": True}
+        return {"cases": 0, "invoked": False, "cleared": True,
+                "verified": True}
 
     pending.write_text(json.dumps(cases, indent=2) + "\n")
     brief = _handoff_brief(cases)
@@ -822,24 +1016,86 @@ def step2b_ai_decisions(report, state_dir, apply, timeout_s=3600):
 
     if not apply:
         return {"cases": len(cases), "invoked": False,
+                "verified": False,
                 "note": "dry run — brief written, gatekeeper not invoked"}
 
     binp = _claude_bin()
     if not binp:
         return {"cases": len(cases), "invoked": False,
+                "verified": False,
                 "error": "no claude binary on this host — cases left pending"}
 
     log = state_dir / "ai_decisions.log"
     # BLOCKING on purpose. Detaching would end this process before the
     # gatekeeper's turn produced anything, which is the failure mode that has
-    # already cost this campaign four rounds on one cell.
-    r = subprocess.run([binp, "-p", brief,
-                        "--permission-mode", "bypassPermissions"],
-                       capture_output=True, text=True, timeout=timeout_s)
-    log.write_text((r.stdout or "") + "\n--- stderr ---\n" + (r.stderr or ""))
-    return {"cases": len(cases), "invoked": True, "rc": r.returncode,
-            "log": str(log),
-            "tail": (r.stdout or "").strip()[-600:]}
+    # already cost this campaign four rounds on one cell.  Runtime itself is
+    # NOT a verdict.  Claude emits stream-json lifecycle/tool events as it
+    # works; each output advance or process-tree CPU advance renews the lease.
+    # There is no total-runtime ceiling, so a healthy long decision completes.
+    run = watchdog.run_supervised(
+        [binp, "-p", brief, "--permission-mode", "bypassPermissions",
+         "--output-format", "stream-json", "--verbose"],
+        stall_grace_s=stall_grace_s,
+        output_progress=True,
+        process_tree_cpu_progress=True,
+    )
+    verification = _verify_ai_cases(cases)
+    by_key = {(v["fork"], v["branch"]): v for v in verification}
+    remaining = []
+    for case in cases:
+        proof = by_key.get((case.get("fork"), case.get("branch"))) or {}
+        if not proof.get("verified"):
+            remaining.append({**case, "verification": proof.get("reason")})
+
+    # The pending file describes NOW, not the queue before the gatekeeper ran.
+    # Successfully-delivered cases leave it; stalled/unverified cases survive.
+    pending.write_text(json.dumps(remaining, indent=2) + "\n")
+    if remaining:
+        brief_path.write_text(
+            _handoff_brief(remaining) + "\n\nPrevious automated attempt left "
+            f"{len(remaining)} case(s) without a verified published "
+            "postcondition. They remain pending.\n")
+    else:
+        brief_path.write_text(
+            "No merge-vs-cherry-pick case is pending.\n\n"
+            "Every case from this round was verified on its fork's published "
+            "mainline. See ai_decisions.log for the retained turn.\n")
+
+    log_error = None
+    try:
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n=== {datetime.now().astimezone().isoformat(timespec='seconds')} "
+                     f"outcome={run.outcome} rc={run.rc} ===\n")
+            fh.write(run.out or "")
+            fh.write("\n--- stderr ---\n")
+            fh.write(run.err or "")
+            fh.write("\n")
+    except OSError as exc:
+        log_error = f"could not retain AI stream: {type(exc).__name__}: {exc}"
+
+    result = {
+        "cases": len(cases), "invoked": True, "rc": run.rc,
+        "outcome": run.outcome,
+        "elapsed_seconds": round(run.elapsed_s, 3),
+        "stall_grace_seconds": stall_grace_s,
+        "progress_mode": "claude_stream_json_or_process_tree_cpu",
+        "verified": bool(verification and not remaining),
+        "verified_cases": sum(1 for v in verification if v.get("verified")),
+        "unverified_cases": remaining,
+        "verification": verification,
+        "log": str(log),
+        "tail": _ai_stream_tail(run.out),
+    }
+    if run.outcome == "stalled":
+        result["error"] = (
+            "gatekeeper AI made no observable progress for the configured "
+            "stall grace; unfinished cases remain pending")
+    elif run.outcome == "launch_error":
+        result["error"] = (
+            "gatekeeper AI could not be launched; cases remain pending")
+    if log_error:
+        result["log_error"] = log_error
+    return result
 
 
 def same_content_divergence(g, main: str) -> str | None:
@@ -888,8 +1144,10 @@ def main_(argv=None) -> int:
     ap.add_argument("--no-ai", action="store_true",
                     help="write the conflict brief but do not invoke the "
                          "gatekeeper (the cases stay pending)")
-    ap.add_argument("--ai-timeout", type=int, default=3600,
-                    help="seconds to let the gatekeeper's turn run (default 3600)")
+    ap.add_argument("--ai-stall-grace", type=float, default=3600,
+                    help="seconds of zero forward progress before the "
+                         "gatekeeper AI is stopped as stalled; this is not a "
+                         "total-runtime limit (default 3600)")
     args = ap.parse_args(argv)
 
     if not FORKS.is_dir():
@@ -915,9 +1173,31 @@ def main_(argv=None) -> int:
         rep = {"main": main, "needs_human": False,
                "pin": pins.get(d.name.lower())}
         if args.apply:
-            sh(*g, "checkout", "-q", main)
+            checkout = sh(*g, "checkout", main, progress=True)
+            if checkout.returncode != 0:
+                rep["error"] = (
+                    "CHECKOUT STALLED — outcome UNKNOWN"
+                    if checkout.returncode == watchdog.RC_STALLED else
+                    f"checkout failed (rc={checkout.returncode}): "
+                    f"{_first_error_line(checkout)}")
+                rep["checkout_outcome"] = (
+                    "stalled" if checkout.returncode == watchdog.RC_STALLED
+                    else "natural_failure")
+                rep["needs_human"] = True
+                needs_human = True
+                report[d.name] = rep
+                continue
             step1_upstream(g, main, rep)
-            step2_ours(g, main, rep)
+            # A stalled/failed upstream merge is not a conflict and must not be
+            # followed by more merges on a base whose state was unmeasurable.
+            if rep.get("upstream_merge_outcome") in {
+                    "natural_success", "not_applicable"}:
+                step2_ours(g, main, rep)
+            else:
+                rep["ours_skipped"] = (
+                    "upstream landing did not form a verified successful "
+                    "record; branch consolidation waits for the required "
+                    "upstream-first base")
 
             # POST-MERGE CHECKS (vibeic-eda#89), BEFORE the push.
             #
@@ -961,20 +1241,36 @@ def main_(argv=None) -> int:
                         out(*g, "rev-parse", f"origin/{main}^{{tree}}"):
                     _was = out(*g, "rev-parse", main)
                     sh(*g, "update-ref", f"refs/salvage/pre-adopt-{_was[:12]}", _was)
-                    sh(*g, "reset", "--hard", f"origin/{main}")
-                    rep["push"] = (f"ADOPTED origin/{main} {adopt[:12]} — same tree, "
-                                   f"different commit; nothing of ours to publish")
-                    rep["diverged_same_content"] = True
-                    step4_prune(g, main, rep, True)
+                    reset = sh(*g, "reset", "--hard", f"origin/{main}",
+                               progress=True)
+                    if reset.returncode == 0:
+                        rep["push"] = (f"ADOPTED origin/{main} {adopt[:12]} — same tree, "
+                                       f"different commit; nothing of ours to publish")
+                        rep["diverged_same_content"] = True
+                        step4_prune(g, main, rep, True)
+                    else:
+                        rep["push"] = (
+                            "ADOPTION STALLED — outcome UNKNOWN"
+                            if reset.returncode == watchdog.RC_STALLED else
+                            f"ADOPTION FAILED (rc={reset.returncode}): "
+                            f"{_first_error_line(reset)}")
+                        rep["needs_human"] = True
                 else:
                     rep["push"] = ("SKIPPED — the trees stopped matching between "
                                    "the check and the reset")
                     rep["needs_human"] = True
             else:
-                r = sh(*g, "push", "-q", "origin", main)
+                r = sh(*g, "push", "--progress", "origin", main,
+                       progress=True)
                 if r.returncode == 0:
                     rep["push"] = "ok"
                     step4_prune(g, main, rep, True)
+                elif r.returncode == watchdog.RC_STALLED:
+                    rep["push"] = (
+                        "PUSH STALLED — no forward progress; publication is "
+                        "UNKNOWN, not rejected")
+                    rep["push_outcome"] = "stalled"
+                    rep["needs_human"] = True
                 elif "non-fast-forward" in (r.stderr or ""):
                     # A DIVERGENCE is not a lost race, and only one of the two is
                     # worth waking someone for. Rendering both as `REJECTED` with
@@ -1025,13 +1321,12 @@ def main_(argv=None) -> int:
     # Step 2b — the AI half. A conflict is NOT a reason to stop the round; it
     # is the one decision this script is not allowed to make alone.
     ai = step2b_ai_decisions(report, gk_state.state_dir(), args.apply and not args.no_ai,
-                             timeout_s=args.ai_timeout)
+                             stall_grace_s=args.ai_stall_grace)
     report["_ai_decisions"] = ai
-    # Only an UNRESOLVED case needs a human. A case the gatekeeper decided is
-    # decided; a case it could not reach still needs someone.
-    if ai.get("cases") and not ai.get("invoked"):
-        needs_human = True
-    if ai.get("invoked") and ai.get("rc"):
+    # Process rc is transport evidence, not delivery evidence.  Only a natural
+    # turn whose every source tip is verified on the remote mainline clears the
+    # case.  A stalled, failed, or rc=0-but-unverified turn stays actionable.
+    if _ai_needs_attention(ai):
         needs_human = True
 
     if args.json:
@@ -1086,7 +1381,10 @@ def main_(argv=None) -> int:
     if _ai.get("cases"):
         if _ai.get("invoked"):
             print(f"\n  step 2b  {_ai['cases']} merge/cherry-pick conflict(s) "
-                  f"handed to the gatekeeper AI (rc={_ai.get('rc')}) "
+                  f"handed to the gatekeeper AI "
+                  f"(outcome={_ai.get('outcome')}, rc={_ai.get('rc')}; "
+                  f"{_ai.get('verified_cases', 0)} verified, "
+                  f"{len(_ai.get('unverified_cases') or [])} pending) "
                   f"— log: {_ai.get('log')}")
         else:
             print(f"\n  step 2b  {_ai['cases']} conflict(s) PENDING a gatekeeper "

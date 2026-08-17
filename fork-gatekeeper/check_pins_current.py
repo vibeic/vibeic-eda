@@ -29,6 +29,9 @@ WHAT EACH VERDICT MEANS
   ORPHANED  no vibeic branch reaches the pin at all. Worse than stale: an
             unreachable commit is a GC candidate, so the image is pinned to
             something the fork may stop serving.
+  BRANCH_LOOKUP_UNKNOWN
+            the branch API did not answer. This blocks release but makes no
+            claim that the repository has zero branches.
 
 WHAT IT DOES NOT CHECK, STATED
 ==============================
@@ -37,11 +40,13 @@ is the same failure one hop later, and it is not visible from the API — it nee
 the built artefact. `check_pins_agree` plus this plus a rebuild is the chain; two
 of three still ships yesterday's tool.
 
-Exit: 0 every pin is its branch tip, 1 one or more is not, 2 nothing compared.
+Exit: 0 every pin is its branch tip, 1 one or more is not, 2 a required
+      measurement was unavailable (or nothing could be compared).
 """
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import re
 import subprocess
@@ -50,6 +55,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 RC_CURRENT, RC_STALE, RC_NOTHING = 0, 1, 2
+BRANCH_LOOKUP_OK = "OK"
+BRANCH_LOOKUP_UNKNOWN = "BRANCH_LOOKUP_UNKNOWN"
 
 #: Branch names that are not the build branch even when their tip equals the pin.
 #: A dated merge branch and a temporary fix branch both sit at the same commit as
@@ -183,16 +190,65 @@ def pinned_refs(eda_root: Path) -> Dict[str, str]:
     return {repo: site["ref"] for repo, site in pin_sites(eda_root).items()}
 
 
-def _branches(repo: str) -> List[Tuple[str, str]]:
+@dataclass(frozen=True)
+class BranchLookup:
+    """One branch-list measurement; UNKNOWN and an authoritative empty differ."""
+
+    outcome: str
+    branches: Tuple[Tuple[str, str], ...]
+    rc: int
+    detail: str = ""
+
+
+def _branches(repo: str) -> BranchLookup:
     """(name, tip) for every branch, paginated.
 
     Paginated deliberately: the endpoint returns 30 without it, cadical has 74,
     and a truncated branch list reads exactly like a missing branch.
+
+    This deliberately does not use ``_gh``: that convenience wrapper erases a
+    failed request into an empty string.  Empty-after-success means no branches;
+    empty-after-timeout/transport failure means no answer.
     """
-    out = _gh(f"repos/vibeic/{repo}/branches?per_page=100",
-              jq='.[] | .name + " " + .commit.sha', paginate=True)
-    return [(ln.split()[0], ln.split()[1]) for ln in out.splitlines()
-            if len(ln.split()) == 2]
+    path = f"repos/vibeic/{repo}/branches?per_page=100"
+    cmd = ["gh", "api", "--paginate", path,
+           "--jq", '.[] | .name + " " + .commit.sha']
+    rc, out, err = _sh(cmd, timeout=180)
+    if rc != 0:
+        detail = (err or out or f"gh exited {rc}").strip()
+        return BranchLookup(
+            BRANCH_LOOKUP_UNKNOWN, (), rc,
+            f"branch API did not answer: {detail[:400]}",
+        )
+
+    rows: List[Tuple[str, str]] = []
+    malformed = []
+    for line in out.splitlines():
+        fields = line.split()
+        if (len(fields) != 2
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", fields[1])):
+            if line.strip():
+                malformed.append(line.strip())
+            continue
+        rows.append((fields[0], fields[1]))
+    if malformed:
+        return BranchLookup(
+            BRANCH_LOOKUP_UNKNOWN, (), 0,
+            "branch API returned malformed rows: " + "; ".join(malformed[:3]),
+        )
+    return BranchLookup(BRANCH_LOOKUP_OK, tuple(rows), 0)
+
+
+def _normalise_branch_lookup(value) -> BranchLookup:
+    """Accept old list-shaped test doubles while production stays structured."""
+    if isinstance(value, BranchLookup):
+        return value
+    if value is None:
+        return BranchLookup(
+            BRANCH_LOOKUP_UNKNOWN, (), 1,
+            "legacy branch lookup returned no measurement",
+        )
+    return BranchLookup(BRANCH_LOOKUP_OK, tuple(value), 0)
 
 
 def _preference(b: str) -> tuple:
@@ -228,7 +284,13 @@ def build_branch(repo: str, pin: str,
 
     So: order candidates by convention, then ASK which of them contains the pin.
     """
-    pool = branches if branches is not None else _branches(repo)
+    if branches is not None:
+        pool = branches
+    else:
+        lookup = _normalise_branch_lookup(_branches(repo))
+        if lookup.outcome == BRANCH_LOOKUP_UNKNOWN:
+            return None
+        pool = list(lookup.branches)
     if not pool:
         return None
     names = [n for n, _ in pool]
@@ -236,10 +298,24 @@ def build_branch(repo: str, pin: str,
 
 
 def check_one(repo: str, pin: str) -> dict:
-    pool = _branches(repo)
+    lookup = _normalise_branch_lookup(_branches(repo))
+    if lookup.outcome == BRANCH_LOOKUP_UNKNOWN:
+        return {
+            "repo": repo,
+            "pin": pin[:9],
+            "verdict": "BRANCH_LOOKUP_UNKNOWN",
+            "detail": (f"could not list the fork branches: {lookup.detail}; "
+                       "this is an absent measurement, not NO_BRANCHES"),
+            "measurement": {
+                "kind": "github_branch_list",
+                "outcome": BRANCH_LOOKUP_UNKNOWN,
+                "exit_code": lookup.rc,
+            },
+        }
+    pool = list(lookup.branches)
     if not pool:
         return {"repo": repo, "pin": pin[:9], "verdict": "NO_BRANCHES",
-                "detail": "the fork reports no branches at all"}
+                "detail": "the branch API completed and reported no branches"}
     names = [n for n, _ in pool]
     cands = sorted(names, key=_preference)
 
@@ -337,6 +413,34 @@ def declared_upstream(repo: str,
     return None
 
 
+def _definitely_missing_branch(rc: int, err: str) -> bool:
+    """Whether GitHub authoritatively said that this branch does not exist.
+
+    A non-zero process status is not that answer.  In particular, ``gh`` uses
+    the same non-zero status for an HTTP 404 and for a DNS failure, a transport
+    error, or our short request deadline expiring.  Only the endpoint's explicit
+    HTTP 404 is negative evidence; everything else is an absent measurement.
+    """
+    message = err or ""
+    return (rc != 0
+            and "branch not found" in message.lower()
+            and bool(re.search(r"\bHTTP\s+404\b", message, re.I)))
+
+
+def _definitely_missing_commit(rc: int, err: str) -> bool:
+    """Whether GitHub explicitly said the upstream has never seen the SHA.
+
+    The commit endpoint reports this case as ``No commit found for SHA`` (most
+    commonly HTTP 422).  Do not generalise all 4xx responses, much less every
+    non-zero exit, into absence: validation, permission, rate-limit and network
+    failures answer no ownership question.
+    """
+    message = err or ""
+    return (rc != 0
+            and "no commit found for sha" in message.lower()
+            and bool(re.search(r"\bHTTP\s+(?:404|422)\b", message, re.I)))
+
+
 def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     """Does this branch carry any commit of ours, or is it an upstream mirror?
 
@@ -365,8 +469,14 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     is to leave a pin alone and say so. It must stay reachable, but it must not
     be reached by the branches this whole system exists to ship.
     """
-    meta = _sh(["gh", "api", f"repos/vibeic/{repo}",
-                "--jq", ".parent.full_name // empty"], timeout=120)[1].strip()
+    meta_rc, meta_out, _meta_err = _sh(
+        ["gh", "api", f"repos/vibeic/{repo}",
+         "--jq", ".parent.full_name // empty"], timeout=120)
+    meta = meta_out.strip() if meta_rc == 0 else ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", meta):
+        # gh may write an HTTP error document to stdout. It is not a repository
+        # slug merely because that JSON happens to contain a URL with a slash.
+        meta = ""
     if not meta:
         # GitHub's `.parent` is empty for any repo in the org that was not
         # created BY forking — a repo pushed up directly, or one deleted and
@@ -394,11 +504,11 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     # The compare failed. Distinguish "upstream has no such branch" — which
     # answers the question rather than leaving it open — from a transport or
     # permission failure, which does not.
-    up_rc, _, _ = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
-                       "--jq", ".name"], timeout=120)
+    up_rc, _, up_err = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
+                            "--jq", ".name"], timeout=120)
     ours_rc, _, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/branches/{branch}",
                          "--jq", ".name"], timeout=120)
-    if ours_rc == 0 and up_rc != 0:
+    if ours_rc == 0 and _definitely_missing_branch(up_rc, up_err):
         return True
 
     # LAST, and the one that answers for a repo with no fork RELATIONSHIP: is
@@ -417,12 +527,17 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     tip_rc, tip, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/commits/{branch}",
                           "--jq", ".sha"], timeout=120)
     if tip_rc == 0 and tip.strip():
-        up_has, _, _ = _sh(["gh", "api", f"repos/{meta}/commits/{tip.strip()}",
-                            "--jq", ".sha"], timeout=120)
+        up_rc, up_tip, up_err = _sh(
+            ["gh", "api", f"repos/{meta}/commits/{tip.strip()}",
+             "--jq", ".sha"], timeout=120)
         # A tip upstream HAS is a mirror tip: advancing the pin to it adopts an
         # upstream version, which is a decision, not a stale pin. That is the
         # #23/#25 finding and it must keep answering False.
-        return up_has != 0
+        if up_rc == 0 and up_tip.strip():
+            return False
+        if _definitely_missing_commit(up_rc, up_err):
+            return True
+        return None
     return None
 
 
@@ -478,22 +593,30 @@ def main(argv=None) -> int:
 
     results = [check_one(r, s) for r, s in sorted(pins.items())]
     # UPSTREAM_AVAILABLE is reported, never failed on: it is a decision waiting
-    # for someone, not a pin that fell behind our own work. Everything else that
-    # is not CURRENT still fails, including the states that mean "not checked".
+    # for someone, not a pin that fell behind our own work. Missing measurements
+    # get rc=2 rather than being mislabeled as stale or absent; both non-zero
+    # paths block the tick, but their remediation is materially different.
     available = [r for r in results if r["verdict"] == "UPSTREAM_AVAILABLE"]
+    unknown_verdicts = {
+        "BRANCH_LOOKUP_UNKNOWN", "COMPARE_FAILED", "STALE_UNDECIDED",
+    }
+    unknown = [r for r in results if r["verdict"] in unknown_verdicts]
+    current = [r for r in results if r["verdict"] == "CURRENT"]
     bad = [r for r in results
-           if r["verdict"] not in ("CURRENT", "UPSTREAM_AVAILABLE")]
+           if r["verdict"] not in ({"CURRENT", "UPSTREAM_AVAILABLE"}
+                                   | unknown_verdicts)]
     # …and only OUR commits count as "not shipping". Counting an upstream
     # version we chose not to adopt inflated this to 288 and made the number
     # mean nothing.
     behind_total = sum(r.get("behind", 0) for r in results
-                       if r["verdict"] != "UPSTREAM_AVAILABLE")
+                       if r["verdict"] == "STALE")
     upstream_total = sum(r.get("behind", 0) for r in available)
 
     print_basis(basis)
     print(f"check_pins_current: {len(results)} pin(s), "
-          f"{len(results) - len(bad) - len(available)} at their branch tip, "
-          f"{len(bad)} not, {len(available)} holding an upstream version "
+          f"{len(current)} at their branch tip, "
+          f"{len(bad)} not, {len(unknown)} unmeasured, "
+          f"{len(available)} holding an upstream version "
           f"({upstream_total} upstream commit(s) available), "
           f"{behind_total} of OUR merged commit(s) not shipping")
     for r in sorted(results, key=lambda x: (x["verdict"] == "CURRENT", x["repo"])):
@@ -503,7 +626,8 @@ def main(argv=None) -> int:
         Path(a.json).parent.mkdir(parents=True, exist_ok=True)
         Path(a.json).write_text(json.dumps(
             {"program": "check_pins_current", "pins": results,
-             "commits_not_shipping": behind_total}, indent=2) + "\n",
+             "commits_not_shipping": behind_total,
+             "unmeasured": unknown}, indent=2) + "\n",
             encoding="utf-8")
 
     if bad:
@@ -511,6 +635,11 @@ def main(argv=None) -> int:
               f"fork commit that no pin points at was reviewed for nothing.",
               file=sys.stderr)
         return RC_STALE
+    if unknown:
+        print(f"[NOT CHECKED] {len(unknown)} pin(s) could not be measured; no "
+              "release may infer branch absence or currency from this run.",
+              file=sys.stderr)
+        return RC_NOTHING
     if available:
         # Reported, not failed on — but not silently either. An upstream version
         # being available is not a neutral fact forever: Xyce reached 182

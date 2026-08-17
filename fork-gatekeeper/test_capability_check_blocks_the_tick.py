@@ -146,6 +146,26 @@ def test_the_tick_still_parses():
     assert subprocess.run(["bash", "-n", str(TICK)]).returncode == 0
 
 
+def test_old_or_released_tag_audit_is_not_mislabeled_candidate_authority():
+    """run_tick can only name REACH_IMG from RELEASED.json. Before a release
+    that is yesterday's image; after it, it is an audit of what was published.
+    The exact candidate authority therefore has to live in daily_release, where
+    the candidate tag exists, and its smoke must precede docker push."""
+    tick = TICK.read_text(encoding="utf-8")
+    release_call = tick.index('python3 "${DIR}/daily_release.py"')
+    released_audit = tick.index('CAP_OUT="${LOG_DIR}/capability-lost.txt"')
+    assert release_call < released_audit, (
+        "check_no_capability_lost was moved before candidate construction and "
+        "is being mistaken for evidence about an image that does not exist yet")
+
+    release = (HERE / "daily_release.py").read_text(encoding="utf-8")
+    smoke = release.index("bad = smoke_image(tag)")
+    candidate_push = release.index('["docker", "push", tag]', smoke)
+    assert smoke < candidate_push, (
+        "daily_release can push the exact candidate before its capability "
+        "smoke authorizes it")
+
+
 # --- the program itself must be able to fail, or the wiring above is decorative
 
 def _cap():
@@ -210,3 +230,20 @@ def test_the_stale_json_is_overwritten_when_the_probe_fails(tmp_path):
     import json as _j
     got = _j.loads(j.read_text())
     assert got["lost"] is None and got.get("error"), got
+
+
+def test_a_failed_base_listing_also_replaces_stale_green_json(tmp_path):
+    """The first Docker arm is evidence too; failing there cannot keep yesterday."""
+    C = _cap()
+    j = tmp_path / "cap.json"
+    j.write_text('{"program": "check_no_capability_lost", "lost": []}\n')
+    C.base_image = lambda df: "base:1"
+    C.replaced_prefixes = lambda df: ["yosys"]
+    C.command_names = lambda img, pre: []
+    rc = C.main(["img:1", "--dockerfile", str(HERE.parent / "Dockerfile"),
+                 "--json", str(j)])
+    import json as _j
+    got = _j.loads(j.read_text())
+    assert rc == C.RC_NOTHING
+    assert got["status"] == "not_checked" and got["lost"] is None
+    assert "list commands" in got["error"]

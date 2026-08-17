@@ -78,14 +78,17 @@ Exit: 0 every entry point is reachable (or waived by name)
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import progress_watchdog as watchdog  # noqa: E402
+
 DEFAULT_FORKS_DIR = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 
 #: Files that constitute a fork's build / CI / test-runner surface.
@@ -134,20 +137,58 @@ TESTISH_PATH = re.compile(r"(^|/)(tests?|proofs?|vibeic[_-]proofs?|ivtest|regres
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "COULD-NOT-CHECK"
 
 
-def _git(clone: Path, *args, timeout=180):
-    try:
-        r = subprocess.run(["git", "-C", str(clone), *args],
-                           capture_output=True, text=True, timeout=timeout)
-        return r.returncode, r.stdout
-    except (OSError, subprocess.SubprocessError):
-        return 1, ""
+GIT_STALL_GRACE_S = float(os.environ.get("GK_STATIC_GIT_STALL_GRACE", "60"))
+GIT_PROGRESS_POLL_S = float(os.environ.get("GK_STATIC_GIT_PROGRESS_POLL", "1"))
+
+
+@dataclass(frozen=True)
+class GitMeasurementUnknown(RuntimeError):
+    """A Git question produced no answer; absence must not be inferred from it."""
+
+    command: tuple[str, ...]
+    rc: int
+    outcome: str
+    detail: str
+
+    def as_meta(self) -> dict:
+        return {
+            "reason": (f"git {' '.join(self.command)} did not answer; "
+                       "test reachability is unknown, not empty"),
+            "measurement": {
+                "kind": "git_command",
+                "command": list(self.command),
+                "outcome": self.outcome,
+                "exit_code": self.rc,
+                "detail": self.detail,
+                "total_runtime_ceiling_seconds": None,
+            },
+        }
+
+
+def _git(clone: Path, *args) -> str:
+    """Run a local graph query under a progress lease, never a wall-time verdict."""
+    command = tuple(str(a) for a in args)
+    result = watchdog.run_supervised(
+        ["git", "-C", str(clone), *command],
+        stall_grace_s=GIT_STALL_GRACE_S,
+        poll_s=GIT_PROGRESS_POLL_S,
+        output_progress=True,
+        process_tree_cpu_progress=True,
+    )
+    if result.outcome != "natural" or result.rc != 0:
+        detail = (result.err or result.out or result.outcome).strip()
+        raise GitMeasurementUnknown(
+            command=command,
+            rc=result.rc,
+            outcome=result.outcome,
+            detail=detail[:500],
+        )
+    return result.out
 
 
 def upstream_ref(clone: Path) -> str | None:
     """The fork's upstream mainline, resolved from the clone rather than guessed."""
-    rc, out = _git(clone, "branch", "-r", "--list", "upstream/*")
-    if rc != 0:
-        return None
+    out = _git(clone, "branch", "-r", "--list", "upstream/*")
     refs = [l.strip() for l in out.splitlines() if l.strip() and "->" not in l]
     for want in ("upstream/master", "upstream/main"):
         if want in refs:
@@ -156,9 +197,7 @@ def upstream_ref(clone: Path) -> str | None:
 
 
 def our_entry_points(clone: Path, up: str) -> list[str]:
-    rc, out = _git(clone, "diff", "--name-only", "--diff-filter=A", f"{up}...HEAD")
-    if rc != 0:
-        return []
+    out = _git(clone, "diff", "--name-only", "--diff-filter=A", f"{up}...HEAD")
     keep = []
     for f in out.splitlines():
         f = f.strip()
@@ -200,9 +239,7 @@ def declared_checks(tool: str, forks_json: Path) -> str:
 
 def surface(clone: Path) -> tuple[str, int]:
     """The concatenated text of every build/CI/test-runner file, and how many."""
-    rc, out = _git(clone, "ls-files")
-    if rc != 0:
-        return "", 0
+    out = _git(clone, "ls-files")
     text, n = [], 0
     for rel in out.splitlines():
         if not RUNNER.search(os.path.basename(rel)) and not RUNNER.search(rel):
@@ -245,13 +282,23 @@ def generated_dir(clone: Path, parent: str, blob: str) -> bool:
 
 
 def unreachable(clone: Path, declared: str = "") -> tuple[str, list[str], dict]:
-    up = upstream_ref(clone)
-    if up is None:
-        return UNKNOWN, [], {"reason": "no upstream/* ref in the clone"}
-    eps = our_entry_points(clone, up)
-    if not eps:
-        return PASS, [], {"upstream": up, "entry_points": 0, "surface": 0}
-    blob, nfiles = surface(clone)
+    up = None
+    try:
+        up = upstream_ref(clone)
+        if up is None:
+            return UNKNOWN, [], {"reason": "no upstream/* ref in the clone"}
+        eps = our_entry_points(clone, up)
+        if not eps:
+            # This is a PASS only because the diff command completed naturally
+            # and authoritatively returned an empty set. A failed/stalled diff
+            # raises above and can never reach this branch.
+            return PASS, [], {"upstream": up, "entry_points": 0, "surface": 0}
+        blob, nfiles = surface(clone)
+    except GitMeasurementUnknown as exc:
+        meta = exc.as_meta()
+        if up is not None:
+            meta["upstream"] = up
+        return UNKNOWN, [], meta
     blob += "\n" + declared          # a declared check is a path, and a daily one
     if nfiles == 0 and not declared.strip():
         return UNKNOWN, [], {"upstream": up, "entry_points": len(eps),
@@ -309,7 +356,11 @@ def main(argv=None) -> int:
             clone, declared_checks(tool, Path(args.forks_json)))
         waived = set(waivers.get(tool, {}).get("files", []))
         live = [o for o in orphans if o not in waived]
-        gone = sorted(waived - set(orphans))
+        # An absent measurement says nothing about whether an existing waiver
+        # expired. Calling every waiver stale when Git failed would turn one
+        # UNKNOWN into a fabricated finding.
+        gone = ([] if state == UNKNOWN
+                else sorted(waived - set(orphans)))
         rows.append({"tool": tool, "state": state, "orphans": orphans,
                      "unwaived": live, "waiver_no_longer_applies": gone, **meta})
         if state == UNKNOWN:
@@ -359,7 +410,8 @@ def main(argv=None) -> int:
             Path(args.json).parent.mkdir(parents=True, exist_ok=True)
             Path(args.json).write_text(json.dumps(
                 {"forks": rows, "entry_points": n_ep, "unreachable": n_or,
-                 "unwaived": n_live}, indent=2), encoding="utf-8")
+                 "unwaived": n_live, "unknown": len(unknowns)}, indent=2),
+                encoding="utf-8")
         except OSError as exc:
             print(f"  (could not write --json: {exc})")
 

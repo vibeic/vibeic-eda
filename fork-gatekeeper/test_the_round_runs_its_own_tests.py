@@ -18,9 +18,21 @@ ROUND = HERE / "run_0530.sh"
 
 def test_the_0530_round_invokes_the_suite():
     src = ROUND.read_text(encoding="utf-8")
-    assert re.search(r"python3 -m pytest .*\$\{DIR\}", src), (
+    assert "semantic_pytest_gate.py" in src
+    assert re.search(r"-- python3 -m pytest .*\$\{DIR\}", src), (
         "the daily round does not run the fork-gatekeeper tests; a suite "
         "nothing invokes is a directory of files")
+
+
+def test_the_suite_has_no_total_runtime_verdict_and_retains_norecord():
+    src = ROUND.read_text(encoding="utf-8")
+    assert "--stall-grace" in src
+    assert "--timeout" not in src[src.index("semantic_pytest_gate.py"):
+                                  src.index("TESTS=$?")]
+    assert "semantic_pytest.json" in src
+    runner = (HERE / "semantic_pytest_gate.py").read_text(encoding="utf-8")
+    assert "semantic_only=True" in runner
+    assert '"total_runtime_ceiling_seconds": None' in runner
 
 
 def test_a_red_suite_blocks_the_publish_and_fails_the_round():

@@ -93,9 +93,10 @@ def _api(monkeypatch, responses):
     def fake_sh(cmd, timeout=180):
         path = cmd[2] if len(cmd) > 2 else ""
         calls.append(path)
-        for frag, (rc, out) in responses.items():
+        for frag, response in responses.items():
             if frag in path:
-                return rc, out, ""
+                rc, out, *error = response
+                return rc, out, error[0] if error else ""
         return 1, "", "unscripted"
 
     monkeypatch.setattr(C, "_sh", fake_sh)
@@ -121,7 +122,8 @@ def test_a_tip_upstream_has_never_seen_is_ours(monkeypatch):
         "repos/AUCOHL/Fault/branches/main": (0, "main"),
         "repos/vibeic/Fault/branches/main": (0, "main"),
         "repos/vibeic/Fault/commits/main": (0, "10613da\n"),
-        "repos/AUCOHL/Fault/commits/10613da": (1, ""),
+        "repos/AUCOHL/Fault/commits/10613da": (
+            1, "", "gh: No commit found for SHA: 10613da (HTTP 422)"),
     })
     monkeypatch.setattr(C, "declared_upstream", lambda *a, **k: "AUCOHL/Fault")
     assert C.branch_is_ours("Fault", "main") is True
@@ -176,8 +178,39 @@ def test_a_branch_absent_upstream_is_still_conclusively_ours(monkeypatch):
     calls = _api(monkeypatch, {
         "repos/vibeic/klayout?": (0, "KLayout/klayout\n"),
         "repos/vibeic/klayout/compare": (1, ""),
-        "repos/KLayout/klayout/branches/vibeic-signoff": (1, ""),
+        "repos/KLayout/klayout/branches/vibeic-signoff": (
+            1, "", "gh: Branch not found (HTTP 404)"),
         "repos/vibeic/klayout/branches/vibeic-signoff": (0, "vibeic-signoff"),
     })
     assert C.branch_is_ours("klayout", "vibeic-signoff") is True
     assert not any("/commits/" in c for c in calls)
+
+
+def test_an_upstream_branch_endpoint_timeout_is_not_absence(monkeypatch):
+    """A request deadline is no evidence that upstream lacks the branch."""
+    _api(monkeypatch, {
+        "repos/vibeic/klayout?": (0, "KLayout/klayout\n"),
+        "repos/vibeic/klayout/compare": (1, ""),
+        "repos/KLayout/klayout/branches/vibeic-signoff": (
+            1, "", "OPERATIONAL_TIMEOUT after 120s"),
+        "repos/vibeic/klayout/branches/vibeic-signoff": (
+            0, "vibeic-signoff"),
+        "repos/vibeic/klayout/commits/vibeic-signoff": (
+            1, "", "OPERATIONAL_TIMEOUT after 120s"),
+    })
+    assert C.branch_is_ours("klayout", "vibeic-signoff") is None
+
+
+def test_an_upstream_commit_lookup_timeout_is_not_missing(monkeypatch):
+    """Only GitHub's explicit missing-SHA answer proves ownership."""
+    _api(monkeypatch, {
+        "repos/vibeic/Fault?": (0, "\n"),
+        "repos/vibeic/Fault/compare": (1, ""),
+        "repos/AUCOHL/Fault/branches/main": (0, "main"),
+        "repos/vibeic/Fault/branches/main": (0, "main"),
+        "repos/vibeic/Fault/commits/main": (0, "10613da\n"),
+        "repos/AUCOHL/Fault/commits/10613da": (
+            1, "", "OPERATIONAL_TIMEOUT after 120s"),
+    })
+    monkeypatch.setattr(C, "declared_upstream", lambda *a, **k: "AUCOHL/Fault")
+    assert C.branch_is_ours("Fault", "main") is None

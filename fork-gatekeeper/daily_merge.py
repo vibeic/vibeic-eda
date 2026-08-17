@@ -70,7 +70,7 @@ entitled to publish.
 
 Three things that are deliberately NOT passes:
   * a declared check whose `path` is absent from the merged tree,
-  * a check that could not be executed (timeout, OSError),
+  * a check that could not be executed, or stopped making forward progress,
   * an entry that is malformed.
 Each is a merge this program could not verify, and an unverified merge is not a
 verified one. They fail exactly like a check that ran and found something.
@@ -92,18 +92,42 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import progress_watchdog as watchdog
+
 RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 
 #: Where the fork checkouts live. Each is a SHARED tree that other sessions and
 #: this tick's siblings use, so every operation here runs in a worktree of it and
 #: never in the tree itself.
 FORKS_ROOT = Path(os.environ.get("VIBEIC_FORKS_ROOT", "/home/reyerchu/vibe-ic-forks"))
+GIT_STALL_GRACE = float(os.environ.get("GK_GIT_STALL_GRACE", "1800"))
+GIT_PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "5"))
 
 
-def _sh(args: List[str], cwd: Optional[Path] = None, timeout: int = 900):
+def _sh(args: List[str], cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+        *, progress: bool = False, stall_grace: Optional[float] = None):
+    if progress:
+        run = watchdog.run_supervised(
+            args, cwd=cwd,
+            stall_grace_s=(GIT_STALL_GRACE if stall_grace is None else stall_grace),
+            poll_s=GIT_PROGRESS_POLL_S,
+            output_progress=True,
+            process_tree_cpu_progress=True,
+        )
+        return run.rc, run.out, run.err
     try:
-        p = subprocess.run(args, cwd=str(cwd) if cwd else None,
-                           capture_output=True, text=True, timeout=timeout)
+        kwargs = {
+            "cwd": str(cwd) if cwd else None,
+            "capture_output": True,
+            "text": True,
+        }
+        # Only callers that are explicitly single-request API probes set this.
+        # Local metadata commands have no elapsed-time correctness verdict;
+        # long clone/fetch/worktree/merge/push paths use the progress branch.
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        p = subprocess.run(args, **kwargs)
         return p.returncode, p.stdout, p.stderr
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
@@ -169,9 +193,14 @@ def _declared_upstream(repo: str) -> str:
     return _declared_upstreams().get(repo, "")
 
 
-#: How long one post-merge check may take before it is reported as unrunnable.
-#: A check that hangs is not a check that passed.
-POST_MERGE_CHECK_TIMEOUT = int(os.environ.get("GK_POST_MERGE_TIMEOUT", "1800"))
+#: How long a post-merge check may make ZERO observable progress.  This is not
+#: a runtime budget: output or process-tree CPU advancement renews the lease,
+#: and a progressing check may run indefinitely.  The name deliberately does
+#: not retain the old ``*_TIMEOUT`` lie; elapsed time is not a merge verdict.
+POST_MERGE_STALL_GRACE = float(
+    os.environ.get("GK_POST_MERGE_STALL_GRACE", "1800")
+)
+POST_MERGE_POLL_S = float(os.environ.get("GK_POST_MERGE_POLL_S", "5"))
 
 
 def _forks_json(path: Optional[Path] = None) -> dict:
@@ -197,6 +226,63 @@ def post_merge_checks(repo: str, forks_json: Optional[Path] = None) -> List[dict
     return []
 
 
+def _is_pytest_command(cmd: List[str]) -> bool:
+    """Whether a declaration invokes pytest and needs semantic supervision."""
+    if not cmd:
+        return False
+    executable = Path(cmd[0]).name
+    return (executable.startswith("pytest")
+            or any(cmd[i:i + 2] == ["-m", "pytest"]
+                   for i in range(1, len(cmd) - 1)))
+
+
+def _semantic_pytest_run(cmd: List[str], wt: Path) -> tuple[int, str, str, dict]:
+    """Run a pytest declaration through the same semantic lease as 05:30.
+
+    The semantic driver contains its own progress supervisor. This parent wait
+    intentionally has no timeout: wrapping it in another elapsed-time or
+    output-activity watchdog would let the weaker outer signal overrule the
+    validated pytest lifecycle channel.
+    """
+    with tempfile.TemporaryDirectory(prefix="vibeic-eda-postmerge-pytest-") as td:
+        root = Path(td)
+        record_path = root / "record.json"
+        argv = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "semantic_pytest_gate.py"),
+            "--junit", str(root / "junit.xml"),
+            "--json", str(record_path),
+            "--cwd", str(wt),
+            "--stall-grace", str(POST_MERGE_STALL_GRACE),
+            "--poll", str(POST_MERGE_POLL_S),
+            "--", *cmd,
+        ]
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(wt), capture_output=True, text=True,
+            )
+        except OSError as exc:
+            return 127, "", f"COMMAND_NOT_STARTED: {type(exc).__name__}: {exc}", {
+                "outcome": "launch_error",
+                "elapsed_seconds": 0.0,
+                "mechanism": "validated_semantic_progress_lease",
+            }
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            record = {
+                "outcome": "protocol_incomplete",
+                "elapsed_seconds": 0.0,
+                "mechanism": "validated_semantic_progress_lease",
+                "reason": "semantic pytest driver wrote no readable record",
+            }
+        outcome = str(record.get("outcome") or "protocol_incomplete")
+        if proc.returncode == 2 and outcome == "natural":
+            outcome = "protocol_incomplete"
+        record["outcome"] = outcome
+        return proc.returncode, proc.stdout, proc.stderr, record
+
+
 def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
     """Run each declared check in the merged worktree. Returns one row per check.
 
@@ -206,8 +292,9 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
 
       * the script is not in the tree (upstream moved or deleted it) — that is a
         check nobody ran, and "MISSING is not a pass" is this repo's oldest rule;
-      * the process could not be started or timed out — measuring nothing proves
-        nothing, the same reasoning `capability_gate` uses for its rc=2;
+      * the process could not be started or made no forward progress — measuring
+        nothing proves nothing, the same reasoning `capability_gate` uses for
+        its rc=2;
       * the declaration is malformed — a typo in FORKS.json must not read as
         "this fork declares no checks", because that is silently identical to
         deleting the gate.
@@ -220,6 +307,7 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd) \
                 or not isinstance(rel, str) or not rel:
             rows.append({"name": name, "ok": False, "rc": -1,
+                         "outcome": "malformed", "elapsed_seconds": 0.0,
                          "detail": "MALFORMED declaration in FORKS.json — needs a "
                                    "string `path` and a non-empty list-of-strings "
                                    "`cmd`; a check that cannot be read is not a "
@@ -228,13 +316,34 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         target = wt / rel
         if not target.exists():
             rows.append({"name": name, "ok": False, "rc": -1,
+                         "outcome": "missing", "elapsed_seconds": 0.0,
                          "detail": f"MISSING: {rel} is not in the merged tree — "
                                    f"nothing was checked, which is not a clean result"})
             continue
-        rc, out, err = _sh(cmd, wt, timeout=POST_MERGE_CHECK_TIMEOUT)
-        # 127 is this module's own "could not run it at all" (see `_sh`), and it
-        # is not distinguishable from a program that genuinely exits 127. Both
-        # block, so the ambiguity costs nothing; the detail says which we saw.
+        if _is_pytest_command(cmd):
+            rc, out, err, supervision = _semantic_pytest_run(cmd, wt)
+            outcome = str(supervision.get("outcome") or "protocol_incomplete")
+            elapsed = float(supervision.get("elapsed_seconds") or 0.0)
+            progress_basis = "validated_pytest_lifecycle"
+        else:
+            run = watchdog.run_supervised(
+                cmd, cwd=wt, stall_grace_s=POST_MERGE_STALL_GRACE,
+                poll_s=POST_MERGE_POLL_S, process_tree_cpu_progress=True,
+            )
+            rc, out, err = run.rc, run.out, run.err
+            outcome = run.outcome
+            elapsed = run.elapsed_s
+            progress_basis = "output_bytes_or_process_tree_cpu"
+            supervision = {
+                "mechanism": "activity_progress_lease",
+                "outcome": outcome,
+                "elapsed_seconds": round(elapsed, 3),
+                "stall_grace_seconds": POST_MERGE_STALL_GRACE,
+                "total_runtime_ceiling_seconds": None,
+            }
+        # launch_error and stalled are evidence states of their own.  Neither is
+        # collapsed into the command's natural non-zero verdict, and neither can
+        # become clean merely because a partial stdout fragment looked healthy.
         #
         # `advisory` — a check that does NOT read the merged tree cannot tell us
         # anything about the merge, so it is not entitled to block the publish.
@@ -255,6 +364,10 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         advisory = bool(chk.get("advisory"))
         rows.append({"name": name, "ok": rc == 0 or advisory, "rc": rc,
                      "advisory": advisory,
+                     "outcome": outcome,
+                     "elapsed_seconds": round(elapsed, 3),
+                     "progress_basis": progress_basis,
+                     "supervision": supervision,
                      "detail": ("clean" if rc == 0 else
                                 ("ADVISORY (does not read the merged tree; "
                                  "reported, not blocking) " if advisory else "")
@@ -350,7 +463,43 @@ def build_branches(eda_root: Path) -> Dict[str, str]:
     return out
 
 
-def branch_for(repo: str, pin: str) -> Optional[str]:
+BRANCH_FOUND = "found"
+BRANCH_ABSENT = "absent"
+BRANCH_UNKNOWN = "unknown"
+
+
+class BranchLookup:
+    """One authoritative branch-at-pin observation.
+
+    ``branch=None`` used to collapse two opposite facts: GitHub successfully
+    listed every branch and found no match, or GitHub never answered.  A merge
+    gate cannot turn the latter into the former, so callers consume ``status``
+    and retain it in the result row.
+    """
+
+    __slots__ = ("status", "branch", "detail", "rc")
+
+    def __init__(self, status: str, branch: Optional[str] = None,
+                 detail: str = "", rc: Optional[int] = None):
+        self.status = status
+        self.branch = branch
+        self.detail = detail
+        self.rc = rc
+
+    def __repr__(self) -> str:
+        return (f"BranchLookup(status={self.status!r}, branch={self.branch!r}, "
+                f"detail={self.detail!r}, rc={self.rc!r})")
+
+
+def _branch_lookup_error(repo: str, rc: int, out: str, err: str) -> str:
+    text = " ".join((err or out).split())
+    if len(text) > 220:
+        text = text[:108] + " ... " + text[-108:]
+    return (f"GitHub branch lookup for vibeic/{repo} returned rc={rc}"
+            + (f": {text}" if text else " with no diagnostic"))
+
+
+def branch_at_pin(repo: str, pin: str) -> BranchLookup:
     """The branch whose tip IS the pin — asked of the fork, not inferred.
 
     An earlier version read `branch <name>` out of the pin's trailing comment.
@@ -367,24 +516,58 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
     three PDK mirrors, and the data mirrors the build clones by URL) still has
     an upstream worth merging from; it just has no commit of ours to locate.
     Returning None for these is what kept them out of the survey entirely.
+
+    This returns a three-way observation.  ``absent`` is emitted only after a
+    complete, parseable API response.  A timeout, transport error, partial
+    pagination, or malformed response is ``unknown`` and must block landing;
+    it is never evidence that the branch does not exist.
     """
     if not pin:
-        rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}",
-                          "--jq", ".default_branch"], timeout=120)
-        return out.strip() if rc == 0 and out.strip() else None
+        rc, out, err = _sh(["gh", "api", f"repos/vibeic/{repo}",
+                            "--jq", ".default_branch"], timeout=120)
+        if rc != 0:
+            return BranchLookup(
+                BRANCH_UNKNOWN, detail=_branch_lookup_error(repo, rc, out, err),
+                rc=rc,
+            )
+        names = [line.strip() for line in out.splitlines() if line.strip()]
+        if len(names) != 1 or any(ch.isspace() for ch in names[0]):
+            return BranchLookup(
+                BRANCH_UNKNOWN,
+                detail=("GitHub default-branch lookup returned no single "
+                        "parseable branch name"),
+                rc=rc,
+            )
+        return BranchLookup(BRANCH_FOUND, branch=names[0],
+                            detail="GitHub confirmed the default branch", rc=rc)
     # --paginate + per_page: the unpaginated endpoint returns the FIRST 30
     # branches. Measured: that made four forks report NO_BRANCH_AT_PIN whose pin
     # was in fact the exact tip of their build branch — a truncated list that
     # reads as a missing branch, the same shape as vibeic-eda#15's fork count.
-    rc, out, _ = _sh(["gh", "api", "--paginate",
-                      f"repos/vibeic/{repo}/branches?per_page=100",
-                      "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
+    rc, out, err = _sh(["gh", "api", "--paginate",
+                        f"repos/vibeic/{repo}/branches?per_page=100",
+                        "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
     if rc != 0:
-        return None
-    hits = [ln.split()[0] for ln in out.splitlines()
-            if len(ln.split()) == 2 and ln.split()[1] == pin]
+        return BranchLookup(
+            BRANCH_UNKNOWN, detail=_branch_lookup_error(repo, rc, out, err), rc=rc,
+        )
+
+    rows = [ln.split() for ln in out.splitlines() if ln.strip()]
+    if any(len(row) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40}", row[1])
+           for row in rows):
+        return BranchLookup(
+            BRANCH_UNKNOWN,
+            detail="GitHub branch listing completed but its output was malformed",
+            rc=rc,
+        )
+    hits = [row[0] for row in rows if row[1].lower() == pin.lower()]
     if not hits:
-        return None
+        return BranchLookup(
+            BRANCH_ABSENT,
+            detail=(f"GitHub authoritatively listed all fork branches; pin "
+                    f"{pin[:9]} is not the tip of any branch"),
+            rc=rc,
+        )
     # SEVERAL branches can sit at one commit — a merge branch pushed today, a
     # temporary fix branch, and the build branch all at the same tip. Picking the
     # first is picking by luck of API ordering, and it picked
@@ -401,7 +584,20 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
                 # unaffected, but merging into it would have split the fork.
                 not re.search(r"int(egration)?$", b, re.I),
                 len(b))
-    return sorted(hits, key=durable)[0]
+    branch = sorted(hits, key=durable)[0]
+    return BranchLookup(
+        BRANCH_FOUND, branch=branch,
+        detail=f"GitHub confirmed {branch} at pin {pin[:9]}", rc=rc,
+    )
+
+
+def branch_for(repo: str, pin: str) -> Optional[str]:
+    """Compatibility view for callers that only need a confirmed branch.
+
+    The landing gate itself uses :func:`branch_at_pin`; this lossy view must
+    never be used to form an absent-versus-unknown verdict.
+    """
+    return branch_at_pin(repo, pin).branch
 
 
 def merge_one(repo: str, branch: str, dry: bool = False,
@@ -423,9 +619,10 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         src.parent.mkdir(parents=True, exist_ok=True)
         rc, _, err = _sh(["git", "clone", "--quiet",
                           f"https://github.com/vibeic/{repo}.git", str(src)],
-                         timeout=1800)
+                         progress=True)
         if rc != 0:
-            res.update(state="CLONE_FAILED", detail=err.strip()[:200])
+            res.update(state=("CLONE_STALLED" if rc == watchdog.RC_STALLED
+                              else "CLONE_FAILED"), detail=err.strip()[:200])
             return res
         _sh(["git", "-C", str(src), "remote", "add", "upstream",
              _upstream_url(repo)])
@@ -476,11 +673,19 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         # never updated, and measuring against it reported 791 commits behind
         # upstream for a branch that had already been merged.
         _sh(["git", "-C", str(src), "remote", "set-branches", "origin", "*"])
-        _sh(["git", "-C", str(src), "fetch", "origin", "--prune"], timeout=1800)
-        rc, _, err = _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
-                         timeout=1800)
+        rc, _, err = _sh(
+            ["git", "-C", str(src), "fetch", "origin", "--prune"],
+            progress=True,
+        )
         if rc != 0:
-            res.update(state="FETCH_FAILED", detail=err.strip()[:200])
+            res.update(state=("FETCH_STALLED" if rc == watchdog.RC_STALLED
+                              else "FETCH_FAILED"), detail=err.strip()[:200])
+            return res
+        rc, _, err = _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
+                         progress=True)
+        if rc != 0:
+            res.update(state=("FETCH_STALLED" if rc == watchdog.RC_STALLED
+                              else "FETCH_FAILED"), detail=err.strip()[:200])
             return res
 
         # The upstream default branch, asked rather than assumed. Defaulting to
@@ -504,9 +709,10 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                     break
 
         rc, _, err = _sh(["git", "-C", str(src), "worktree", "add", "--detach",
-                          str(wt), f"origin/{branch}"], timeout=1800)
+                          str(wt), f"origin/{branch}"], progress=True)
         if rc != 0:
-            res.update(state="WORKTREE_FAILED", detail=err.strip()[:200])
+            res.update(state=("WORKTREE_STALLED" if rc == watchdog.RC_STALLED
+                              else "WORKTREE_FAILED"), detail=err.strip()[:200])
             return res
 
         # A SHALLOW clone cannot be counted and must not be merged. The shared
@@ -518,12 +724,12 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                              "--is-shallow-repository"])
         if sh_out.strip() == "true":
             rc, _, err = _sh(["git", "-C", str(src), "fetch", "--unshallow",
-                              "origin"], timeout=3600)
+                              "origin"], progress=True)
             if rc != 0:
                 _sh(["git", "-C", str(src), "fetch", "--depth=2147483647",
-                     "origin"], timeout=3600)
+                     "origin"], progress=True)
             _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
-                timeout=3600)
+                progress=True)
             rc, sh_out, _ = _sh(["git", "-C", str(src), "rev-parse",
                                  "--is-shallow-repository"])
             if sh_out.strip() == "true":
@@ -558,8 +764,16 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                           "-c", "user.email=fork-gatekeeper@vibeic.ai",
                           "merge", f"upstream/{up}", "-m",
                           f"Merge upstream/{up} into {branch} (daily, owner ruling 2026-07-29)"],
-                         wt, timeout=1800)
+                         wt, progress=True)
         if rc != 0:
+            if rc == watchdog.RC_STALLED:
+                _sh(["git", "merge", "--abort"], wt)
+                res.update(
+                    state="MERGE_STALLED",
+                    detail="merge made no output/process-tree CPU progress; "
+                           "no conflict verdict was formed and nothing was pushed",
+                )
+                return res
             _, cf, _ = _sh(["git", "diff", "--name-only", "--diff-filter=U"], wt)
             res["conflicts"] = [c for c in cf.splitlines() if c.strip()]
             # ABORT, do not guess. Merging everything is the owner's policy;
@@ -587,17 +801,35 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         res["checks"] = run_post_merge_checks(wt, checks)
         failed = [c for c in res["checks"] if not c["ok"]]
         if failed:
-            res.update(state="POST_MERGE_CHECK_FAILED",
+            outcomes = {c.get("outcome") for c in failed}
+            if any(c.get("outcome") == "natural" and c.get("rc") != 0
+                   for c in failed):
+                state = "POST_MERGE_CHECK_FAILED"
+            elif "stalled" in outcomes:
+                state = "POST_MERGE_CHECK_STALLED"
+            elif any(outcome != "natural" for outcome in outcomes):
+                state = "POST_MERGE_CHECK_UNMEASURABLE"
+            else:
+                state = "POST_MERGE_CHECK_FAILED"
+            finding = {
+                "POST_MERGE_CHECK_FAILED": "returned a complete red result",
+                "POST_MERGE_CHECK_STALLED": "made no validated forward progress",
+                "POST_MERGE_CHECK_UNMEASURABLE": "produced no complete record",
+            }[state]
+            res.update(state=state,
                        detail=f"{len(failed)} of {len(res['checks'])} post-merge "
-                              f"check(s) failed on the merged tree; NOT pushed, "
+                              f"check(s) {finding}; NOT pushed, "
                               f"fork left at its previous tip — "
                               + "; ".join(f"{c['name']} rc={c['rc']}: {c['detail']}"
                                           for c in failed)[:400])
             return res
 
-        rc, _, err = _sh(["git", "push", "origin", f"HEAD:{branch}"], wt, timeout=1800)
+        rc, _, err = _sh(
+            ["git", "push", "origin", f"HEAD:{branch}"], wt, progress=True,
+        )
         if rc != 0:
-            res.update(state="PUSH_FAILED", detail=err.strip()[:200])
+            res.update(state=("PUSH_STALLED" if rc == watchdog.RC_STALLED
+                              else "PUSH_FAILED"), detail=err.strip()[:200])
             return res
         res.update(state="MERGED",
                    detail=f"took {behind} upstream commit(s); {ours} of ours still ahead")
@@ -622,17 +854,29 @@ def main(argv=None) -> int:
     pins = build_branches(Path(a.eda_root))
     if a.only:
         pins = {k: v for k, v in pins.items() if k == a.only}
-    branches, unresolved = {}, []
+    branches, lookup_rows = {}, []
     for repo, pin in sorted(pins.items()):
-        b = branch_for(repo, pin)
-        (branches.__setitem__(repo, b) if b else unresolved.append((repo, pin)))
-    for repo, pin in unresolved:
-        # NAMED, not dropped. A fork whose pin matches no branch tip is a real
-        # finding — the pin names a commit no branch carries — and it must not
-        # look like a fork with nothing to merge.
-        print(f"  {repo:<14} NO_BRANCH_AT_PIN      pin {pin[:9]} is not the tip "
-              f"of any branch on the fork", file=sys.stderr)
-    if not branches:
+        lookup = branch_at_pin(repo, pin)
+        if lookup.status == BRANCH_FOUND and lookup.branch:
+            branches[repo] = lookup.branch
+            continue
+        state = ("NO_BRANCH_AT_PIN" if lookup.status == BRANCH_ABSENT
+                 else "BRANCH_LOOKUP_UNKNOWN")
+        lookup_rows.append({
+            "repo": repo,
+            "branch": "",
+            "state": state,
+            "detail": lookup.detail,
+            "conflicts": [],
+            "checks": [],
+            "took": 0,
+            "branch_lookup": {
+                "status": lookup.status,
+                "rc": lookup.rc,
+                "pin": pin,
+            },
+        })
+    if not branches and not lookup_rows:
         print("[NOT CHECKED] no fork/branch pairs found in the Dockerfiles — "
               "nothing was attempted, which is not success", file=sys.stderr)
         return RC_NOTHING
@@ -650,12 +894,15 @@ def main(argv=None) -> int:
               f"checks cannot fire, which is not the same as passing",
               file=sys.stderr)
 
-    results = [merge_one(r, b, a.dry_run) for r, b in sorted(branches.items())]
+    results = lookup_rows + [
+        merge_one(r, b, a.dry_run) for r, b in sorted(branches.items())
+    ]
     merged = [r for r in results if r["state"] == "MERGED"]
     human = [r for r in results if r["state"] not in ("MERGED", "ALREADY_CURRENT",
                                                       "WOULD_MERGE")]
 
-    blocked = [r for r in results if r["state"] == "POST_MERGE_CHECK_FAILED"]
+    blocked = [r for r in results
+               if r["state"].startswith("POST_MERGE_CHECK_")]
 
     print(f"daily_merge: {len(results)} fork(s), {len(merged)} merged, "
           f"{sum(r['took'] for r in merged)} upstream commit(s) taken, "
@@ -684,10 +931,11 @@ def main(argv=None) -> int:
         if blocked:
             # Named separately because the two failures need different actions.
             # A conflict is "git could not merge this"; a post-merge check is
-            # "git merged it and the result is wrong" — a clean merge that must
-            # not ship, which is the harder one to believe without being told.
+            # "git merged it but the declared evidence was red or incomplete"
+            # — a clean merge that must not ship, with the exact evidence state
+            # retained on each check row.
             print(f"[POST-MERGE CHECK] {', '.join(r['repo'] for r in blocked)} "
-                  f"merged with NO textual conflict and still failed a declared "
+                  f"merged with NO textual conflict and was blocked by a declared "
                   f"check on the merged tree (vibeic-eda#89)", file=sys.stderr)
         return RC_NEEDS_HUMAN
     return RC_OK

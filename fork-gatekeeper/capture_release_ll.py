@@ -55,6 +55,16 @@ def _parse_when(value: Optional[str]) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _strict_when(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc)
+
+
 def _target(release: dict) -> Optional[str]:
     for key in ("version_candidate", "version"):
         value = release.get(key)
@@ -63,16 +73,52 @@ def _target(release: dict) -> Optional[str]:
     return None
 
 
+def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
+    """Retain verdict and supervision outcome as two different facts.
+
+    In particular, ``exit_code=2`` means NORECORD; ``outcome=stalled`` says
+    why no complete record formed.  Folding those into one timeout/failure
+    label would lose the distinction the semantic pytest gate was added for.
+    """
+    if record is None:
+        return None
+    rc = record.get("exit_code")
+    if rc == 0:
+        status = "passed"
+    elif rc == 1:
+        status = "red"
+    elif rc == 2:
+        status = "norecord"
+    else:
+        status = "cannot_ask"
+    progress = record.get("progress")
+    return {
+        "status": status,
+        "exit_code": rc,
+        "outcome": record.get("outcome"),
+        "reason": record.get("reason"),
+        "mechanism": record.get("mechanism"),
+        "elapsed_seconds": record.get("elapsed_seconds"),
+        "stall_grace_seconds": record.get("stall_grace_seconds"),
+        "total_runtime_ceiling_seconds": record.get(
+            "total_runtime_ceiling_seconds"),
+        "progress": progress if isinstance(progress, dict) else None,
+    }
+
+
 def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
                 tick_exit: Optional[int] = None,
-                source_errors: Optional[list[str]] = None) -> dict:
+                source_errors: Optional[list[str]] = None,
+                semantic_pytest: Optional[dict] = None,
+                tick_state: str = "ran") -> dict:
     release = release or {}
     gap = gap or {}
     attempts = release.get("compose_attempts") or []
     failed_attempts = sum(1 for a in attempts
                           if isinstance(a, dict) and a.get("exit_code"))
     status = release.get("status") or "unmeasured"
-    failure = release.get("failure") if isinstance(release.get("failure"), dict) else {}
+    failure = (release.get("failure")
+               if isinstance(release.get("failure"), dict) else {})
     anchor_pr = (release.get("anchor_pr")
                  if isinstance(release.get("anchor_pr"), dict) else None)
     sync_lag = gap.get("q1_sync_lag_at_merge")
@@ -120,12 +166,34 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     else:
         outcome = "finished_with_gap"
 
-    category = failure.get("category") or ("anchor_pr" if anchor_blocked else None)
+    selftest = _selftest_summary(semantic_pytest)
+    category = (failure.get("category")
+                or ("anchor_pr" if anchor_blocked else None))
+    if tick_state != "ran":
+        if tick_state == "not_checked_stale_round_code":
+            category = "stale_round_code"
+        elif tick_state == "not_checked_round_code_norecord":
+            category = "round_code_norecord"
+        elif selftest and selftest["status"] == "red":
+            category = "pytest_red"
+        elif selftest and selftest["status"] == "norecord":
+            category = ("pytest_stalled" if selftest["outcome"] == "stalled"
+                        else "pytest_norecord")
+        else:
+            category = "release_tick_not_checked"
     control = None
-    if anchor_blocked:
-        control = "retain the published image; refuse to bypass the anchor repository push gate"
+    if tick_state != "ran":
+        control = (
+            "do not invoke the release tick without current code and a "
+            "complete green semantic pytest record")
+    elif anchor_blocked:
+        control = (
+            "retain the published image; refuse to bypass the anchor "
+            "repository push gate")
     elif failed_attempts:
-        control = "classified bounded retry; reuse pushed artefacts and BuildKit cache"
+        control = (
+            "classified bounded retry; reuse pushed artefacts and BuildKit "
+            "cache")
     elif attempts:
         control = "single compose attempt; no retry needed"
     elif failure:
@@ -146,7 +214,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "failure": failure or None,
             "anchor_pr": anchor_pr,
             "tick_exit": tick_exit,
+            "tick_state": tick_state,
         },
+        "selftest": selftest,
         "convergence": {
             "measured": measured,
             "round_measured": round_measured,
@@ -219,6 +289,9 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "outcome": record["lesson"]["outcome"],
         "compose_attempts": len(record["release"]["compose_attempts"]),
         "anchor_pr_ok": (record["release"]["anchor_pr"] or {}).get("ok"),
+        "tick_state": record["release"].get("tick_state"),
+        "selftest_status": (record.get("selftest") or {}).get("status"),
+        "selftest_outcome": (record.get("selftest") or {}).get("outcome"),
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
         "live_sync_lag": record["convergence"]["live_sync_lag"],
         "release_lag": record["convergence"]["release_lag"],
@@ -241,22 +314,71 @@ def main(argv=None) -> int:
     ap.add_argument("--state-dir", type=Path, default=gk_state.state_dir())
     ap.add_argument("--release-json", type=Path, required=True)
     ap.add_argument("--gap-json", type=Path, required=True)
+    ap.add_argument("--semantic-pytest-json", type=Path)
     ap.add_argument("--round-at", required=True)
     ap.add_argument("--tick-exit", type=int, default=None)
+    ap.add_argument("--tick-state", default="ran", choices=(
+        "ran", "not_checked_pytest_red", "not_checked_pytest_norecord",
+        "not_checked_stale_round_code", "not_checked_round_code_norecord",
+    ))
     a = ap.parse_args(argv)
 
-    release, release_err = _read(a.release_json)
+    semantic, semantic_err = ((None, None) if a.semantic_pytest_json is None
+                              else _read(a.semantic_pytest_json))
+    if semantic_err is None and semantic is not None:
+        if (semantic.get("mechanism") != "validated_semantic_progress_lease"
+                or semantic.get("exit_code") not in (0, 1, 2)):
+            semantic_err = (
+                f"{a.semantic_pytest_json.name} has no validated semantic "
+                "pytest verdict")
+            semantic = None
+
+    # A skipped tick has no release record.  Do not even read the live path:
+    # it necessarily still contains an earlier round and must not be allowed
+    # to impersonate this one.  `not_checked` is evidence, not an error in the
+    # LL capture itself.
+    if a.tick_state == "ran":
+        release, release_err = _read(a.release_json)
+    else:
+        release = {"program": "daily_release", "status": "not_checked",
+                   "not_checked_reason": a.tick_state}
+        release_err = None
     gap, gap_err = _read(a.gap_json)
     if release_err is None and (release.get("program") != "daily_release"
                                 or not release.get("status")):
         release_err = ("daily-release.json has no current-run status; it is "
                        "a pre-schema or unrelated record, not this round's verdict")
         release = None
+    if release_err is None and a.tick_state == "ran":
+        started = _strict_when(release.get("started_at"))
+        boundary = _strict_when(a.round_at)
+        if boundary is None or started is None or started < boundary:
+            release_err = (
+                "daily-release.json predates this 05:30 round; the release "
+                "tick produced no current-run record")
+            release = None
+    if semantic_err is None and semantic is not None:
+        semantic_started = _strict_when(semantic.get("started_at"))
+        boundary = _strict_when(a.round_at)
+        if (boundary is None or semantic_started is None
+                or semantic_started < boundary):
+            semantic_err = (
+                f"{a.semantic_pytest_json.name} predates this 05:30 round; "
+                "no current self-test verdict was recorded")
+            semantic = None
+    if (semantic_err is None and semantic is not None
+            and a.tick_state == "ran" and semantic.get("exit_code") != 0):
+        semantic_err = (
+            "release tick ran without a complete green semantic pytest "
+            "record; cron gate wiring is inconsistent")
     if gap_err is None and "q1_image_behind_upstream" not in gap:
         gap_err = "fork_gap.json has no convergence headline"
         gap = None
-    errors = [e for e in (release_err, gap_err) if e]
-    record = make_record(release, gap, a.round_at, a.tick_exit, errors)
+    errors = [e for e in (release_err, gap_err, semantic_err) if e]
+    record = make_record(
+        release, gap, a.round_at, a.tick_exit, errors,
+        semantic_pytest=semantic, tick_state=a.tick_state,
+    )
     written = retain(record, a.state_dir)
     print("release LL: "
           f"{record['lesson']['outcome']} · "

@@ -3,6 +3,6 @@
   "image_build": {
     "cmd": "bash build_and_regress.sh",
     "mode": "verify",
-    "timeout": 21600
+    "stall_grace": 1800
   }
 }

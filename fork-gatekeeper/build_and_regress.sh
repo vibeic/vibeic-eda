@@ -88,6 +88,7 @@ PYBUMP
 
 FORKS_DIR="${GK_FORKS_DIR:-/home/reyerchu/vibe-ic-forks}"
 EDA_CLONE="${GK_EDA_CLONE:-/home/reyerchu/vibeic-eda}"
+GATEKEEPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GK_MODE="${GK_MODE:-verify}"                    # verify | promote
 GK_STATE_DIR="${GK_STATE_DIR:-${HOME}/.cache/eda-fork-gatekeeper}"
 GK_RESULT="${GK_RESULT:-${GK_STATE_DIR}/last_build_result.json}"
@@ -95,6 +96,11 @@ STAMP="$(date +%Y%m%d)"
 SCRATCH="/tmp/gk-build-${STAMP}"
 IMG="vibeic/vibeic-eda:gkcandidate-${STAMP}"
 RESULTS="[]"
+
+_progress_exec() {
+    python3 "${GATEKEEPER_DIR}/progress_exec.py" \
+        --stall-grace "${GK_PUSH_STALL_GRACE:-1800}" -- "$@"
+}
 
 emit() { python3 - "$RESULTS" "$1" "$2" "$3" "$4" <<'PY'
 import json,sys
@@ -163,7 +169,8 @@ _pf_abort() {
 #      anything pins it; any push failure → abort, ship NOTHING.
 #   2. bump Dockerfile pins + VERSION (tolerate sync's repo-wide drift audit — verify the
 #      write took, don't gate on unrelated stale pointers).
-#   3. GATE the image ship: :NEWVER then :latest, both checked + timeout-bounded. Shipped
+#   3. GATE the image ship: :NEWVER then :latest, both checked by a renewable
+#      progress lease with no total-runtime ceiling. Shipped
 #      BEFORE the origin commit so a failed origin push re-ships the same version (converges).
 #   4. GATE the origin commit+push (retry once on non-ff via rebase); on failure roll the
 #      LOCAL commit back → next tick retries.
@@ -173,7 +180,6 @@ _pf_abort() {
 # Mutates global RESULTS (call NOT in a subshell). Returns 0 only on a fully-landed promote.
 promote_all() {
     local plog="/tmp/gk-push-${STAMP}.log" tool arg sha br fr CURVER NEWVER tools_csv DH="dockerhub:skipped"
-    local T="${GK_PUSH_TIMEOUT:-1800}"
     # 0. reconcile — preservation guards use _pf_mark (NO reset): they exist to protect
     #    human WIP, so they must not touch the tree. The reconcile reset runs only AFTER
     #    they pass (tree clean + not ahead), so it discards nothing human.
@@ -222,18 +228,30 @@ promote_all() {
     if [ "$(cd "${EDA_CLONE}" && ./sync_image_version.py --print 2>/dev/null)" != "${NEWVER}" ]; then
         _pf_abort "VERSION write to ${NEWVER} did not take"; return 1
     fi
-    # 3. GATE the image ship (both tags, timeout-bounded) ---------------------
+    # The locally runnable candidate can still be impossible to pull.  This is
+    # the legacy promote path, so it needs the same measured/automatic
+    # compaction gate as daily_release and release.sh before either registry tag
+    # becomes durable. The checker leases on transferred bytes; total runtime is
+    # not a verdict.
+    if ! python3 "${EDA_CLONE}/tools/check_image_depth.py" --compact "${IMG}" \
+            >>"${plog}" 2>&1; then
+        _pf_abort "candidate image is over-depth or compaction was unmeasurable — nothing shipped (see ${plog})"
+        return 1
+    fi
+    # 3. GATE the image ship (both tags, progress-supervised) ----------------
     docker tag "${IMG}" "ghcr.io/vibeic/vibeic-eda:${NEWVER}"
     docker tag "${IMG}" "ghcr.io/vibeic/vibeic-eda:latest"
-    if ! timeout "${T}" docker push "ghcr.io/vibeic/vibeic-eda:${NEWVER}" >>"${plog}" 2>&1; then
-        _pf_abort "GHCR push ${NEWVER} failed/timed out (see ${plog})"; return 1
+    if ! _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:${NEWVER}" >>"${plog}" 2>&1; then
+        _pf_abort "GHCR push ${NEWVER} failed or stalled (see ${plog})"; return 1
     fi
-    if ! timeout "${T}" docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1; then
-        timeout "${T}" docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1 \
+    if ! _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1; then
+        _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1 \
             || { _pf_abort "GHCR :latest push failed (:${NEWVER} shipped, :latest stale) — retry next tick"; return 1; }
     fi
-    if timeout "${T}" bash -c "docker tag '${IMG}' 'vibeic/vibeic-eda:${NEWVER}' && docker push 'vibeic/vibeic-eda:${NEWVER}'" >>"${plog}" 2>&1; then
-        timeout "${T}" bash -c "docker tag '${IMG}' 'vibeic/vibeic-eda:latest' && docker push 'vibeic/vibeic-eda:latest'" >>"${plog}" 2>&1 || true
+    if docker tag "${IMG}" "vibeic/vibeic-eda:${NEWVER}" \
+       && _progress_exec docker push "vibeic/vibeic-eda:${NEWVER}" >>"${plog}" 2>&1; then
+        docker tag "${IMG}" "vibeic/vibeic-eda:latest"
+        _progress_exec docker push "vibeic/vibeic-eda:latest" >>"${plog}" 2>&1 || true
         DH="dockerhub:${NEWVER}"
     else
         DH="dockerhub:skipped(login?)"
@@ -351,7 +369,10 @@ if [ "${CLEAN_COUNT}" -gt 0 ]; then
     else
         BUILD_CMD=(docker build -t "${IMG}" "${SCRATCH}")
     fi
-    if (cd "${SCRATCH}" && "${BUILD_CMD[@]}") >"/tmp/gk-docker-${STAMP}.log" 2>&1; then
+    # Stream BuildKit bytes to the parent progress lease and retain the same
+    # diagnostic log. `pipefail` makes the build's rc authoritative, not tee's.
+    if (cd "${SCRATCH}" && "${BUILD_CMD[@]}") 2>&1 \
+            | tee "/tmp/gk-docker-${STAMP}.log"; then
         [ -f "${SCRATCH}/docker-bake.hcl" ] && docker tag ghcr.io/vibeic/vibeic-eda:local "${IMG}"
         # smoke regression: yosys/openroad baseline + a per-candidate-tool check so the
         # tool being shipped is actually exercised in the fresh image, not just assumed.

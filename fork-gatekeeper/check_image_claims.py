@@ -46,13 +46,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import subprocess
+import shlex
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
+from capability_smoke import run_container_probe
+
 RC_OK, RC_DRIFT, RC_NOTHING = 0, 1, 2
+PROBE_STALL_GRACE_S = float(
+    os.environ.get("GK_IMAGE_CLAIMS_STALL_GRACE", "300")
+)
 
 DIR = Path(__file__).resolve().parent
 
@@ -96,12 +103,59 @@ def _load_probes(path: Path = _PROBE_TABLE):
 _TOOL_PROBE = _load_probes()
 
 
-def _sh(cmd, timeout=600):
+@dataclass(frozen=True)
+class ProbeRun:
+    """A Docker probe result whose completeness is separate from its exit code.
+
+    ``docker run`` can be killed by the progress supervisor or fail before the
+    container starts.  Neither is an answer about the image.  Keeping
+    ``outcome`` beside ``rc`` prevents callers from turning those cases into a
+    missing PDK/version finding.
+
+    Iteration preserves the historical ``(rc, out, err)`` test seam.
+    """
+
+    rc: int
+    out: str
+    err: str
+    outcome: str = "natural"
+
+    def __iter__(self):
+        yield self.rc
+        yield self.out
+        yield self.err
+
+    @property
+    def measurable(self) -> bool:
+        return self.outcome == "natural"
+
+
+def _as_run(value) -> ProbeRun:
+    """Normalise the legacy tuple used by fixtures and older callers."""
+    if isinstance(value, ProbeRun):
+        return value
+    if hasattr(value, "outcome") and hasattr(value, "rc"):
+        return ProbeRun(int(value.rc), getattr(value, "output", ""),
+                        getattr(value, "err", ""), str(value.outcome))
+    rc, out, err = value
+    return ProbeRun(int(rc), out or "", err or "", "natural")
+
+
+def _sh(cmd, timeout=None):
+    """Run an in-image probe under a renewable activity lease, with no cap."""
+    del timeout  # compatibility only; elapsed time is not a probe verdict
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
+        bash_i = cmd.index("bash")
+        image, script = cmd[bash_i + 1], cmd[-1]
+    except (ValueError, IndexError):
+        return ProbeRun(127, "", "unsupported Docker probe command",
+                        "launch_error")
+    try:
+        got = run_container_probe(image, script, PROBE_STALL_GRACE_S)
     except Exception as exc:                                   # noqa: BLE001
-        return 1, "", str(exc)
+        return ProbeRun(127, "", f"{type(exc).__name__}: {exc}",
+                        "launch_error")
+    return ProbeRun(got.rc, got.output, "", got.outcome)
 
 
 def _in_image(image: str, script: str):
@@ -119,11 +173,25 @@ def _in_image(image: str, script: str):
     because the real line was further down the same blob. A verdict that is
     right for the wrong reason survives exactly until the input changes shape.
     """
-    rc, out, err = _sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
-                        "-lc", script])
-    keep = "\n".join(ln for ln in out.splitlines()
+    run = _as_run(_sh(["docker", "run", "--rm", "--entrypoint", "bash", image,
+                       "-lc", script]))
+    keep = "\n".join(ln for ln in run.out.splitlines()
                      if not ln.startswith("[INFO]"))
-    return rc, keep, err
+    return ProbeRun(run.rc, keep, run.err, run.outcome)
+
+
+def _not_checked(what: str, run: ProbeRun, **fields) -> dict:
+    """One retained UNKNOWN row; it is never a claim about image contents."""
+    detail = (run.err or run.out).strip().splitlines()
+    suffix = f": {detail[-1][:200]}" if detail else ""
+    kind = "stalled" if run.outcome == "stalled" else "unmeasurable"
+    return {
+        "kind": "not_checked",
+        **fields,
+        "probe_outcome": run.outcome,
+        "probe_rc": run.rc,
+        "problem": f"{what} was {kind}{suffix}",
+    }
 
 
 def declared(root: Path = DIR) -> List[dict]:
@@ -140,13 +208,15 @@ def pdk_findings(image: str, decl: List[dict]) -> List[dict]:
     declared one that vanished is a flow that will fail on a PDK the docs
     promise.
     """
-    rc, out, _ = _in_image(image, "ls -1 /foss/pdks 2>/dev/null")
-    present = {ln.strip() for ln in out.splitlines()
+    listing = _in_image(image, "ls -1 /foss/pdks 2>/dev/null")
+    if not listing.measurable or listing.rc != 0:
+        return [_not_checked(f"listing /foss/pdks in {image}", listing)]
+    present = {ln.strip() for ln in listing.out.splitlines()
                if ln.strip() and not ln.startswith("[INFO")
                and "." not in ln.strip()}
-    if rc != 0 or not present:
-        return [{"kind": "not_checked",
-                 "problem": f"could not list /foss/pdks in {image}"}]
+    if not present:
+        return [_not_checked(
+            f"listing /foss/pdks in {image} produced no PDK names", listing)]
 
     by_name = {d["name"]: d for d in decl}
     findings = []
@@ -168,9 +238,19 @@ def pdk_findings(image: str, decl: List[dict]) -> List[dict]:
         d = by_name[name]
         if not d.get("version_file"):
             continue
-        _, vout, _ = _in_image(
-            image, f"cat /foss/pdks/{name}/{d['version_file']} 2>/dev/null | head -1")
-        v = vout.strip()
+        version_path = f"/foss/pdks/{name}/{d['version_file']}"
+        quoted = shlex.quote(version_path)
+        version = _in_image(
+            image,
+            f"if [ -r {quoted} ]; then head -n 1 {quoted}; "
+            "else printf '%s\\n' __VIBEIC_VERSION_FILE_ABSENT__; fi")
+        if not version.measurable or version.rc != 0:
+            findings.append(_not_checked(
+                f"reading {version_path} in {image}", version, pdk=name))
+            continue
+        v = version.out.strip()
+        if v == "__VIBEIC_VERSION_FILE_ABSENT__":
+            v = ""
         if not v:
             findings.append({
                 "kind": "no_version", "pdk": name,
@@ -195,10 +275,19 @@ def manifest_findings(image: str) -> List[dict]:
     The manifest belongs to the base image. We replace tools it names and never
     touched it, so it ships with our image telling users the base's versions.
     """
-    _, man, _ = _in_image(image, "cat /foss/pdks/versions.txt 2>/dev/null")
-    if not man.strip():
-        return [{"kind": "not_checked",
-                 "problem": "the image has no /foss/pdks/versions.txt"}]
+    manifest = _in_image(
+        image,
+        "if [ -r /foss/pdks/versions.txt ]; then "
+        "cat /foss/pdks/versions.txt; else "
+        "printf '%s\\n' __VIBEIC_MANIFEST_ABSENT__; fi")
+    if not manifest.measurable or manifest.rc != 0:
+        return [_not_checked("reading /foss/pdks/versions.txt", manifest)]
+    man = manifest.out
+    if not man.strip() or man.strip() == "__VIBEIC_MANIFEST_ABSENT__":
+        return [{"kind": "not_checked", "probe_outcome": "natural",
+                 "probe_rc": manifest.rc,
+                 "problem": "the image has no readable "
+                            "/foss/pdks/versions.txt"}]
     claims = {}
     for ln in man.splitlines():
         parts = ln.split()
@@ -209,11 +298,45 @@ def manifest_findings(image: str) -> List[dict]:
     for tool, (cmd, pat) in _TOOL_PROBE.items():
         if tool not in claims:
             continue
-        _, out, err = _in_image(image, f"{cmd} 2>&1 | head -3")
-        m = re.search(pat, out + err)
+        # Preserve the tool command's own rc before truncating its output.  A
+        # pipeline's rc belongs to ``head`` and used to turn a failed probe into
+        # a reassuring "no version" row.
+        script = (
+            "probe_log=$(mktemp); "
+            f"( {cmd} ) >\"$probe_log\" 2>&1; probe_rc=$?; "
+            "head -n 3 \"$probe_log\"; "
+            "printf '%s%s\\n' __VIBEIC_PROBE_RC__ \"$probe_rc\"; "
+            "rm -f \"$probe_log\"; exit 0"
+        )
+        probe = _in_image(image, script)
+        if not probe.measurable or probe.rc != 0:
+            findings.append(_not_checked(
+                f"probing the installed {tool} version", probe, tool=tool))
+            continue
+        marker = re.search(r"^__VIBEIC_PROBE_RC__(-?\d+)$", probe.out, re.M)
+        if marker is None:
+            findings.append({
+                "kind": "not_checked", "tool": tool,
+                "probe_outcome": probe.outcome, "probe_rc": probe.rc,
+                "problem": f"`{cmd}` returned no trustworthy completion "
+                           "record"})
+            continue
+        tool_rc = int(marker.group(1))
+        clean_out = re.sub(r"^__VIBEIC_PROBE_RC__-?\d+\n?", "", probe.out,
+                           flags=re.M)
+        if tool_rc != 0:
+            findings.append({
+                "kind": "not_checked", "tool": tool,
+                "probe_outcome": "natural", "probe_rc": tool_rc,
+                "problem": f"`{cmd}` exited {tool_rc}; no version was "
+                           "measured"})
+            continue
+        m = re.search(pat, clean_out)
         if not m:
-            findings.append({"kind": "unprobed", "tool": tool,
-                             "problem": f"`{cmd}` gave no version to compare"})
+            findings.append({"kind": "not_checked", "tool": tool,
+                             "probe_outcome": "natural", "probe_rc": tool_rc,
+                             "problem": f"`{cmd}` gave no version matching "
+                                        "the probe contract"})
             continue
         actual, claimed = m.group(1), claims[tool].lstrip("v")
         if not actual.startswith(claimed) and not claimed.startswith(actual):
@@ -244,14 +367,18 @@ def main(argv=None) -> int:
     manifest = manifest_findings(a.image)
 
     ok = [f for f in pdks if f["kind"] == "ok"]
-    bad = [f for f in pdks if f["kind"] not in ("ok",)]
+    pdk_unknown = [f for f in pdks if f["kind"] == "not_checked"]
+    manifest_unknown = [f for f in manifest if f["kind"] == "not_checked"]
+    unknown = pdk_unknown + manifest_unknown
+    bad = [f for f in pdks if f["kind"] not in ("ok", "not_checked")]
 
     print(f"check_image_claims: {len(decl)} PDK(s) declared, {len(ok)} with a "
-          f"readable version, {len(bad)} finding(s); "
+          f"readable version, {len(bad)} finding(s), "
+          f"{len(unknown)} not measured; "
           f"{len(manifest)} manifest finding(s)")
     for f in ok:
         print(f"  {f['pdk']:<16} {f['status']:<9} {f['read']}")
-    for f in bad:
+    for f in bad + pdk_unknown:
         print(f"  {f.get('pdk', '*'):<16} {f['kind'].upper():<14} {f['problem']}")
     for f in manifest:
         if f["kind"] == "manifest_wrong":
@@ -277,6 +404,11 @@ def main(argv=None) -> int:
         print(f"[FAIL] versions.txt misreports {len(wrong_manifest)} tool(s) "
               f"we replaced.", file=sys.stderr)
         return RC_DRIFT
+    if unknown:
+        print(f"[NOT CHECKED] {len(unknown)} image claim probe(s) did not "
+              f"produce a complete measurement; no clean verdict exists",
+              file=sys.stderr)
+        return RC_NOTHING
     if wrong_manifest:
         print(f"[PASS] every PDK is declared and its provenance readable. "
               f"versions.txt misreports {len(wrong_manifest)} tool(s) we "

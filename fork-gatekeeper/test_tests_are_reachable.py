@@ -35,6 +35,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -223,3 +224,73 @@ def test_a_generator_beside_the_test_counts_as_collection():
     assert not M.GENERATOR.match("helper.py")
     # a generator that exists but is NOT named in the surface must not count
     assert M.generated_dir(clone, "tests/techmap", "") is False
+
+
+# --------------------------------------------------------------------------
+# Missing Git answers are UNKNOWN, never an empty-diff PASS.
+# --------------------------------------------------------------------------
+
+def test_a_failed_diff_cannot_become_zero_entry_points(monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "upstream_ref", lambda _clone: "upstream/main")
+
+    def no_answer(cmd, **_kwargs):
+        assert "diff" in cmd
+        return SimpleNamespace(
+            rc=128, out="", err="fatal: graph could not be read",
+            outcome="natural", elapsed_s=0.1,
+        )
+
+    monkeypatch.setattr(M.watchdog, "run_supervised", no_answer)
+    state, orphans, meta = M.unreachable(tmp_path)
+
+    assert state == M.UNKNOWN
+    assert orphans == []
+    assert "entry_points" not in meta, "a failed diff was reported as empty"
+    assert meta["measurement"]["exit_code"] == 128
+    assert meta["measurement"]["outcome"] == "natural"
+    assert meta["measurement"]["total_runtime_ceiling_seconds"] is None
+
+
+def test_a_stalled_diff_is_unknown_not_a_machine_speed_verdict(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "upstream_ref", lambda _clone: "upstream/main")
+    monkeypatch.setattr(M.watchdog, "run_supervised", lambda *a, **k:
+                        SimpleNamespace(
+                            rc=M.watchdog.RC_STALLED, out="", err="",
+                            outcome="stalled", elapsed_s=61.0,
+                        ))
+
+    state, _, meta = M.unreachable(tmp_path)
+    assert state == M.UNKNOWN
+    assert meta["measurement"]["outcome"] == "stalled"
+    assert "unknown, not empty" in meta["reason"]
+
+
+def test_unknown_git_answer_exits_two_and_does_not_expire_waivers(
+        monkeypatch, tmp_path):
+    forks = tmp_path / "forks"
+    (forks / "tool" / ".git").mkdir(parents=True)
+    manifest = tmp_path / "FORKS.json"
+    manifest.write_text(json.dumps({"forks": [{"tool": "tool"}]}))
+    waivers = tmp_path / "waivers.json"
+    waivers.write_text(json.dumps({
+        "tool": {"files": ["tests/test_known_orphan.py"], "issue": "#1"},
+    }))
+    record = tmp_path / "result.json"
+    monkeypatch.setattr(M, "unreachable", lambda *a, **k: (
+        M.UNKNOWN, [], {
+            "reason": "git diff did not answer",
+            "measurement": {"outcome": "stalled", "exit_code": 199},
+        },
+    ))
+
+    rc = M.main([
+        "--forks-dir", str(forks), "--forks-json", str(manifest),
+        "--waivers", str(waivers), "--json", str(record),
+    ])
+    saved = json.loads(record.read_text())
+
+    assert rc == 2
+    assert saved["unknown"] == 1
+    assert saved["forks"][0]["state"] == M.UNKNOWN
+    assert saved["forks"][0]["waiver_no_longer_applies"] == []

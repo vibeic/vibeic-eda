@@ -48,7 +48,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import time
 from pathlib import Path
 
 REACHABLE = "reachable"
@@ -67,7 +66,6 @@ SURFACE_MAX_BYTES = 400_000
 # How far the caller walk may go before it gives up and says UNKNOWN.
 MAX_DEPTH = int(os.environ.get("GK_REACH_MAX_DEPTH", "3"))
 MAX_NODES = int(os.environ.get("GK_REACH_MAX_NODES", "200"))
-MAX_SECONDS = float(os.environ.get("GK_REACH_MAX_SECONDS", "90"))
 
 SOURCE_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp")
 _CALLER_GLOBS = ("*.c", "*.cc", "*.cpp", "*.cxx")
@@ -179,12 +177,12 @@ def _enclosing(clone: Path, path: str, lineno: int) -> str | None:
 
 
 def reachable_commands(clone: Path, symbols: set[str], reg: dict[str, set[str]],
-                       regfiles: set[str], deadline: float | None = None) -> tuple[set[str], bool]:
+                       regfiles: set[str]) -> tuple[set[str], bool]:
     """(commands that can reach `symbols`, closure_complete).
 
     Walks CALLERS upward. A registered handler is a root — nothing above it matters,
     so the walk stops there. `closure_complete` is False the moment the walk is cut
-    short by depth, node count or the deadline; a truncated closure may be MISSING
+    short by the deterministic depth or node-count bounds; a truncated closure may be MISSING
     commands, so it can support "reachable" but never "unreachable".
     """
     seen = set(symbols)
@@ -198,8 +196,6 @@ def reachable_commands(clone: Path, symbols: set[str], reg: dict[str, set[str]],
             return cmds, False
         nxt: set[str] = set()
         for sym in sorted(frontier):
-            if deadline is not None and time.monotonic() > deadline:
-                return cmds, False
             r = _git(clone, "grep", "-n", "-w", sym, "--", *_CALLER_GLOBS)
             if r is None:
                 return cmds, False
@@ -337,8 +333,9 @@ def check(tool: str, sha_full: str, clone: Path | None = None,
             return _u(tool, f"the patch changes no function this check can name "
                             f"({len(files)} file(s) touched) — nothing to trace",
                       surface=surface)
-        cmds, complete = reachable_commands(clone, syms, reg, regfiles,
-                                            deadline=time.monotonic() + MAX_SECONDS)
+        # Machine speed must not change this verdict.  The walk is bounded by the
+        # graph itself (depth and node count), never by elapsed wall-clock time.
+        cmds, complete = reachable_commands(clone, syms, reg, regfiles)
         hit = sorted(cmds & surface)
         if hit:
             # DECISIVE even from a truncated closure: more searching only adds commands.

@@ -387,6 +387,48 @@ def test_a_hung_fetch_is_recorded_as_unconfirmed(fleet, monkeypatch):
     assert ev["confirmed_by"] is None, ev
 
 
+def test_a_progress_stall_is_unknown_and_never_a_fetch_failure(fleet,
+                                                                monkeypatch):
+    real = D.sh
+
+    def _fetch_stalls(*a, **k):
+        if "fetch" in a:
+            return subprocess.CompletedProcess(
+                a, D.watchdog.RC_STALLED, "",
+                "WATCHDOG_STALLED: no forward progress")
+        return real(*a, **k)
+
+    monkeypatch.setattr(D, "sh", _fetch_stalls)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    ev = _evidence(rep)
+    assert ev["fetch"] == "stalled", ev
+    assert rep["upstream_merge_outcome"] == "unmeasurable"
+    assert rep["needs_human"] is True
+    assert "UNKNOWN" in rep["upstream"]
+    assert "FETCH FAILED" not in rep["upstream"]
+
+
+def test_a_stalled_merge_is_not_invented_as_a_conflict(fleet, monkeypatch):
+    _commit(fleet["up"], "upstream-change")
+    real = D.sh
+
+    def _merge_stalls(*a, **k):
+        if "merge" in a and "--no-edit" in a:
+            return subprocess.CompletedProcess(
+                a, D.watchdog.RC_STALLED, "",
+                "WATCHDOG_STALLED: no forward progress")
+        return real(*a, **k)
+
+    monkeypatch.setattr(D, "sh", _merge_stalls)
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+    assert rep["upstream_merge_outcome"] == "stalled", rep
+    assert rep["needs_human"] is True
+    assert "UNKNOWN, not a conflict" in rep["upstream"]
+    assert not rep.get("conflicted"), rep
+
+
 def test_an_rc_zero_fetch_over_a_stale_ref_is_recorded_as_unconfirmed(fleet,
                                                                       monkeypatch):
     """THE #82 SHAPE. rc 0, ref unmoved, and upstream really has moved. The

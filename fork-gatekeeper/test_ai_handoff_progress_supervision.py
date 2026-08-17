@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""The 05:30 AI handoff is progress-supervised and delivery-verified."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import daily_0530 as D  # noqa: E402
+import capture_release_ll as LL  # noqa: E402
+
+
+CASE = {
+    "branch": "origin/vibeic/topic",
+    "direction": "our branch -> our mainline",
+    "commits": 1,
+    "conflicting_files": ["src/x.cc"],
+    "commits_detail": [{"sha": "abc123", "subject": "fix x"}],
+}
+
+
+def _report():
+    return {"Demo": {"main": "main", "conflicted": [dict(CASE)]}}
+
+
+def _supervised(*, outcome="natural", rc=0, out=""):
+    return SimpleNamespace(
+        outcome=outcome, rc=rc, out=out, err="", elapsed_s=25000.0,
+    )
+
+
+def _proofs(cases, verified):
+    return [{
+        "fork": c["fork"], "branch": c["branch"],
+        "mainline": c.get("mainline"), "source_tip": c.get("source_tip"),
+        "published_tip": "f" * 40 if verified else None,
+        "verified": verified,
+        "reason": "published" if verified else "still absent",
+    } for c in cases]
+
+
+def test_ai_can_run_past_the_old_total_limit_when_progressing(
+        tmp_path, monkeypatch):
+    captured = {}
+
+    def run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return _supervised(
+            out=json.dumps({"type": "result", "result": "landed"}) + "\n")
+
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
+    monkeypatch.setattr(D.watchdog, "run_supervised", run)
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, True))
+
+    result = D.step2b_ai_decisions(
+        _report(), tmp_path / "state", apply=True, stall_grace_s=90,
+    )
+
+    assert result["elapsed_seconds"] == 25000.0  # beyond the old 3600/5400 cap
+    assert result["outcome"] == "natural" and result["verified"] is True
+    assert result["tail"] == "landed"
+    assert "--output-format" in captured["cmd"]
+    assert "stream-json" in captured["cmd"]
+    assert captured["kwargs"]["stall_grace_s"] == 90
+    assert captured["kwargs"]["output_progress"] is True
+    assert captured["kwargs"]["process_tree_cpu_progress"] is True
+    assert "timeout" not in captured["kwargs"]
+    assert json.loads((tmp_path / "state" / "ai_decisions_pending.json").read_text()) == []
+    assert D._ai_needs_attention(result) is False
+
+
+def test_stalled_ai_keeps_unverified_cases_pending(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
+    monkeypatch.setattr(
+        D.watchdog, "run_supervised",
+        lambda *a, **k: _supervised(outcome="stalled", rc=D.watchdog.RC_STALLED),
+    )
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, False))
+
+    result = D.step2b_ai_decisions(
+        _report(), tmp_path / "state", apply=True, stall_grace_s=12,
+    )
+
+    assert result["outcome"] == "stalled"
+    assert result["rc"] == D.watchdog.RC_STALLED
+    assert result["verified"] is False
+    assert result["verified_cases"] == 0
+    assert len(result["unverified_cases"]) == 1
+    pending = json.loads(
+        (tmp_path / "state" / "ai_decisions_pending.json").read_text())
+    assert len(pending) == 1 and pending[0]["fork"] == "Demo"
+    assert "still absent" in pending[0]["verification"]
+    assert D._ai_needs_attention(result) is True
+
+
+def test_rc_zero_alone_cannot_clear_an_unverified_case(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
+    monkeypatch.setattr(
+        D.watchdog, "run_supervised", lambda *a, **k: _supervised(rc=0),
+    )
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, False))
+
+    result = D.step2b_ai_decisions(_report(), tmp_path / "state", apply=True)
+
+    assert result["rc"] == 0 and result["outcome"] == "natural"
+    assert result["verified"] is False
+    assert D._ai_needs_attention(result) is True
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_postcondition_reads_the_published_mainline_not_process_rc(tmp_path):
+    repo = tmp_path / "fork"
+    origin = tmp_path / "origin.git"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main", ".")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "user.email", "t@t")
+    (repo / "x").write_text("base\n")
+    _git(repo, "add", "x")
+    _git(repo, "commit", "-qm", "base")
+    subprocess.run(
+        ["git", "init", "--bare", "-q", "-b", "main", str(origin)],
+        check=True, timeout=30,
+    )
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-q", "-u", "origin", "main")
+    _git(repo, "checkout", "-qb", "topic")
+    (repo / "x").write_text("fixed\n")
+    _git(repo, "commit", "-qam", "fix")
+    source_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+
+    case = {"fork": "Demo", "branch": "topic", "mainline": "main",
+            "source_tip": source_tip, "path": str(repo)}
+    before = D._verify_ai_case(case)
+    assert before["verified"] is False
+    assert "remain absent" in before["reason"]
+
+    _git(repo, "merge", "--ff-only", "topic")
+    _git(repo, "push", "-q", "origin", "main")
+    after = D._verify_ai_case(case)
+    assert after["verified"] is True
+    assert after["published_tip"] == source_tip
+
+
+def test_cron_wires_a_stall_grace_not_a_total_timeout():
+    source = (Path(__file__).resolve().parent / "run_0530.sh").read_text()
+    invocation = source[source.index('python3 "${DIR}/daily_0530.py"'):]
+    invocation = invocation[:invocation.index("SIX=$?")]
+    assert "--ai-stall-grace" in invocation
+    assert "GK_AI_STALL_GRACE" in invocation
+    assert "--ai-timeout" not in invocation
+
+
+def _semantic_record(*, rc: int, outcome: str) -> dict:
+    return {
+        "schema": 1,
+        "mechanism": "validated_semantic_progress_lease",
+        "started_at": "2026-08-17T05:31:00+08:00",
+        "total_runtime_ceiling_seconds": None,
+        "stall_grace_seconds": 300,
+        "outcome": outcome,
+        "exit_code": rc,
+        "elapsed_seconds": 42.0,
+        "reason": "fixture",
+        "progress": {"stage": "running" if rc == 2 else "finished"},
+    }
+
+
+def _gap_record() -> dict:
+    return {
+        "q1_sync_lag_at_merge": 0,
+        "q1_sync_lag": 0,
+        "q1_release_lag": 0,
+        "q1_image_behind_upstream": 0,
+        "q2_ours_past_the_pin": 0,
+    }
+
+
+def test_cron_does_not_invoke_release_without_both_green_controls():
+    source = (Path(__file__).resolve().parent / "run_0530.sh").read_text()
+    gate = source[source.index('TICK_STATE="ran"'):
+                  source.index("# Step 6")]
+    assert 'if [ "${TESTS}" -ne 0 ]' in gate
+    assert 'elif [ "${CODE}" -ne 0 ]' in gate
+    assert gate.count('"${DIR}/run_tick.sh"') == 1
+    assert 'TICK=2' in gate and "NOT CHECKED" in gate
+
+    page_gate = source[source.index("if [ \"${DISC}\""):
+                       source.index("# THE ROUND MUST NOTICE")]
+    assert '[ "${CODE}" -eq 0 ]' in page_gate
+    assert '--semantic-pytest-json "${PYTEST_RETAINED}"' in source
+    assert '--tick-state "${TICK_STATE}"' in source
+
+
+def test_stalled_norecord_is_retained_without_reusing_old_release(
+        tmp_path, capsys):
+    old_release = tmp_path / "daily-release.json"
+    old_release.write_text(json.dumps({
+        "program": "daily_release", "status": "published",
+        "started_at": "2026-08-16T05:31:00+08:00",
+        "version": {"to": "0.3.0"},
+    }))
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(_semantic_record(rc=2, outcome="stalled")))
+    gap = tmp_path / "gap.json"
+    gap.write_text(json.dumps(_gap_record()))
+
+    rc = LL.main([
+        "--state-dir", str(tmp_path / "state"),
+        "--release-json", str(old_release),
+        "--gap-json", str(gap),
+        "--semantic-pytest-json", str(semantic),
+        "--round-at", "2026-08-17T05:30:00+08:00",
+        "--tick-exit", "2",
+        "--tick-state", "not_checked_pytest_norecord",
+    ])
+    capsys.readouterr()
+    record = json.loads(
+        (tmp_path / "state" / "release-ll" / "latest.json").read_text())
+    assert rc == 0
+    assert record["release"]["status"] == "not_checked"
+    assert record["release"]["target"] is None  # not yesterday's 0.3.0
+    assert record["selftest"]["status"] == "norecord"
+    assert record["selftest"]["outcome"] == "stalled"
+    assert record["lesson"]["trigger"] == "pytest_stalled"
+    assert record["lesson"]["outcome"] == "release_not_checked"
+    assert record["source_errors"] == []
+
+
+def test_red_and_norecord_remain_different_ll_facts():
+    red = LL.make_record(
+        {"status": "not_checked"}, _gap_record(),
+        "2026-08-17T05:30:00+08:00", 2,
+        semantic_pytest=_semantic_record(rc=1, outcome="natural"),
+        tick_state="not_checked_pytest_red",
+    )
+    norecord = LL.make_record(
+        {"status": "not_checked"}, _gap_record(),
+        "2026-08-17T05:30:00+08:00", 2,
+        semantic_pytest=_semantic_record(rc=2, outcome="stalled"),
+        tick_state="not_checked_pytest_norecord",
+    )
+    assert (red["selftest"]["status"], red["selftest"]["outcome"],
+            red["lesson"]["trigger"]) == ("red", "natural", "pytest_red")
+    assert (norecord["selftest"]["status"],
+            norecord["selftest"]["outcome"],
+            norecord["lesson"]["trigger"]) == (
+                "norecord", "stalled", "pytest_stalled")
+
+
+def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
+    release = tmp_path / "daily-release.json"
+    release.write_text(json.dumps({
+        "program": "daily_release", "status": "published",
+        "started_at": "2026-08-16T05:31:00+08:00",
+        "version": {"to": "0.3.0"},
+    }))
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(_semantic_record(rc=0, outcome="natural")))
+    gap = tmp_path / "gap.json"
+    gap.write_text(json.dumps(_gap_record()))
+
+    rc = LL.main([
+        "--state-dir", str(tmp_path / "state"),
+        "--release-json", str(release),
+        "--gap-json", str(gap),
+        "--semantic-pytest-json", str(semantic),
+        "--round-at", "2026-08-17T05:30:00+08:00",
+        "--tick-exit", "1", "--tick-state", "ran",
+    ])
+    capsys.readouterr()
+    record = json.loads(
+        (tmp_path / "state" / "release-ll" / "latest.json").read_text())
+    assert rc == 1
+    assert record["release"]["status"] == "unmeasured"
+    assert record["release"]["target"] is None
+    assert record["lesson"]["outcome"] == "could_not_measure_inputs"
+    assert any("predates this 05:30 round" in e
+               for e in record["source_errors"])

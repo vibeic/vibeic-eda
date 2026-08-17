@@ -34,23 +34,43 @@ EXIT
     0  the programs this round runs are identical to origin/main
     1  at least one changed — the round is executing superseded logic
     2  could not tell (no remote, fetch failed). NOT the same as 0, and the
-       caller decides: this repo blocks the PUBLISH on 1 but not on 2, because a
-       proven-stale program and a transient network failure are different risks
-       and only the first is a reason to leave yesterday's page up.
+       caller blocks the publish on both 1 and 2 while retaining the distinction:
+       proven stale and unmeasured are different evidence, but neither is
+       permission to ship.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import progress_watchdog as watchdog
 
-def _git(repo: Path, *args: str, timeout: int = 120) -> Tuple[int, str]:
+
+FETCH_STALL_GRACE_S = float(
+    os.environ.get("GK_CODE_FETCH_STALL_GRACE", "300")
+)
+PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "1"))
+
+
+def _git(repo: Path, *args: str, timeout: Optional[int] = None,
+         progress: bool = False) -> Tuple[int, str]:
+    argv = ["git", "-C", str(repo), *args]
     try:
-        r = subprocess.run(["git", "-C", str(repo), *args],
-                           capture_output=True, text=True, timeout=timeout)
+        if progress:
+            r = watchdog.run_supervised(
+                argv, stall_grace_s=FETCH_STALL_GRACE_S,
+                poll_s=PROGRESS_POLL_S, output_progress=True,
+                process_tree_cpu_progress=True,
+            )
+            return r.rc, (r.out or r.err).strip()
+        kwargs = {"capture_output": True, "text": True}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        r = subprocess.run(argv, **kwargs)
     except (OSError, subprocess.SubprocessError) as e:
         return 127, str(e)
     return r.returncode, (r.stdout or r.stderr).strip()
@@ -73,9 +93,13 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     if not a.no_fetch:
-        rc, out = _git(a.repo, "fetch", "-q", "origin", timeout=180)
+        rc, out = _git(a.repo, "fetch", "--progress", "origin",
+                       progress=True)
         if rc != 0:
-            print(f"check_round_code_is_current: rc=2 NOT CHECKED — fetch failed: {out[:200]}")
+            kind = ("stalled with no forward progress" if
+                    rc == watchdog.RC_STALLED else f"failed (rc={rc})")
+            print("check_round_code_is_current: rc=2 NOT CHECKED — "
+                  f"fetch {kind}: {out[:200]}")
             return 2
     rc, _ = _git(a.repo, "rev-parse", "--verify", "-q", a.ref)
     if rc != 0:

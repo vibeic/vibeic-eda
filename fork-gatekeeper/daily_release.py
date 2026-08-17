@@ -48,12 +48,13 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 import hashlib
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
@@ -65,11 +66,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
                                 pin_sites,
                                 pinned_refs)
+import progress_watchdog as watchdog                            # noqa: E402
+from capability_smoke import run_container_probe               # noqa: E402
 
 RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 
 #: How many hex characters the artefact tag uses. `short()` in docker-bake.hcl.
 SHORT = 7
+
+
+class Presence(str, Enum):
+    """A measured image/tag state; UNKNOWN is never treated as absence."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PresenceMeasurement:
+    state: Presence
+    subject: str
+    source: str
+    detail: str = ""
+
+
+class ReleaseMeasurementUnknown(RuntimeError):
+    """A release input could not be measured, so mutation must not proceed."""
+
+    def __init__(self, *, stage: str, category: str, subject: str,
+                 detail: str):
+        self.stage = stage
+        self.category = category
+        self.subject = subject
+        self.detail = detail
+        super().__init__(f"{subject}: {detail}")
+
+    def as_dict(self) -> dict:
+        return {
+            "stage": self.stage,
+            "category": self.category,
+            "subject": self.subject,
+            "detail": self.detail,
+        }
 
 
 #: Environment every buildx invocation gets.
@@ -149,15 +188,17 @@ def log_limit_effective(builder: Optional[str] = None) -> Optional[bool]:
             return line.split(":", 1)[1].strip() != "docker"
     return None
 
-#: Deadlines, set from measurement rather than from caution.
-#:
-#: Observed composes run 13–20 minutes when every artefact is already pulled,
-#: and the longest legitimate one is a cold ALIGN build, whose CBC dependency
-#: compiles serially upstream. 90 minutes clears that with room and still turns
-#: an overnight wedge into a morning failure instead of a morning mystery.
-#: Tool builds get longer: klayout with Qt is the slowest of them.
-COMPOSE_TIMEOUT = 5400
-TOOL_BUILD_TIMEOUT = 10800
+#: A no-progress lease, not an estimate of how long a build should take. Output
+#: bytes or scoped process-tree CPU renew it; total runtime has no ceiling.
+#: BuildKit's plain progress stream makes completed vertices observable while
+#: the process-tree probe covers local compiler work.
+BUILD_STALL_GRACE_S = float(os.environ.get("GK_BUILD_STALL_GRACE", "1800"))
+BUILD_POLL_S = float(os.environ.get("GK_BUILD_PROGRESS_POLL", "5"))
+PUSH_STALL_GRACE_S = float(os.environ.get("GK_PUSH_STALL_GRACE", "900"))
+SMOKE_STALL_GRACE_S = float(os.environ.get("GK_SMOKE_STALL_GRACE", "60"))
+COMPACTION_STALL_GRACE_S = float(
+    os.environ.get("GK_COMPACTION_STALL_GRACE", "1800")
+)
 
 #: A network outage in the registry compose must not turn a completely-built
 #: release into tomorrow's work.  BuildKit cache makes these retries cheap: the
@@ -178,7 +219,7 @@ _TRANSIENT_FAILURES = (
                        "the remote end hung up unexpectedly", "rpc failed")),
     ("service_unavailable", ("http 429", "http 502", "http 503", "http 504",
                              "too many requests", "service unavailable")),
-    ("build_timeout", ("timed out after",)),
+    ("progress_stall", ("watchdog_stalled",)),
 )
 _EXTENDED_RETRY_CATEGORIES = {
     "dns", "network_timeout", "network_reset", "service_unavailable",
@@ -219,6 +260,21 @@ def _finish(result: dict, json_path: Optional[str], rc: int, status: str,
     return rc
 
 
+def _finish_unmeasured(result: dict, json_path: Optional[str],
+                       exc: ReleaseMeasurementUnknown) -> int:
+    evidence = exc.as_dict()
+    result.setdefault("unmeasured", []).append(evidence)
+    print(f"[UNMEASURED] {exc.subject}: {exc.detail}; no release build or "
+          "publish may follow from an unknown answer", file=sys.stderr)
+    return _finish(result, json_path, RC_NEEDS_HUMAN, "unmeasured", {
+        "stage": exc.stage,
+        "category": exc.category,
+        "retryable": True,
+        "subject": exc.subject,
+        "summary": exc.detail,
+    })
+
+
 def transient_failure_category(text: str) -> Optional[str]:
     """Classify only errors for which waiting can change the answer."""
     low = (text or "").lower()
@@ -246,8 +302,8 @@ def compose_with_retries(bake: List[str], root: Path,
     """Compose with bounded, classified retries and return an audit trail.
 
     Unclassified failures get one retry, preserving the previous defence in
-    depth without multiplying a deterministic 90-minute failure.  Transport,
-    DNS and BuildKit timeout signatures get the longer bounded policy.  The
+    depth without multiplying a deterministic failure. Transport and DNS
+    signatures get the longer bounded retry-count policy. The
     exact same command is rerun, so already-pushed artefacts and BuildKit cache
     are reused rather than rebuilt.
     """
@@ -258,27 +314,34 @@ def compose_with_retries(bake: List[str], root: Path,
         attempt += 1
         started = _utcnow()
         if run is None:
-            rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
-                             timeout=COMPOSE_TIMEOUT)
+            rc, _, err = _sh(
+                bake, cwd=root, stream=True, env=BUILD_ENV,
+                stall_grace=BUILD_STALL_GRACE_S,
+            )
         else:
-            rc, _, err = run(bake, cwd=root, stream=True, env=BUILD_ENV,
-                             timeout=COMPOSE_TIMEOUT)
+            rc, _, err = run(
+                bake, cwd=root, stream=True, env=BUILD_ENV,
+                stall_grace=BUILD_STALL_GRACE_S,
+            )
         category = transient_failure_category(err)
         history.append({
             "attempt": attempt,
             "started_at": started,
             "finished_at": _utcnow(),
             "exit_code": rc,
+            "supervision_outcome": (
+                "stalled" if rc == watchdog.RC_STALLED else "natural"),
+            "total_runtime_ceiling_seconds": None,
             "category": category,
             "summary": None if rc == 0 else _one_line_error(err),
         })
         if rc == 0:
             return rc, err, history
 
-        # A 90-minute BuildKit wedge is worth one clean restart, not five; the
+        # A BuildKit progress stall is worth one clean restart, not five; the
         # extended window is exclusively for failures whose diagnostic names a
-        # network condition.  This keeps the self-healing path bounded in wall
-        # time as well as in attempt count.
+        # network condition. Retry count stays bounded; one healthy attempt's
+        # runtime does not.
         limit = (max_transient_attempts
                  if category in _EXTENDED_RETRY_CATEGORIES else 2)
         if attempt >= limit:
@@ -292,7 +355,8 @@ def compose_with_retries(bake: List[str], root: Path,
         sleeper(delay)
 
 
-def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
+def _sh(cmd, cwd=None, timeout=None, stream=False, env=None,
+        stall_grace=None, progress=False):
     """Run a command. `stream=True` lets its output through to OUR stdout.
 
     Capturing is right for the short API calls, and wrong for the two builds:
@@ -306,11 +370,9 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
     Streaming gives up the captured text for the failure message. The output is
     in the log instead, which is more than the tail we were printing.
 
-    A TIMEOUT IS REPORTED AS A TIMEOUT. The wedge has cost four manual
-    interventions, each of which began with me deciding by hand whether a silent
-    build was working; `subprocess` already knows when it has waited too long,
-    and the only reason that never turned into a failure is that the deadline was
-    two hours and nobody waited for it.
+    Long work uses a progress lease. A progressing command can run indefinitely;
+    a flat output+CPU score becomes the distinct WATCHDOG_STALLED outcome. The
+    ``timeout`` argument remains only for short request/probe calls.
     """
     full = None
     if env:
@@ -327,52 +389,74 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
             sys.stdout.flush()
             proc = subprocess.Popen(
                 cmd, cwd=cwd, env=full, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, errors="replace",
-                bufsize=1, start_new_session=True,
+                stderr=subprocess.STDOUT, start_new_session=True,
             )
-            tail: deque[str] = deque()
+            tail: deque[bytes] = deque()
             tail_size = 0
+            progress_bytes = 0
 
             def pump() -> None:
-                nonlocal tail_size
+                nonlocal tail_size, progress_bytes
                 assert proc.stdout is not None
-                for line in proc.stdout:
-                    sys.stdout.write(line)
+                while True:
+                    chunk = os.read(proc.stdout.fileno(), 64 * 1024)
+                    if not chunk:
+                        break
+                    progress_bytes += len(chunk)
+                    text = chunk.decode("utf-8", errors="replace")
+                    sys.stdout.write(text)
                     sys.stdout.flush()
-                    tail.append(line)
-                    tail_size += len(line)
+                    tail.append(chunk)
+                    tail_size += len(chunk)
                     while tail and tail_size > STREAM_TAIL_CHARS:
                         tail_size -= len(tail.popleft())
 
             reader = threading.Thread(target=pump, name="build-log-tee",
                                       daemon=True)
             reader.start()
-            try:
-                rc = proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    proc.wait(timeout=10)
-                except Exception:                              # noqa: BLE001
-                    proc.kill()
-                    proc.wait()
-                reader.join(timeout=10)
-                captured = "".join(tail)
-                return 1, "", (captured + "\n" +
-                    f"TIMED OUT after {timeout}s with no exit. This is the "
-                    f"signature recorded in vibeic-eda#26: buildx alive, no "
-                    f"compiler running, no disk write, no network. Treated as "
-                    f"a failure so the release stops instead of hanging.")
+            if stall_grace is not None:
+                cpu = watchdog.HostProcessTreeCpuProbe(proc.pid)
+                meter = watchdog.ProgressMeter(
+                    size_fn=lambda: progress_bytes, cpu_fn=cpu.sample,
+                )
+                outcome, natural_rc = watchdog.supervise(
+                    proc, meter.sample, cpu.terminate,
+                    poll_s=BUILD_POLL_S, stall_grace_s=stall_grace,
+                )
+                rc = (watchdog.RC_STALLED if outcome == "stalled"
+                      else int(natural_rc if natural_rc is not None else 0))
+            else:
+                rc = proc.wait() if timeout is None else proc.wait(timeout=timeout)
             reader.join(timeout=10)
-            return rc, "", "".join(tail)
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, env=full)
+            captured = b"".join(tail).decode("utf-8", errors="replace")
+            if stall_grace is not None and outcome == "stalled":
+                captured += (
+                    f"\nWATCHDOG_STALLED: no forward progress (output or "
+                    f"process-tree CPU) for > {stall_grace:g}s; killed as "
+                    "stalled, not judged by total runtime."
+                )
+            return rc, "", captured
+        if progress:
+            run = watchdog.run_supervised(
+                cmd, cwd=cwd, env=full, stall_grace_s=(
+                    stall_grace if stall_grace is not None
+                    else watchdog.DEFAULT_STALL_GRACE_S),
+                poll_s=BUILD_POLL_S, process_tree_cpu_progress=True,
+            )
+            return run.rc, run.out, run.err
+        kwargs = {
+            "cwd": cwd, "capture_output": True, "text": True, "env": full,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        p = subprocess.run(cmd, **kwargs)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return 1, "", (f"TIMED OUT after {timeout}s with no exit. This is the "
-                       f"signature recorded in vibeic-eda#26: buildx alive, no "
-                       f"compiler running, no disk write, no network. Treated as "
-                       f"a failure so the release stops instead of hanging.")
+        return 1, "", (
+            f"OPERATIONAL_TIMEOUT after {timeout}s: a short request/probe did "
+            "not answer. Long build, compaction, and push work must use a "
+            "progress lease instead of this path."
+        )
     except Exception as exc:                                   # noqa: BLE001
         return 1, "", str(exc)
 
@@ -763,29 +847,91 @@ def push_release_record(eda_root: Path, branch: str = "main") -> Tuple[bool, str
     minutes. A refusal is reported, never silent: the caller prints it and the
     record stays committed for a human to land.
     """
-    rc, out, err = _sh(["git", "-C", str(eda_root), "fetch", "origin", branch],
-                       timeout=180)
+    rc, out, err = _sh(["git", "-C", str(eda_root), "fetch", "--progress",
+                        "origin", branch], progress=True,
+                       stall_grace=PUSH_STALL_GRACE_S)
     if rc != 0:
-        return False, f"NOT PUSHED (fetch failed: {(err or out).strip()[:100]})"
+        kind = "stalled; state UNKNOWN" if rc == watchdog.RC_STALLED else "failed"
+        return False, f"NOT PUSHED (fetch {kind}: {(err or out).strip()[:100]})"
 
     rc, _, _ = _sh(["git", "-C", str(eda_root), "merge-base", "--is-ancestor",
-                    f"origin/{branch}", "HEAD"], timeout=60)
+                    f"origin/{branch}", "HEAD"])
     if rc != 0:
         return False, (f"NOT PUSHED — origin/{branch} is not an ancestor of HEAD; "
                        f"the remote moved while the image was building. The "
                        f"record is committed; land it by hand.")
 
-    rc, out, err = _sh(["git", "-C", str(eda_root), "push", "origin", branch],
-                       timeout=900)
+    rc, out, err = _sh(["git", "-C", str(eda_root), "push", "--progress",
+                        "origin", branch], progress=True,
+                       stall_grace=PUSH_STALL_GRACE_S)
     if rc != 0:
-        return False, f"NOT PUSHED (push failed: {(err or out).strip()[:200]})"
+        kind = "stalled; state UNKNOWN" if rc == watchdog.RC_STALLED else "failed"
+        return False, f"NOT PUSHED (push {kind}: {(err or out).strip()[:200]})"
     return True, "pushed"
 
 
+_LOCAL_ABSENCE = re.compile(
+    r"(?:no such image|no such object|image\s+\S+\s+not found)", re.IGNORECASE,
+)
+_REMOTE_ABSENCE = re.compile(
+    r"(?:no such manifest|manifest unknown|name unknown|"
+    r"manifest\b[^\n]*\bnot found|not found\b[^\n]*\bmanifest)",
+    re.IGNORECASE,
+)
+
+
+def _probe_local_image(ref: str) -> PresenceMeasurement:
+    """Measure local image presence without converting daemon failure to no."""
+    rc, out, err = _sh(["docker", "image", "inspect", ref], timeout=60)
+    detail = (err or out).strip()
+    if rc == 0:
+        return PresenceMeasurement(Presence.PRESENT, ref, "local", detail)
+    if _LOCAL_ABSENCE.search(detail):
+        return PresenceMeasurement(Presence.ABSENT, ref, "local", detail)
+    return PresenceMeasurement(Presence.UNKNOWN, ref, "local", detail or (
+        f"docker image inspect exited {rc} without an explicit not-found answer"
+    ))
+
+
+def _probe_remote_manifest(ref: str) -> PresenceMeasurement:
+    """Measure a registry tag; only an explicit manifest absence is ABSENT."""
+    rc, out, err = _sh(["docker", "manifest", "inspect", ref], timeout=180)
+    detail = (err or out).strip()
+    if rc == 0:
+        return PresenceMeasurement(Presence.PRESENT, ref, "registry", detail)
+    if _REMOTE_ABSENCE.search(detail):
+        return PresenceMeasurement(Presence.ABSENT, ref, "registry", detail)
+    return PresenceMeasurement(Presence.UNKNOWN, ref, "registry", detail or (
+        f"docker manifest inspect exited {rc} without an explicit not-found answer"
+    ))
+
+
+def _require_measured(measurement: PresenceMeasurement, *, stage: str,
+                      category: str) -> PresenceMeasurement:
+    if measurement.state is Presence.UNKNOWN:
+        raise ReleaseMeasurementUnknown(
+            stage=stage, category=category, subject=measurement.subject,
+            detail=f"{measurement.source} presence unmeasured: "
+                   f"{measurement.detail}",
+        )
+    return measurement
+
+
 def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
-    """Every `x.y.z` this image has actually been tagged with, locally."""
-    rc, out, _ = _sh(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                     timeout=120)
+    """Every local `x.y.z`, or a typed UNKNOWN when Docker did not answer."""
+    rc, out, err = _sh(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        timeout=120,
+    )
+    if rc != 0:
+        raise ReleaseMeasurementUnknown(
+            stage="version_discovery",
+            category="existing_versions_unmeasurable",
+            subject="local vibeic-eda version tags",
+            detail=(err or out).strip() or (
+                f"docker images exited {rc} without a version inventory"
+            ),
+        )
     seen = set()
     for ln in out.splitlines():
         m = re.search(r"vibeic-eda:(\d+)\.(\d+)\.(\d+)$", ln.strip())
@@ -905,9 +1051,17 @@ def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
         ref = artefact_tag(eda_root, target, ref_vars, refs_now)
         if ref is None:
             continue
-        if _sh(["docker", "image", "inspect", ref], timeout=60)[0] == 0:
+        local = _require_measured(
+            _probe_local_image(ref), stage="artefact_discovery",
+            category="local_artefact_state_unmeasurable",
+        )
+        if local.state is Presence.PRESENT:
             continue
-        if _sh(["docker", "manifest", "inspect", ref], timeout=180)[0] == 0:
+        remote = _require_measured(
+            _probe_remote_manifest(ref), stage="artefact_discovery",
+            category="registry_artefact_state_unmeasurable",
+        )
+        if remote.state is Presence.PRESENT:
             continue
         missing[target] = ref
     return missing
@@ -949,14 +1103,40 @@ def smoke_image(image: str) -> List[dict]:
     """
     bad: List[dict] = []
     for tool, cmd in sorted(SMOKE.items()):
-        rc, _, err = _sh(["docker", "run", "--rm", "--entrypoint", "bash",
-                          image, "-lc", cmd], timeout=300)
-        if rc != 0:
-            bad.append({"tool": tool, "cmd": cmd, "err": err.strip()[-200:]})
+        # Docker work happens outside the client process tree. Reuse the
+        # capability gate's container-aware lease: output or the container's
+        # actual host process-tree CPU may advance for any length of time, and
+        # the container is removed on a flat lease. These are liveness signals,
+        # never a verdict; only a natural OS rc is judged below.
+        run = run_container_probe(image, cmd, SMOKE_STALL_GRACE_S)
+        if run.rc != 0:
+            outcome = ("natural_failure" if run.outcome == "natural"
+                       else run.outcome)
+            detail = run.output.strip()[-200:]
+            bad.append({"tool": tool, "cmd": cmd, "err": detail,
+                        "outcome": outcome, "rc": run.rc})
+            # A stalled Docker arm is an infrastructure/protocol NORECORD.  One
+            # is sufficient to refuse this release; serially waiting for the
+            # same wedged daemon ten more times adds no evidence.
+            if run.outcome != "natural":
+                break
     return bad
 
 
-def peek_version(eda_root: Path) -> Tuple[str, str]:
+def _next_version(version: str) -> str:
+    fields = version.split(".")
+    if len(fields) != 3 or any(not field.isdigit() for field in fields):
+        raise ValueError(f"invalid release version {version!r}")
+    major, minor, patch = (int(field) for field in fields)
+    patch += 1
+    if patch > 99:
+        minor, patch = minor + 1, 0
+    return f"{major}.{minor}.{patch}"
+
+
+def peek_version(eda_root: Path,
+                 existing_versions: Optional[List[Tuple[int, int, int]]] = None,
+                 ) -> Tuple[str, str]:
     """Next version, above BOTH the VERSION file and every tag that exists.
 
     The file drifts. Measured 2026-07-29: `VERSION` read 0.2.30 while images
@@ -967,15 +1147,46 @@ def peek_version(eda_root: Path) -> Tuple[str, str]:
     vf = eda_root / "VERSION"
     old = vf.read_text().strip()
     cur = tuple(int(x) for x in (old.split(".") + ["0", "0"])[:3])
-    top = max([cur] + _existing_versions(eda_root))
-    maj, minor, patch = (str(top[0]), str(top[1]), str(top[2]))
-    patch = int(patch) + 1
-    if patch > 99:                       # patch 0-99, then roll the minor
-        minor, patch = str(int(minor) + 1), 0
+    measured = (_existing_versions(eda_root)
+                if existing_versions is None else existing_versions)
+    top = max([cur] + measured)
     # DECIDED, NOT WRITTEN. The file moves only after the image is smoked and
     # pushed — a VERSION that advanced for an image nobody can pull is how the
     # file drifted from reality in the first place (0.2.30 on disk, 0.2.32 built).
-    return old, f"{maj}.{minor}.{patch}"
+    return old, _next_version(".".join(str(part) for part in top))
+
+
+def select_publish_version(
+        eda_root: Path,
+        existing_versions: Optional[List[Tuple[int, int, int]]] = None,
+        *, max_registry_probes: int = 10_000,
+        ) -> Tuple[str, str, List[str]]:
+    """Choose a version whose remote manifest is explicitly absent.
+
+    A local inventory cannot establish that a registry tag is unused.  This is
+    how a host with no local 0.3.0 image could otherwise overwrite an existing
+    remote 0.3.0.  PRESENT candidates are skipped; UNKNOWN is a refusal, never
+    permission to publish.  The returned list records occupied candidates.
+    """
+    old, candidate = peek_version(eda_root, existing_versions)
+    occupied: List[str] = []
+    for _ in range(max_registry_probes):
+        tag = f"ghcr.io/vibeic/vibeic-eda:{candidate}"
+        measured = _require_measured(
+            _probe_remote_manifest(tag), stage="version_discovery",
+            category="candidate_tag_state_unmeasurable",
+        )
+        if measured.state is Presence.ABSENT:
+            return old, candidate, occupied
+        occupied.append(candidate)
+        candidate = _next_version(candidate)
+    raise ReleaseMeasurementUnknown(
+        stage="version_discovery",
+        category="candidate_space_unmeasurable",
+        subject="vibeic-eda version candidate",
+        detail=(f"the first {max_registry_probes} candidates all exist; "
+                "refusing to guess beyond the measured search window"),
+    )
 
 
 def main(argv=None) -> int:
@@ -1159,11 +1370,12 @@ def main(argv=None) -> int:
                                   "branch_is_ours": False})
             continue
         if v["verdict"] != "STALE":
-            unresolved.append({"repo": repo, "why": f"{v['verdict']}: {v['detail']}"})
+            unresolved.append({"repo": repo, "verdict": v["verdict"],
+                               "why": f"{v['verdict']}: {v['detail']}"})
             continue
         tip = _gh_tip(repo, v["branch"])
         if not tip:
-            unresolved.append({"repo": repo,
+            unresolved.append({"repo": repo, "verdict": "TIP_LOOKUP_UNKNOWN",
                                "why": f"tip of {v['branch']} unreadable"})
             continue
         ours = branch_is_ours(repo, v["branch"])
@@ -1210,6 +1422,15 @@ def main(argv=None) -> int:
             # why.
             undecidable.append(row)
 
+    # Mapping a fork to no Dockerfile ARG is also a missing release input.  It
+    # used to be discovered only inside the mutation block, after recipe files
+    # had already been rewritten.  Resolve every prospective writer target now
+    # so an incomplete pin set cannot produce a partial release.
+    for m in moved:
+        if not m.get("arg"):
+            unresolved.append({"repo": m["repo"], "verdict": "PIN_SITE_MISSING",
+                               "why": "no ARG <NAME>_REF pins it"})
+
     print(f"daily_release: {len(pins)} pin(s), {len(moved)} tool(s) with a new "
           f"version, {len(upstream_bump)} awaiting an upstream decision, "
           f"{len(undecidable)} undecidable, {len(unresolved)} unresolved")
@@ -1235,6 +1456,66 @@ def main(argv=None) -> int:
     if a.json:
         _atomic_json(a.json, result)
 
+    # Ownership is an input to the mutation, not an advisory printed after it.
+    # A transport failure used to become ``True`` inside ``branch_is_ours``;
+    # even after that predicate became tri-state, this program merely listed
+    # ``undecidable`` and continued to rewrite other pins, build, and push.  A
+    # partial release made while one ownership measurement is absent is not a
+    # converged release.  Stop before the first writer (`write_recipe_vars`) and
+    # preserve the distinction from a measured rejection in the sidecar.
+    if undecidable:
+        print(f"[UNMEASURED] ownership of {len(undecidable)} stale branch(es) "
+              "could not be established; no pin, build, or image was changed",
+              file=sys.stderr)
+        return _finish(result, a.json, RC_NEEDS_HUMAN, "unmeasured", {
+            "stage": "pin_ownership",
+            "category": "ownership_unmeasurable",
+            "retryable": True,
+            "summary": (f"ownership of {len(undecidable)} stale branch(es) "
+                        "was not measured"),
+        })
+
+    # Pin resolution is an authorization input, not an after-the-fact audit.
+    # Previously this refusal lived at the end of the function, after
+    # write_recipe_vars/rewrite_pin/build/push.  A red exit cannot undo a tag
+    # that was already published, so stop before the first writer instead.
+    if unresolved:
+        # Some unresolved states are completed negative measurements (the fork
+        # authoritatively has no branches / the pin is orphaned); others mean a
+        # required API or comparison never formed a record.  Both block before
+        # writers, but only the latter may honestly be called unmeasured.
+        unmeasured_kinds = {
+            "BRANCH_LOOKUP_UNKNOWN": ("pin_resolution",
+                                      "branch_lookup_unmeasurable"),
+            "COMPARE_FAILED": ("pin_resolution", "pin_compare_unmeasurable"),
+            "STALE_UNDECIDED": ("pin_ownership", "ownership_unmeasurable"),
+            "TIP_LOOKUP_UNKNOWN": ("pin_resolution", "tip_lookup_unmeasurable"),
+        }
+        measured_negative = {
+            "NO_BRANCHES": ("pin_resolution", "no_branches"),
+            "ORPHANED": ("pin_resolution", "orphaned_pin"),
+            "PIN_SITE_MISSING": ("pin_resolution", "pin_site_missing"),
+        }
+        first = unresolved[0].get("verdict", "UNKNOWN_VERDICT")
+        any_unmeasured = next(
+            (row.get("verdict") for row in unresolved
+             if row.get("verdict") not in measured_negative), None)
+        if any_unmeasured:
+            stage, category = unmeasured_kinds.get(
+                any_unmeasured, ("pin_resolution", "pin_resolution_unmeasurable"))
+            status, retryable, label = "unmeasured", True, "UNMEASURED"
+        else:
+            stage, category = measured_negative.get(
+                first, ("pin_resolution", "unresolved_pins"))
+            status, retryable, label = "failed", False, "REFUSED"
+        print(f"[{label}] {len(unresolved)} pin(s) could not be resolved; "
+              "no pin, build, or image was changed", file=sys.stderr)
+        return _finish(result, a.json, RC_NEEDS_HUMAN, status, {
+            "stage": stage, "category": category,
+            "retryable": retryable,
+            "summary": f"{len(unresolved)} pin(s) could not be resolved",
+        })
+
     # THE COMPOSED IMAGE IS AN ARTEFACT TOO. Checking only the per-tool
     # artefacts left the exact hole this program is about, one level up: after a
     # run built and published both tools and was then interrupted before
@@ -1247,12 +1528,6 @@ def main(argv=None) -> int:
     # exist" cannot be asked of the registry. RELEASED.json records what the last
     # published image was built FROM; a pin set that does not match it has never
     # been released.
-    # Publish the recipe digests BEFORE anything reads a tag, so bake and this
-    # program cannot disagree about what an artefact is called.
-    stale = write_recipe_vars(root, targets)
-    for s in stale:
-        print(f"  recipe changed: {s}")
-
     # The fingerprint covers pins AND recipes, because an image is built from
     # both. Over pins alone, 0.2.33 and 0.2.34 — identical pins, different
     # verilator recipe, different bytes — would share a fingerprint, and
@@ -1273,18 +1548,43 @@ def main(argv=None) -> int:
     # Computed on a dry run too: `docker image/manifest inspect` only reads, and
     # a preview that cannot see a missing artefact previews a rosier release than
     # the real one.
-    absent = missing_artefacts(root, refs_all, targets)
+    try:
+        absent = missing_artefacts(root, refs_all, targets)
+    except ReleaseMeasurementUnknown as exc:
+        return _finish_unmeasured(result, a.json, exc)
     if absent:
         print(f"  {len(absent)} pinned artefact(s) do not exist yet: "
               f"{', '.join(sorted(absent))}")
     result["absent_artefacts"] = sorted(absent)
 
+    # Version inventory is an input to the FIRST candidate number, so measure
+    # it before the first writer.  Previously `docker images` failure became an
+    # empty list, then VERSION 0.2.99 selected 0.3.0 even when that tag already
+    # existed.  A missing inventory is now retained as UNKNOWN and reaches no
+    # pin rewrite, artefact build, compose, or push.
+    existing_versions: Optional[List[Tuple[int, int, int]]] = None
+    selected_version: Optional[Tuple[str, str]] = None
+    release_needed = bool(moved or absent or unreleased)
+    if release_needed and not a.dry_run and not a.no_build:
+        try:
+            existing_versions = _existing_versions(root)
+            old_candidate, new_candidate, occupied = select_publish_version(
+                root, existing_versions,
+            )
+        except ReleaseMeasurementUnknown as exc:
+            return _finish_unmeasured(result, a.json, exc)
+        selected_version = (old_candidate, new_candidate)
+        result["occupied_version_candidates"] = occupied
+
+    # Publish the recipe digests only after every pre-mutation measurement has
+    # formed a record.  `artefact_tag` hashes the source Dockerfile directly, so
+    # the registry questions above do not depend on this write.
+    stale = write_recipe_vars(root, targets)
+    for s in stale:
+        print(f"  recipe changed: {s}")
+
     if (moved or absent or unreleased) and not a.dry_run:
         for m in moved:
-            if not m["arg"]:
-                unresolved.append({"repo": m["repo"],
-                                   "why": "no ARG <NAME>_REF pins it"})
-                continue
             m["files"] = rewrite_pin(root, m["arg"], m["sha"])
         refs_now = {f"{args_of[r]}_REF": s for r, s in
                     {**pins, **{m["repo"]: m["sha"] for m in moved}}.items()
@@ -1339,7 +1639,10 @@ def main(argv=None) -> int:
             elif eff is None:
                 print("  NOTE: could not read the buildx driver, so whether the "
                       "step-log limit is lifted is UNKNOWN — not assumed lifted.")
-            build = sorted(missing_artefacts(root, refs_now, targets))
+            try:
+                build = sorted(missing_artefacts(root, refs_now, targets))
+            except ReleaseMeasurementUnknown as exc:
+                return _finish_unmeasured(result, a.json, exc)
             if build:
                 print(f"  artefacts to build (absent, not merely moved): "
                       f"{', '.join(build)}")
@@ -1367,17 +1670,29 @@ def main(argv=None) -> int:
                 rc, _, err = _sh(["docker", "buildx", "bake", *bflag, "-f",
                                   str(root / "docker-bake.hcl"), "--push",
                                   "--progress", "plain",
-                                  "--set", f"{t}.tags={want}", t], cwd=root,
+                                 "--set", f"{t}.tags={want}", t], cwd=root,
                                  stream=True, env=BUILD_ENV,
-                                 timeout=TOOL_BUILD_TIMEOUT)
+                                 stall_grace=BUILD_STALL_GRACE_S)
                 if rc != 0:
+                    build_category = (
+                        "progress_stall" if watchdog.RC_STALLED == rc
+                        else "build_failed"
+                    )
                     print(f"[FAIL] {t} did not build; the release stops here so "
                           f"a broken tool is not tagged as a version:\n"
                           f"{err[-1500:]}", file=sys.stderr)
                     return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
-                        "stage": "tool_build", "category": "build_failed",
-                        "retryable": bool(transient_failure_category(err)),
+                        "stage": "tool_build", "category": build_category,
+                        "retryable": (
+                            transient_failure_category(err)
+                            in _EXTENDED_RETRY_CATEGORIES),
                         "tool": t, "summary": _one_line_error(err),
+                        "supervision": {
+                            "mechanism": "activity_progress_lease",
+                            "outcome": ("stalled" if rc == watchdog.RC_STALLED
+                                        else "natural"),
+                            "total_runtime_ceiling_seconds": None,
+                        },
                     })
                 result["built"].append(t)
             # COMPOSE THE IMAGE. Building the tool artefacts is not the
@@ -1411,7 +1726,12 @@ def main(argv=None) -> int:
             #
             # `--set` overrides the target's tags so the compose cannot move
             # `:latest` onto an image that has not passed the smoke yet.
-            old, new = peek_version(root)
+            # Selected before every writer from a successfully measured local
+            # inventory and an explicitly absent registry manifest.  Do not
+            # re-read a possibly changed/failed local inventory here and do not
+            # turn a registry UNKNOWN into permission to reuse a tag.
+            assert selected_version is not None
+            old, new = selected_version
             tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
             result["version_candidate"] = {"from": old, "to": new,
                                            "tag": tag}
@@ -1451,7 +1771,8 @@ def main(argv=None) -> int:
                 return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
                     "stage": "compose",
                     "category": last.get("category") or "compose_failed",
-                    "retryable": bool(last.get("category")),
+                    "retryable": (
+                        last.get("category") in _EXTENDED_RETRY_CATEGORIES),
                     "attempts": len(attempts),
                     "summary": last.get("summary") or _one_line_error(err),
                 })
@@ -1466,22 +1787,39 @@ def main(argv=None) -> int:
                 "python3", str(root / "tools/check_image_depth.py"),
                 "--compact", tag,
             ]
-            # A 31 GB image can take minutes to stream through export/import.
-            # The old 120 s probe deadline was enough to count layers but would
-            # kill the automatic repair it now invokes. Give it the same bound
-            # as a full tool rebuild; the checker has its own 2 h inner bound.
+            # A 31 GB image can take as long as its measured byte stream needs.
+            # This outer lease has no total-runtime ceiling; the checker also
+            # supervises export/import by transferred bytes.
             drc, dout, derr = _sh(
-                depth_cmd, cwd=root, timeout=TOOL_BUILD_TIMEOUT,
+                depth_cmd, cwd=root, progress=True,
+                stall_grace=COMPACTION_STALL_GRACE_S,
             )
             if drc != 0:
                 _sh(["docker", "rmi", tag])
-                print(f"[FAIL] composed image could not be made publishable; the tag was "
+                depth_detail = (derr or dout).strip()
+                no_measurement = (
+                    drc == watchdog.RC_STALLED
+                    or "cannot prove image depth" in depth_detail
+                )
+                print(f"[{'REFUSE' if no_measurement else 'FAIL'}] composed image "
+                      f"could not be made publishable; the tag was "
                       f"removed and NO version was cut:\n{(derr or dout).strip()}",
                       file=sys.stderr)
-                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
-                    "stage": "image_depth", "category": "unpublishable_depth",
-                    "retryable": False,
+                return _finish(result, a.json, RC_NEEDS_HUMAN,
+                               "unmeasured" if no_measurement else "failed", {
+                    "stage": "image_depth", "category": (
+                        "progress_stall" if drc == watchdog.RC_STALLED
+                        else "image_depth_unmeasurable" if no_measurement
+                        else "unpublishable_depth"),
+                    "retryable": no_measurement,
                     "summary": _one_line_error(derr or dout),
+                    "supervision": {
+                        "mechanism": "transferred_bytes_progress_lease",
+                        "outcome": ("stalled" if drc == watchdog.RC_STALLED
+                                    else "unmeasured" if no_measurement
+                                    else "natural"),
+                        "total_runtime_ceiling_seconds": None,
+                    },
                 })
             print(f"  depth: {dout.strip()}")
 
@@ -1493,20 +1831,71 @@ def main(argv=None) -> int:
             result["smoke_failures"] = bad
             if bad:
                 _sh(["docker", "rmi", tag])
-                print(f"[FAIL] {len(bad)} tool(s) do not run in the composed "
-                      f"image; the tag was removed and NO version was cut:",
-                      file=sys.stderr)
+                unmeasured = [b for b in bad
+                              if b.get("outcome", "natural_failure")
+                              != "natural_failure"]
+                if unmeasured:
+                    print("[REFUSE] smoke produced NORECORD; a stalled or "
+                          "unlaunchable probe says nothing about tool health. "
+                          "The tag was removed and NO version was cut:",
+                          file=sys.stderr)
+                else:
+                    print(f"[FAIL] {len(bad)} tool(s) do not run in the composed "
+                          f"image; the tag was removed and NO version was cut:",
+                          file=sys.stderr)
                 for b in bad:
-                    print(f"    {b['tool']}: {b['cmd']}\n      {b['err']}",
+                    print(f"    {b['tool']} "
+                          f"[{b.get('outcome', 'natural_failure')}]: "
+                          f"{b['cmd']}\n      {b['err']}",
                           file=sys.stderr)
                 return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
-                    "stage": "smoke", "category": "tool_smoke",
+                    "stage": "smoke", "category": (
+                        "smoke_unmeasurable" if unmeasured else "tool_smoke"),
                     "retryable": False,
-                    "summary": f"{len(bad)} tool(s) failed smoke",
+                    "summary": (
+                        f"{len(unmeasured)} smoke probe(s) formed no record"
+                        if unmeasured else f"{len(bad)} tool(s) failed smoke"),
+                    "supervision": {
+                        "mechanism": "container_activity_progress_lease",
+                        "progress_basis": ["output_bytes",
+                                           "container_process_tree_cpu"],
+                        "outcome": (unmeasured[0].get("outcome")
+                                    if unmeasured else "natural"),
+                        "total_runtime_ceiling_seconds": None,
+                    },
                 })
             print(f"  smoke: all {len(SMOKE)} tools run in {tag}")
 
-            prc, _, perr = _sh(["docker", "push", tag], timeout=7200)
+            # Close the selection/push race.  `docker manifest inspect` asks the
+            # registry even though a local image now has the same name.  Only a
+            # second explicit not-found answer permits the immutable tag to be
+            # created; a concurrent publisher or an unmeasured registry state
+            # cannot be overwritten by `docker push`.
+            try:
+                before_push = _require_measured(
+                    _probe_remote_manifest(tag), stage="pre_push_registry_guard",
+                    category="candidate_tag_state_unmeasurable",
+                )
+            except ReleaseMeasurementUnknown as exc:
+                _sh(["docker", "rmi", tag])
+                return _finish_unmeasured(result, a.json, exc)
+            if before_push.state is Presence.PRESENT:
+                _sh(["docker", "rmi", tag])
+                print(f"[REFUSED] {tag} appeared in the registry after version "
+                      "selection; the local candidate was removed and the "
+                      "immutable tag was not overwritten", file=sys.stderr)
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "pre_push_registry_guard",
+                    "category": "candidate_tag_collision",
+                    "retryable": True,
+                    "tag": tag,
+                    "summary": "candidate tag already exists in the registry",
+                })
+
+            prc, _, perr = _sh(
+                ["docker", "push", tag], progress=True,
+                stall_grace=PUSH_STALL_GRACE_S,
+            )
             pushed = prc == 0
             if not pushed:
                 print(f"  PUSH FAILED — {new} exists here and nowhere else:"
@@ -1519,7 +1908,7 @@ def main(argv=None) -> int:
                 # so it can never point at something nobody could pull.
                 _sh(["docker", "tag", tag, "ghcr.io/vibeic/vibeic-eda:latest"])
                 _sh(["docker", "push", "ghcr.io/vibeic/vibeic-eda:latest"],
-                    timeout=7200)
+                    progress=True, stall_grace=PUSH_STALL_GRACE_S)
                 (root / "VERSION").write_text(new + "\n", encoding="utf-8")
                 # RECOMPUTE. `fp` above was measured before `rewrite_pin` and
                 # `retag_images` edited the root Dockerfile, and those edits feed
@@ -1584,14 +1973,6 @@ def main(argv=None) -> int:
                 result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
                 result["anchor_pr"]["note"] = _anote
 
-    if unresolved:
-        print(f"[NEEDS HUMAN] {len(unresolved)} pin(s) could not be resolved; "
-              f"they were left alone and are NOT in this release", file=sys.stderr)
-        return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
-            "stage": "pin_resolution", "category": "unresolved_pins",
-            "retryable": False,
-            "summary": f"{len(unresolved)} pin(s) could not be resolved",
-        })
     if not moved and not absent and not unreleased:
         print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
               "and this pin set is already released — nothing to do")

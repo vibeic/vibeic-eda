@@ -64,6 +64,7 @@ sys.path.insert(0, str(HERE))
 # without dirtying the repo. Override with GK_STATE_DIR; defaults to the user cache.
 # WHO may WRITE that shared default is gk_state's question (vibeic/vibeic-eda#12).
 import gk_state  # noqa: E402
+import progress_watchdog as watchdog  # noqa: E402
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"
@@ -172,6 +173,17 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
                [{"tool": c["tool"], "arg": c.get("dockerfile_arg"), "branch": c.get("vibeic_branch"),
                  "release": c.get("upstream_latest_release"), "upstream": c.get("upstream")}
                 for c in candidates])}
+    # A crashed run must not read yesterday's green result. The harness writes
+    # this file only at its terminal boundary, so absence after this unlink is
+    # evidence that this invocation produced no result.
+    try:
+        Path(result_path).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return {c["tool"]: {"status": "harness_error",
+                            "detail": f"could not clear stale harness result: {exc}"}
+                for c in candidates}
     # THE OTHER `shell=True` IN THIS TREE, and the one whose command is not even
     # written here — `cmd` comes from `regression.json` and today is
     # `bash build_and_regress.sh`, but the field takes any shell text, pipelines
@@ -184,21 +196,30 @@ def _run_harness(cfg: dict, candidates: list[dict]) -> dict:
     # recorded on every candidate so a harness that fails without writing
     # GK_RESULT stops being indistinguishable from one that never ran.
     argv = ["/bin/bash", "-o", "pipefail", "-c", cmd]
-    try:
-        r = subprocess.run(argv, cwd=cwd, timeout=cfg.get("timeout", 21600), env=env)
-    except subprocess.TimeoutExpired:
-        return {c["tool"]: {"status": "timeout", "detail": "harness timed out"} for c in candidates}
-    except OSError as e:
+    r = watchdog.run_supervised(
+        argv, cwd=cwd, env=env,
+        stall_grace_s=float(cfg.get("stall_grace", 1800)),
+        output_progress=True, process_tree_cpu_progress=True,
+    )
+    sys.stdout.write(r.out)
+    sys.stderr.write(r.err)
+    if r.stalled:
+        return {c["tool"]: {
+            "status": "harness_stalled",
+            "detail": "harness made no output/process-tree CPU progress; "
+                      "total runtime was not bounded",
+        } for c in candidates}
+    if r.outcome == "launch_error":
         return {c["tool"]: {"status": "harness_error",
-                            "detail": f"the harness could not be started: {e}"}
+                            "detail": f"the harness could not be started: {r.err}"}
                 for c in candidates}
     try:
         arr = json.loads(Path(result_path).read_text())
         return {r_["tool"]: r_ for r_ in arr}
     except (OSError, json.JSONDecodeError):
-        if r.returncode != 0:
+        if r.rc != 0:
             return {c["tool"]: {"status": "harness_error",
-                                "detail": f"the harness exited {r.returncode} and wrote no "
+                                "detail": f"the harness exited {r.rc} and wrote no "
                                           f"{result_path}"} for c in candidates}
         return {}
 

@@ -168,7 +168,7 @@ def test_a_declared_check_missing_from_the_tree_is_not_a_pass(tmp_path, monkeypa
     before = _tip(bare)
     res = _run(monkeypatch, root, [{"name": "gone", "path": "etc/not_here.py",
                                     "cmd": ["python3", "etc/not_here.py"]}])
-    assert res["state"] == "POST_MERGE_CHECK_FAILED", res
+    assert res["state"] == "POST_MERGE_CHECK_UNMEASURABLE", res
     assert "MISSING" in res["detail"]
     assert _tip(bare) == before
 
@@ -179,7 +179,7 @@ def test_a_malformed_declaration_is_not_a_pass(tmp_path, monkeypatch):
     root, bare = _mech(tmp_path, PASSING)
     before = _tip(bare)
     res = _run(monkeypatch, root, [{"name": "typo", "cmd": "python3 etc/check.py"}])
-    assert res["state"] == "POST_MERGE_CHECK_FAILED", res
+    assert res["state"] == "POST_MERGE_CHECK_UNMEASURABLE", res
     assert "MALFORMED" in res["detail"]
     assert _tip(bare) == before
 
@@ -195,14 +195,55 @@ def test_a_fork_declaring_nothing_still_merges(tmp_path, monkeypatch):
 
 
 def test_a_check_that_cannot_be_executed_blocks(tmp_path, monkeypatch):
-    """Timeout / OSError is 'we could not tell', and we could not tell is not a
-    pass — the rule capability_gate uses for its rc=2."""
+    """A launch error is 'we could not tell', never a pass."""
     root, bare = _mech(tmp_path, PASSING)
     before = _tip(bare)
-    monkeypatch.setattr(D, "POST_MERGE_CHECK_TIMEOUT", 0)
-    res = _run(monkeypatch, root, CHECK)
-    assert res["state"] == "POST_MERGE_CHECK_FAILED", res
+    res = _run(monkeypatch, root, [{
+        "name": "cannot-start", "path": "etc/check.py",
+        "cmd": ["/definitely/not/a/real/program"],
+    }])
+    assert res["state"] == "POST_MERGE_CHECK_UNMEASURABLE", res
+    assert res["checks"][0]["outcome"] == "launch_error"
     assert _tip(bare) == before
+
+
+def test_a_stalled_check_is_not_misreported_as_a_test_failure(
+        tmp_path, monkeypatch):
+    """No progress is UNKNOWN evidence, distinct from a natural red check."""
+    sleeper = "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
+    root, bare = _mech(tmp_path, sleeper)
+    before = _tip(bare)
+    monkeypatch.setattr(D, "POST_MERGE_STALL_GRACE", 0.15)
+    monkeypatch.setattr(D, "POST_MERGE_POLL_S", 0.03)
+    res = _run(monkeypatch, root, CHECK)
+    assert res["state"] == "POST_MERGE_CHECK_STALLED", res
+    assert res["checks"][0]["outcome"] == "stalled"
+    assert res["checks"][0]["rc"] == D.watchdog.RC_STALLED
+    assert "WATCHDOG_STALLED" in res["checks"][0]["detail"]
+    assert _tip(bare) == before
+
+
+def test_a_chatty_pytest_hang_cannot_impersonate_landing_progress(
+        tmp_path, monkeypatch):
+    wt = tmp_path / "tree"
+    wt.mkdir()
+    test = wt / "test_hang.py"
+    test.write_text(
+        "def test_hang():\n"
+        "    while True:\n"
+        "        print('noise', flush=True)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(D, "POST_MERGE_STALL_GRACE", 0.15)
+    monkeypatch.setattr(D, "POST_MERGE_POLL_S", 0.03)
+    row = D.run_post_merge_checks(wt, [{
+        "name": "semantic", "path": test.name,
+        "cmd": [sys.executable, "-m", "pytest", "-q", test.name],
+    }])[0]
+    assert row["ok"] is False
+    assert row["outcome"] == "stalled"
+    assert row["progress_basis"] == "validated_pytest_lifecycle"
+    assert row["supervision"]["total_runtime_ceiling_seconds"] is None
 
 
 def test_the_checks_run_before_the_push_not_after(tmp_path, monkeypatch):

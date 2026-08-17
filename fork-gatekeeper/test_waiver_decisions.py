@@ -31,6 +31,7 @@ G = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(G)                                   # noqa: E402
 
 GATE = HERE / "capability_gate.py"
+WATCHDOG = HERE / "progress_watchdog.py"
 LIVE = HERE / "capability_waivers.txt"
 
 #: A complete, well-formed entry. Tests below mutate ONE field of it, so that a
@@ -86,6 +87,8 @@ def _full_gate(tmp_path, waiver_text, smoke=_STUB_SMOKE):
     d.mkdir(exist_ok=True)
     (d / "capability_gate.py").write_text(GATE.read_text(encoding="utf-8"),
                                           encoding="utf-8")
+    (d / "progress_watchdog.py").write_text(
+        WATCHDOG.read_text(encoding="utf-8"), encoding="utf-8")
     (d / "capability_smoke.py").write_text(smoke, encoding="utf-8")
     w = d / "w.txt"
     w.write_text(waiver_text, encoding="utf-8")
@@ -347,6 +350,8 @@ def test_no_waiver_file_at_all_is_not_itself_a_failure(tmp_path):
     d = tmp_path / "nofile"
     d.mkdir()
     (d / "capability_gate.py").write_text(GATE.read_text(encoding="utf-8"), encoding="utf-8")
+    (d / "progress_watchdog.py").write_text(
+        WATCHDOG.read_text(encoding="utf-8"), encoding="utf-8")
     (d / "capability_smoke.py").write_text(works, encoding="utf-8")
     r = subprocess.run([sys.executable, str(d / "capability_gate.py"), "unused-image",
                         "--waivers", str(d / "absent.txt"), "--json", str(d / "r.json")],
