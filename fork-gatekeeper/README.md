@@ -107,7 +107,9 @@ and set the env knobs above.
 fork's one line, our branches into that line, then prune — and only afterwards
 the pre-existing `run_tick.sh`. Two pipelines, one entry, so the order is
 guaranteed; the wrapper holds its own lock and captures each exit code directly
-rather than through a pipe.
+rather than through a pipe. `run_tick.sh` is now the release-capable inner half,
+not a standalone cron/manual entrypoint: without the wrapper's current one-use
+authorization context it exits before GitHub auth, merge, or release work.
 
 ### Step 2b — the gatekeeper AI decides merge vs cherry-pick
 
@@ -137,6 +139,19 @@ ancestry or patch equivalence. An rc=0 turn with no such postcondition, and any
 stalled turn, leaves that case in `ai_decisions_pending.json` and keeps the
 round actionable. Verified cases leave the queue immediately; the full stream
 and verification rows remain in `ai_decisions.log` / `daily_0530.json`.
+
+Before `run_tick.sh` may publish, `check_ai_release_authorization.py` validates
+that same round again. It requires an exact row for every tool in `FORKS.json`,
+the round nonce and timestamps, and one verified result for every conflict.
+Blocked evidence and NORECORD both skip the release; a partial fleet cannot
+turn a missing conflict into an apparent zero. The normalized authorization
+record, including every source and published tip, is retained by LL. For
+defence in depth, the wrapper then creates a mode-0600, one-use capability bound
+to the canonical round/registry paths, boundary timestamp, round nonce, and its
+own PID. `run_tick.sh` atomically consumes that capability and independently
+re-runs the checker before `daily_merge` or `daily_release`. A direct call, a
+stale second cron line, or replay of yesterday's arguments therefore cannot
+inherit an earlier authorization.
 
 The brief is self-contained: a gatekeeper turn needs no prior knowledge of this
 document to do the job. It states the per-case evidence, asks for MERGE /
@@ -224,13 +239,15 @@ measured sync/image/pin lag, then retains:
   (`GK_RELEASE_LL_KEEP_DAYS`);
 * `release-ll/index.jsonl` — narrow append-only outcome history, never pruned.
 
-The release tick runs only after code currency is proved (`CODE=0`) and the
-semantic pytest record is complete and green. A red record and NORECORD both
-block release, but remain distinct facts; a stalled suite is retained as
-`status=norecord, outcome=stalled`. On any such skip, LL records the tick as
-`not_checked` and never reads the live `daily-release.json`, which may still be
-yesterday's terminal record. Even when the tick did run, the release record's
-`started_at` must fall inside this 05:30 round before LL will accept it.
+The release tick runs only after code currency is proved (`CODE=0`), the
+semantic pytest record is complete and green, and every AI conflict has a
+verified published-mainline postcondition. A red record, a blocked AI
+postcondition, and NORECORD all block release but remain distinct facts; a
+stalled suite is retained as `status=norecord, outcome=stalled`. On any such
+skip, LL records the tick as `not_checked` and never reads the live
+`daily-release.json`, which may still be yesterday's terminal record. Even when
+the tick did run, the release record's `started_at` must fall inside this 05:30
+round before LL will accept it.
 `fork_gap_report` likewise publishes `program/schema_version/started_at/
 completed_at` and the exact `daily_0530._round` nonce it measured. The cron
 passes its own `--round-at`; missing, stale, non-applied, or malformed merge

@@ -2434,18 +2434,52 @@ def _unpinned_head_compare(tool: str, up_full: str, up_branch: str, head: str):
     could not tell". For a mirror that sits exactly on the upstream head that is
     the wrong word: the question is answerable, cheaply, and the answer is zero.
 
-    Two `ls-remote` calls settle it — no clone, no API compare, no fork network.
+    After resolving our fork's CURRENT remote head, a local clone settles the
+    full graph question first when one exists.  Passing that immutable SHA is
+    load-bearing: passing the mutable local branch name can measure a stale
+    ``main`` while claiming it describes the current fork.  This matters for a
+    divergent watch-only mirror: two remote SHAs prove only that it differs,
+    while the clone can measure how many commits of ours sit on top of upstream.
+    Without that route, icsprout55-pdk's three carried commits were written as
+    ``ahead=null`` and the release report silently counted them as zero stranded
+    commits.
+
+    When no clone can answer, two `ls-remote` calls still settle equality — no
+    API compare and no fork network.
 
     Returns `(cmp, source)` when it can answer, `(err_cmp, None)` when it has
     something honest to say about why it cannot, and `(None, None)` when it has
     nothing to add and the caller's own refusal should stand.
 
-    EQUALITY IS THE ONLY CONCLUSION DRAWN. When the heads differ, the SIZE of the
-    gap is not knowable from two SHAs, and a guess would land on "barely behind" —
-    the reassuring direction, which is the one that gets believed. That stays
-    undetermined and says what it would take to answer.
+    EQUALITY IS THE ONLY CONCLUSION DRAWN BY THE FALLBACK. When the heads differ,
+    the SIZE of the gap is not knowable from two SHAs, and a guess would land on
+    "barely behind" — the reassuring direction, which is the one that gets
+    believed. That stays undetermined and says what it would take to answer.
     """
-    ours = _ls_remote_head(f"https://github.com/{ORG}/{tool}.git", head)
+    fork_url = f"https://github.com/{ORG}/{tool}.git"
+    ours = _ls_remote_head(fork_url, head)
+    if ours:
+        clone = _clone_for(tool)
+        if clone is not None:
+            held = _peel(clone, [ours])
+            if held is None or ours not in held:
+                # Fetch the fork head as an object only.  No refspec means git
+                # writes FETCH_HEAD without moving `main`, `origin/main`, or a
+                # worktree branch another process may be using.  A newly pushed
+                # watch-only fix otherwise remains permanently unmeasured: this
+                # fork never enters the merge path that refreshes ordinary
+                # integrated clones.
+                fetched = _git(clone, "fetch", "--quiet", fork_url, head,
+                               timeout=600)
+                held = _peel(clone, [ours]) if fetched.ok else None
+            if held is not None and ours in held:
+                # `_local_compare` is handed the immutable remote SHA, never the
+                # mutable local branch name: that branch may lag origin and
+                # would undercount the carried work this path protects.
+                local = _local_compare(tool, up_full, up_branch, ours)
+                if local is not None:
+                    return local, "local-clone"
+
     theirs = _ls_remote_head(f"https://github.com/{up_full}.git", up_branch)
     if not ours or not theirs:
         return None, None
@@ -2749,9 +2783,9 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     cmp: dict = {"_err": "not attempted"}
     source = None
 
-    # The clone answers about our PIN. An unpinned tool has no ref to ask about,
-    # and resolving its fork's branch name inside a clone would answer about a
-    # different commit than the one the API would name.
+    # The pinned route asks the clone here.  The unpinned route asks it inside
+    # `_unpinned_head_compare`, where a divergent branch can be measured instead
+    # of being reduced to two unequal-but-unsized remote SHAs.
     _loc = _local_compare(tool, up_full, up_branch, ref) if ref else None
     if _loc is not None:
         cmp, source = _loc, "local-clone"

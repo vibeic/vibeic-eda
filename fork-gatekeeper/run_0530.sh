@@ -49,6 +49,51 @@ python3 "${DIR}/daily_0530.py" --apply \
 SIX=$?
 echo "[$(date -Is)] daily_0530 exit ${SIX}" >> "${LOG}"
 
+# A process exit is not the release authorization for AI-resolved conflicts.
+# `daily_0530` can return 1 after a conflict was successfully delivered, and an
+# AI process can return 0 while its source tip is still absent from the published
+# mainline.  Read this round's retained postconditions and fail closed on both a
+# measured rejection and NORECORD.  The normalized sidecar is also the exact
+# evidence the learning loop retains later in this script.
+AI_AUTH_JSON="${GK_STATE_DIR}/ai-release-authorization.json"
+AI_RUN_ID=""
+if ! rm -f "${AI_AUTH_JSON}"; then
+    INPUT_CLEAR=1
+    echo "[$(date -Is)] could not clear ${AI_AUTH_JSON} — stale AI authorization must not permit release" >> "${LOG}"
+fi
+if [ -f "${DIR}/check_ai_release_authorization.py" ]; then
+    python3 "${DIR}/check_ai_release_authorization.py" \
+        --round-json "${GK_STATE_DIR}/daily_0530.json" \
+        --forks-json "${DIR}/FORKS.json" \
+        --round-at "${ROUND_AT}" --json "${AI_AUTH_JSON}" >> "${LOG}" 2>&1
+    AI_AUTH=$?
+else
+    AI_AUTH=2
+    echo "[$(date -Is)] AI release authorization NOT CHECKED — checker missing" >> "${LOG}"
+fi
+echo "[$(date -Is)] check_ai_release_authorization exit ${AI_AUTH} (0=authorized, 1=blocked, 2=NORECORD)" >> "${LOG}"
+if [ "${AI_AUTH}" -eq 0 ]; then
+    AI_RUN_ID="$(python3 - "${AI_AUTH_JSON}" <<'PY'
+import json
+import re
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+meta = value.get("round") if isinstance(value, dict) else None
+run_id = meta.get("run_id") if isinstance(meta, dict) else None
+if (value.get("status") != "authorized" or not isinstance(run_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", run_id)):
+    raise SystemExit("authorization sidecar has no valid authorized run_id")
+print(run_id)
+PY
+)"
+    if [ "$?" -ne 0 ]; then
+        AI_AUTH=2
+        AI_RUN_ID=""
+        echo "[$(date -Is)] AI release authorization sidecar could not supply its exact round nonce — forced NORECORD" >> "${LOG}"
+    fi
+fi
+
 # Is this round even running the code that was landed for it?
 #
 # Nothing here or in run_tick.sh updates this checkout, so a fix landed in
@@ -135,10 +180,70 @@ elif [ "${CODE}" -ne 0 ]; then
     fi
     echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — ${CODE_KIND}; no release was authorised" >> "${LOG}"
     echo "[$(date -Is)] run_tick NOT CHECKED — ${CODE_KIND}" >> "${GK_STATE_DIR}/cron.log"
+elif [ "${AI_AUTH}" -ne 0 ]; then
+    TICK=2
+    if [ "${AI_AUTH}" -eq 1 ]; then
+        TICK_STATE="not_checked_ai_unverified"
+        AI_KIND="an AI conflict lacks a verified published-mainline postcondition"
+    else
+        TICK_STATE="not_checked_ai_norecord"
+        AI_KIND="AI release authorization produced NORECORD (rc=${AI_AUTH})"
+    fi
+    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — ${AI_KIND}; no release was authorised" >> "${LOG}"
+    echo "[$(date -Is)] run_tick NOT CHECKED — ${AI_KIND}; see ${AI_AUTH_JSON}" >> "${GK_STATE_DIR}/cron.log"
 else
-    "${DIR}/run_tick.sh" >> "${GK_STATE_DIR}/cron.log" 2>&1
-    TICK=$?
-    echo "[$(date -Is)] run_tick exit ${TICK}" >> "${LOG}"
+    AI_CAPABILITY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+    AI_HANDOFF="${GK_STATE_DIR}/ai-release-handoff.${AI_CAPABILITY}.json"
+    if [ -z "${AI_CAPABILITY}" ] || ! (umask 077; python3 - \
+            "${AI_HANDOFF}" "${AI_CAPABILITY}" "$$" \
+            "${GK_STATE_DIR}/daily_0530.json" "${DIR}/FORKS.json" \
+            "${ROUND_AT}" "${AI_RUN_ID}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+record = {
+    "schema_version": 1,
+    "capability": sys.argv[2],
+    "parent_pid": int(sys.argv[3]),
+    "round_json": sys.argv[4],
+    "forks_json": sys.argv[5],
+    "round_at": sys.argv[6],
+    "run_id": sys.argv[7],
+}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    json.dump(record, stream, sort_keys=True)
+    stream.write("\n")
+PY
+    ); then
+        AI_AUTH=2
+        TICK=2
+        TICK_STATE="not_checked_ai_norecord"
+        echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — could not create one-use AI release capability; no release was authorised" >> "${LOG}"
+        echo "[$(date -Is)] run_tick NOT CHECKED — AI release capability produced NORECORD" >> "${GK_STATE_DIR}/cron.log"
+        rm -f -- "${AI_HANDOFF}"
+    else
+        "${DIR}/run_tick.sh" \
+            --ai-round-json "${GK_STATE_DIR}/daily_0530.json" \
+            --ai-forks-json "${DIR}/FORKS.json" \
+            --ai-round-at "${ROUND_AT}" \
+            --ai-run-id "${AI_RUN_ID}" \
+            --ai-capability "${AI_CAPABILITY}" \
+            >> "${GK_STATE_DIR}/cron.log" 2>&1
+        TICK=$?
+        rm -f -- "${AI_HANDOFF}"
+        if [ "${TICK}" -eq 9 ]; then
+            # The inner release boundary consumed or rejected its one-use
+            # context.  It intentionally leaves the prior terminal release
+            # record untouched; this state tells LL not to read that old file.
+            AI_AUTH=2
+            TICK_STATE="not_checked_ai_norecord"
+            echo "[$(date -Is)] run_tick refused current-round AI authorization (TICK=9) — forced NORECORD; no release was authorised" >> "${LOG}"
+        fi
+        echo "[$(date -Is)] run_tick exit ${TICK}" >> "${LOG}"
+    fi
 fi
 
 # Step 6 — refresh the fork ledger and REGENERATE the public page.
@@ -262,6 +367,7 @@ python3 "${DIR}/capture_release_ll.py" \
     --fork-github-json "${FORK_GH_JSON}" \
     --forks-json "${DIR}/FORKS.json" \
     --expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}" \
+    --ai-authorization-json "${AI_AUTH_JSON}" \
     --semantic-pytest-json "${PYTEST_RETAINED}" \
     --round-at "${ROUND_AT}" --tick-exit "${TICK}" \
     --tick-state "${TICK_STATE}" >> "${LOG}" 2>&1
@@ -352,6 +458,7 @@ fi
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
    || [ "${TESTS}" -ne 0 ] || [ "${INPUT_CLEAR}" -ne 0 ] \
+   || [ "${AI_AUTH}" -ne 0 ] \
    || [ "${GAP_FATAL}" -ne 0 ] \
    || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
 exit 0

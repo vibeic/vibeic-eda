@@ -810,7 +810,21 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
                   and r["kind"] != "contents_assertion"]
     not_built = [r for r in rows
                  if not r["integrated"] and r["kind"] != "contents_assertion"]
-    stranded = [r for r in not_built if (r.get("ahead") or 0) > 0]
+    # Q2 has a denominator too.  ``ahead=None`` means discovery could not size
+    # our fork's divergence; it is not the reassuring answer zero.  This was a
+    # live false-zero on the watch-only icsprout55-pdk mirror: it was divergent,
+    # carried three commits, and the old ``or 0`` arithmetic published zero
+    # stranded work because its compare was unmeasured.  Keep the unknown rows
+    # explicit and let the round form no record until every not-built fork has a
+    # nonnegative integer measurement.
+    def measured_ahead(r: dict) -> bool:
+        value = r.get("ahead")
+        return (isinstance(value, int) and not isinstance(value, bool)
+                and value >= 0)
+
+    unmeasured_stranded = [r for r in not_built if not measured_ahead(r)]
+    stranded = [r for r in not_built
+                if measured_ahead(r) and r["ahead"] > 0]
 
     return {
         "assertions": [{"tool": r["tool"], "contents": r["asserted_contents"]}
@@ -825,7 +839,8 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         "q1_release_lag": sum(r["release_lag"] or 0 for r in measurable),
         "q1_unmeasured": [r["tool"] for r in unmeasured],
         "q2_forks_not_built_from_ours": [r["tool"] for r in not_built],
-        "q2_our_commits_stranded": sum(r.get("ahead") or 0 for r in stranded),
+        "q2_our_commits_stranded": sum(r["ahead"] for r in stranded),
+        "q2_unmeasured_stranded": [r["tool"] for r in unmeasured_stranded],
         "q2_ours_past_the_pin": sum(r["ours_unshipped"] or 0 for r in rows),
         "q2_ours_past_the_pin_substantive":
             sum(r["ours_unshipped_substantive"] or 0 for r in rows),
@@ -1210,6 +1225,8 @@ def _measurement_incomplete(rep: dict) -> bool:
                 or rep.get("q1_unmeasured")
                 or rep.get("q1_unmeasured_at_merge")
                 or rep.get("q2_unmeasured_ship")
+                or not isinstance(rep.get("q2_unmeasured_stranded"), list)
+                or rep.get("q2_unmeasured_stranded")
                 or rep.get("tip_rejected")
                 or disagreed)
 
@@ -1337,6 +1354,7 @@ def main(argv=None) -> int:
         print(f"  FLEET NOT MEASURED: {error}")
 
     unmeasured = (rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
+                  + rep["q2_unmeasured_stranded"]
                   + [r["tool"] for r in disagreed])
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")

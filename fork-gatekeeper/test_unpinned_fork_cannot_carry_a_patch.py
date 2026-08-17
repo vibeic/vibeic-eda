@@ -61,13 +61,24 @@ _FIELDS = dict(integrated=False, ahead=0, image_behind=None, sync_lag=None,
 
 
 def _run(rows, monkeypatch, baseline=None):
+    def _ahead_is_measured(row):
+        value = row.get("ahead")
+        return (isinstance(value, int) and not isinstance(value, bool)
+                and value >= 0)
+
     rep = {
         "q1_image_behind_upstream": 0, "q1_forks_behind": 0, "q1_sync_lag": 0,
         "q1_release_lag": 0, "q1_unmeasured": [], "q2_unmeasured_ship": [],
         "q2_forks_not_built_from_ours": [r["tool"] for r in rows
                                          if not r["integrated"]],
-        "q2_our_commits_stranded": sum(r.get("ahead") or 0 for r in rows
-                                       if not r["integrated"]),
+        "q2_our_commits_stranded": sum(
+            r["ahead"] for r in rows
+            if not r["integrated"] and r.get("kind") != "contents_assertion"
+            and _ahead_is_measured(r) and r["ahead"] > 0),
+        "q2_unmeasured_stranded": [
+            r["tool"] for r in rows
+            if not r["integrated"] and r.get("kind") != "contents_assertion"
+            and not _ahead_is_measured(r)],
         "q2_ours_past_the_pin": 0, "q2_ours_past_the_pin_substantive": 0,
         "q2_unshipped_commits": [], "rows": rows,
         # `analyse`'s contract, modelled faithfully rather than worked around.
@@ -149,6 +160,15 @@ def test_a_baselined_fork_that_gains_a_patch_still_FAILS(monkeypatch):
     assert rows[0]["tool"] in out
 
 
+def test_an_unknown_unpinned_ahead_forms_no_record_instead_of_zero(monkeypatch):
+    """The ledger shape that hid icsprout55-pdk's three carried commits."""
+    rows = [dict(_FIELDS, tool="icsprout55-pdk", ahead=None)]
+    rc, out = _run(rows, monkeypatch, baseline={"icsprout55-pdk"})
+    assert rc == 2
+    assert "NOT MEASURED" in out
+    assert "icsprout55-pdk" in out
+
+
 def test_the_stranded_check_runs_BEFORE_the_baseline_is_consulted():
     """Order matters: if the baseline were consulted first and returned 0, a
     patched-and-unbuilt fork would pass on the strength of being known."""
@@ -172,8 +192,8 @@ def test_a_SHRUNK_baseline_is_reported_and_passes(monkeypatch):
     assert rc == 0 and "baseline shrank" in out
 
 
-def test_the_repo_as_committed_has_no_RECORDING_inconsistency():
-    """The regression: whatever the real state is, it must be the recorded one.
+def test_the_live_watch_only_gap_never_passes_as_zero():
+    """The old ledger and the repaired ledger both fail safely.
 
     ASSERTS THE DOCSTRING, NOT rc==0. This required exit 0, and the report's
     final line is `rc 0 iff q1_image_behind_upstream == 0`. Being behind upstream
@@ -184,8 +204,14 @@ def test_the_repo_as_committed_has_no_RECORDING_inconsistency():
     not a question it can answer). The test asserted a condition the repo cannot
     satisfy by design, and had been red long enough to be filed as a mystery.
 
-    What "recorded == real" actually means here is the three INCONSISTENCY
-    conditions, each of which is a genuine defect rather than a passage of time:
+    icsprout55-pdk has since become the fourth inconsistency: its unpinned mirror
+    carries three commits.  A ledger written before discovery learned to use the
+    local clone has ``ahead=null`` and must now form no record (rc=2).  A ledger
+    written by repaired discovery has ``ahead=3`` and must raise CANNOT SHIP
+    (rc=1).  The only forbidden result is the old false-green rc=0.
+
+    The original three inconsistency conditions remain genuine defects rather
+    than ordinary passage of time:
 
         CANNOT SHIP        a fork carries a patch with no pin to ship it through
         newly not built    a fork stopped being built from, unrecorded
@@ -198,10 +224,14 @@ def test_the_repo_as_committed_has_no_RECORDING_inconsistency():
                         "--no-fetch"], capture_output=True, text=True,
                        timeout=180, cwd=str(_HERE.parent))
     out = r.stdout + r.stderr
-    assert r.returncode != 2, f"the report could not measure:\n{out[-600:]}"
-    for marker in ("CANNOT SHIP", "newly not built", "baseline shrank"):
-        assert marker not in out, (
-            f"recorded state disagrees with real state — {marker!r}:\n{out[-800:]}")
+    assert r.returncode in (1, 2), (
+        "the live unpinned carried-work gap was published as green:\n"
+        f"{out[-800:]}")
+    assert "icsprout55-pdk" in out
+    if r.returncode == 2:
+        assert "NOT MEASURED" in out
+    else:
+        assert "CANNOT SHIP" in out
 
 
 # ── vibeic-eda#79 — an ASSERTION is not a pin, and the sweep must know it ──
@@ -311,8 +341,30 @@ def test_it_is_not_swept_and_not_NOT_MEASURED_either(tmp_path):
     rep = F.analyse(repo, forks, ledger, fetch=False)
     assert "demo" not in rep["q1_unmeasured"]
     assert "demo" not in rep["q2_unmeasured_ship"]
+    assert "demo" not in rep["q2_unmeasured_stranded"]
     assert "demo" not in rep["q2_forks_not_built_from_ours"]
     assert rep["assertions"] == [{"tool": "demo", "contents": shas[0]}]
+
+
+def test_live_watch_only_null_ahead_is_explicitly_unmeasured(tmp_path):
+    """A no-clone icsprout55-pdk ledger row cannot publish stranded=0."""
+    repo = tmp_path / "eda"
+    repo.mkdir()
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    (ledger / "icsprout55-pdk.json").write_text(_json.dumps({
+        "tool": "icsprout55-pdk",
+        "integrated": False,
+        "ahead": None,
+        "pinned_ref_full": None,
+    }))
+
+    rep = F.analyse(repo, tmp_path / "forks", ledger, fetch=False)
+
+    assert rep["q2_forks_not_built_from_ours"] == ["icsprout55-pdk"]
+    assert rep["q2_our_commits_stranded"] == 0
+    assert rep["q2_unmeasured_stranded"] == ["icsprout55-pdk"]
+    assert F._measurement_incomplete(rep) is True
 
 
 def test_the_fact_it_carries_is_still_reported(tmp_path):

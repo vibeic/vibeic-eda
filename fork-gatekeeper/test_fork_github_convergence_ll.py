@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -17,6 +18,8 @@ ROUND_AT = "2026-08-17T05:30:00+08:00"
 FORK_ENTRIES = json.loads(
     (HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"]
 REGISTERED_FORKS = sorted(entry["tool"] for entry in FORK_ENTRIES)
+REGISTRY_SHA256 = hashlib.sha256(
+    (HERE / "FORKS.json").read_bytes()).hexdigest()
 REGISTERED_REPOSITORIES = sorted(
     f"vibeic/{entry['tool']}" for entry in FORK_ENTRIES)
 REQUIRED_REPOSITORIES = sorted(
@@ -258,6 +261,27 @@ def _validate_record(record: dict) -> tuple[dict | None, list[str]]:
 
 
 def _gap_record(**updates) -> dict:
+    def gap_row(tool: str) -> dict:
+        return {
+            "tool": tool,
+            "integrated": True,
+            "ahead": 0,
+            "pin": "c" * 40,
+            "pin_disagreement": None,
+            "kind": "pin",
+            "asserted_contents": None,
+            "sync_lag": 0,
+            "sync_lag_at_merge": 0,
+            "release_lag": 0,
+            "image_behind": 0,
+            "ours_unshipped": 0,
+            "ours_unshipped_substantive": 0,
+            "unshipped_commits": [],
+            "tip_state": "current",
+            "tip_note": None,
+            "merge_ref_seen": "b" * 40,
+        }
+
     record = {
         "program": "fork_gap_report",
         "schema_version": 1,
@@ -277,6 +301,7 @@ def _gap_record(**updates) -> dict:
             },
         },
         "source_errors": [],
+        "assertions": [],
         "q1_sync_lag_at_merge": 0,
         "q1_unmeasured_at_merge": [],
         "q1_sync_lag": 0,
@@ -290,29 +315,59 @@ def _gap_record(**updates) -> dict:
         "q2_ours_past_the_pin_substantive": 0,
         "q2_unshipped_commits": [],
         "q2_unmeasured_ship": [],
+        "q2_unmeasured_stranded": [],
         "tip_rejected": [],
         "tip_unverified": [],
         "registered_forks": REGISTERED_FORKS,
         "ledger_forks": REGISTERED_FORKS,
         "merge_tips_seen": {tool: "b" * 40 for tool in REGISTERED_FORKS},
         "fleet_errors": [],
-        "rows": [{"tool": tool} for tool in REGISTERED_FORKS],
+        "rows": [gap_row(tool) for tool in REGISTERED_FORKS],
         "measured_with_fetch": True,
     }
     record.update(updates)
     return record
 
 
+def _ai_authorization_record() -> dict:
+    return {
+        "program": "check_ai_release_authorization",
+        "schema_version": 1,
+        "checked_at": "2026-08-17T06:02:00+08:00",
+        "round_at": ROUND_AT,
+        "source": "/state/daily_0530.json",
+        "registered_forks": REGISTERED_FORKS,
+        "registered_count": len(REGISTERED_FORKS),
+        "registry": {
+            "source": str(HERE / "FORKS.json"),
+            "sha256": REGISTRY_SHA256,
+        },
+        "round": {
+            "schema_version": 1, "run_id": "a" * 64,
+            "started_at": "2026-08-17T05:30:01+08:00",
+            "finished_at": "2026-08-17T05:59:00+08:00",
+            "applied": True,
+        },
+        "status": "authorized",
+        "case_count": 0, "verified_count": 0, "unverified_count": 0,
+        "transport": {"invoked": False, "outcome": None, "rc": None},
+        "case_results": [], "reasons": [], "source_errors": [],
+    }
+
+
 def _capture(tmp_path: Path, fork_path: Path, *, gap_record=None
              ) -> tuple[int, dict, dict]:
     gap = tmp_path / "gap.json"
     gap.write_text(json.dumps(_gap_record() if gap_record is None else gap_record))
+    ai = tmp_path / "ai-authorization.json"
+    ai.write_text(json.dumps(_ai_authorization_record()))
     state = tmp_path / "state"
     rc = LL.main([
         "--state-dir", str(state),
         "--release-json", str(tmp_path / "release-not-read.json"),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_path),
+        "--ai-authorization-json", str(ai),
         "--expected-github-actor", "reyerchu",
         "--round-at", ROUND_AT,
         "--tick-exit", "2",
@@ -343,6 +398,7 @@ def test_cron_runs_checker_between_gap_and_ll_and_gates_on_its_rc():
 
     ll_arm = source[ll:source.index("LL=$?")]
     assert '--fork-github-json "${FORK_GH_JSON}"' in ll_arm
+    assert '--ai-authorization-json "${AI_AUTH_JSON}"' in ll_arm
     assert '--forks-json "${DIR}/FORKS.json"' in ll_arm
     assert ('--expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}"'
             in ll_arm)
@@ -426,6 +482,8 @@ def test_open_github_cannot_contradict_a_generic_converged_lesson():
      "q1_unmeasured is not empty"),
     (lambda gap: gap.update(q2_unmeasured_ship=["yosys"]),
      "q2_unmeasured_ship is not empty"),
+    (lambda gap: gap.update(q2_unmeasured_stranded=["yosys"]),
+     "q2_unmeasured_stranded is not empty"),
     (lambda gap: gap.update(q1_sync_lag_at_merge=None),
      "q1_sync_lag_at_merge is not a non-negative integer"),
     (lambda gap: gap.update(started_at="2026-08-16T06:00:00+08:00"),
@@ -455,7 +513,7 @@ def test_open_github_cannot_contradict_a_generic_converged_lesson():
      "registered_forks is missing registered tool"),
     (lambda gap: gap.update(
         ledger_forks=REGISTERED_FORKS[:-1],
-        rows=[{"tool": tool} for tool in REGISTERED_FORKS[:-1]]),
+        rows=gap["rows"][:-1]),
      "ledger_forks is missing registered tool"),
 ])
 def test_partial_stale_or_unproven_gap_zero_is_not_accepted(
@@ -474,6 +532,139 @@ def test_partial_stale_or_unproven_gap_zero_is_not_accepted(
     assert full["convergence"]["converged"] is False
     assert any(needle in error for error in full["source_errors"])
     assert narrow["delivery_converged"] is False
+
+
+def test_gap_row_nonzero_cannot_be_laundered_by_zero_headline(tmp_path, capsys):
+    fork = tmp_path / "fork.json"
+    fork.write_text(json.dumps(_fork_record()))
+    gap = _gap_record()
+    gap["rows"][0]["sync_lag_at_merge"] = 1
+
+    rc, full, narrow = _capture(tmp_path, fork, gap_record=gap)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert any("q1_sync_lag_at_merge contradicts retained per-fork rows"
+               in error for error in full["source_errors"])
+    assert full["convergence"]["sync_lag_at_merge"] is None
+    assert full["convergence"]["converged"] is False
+    assert narrow["converged"] is False
+
+
+def test_gap_nonzero_headline_cannot_override_zero_rows(tmp_path, capsys):
+    fork = tmp_path / "fork.json"
+    fork.write_text(json.dumps(_fork_record()))
+    gap = _gap_record(q1_sync_lag_at_merge=1)
+
+    rc, full, narrow = _capture(tmp_path, fork, gap_record=gap)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert any("q1_sync_lag_at_merge contradicts retained per-fork rows"
+               in error for error in full["source_errors"])
+    assert full["convergence"]["sync_lag_at_merge"] is None
+    assert full["convergence"]["converged"] is False
+    assert narrow["converged"] is False
+
+
+@pytest.mark.parametrize(("headline", "forged"), [
+    ("assertions", [{"tool": REGISTERED_FORKS[0], "contents": "d" * 40}]),
+    ("q1_image_behind_upstream", 1),
+    ("q1_forks_behind", 1),
+    ("q1_sync_lag", 1),
+    ("q1_release_lag", 1),
+    ("q2_our_commits_stranded", 1),
+    ("q2_ours_past_the_pin", 1),
+    ("q2_ours_past_the_pin_substantive", 1),
+    ("q2_forks_not_built_from_ours", [REGISTERED_FORKS[0]]),
+    ("q2_unshipped_commits", [
+        {"tool": REGISTERED_FORKS[0], "sha": "d" * 40, "merge": False},
+    ]),
+    ("tip_unverified", [
+        {"tool": REGISTERED_FORKS[0], "why": "forged unknown"},
+    ]),
+])
+def test_gap_consumer_recomputes_each_retained_headline(headline, forged):
+    gap = _gap_record()
+    gap[headline] = forged
+
+    accepted, errors = LL._validate_gap(
+        gap, Path("fixture-gap.json"), ROUND_AT, HERE / "FORKS.json")
+
+    assert accepted is None
+    assert any(f"{headline} contradicts retained per-fork rows" in error
+               for error in errors)
+
+
+def test_legitimate_not_built_from_ours_row_keeps_producer_semantics():
+    gap = _gap_record()
+    row = gap["rows"][0]
+    row.update(
+        integrated=False,
+        pin=None,
+        release_lag=None,
+        image_behind=None,
+        ours_unshipped=None,
+        ours_unshipped_substantive=None,
+    )
+    gap["q2_forks_not_built_from_ours"] = [row["tool"]]
+
+    accepted, errors = LL._validate_gap(
+        gap, Path("fixture-gap.json"), ROUND_AT, HERE / "FORKS.json")
+
+    assert errors == []
+    assert accepted == gap
+
+
+def test_unmeasured_ahead_on_not_built_row_cannot_launder_stranded_work():
+    gap = _gap_record()
+    row = gap["rows"][0]
+    row.update(
+        integrated=False,
+        ahead=None,
+        pin=None,
+        release_lag=None,
+        image_behind=None,
+        ours_unshipped=None,
+        ours_unshipped_substantive=None,
+    )
+    gap["q2_forks_not_built_from_ours"] = [row["tool"]]
+    # This is the historical icsprout55-pdk shape: its unknown ahead count was
+    # silently summed as zero and no third-state field admitted the omission.
+    gap["q2_unmeasured_stranded"] = []
+
+    accepted, errors = LL._validate_gap(
+        gap, Path("fixture-gap.json"), ROUND_AT, HERE / "FORKS.json")
+
+    assert accepted is None
+    assert any("q2_unmeasured_stranded contradicts retained per-fork rows"
+               in error for error in errors)
+
+
+def test_contents_assertion_is_not_misclassified_as_unmeasured_or_not_built():
+    gap = _gap_record()
+    row = gap["rows"][0]
+    row.update(
+        kind="contents_assertion",
+        asserted_contents="d" * 64,
+        pin=None,
+        sync_lag=None,
+        sync_lag_at_merge=None,
+        release_lag=None,
+        image_behind=None,
+        ours_unshipped=None,
+        ours_unshipped_substantive=None,
+        tip_state=None,
+        tip_note=None,
+    )
+    row.pop("merge_ref_seen")
+    gap["assertions"] = [{"tool": row["tool"], "contents": "d" * 64}]
+
+    accepted, errors = LL._validate_gap(
+        gap, Path("fixture-gap.json"), ROUND_AT, HERE / "FORKS.json")
+
+    assert errors == []
+    assert accepted == gap
 
 
 def test_gap_and_github_must_name_the_same_daily_round_nonce(tmp_path, capsys):

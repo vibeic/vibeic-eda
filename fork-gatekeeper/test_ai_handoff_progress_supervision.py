@@ -2,11 +2,14 @@
 """The 05:30 AI handoff is progress-supervised and delivery-verified."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import daily_0530 as D  # noqa: E402
@@ -17,6 +20,8 @@ _HERE = Path(__file__).resolve().parent
 _FORK_ENTRIES = json.loads(
     (_HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"]
 _REGISTERED_FORKS = sorted(entry["tool"] for entry in _FORK_ENTRIES)
+_REGISTRY_SHA256 = hashlib.sha256(
+    (_HERE / "FORKS.json").read_bytes()).hexdigest()
 _REGISTERED_REPOSITORIES = sorted(
     f"vibeic/{entry['tool']}" for entry in _FORK_ENTRIES)
 _REQUIRED_REPOSITORIES = sorted(
@@ -193,6 +198,27 @@ def _semantic_record(*, rc: int, outcome: str) -> dict:
 
 
 def _gap_record() -> dict:
+    def gap_row(tool: str) -> dict:
+        return {
+            "tool": tool,
+            "integrated": True,
+            "ahead": 0,
+            "pin": "c" * 40,
+            "pin_disagreement": None,
+            "kind": "pin",
+            "asserted_contents": None,
+            "sync_lag": 0,
+            "sync_lag_at_merge": 0,
+            "release_lag": 0,
+            "image_behind": 0,
+            "ours_unshipped": 0,
+            "ours_unshipped_substantive": 0,
+            "unshipped_commits": [],
+            "tip_state": "current",
+            "tip_note": None,
+            "merge_ref_seen": "b" * 40,
+        }
+
     return {
         "program": "fork_gap_report",
         "schema_version": 1,
@@ -212,6 +238,7 @@ def _gap_record() -> dict:
             },
         },
         "source_errors": [],
+        "assertions": [],
         "q1_sync_lag_at_merge": 0,
         "q1_unmeasured_at_merge": [],
         "q1_sync_lag": 0,
@@ -225,6 +252,7 @@ def _gap_record() -> dict:
         "q2_ours_past_the_pin_substantive": 0,
         "q2_unshipped_commits": [],
         "q2_unmeasured_ship": [],
+        "q2_unmeasured_stranded": [],
         "tip_rejected": [],
         "tip_unverified": [],
         "registered_forks": _REGISTERED_FORKS,
@@ -232,7 +260,7 @@ def _gap_record() -> dict:
         "merge_tips_seen": {tool: "b" * 40
                             for tool in _REGISTERED_FORKS},
         "fleet_errors": [],
-        "rows": [{"tool": tool} for tool in _REGISTERED_FORKS],
+        "rows": [gap_row(tool) for tool in _REGISTERED_FORKS],
         "measured_with_fetch": True,
     }
 
@@ -348,12 +376,52 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
     }
 
 
-def test_cron_does_not_invoke_release_without_both_green_controls():
+def _ai_authorization_record(*, status="authorized", run_id=None) -> dict:
+    verified = status == "authorized"
+    result = {
+        "fork": "Demo", "branch": "origin/vibeic/topic",
+        "mainline": "main", "source_tip": "b" * 40,
+        "published_tip": "c" * 40 if verified else "d" * 40,
+        "verified": verified,
+        "reason": "published" if verified else "still absent",
+    }
+    return {
+        "program": "check_ai_release_authorization",
+        "schema_version": 1,
+        "checked_at": "2026-08-17T06:02:00+08:00",
+        "round_at": "2026-08-17T05:30:00+08:00",
+        "source": "/state/daily_0530.json",
+        "registered_forks": _REGISTERED_FORKS,
+        "registered_count": len(_REGISTERED_FORKS),
+        "registry": {
+            "source": str(_HERE / "FORKS.json"),
+            "sha256": _REGISTRY_SHA256,
+        },
+        "round": {
+            "schema_version": 1, "run_id": run_id or "a" * 64,
+            "started_at": "2026-08-17T05:30:01+08:00",
+            "finished_at": "2026-08-17T05:59:00+08:00",
+            "applied": True,
+        },
+        "status": status,
+        "case_count": 1,
+        "verified_count": int(verified),
+        "unverified_count": int(not verified),
+        "transport": {"invoked": True, "outcome": "natural", "rc": 0},
+        "case_results": [result],
+        "reasons": [] if verified else [
+            "1 AI conflict case(s) lack a verified published-mainline postcondition"],
+        "source_errors": [],
+    }
+
+
+def test_cron_does_not_invoke_release_without_all_green_controls():
     source = (Path(__file__).resolve().parent / "run_0530.sh").read_text()
     gate = source[source.index('TICK_STATE="ran"'):
                   source.index("# Step 6")]
     assert 'if [ "${TESTS}" -ne 0 ]' in gate
     assert 'elif [ "${CODE}" -ne 0 ]' in gate
+    assert 'elif [ "${AI_AUTH}" -ne 0 ]' in gate
     assert gate.count('"${DIR}/run_tick.sh"') == 1
     assert 'TICK=2' in gate and "NOT CHECKED" in gate
 
@@ -361,6 +429,7 @@ def test_cron_does_not_invoke_release_without_both_green_controls():
                        source.index("# THE ROUND MUST NOTICE")]
     assert '[ "${CODE}" -eq 0 ]' in page_gate
     assert '--semantic-pytest-json "${PYTEST_RETAINED}"' in source
+    assert '--ai-authorization-json "${AI_AUTH_JSON}"' in source
     assert '--tick-state "${TICK_STATE}"' in source
 
 
@@ -378,12 +447,15 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     gap.write_text(json.dumps(_gap_record()))
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
+    ai_authorization = tmp_path / "ai-authorization.json"
+    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(old_release),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--ai-authorization-json", str(ai_authorization),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
@@ -401,6 +473,76 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     assert record["lesson"]["trigger"] == "pytest_stalled"
     assert record["lesson"]["outcome"] == "release_not_checked"
     assert record["source_errors"] == []
+
+
+def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
+                     tick_state: str) -> tuple[int, dict, dict]:
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(_semantic_record(rc=0, outcome="natural")))
+    gap = tmp_path / "gap.json"
+    gap.write_text(json.dumps(_gap_record()))
+    fork_github = tmp_path / "fork-github.json"
+    fork_github.write_text(json.dumps(_fork_github_record()))
+    ai = tmp_path / "ai-authorization.json"
+    if ai_value is not None:
+        ai.write_text(json.dumps(ai_value))
+    state = tmp_path / "state"
+    rc = LL.main([
+        "--state-dir", str(state),
+        "--release-json", str(tmp_path / "release-must-not-be-read.json"),
+        "--gap-json", str(gap),
+        "--fork-github-json", str(fork_github),
+        "--ai-authorization-json", str(ai),
+        "--expected-github-actor", "reyerchu",
+        "--semantic-pytest-json", str(semantic),
+        "--round-at", "2026-08-17T05:30:00+08:00",
+        "--tick-exit", "2", "--tick-state", tick_state,
+    ])
+    full = json.loads((state / "release-ll" / "latest.json").read_text())
+    narrow = json.loads(
+        (state / "release-ll" / "index.jsonl").read_text().splitlines()[-1])
+    return rc, full, narrow
+
+
+def test_ll_retains_the_exact_ai_postcondition_that_blocked_release(
+        tmp_path, capsys):
+    blocked = _ai_authorization_record(status="blocked")
+    rc, full, narrow = _capture_ai_gate(
+        tmp_path, blocked, "not_checked_ai_unverified")
+    capsys.readouterr()
+
+    assert rc == 0  # a measured rejection is a complete LL input
+    assert full["release"]["status"] == "not_checked"
+    assert full["ai_authorization"] == blocked
+    assert narrow["ai_authorization"] == blocked
+    assert full["convergence"]["ai_authorized"] is False
+    assert full["convergence"]["converged"] is False
+    assert full["lesson"]["trigger"] == "ai_postcondition_unverified"
+    assert full["lesson"]["outcome"] == (
+        "release_blocked_by_unverified_ai_decision")
+    assert full["source_errors"] == []
+
+
+@pytest.mark.parametrize("kind", ["missing", "malformed"])
+def test_ll_retains_norecord_when_ai_authorization_is_missing_or_malformed(
+        tmp_path, capsys, kind):
+    value = None
+    if kind == "malformed":
+        value = _ai_authorization_record()
+        value["case_count"] = 2  # contradicts its one-result list
+    rc, full, narrow = _capture_ai_gate(
+        tmp_path, value, "not_checked_ai_norecord")
+    capsys.readouterr()
+
+    assert rc == 1
+    assert full["release"]["status"] == "not_checked"
+    assert full["ai_authorization"]["status"] == "norecord"
+    assert narrow["ai_authorization"]["status"] == "norecord"
+    assert full["convergence"]["ai_authorized"] is False
+    assert full["convergence"]["converged"] is False
+    assert full["lesson"]["outcome"] == "could_not_measure_inputs"
+    assert any("ai-authorization.json" in error
+               for error in full["source_errors"])
 
 
 def test_red_and_norecord_remain_different_ll_facts():
@@ -437,12 +579,15 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
     gap.write_text(json.dumps(_gap_record()))
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
+    ai_authorization = tmp_path / "ai-authorization.json"
+    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(release),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--ai-authorization-json", str(ai_authorization),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
@@ -469,12 +614,15 @@ def _capture_ran_tick(tmp_path: Path, release: dict,
     gap.write_text(json.dumps(_gap_record()))
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
+    ai_authorization = tmp_path / "ai-authorization.json"
+    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(release_path),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--ai-authorization-json", str(ai_authorization),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic_path),
         "--round-at", "2026-08-17T05:30:00+08:00",

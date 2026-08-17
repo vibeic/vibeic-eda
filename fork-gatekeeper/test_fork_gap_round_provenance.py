@@ -28,6 +28,7 @@ def _payload(*, tools=TOOLS, unmeasured=False) -> dict:
         "q1_unmeasured": ["yosys"] if unmeasured else [],
         "q2_forks_not_built_from_ours": [],
         "q2_our_commits_stranded": 0,
+        "q2_unmeasured_stranded": [],
         "q2_ours_past_the_pin": 0,
         "q2_ours_past_the_pin_substantive": 0,
         "q2_unshipped_commits": [],
