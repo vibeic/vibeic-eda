@@ -215,6 +215,13 @@ attempts, outcome, and final lag — not prose inferred from a log. Missing or
 pre-schema inputs make the capture fail and therefore make the 05:30 round fail;
 they never become a clean LL row.
 
+The LL keeps the merge-boundary verdict separate from live drift. A round with
+`sync_lag_at_merge=0`, `release_lag=0`, and `ours_past_pin=0` converged on every
+commit it could have seen. If upstream advances while the image is composing,
+the record says `converged_at_boundary_with_late_upstream_drift`, retains that
+new live lag for the next round, and does not mislabel either number as zero or
+the completed round as having skipped those later commits.
+
 ## Merging upstream into a "restoration" branch (e.g. Trilinos epetra-restored)
 
 A handful of forks carry a branch that exists to **revert** a class of upstream

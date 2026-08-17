@@ -114,6 +114,8 @@ def test_page_reads_the_release_programs_own_blocker(tmp_path, monkeypatch):
 
 def _gap(image=31, past=3):
     return {"q1_sync_lag_at_merge": 0,
+            "q1_sync_lag": 0,
+            "q1_release_lag": image,
             "q1_image_behind_upstream": image,
             "q2_ours_past_the_pin": past,
             "q2_ours_past_the_pin_substantive": 0}
@@ -150,6 +152,28 @@ def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
         "blocked_after_bounded_retries", "self_healed_after_retry"]
     assert json.loads((tmp_path / "release-ll" / "latest.json").read_text()) \
         ["convergence"]["converged"] is True
+
+
+def test_ll_separates_late_upstream_drift_from_a_failed_round():
+    release = {
+        "status": "published", "version": {"to": "0.3.4"},
+        "compose_attempts": [{"exit_code": 0}],
+    }
+    gap = {
+        "q1_sync_lag_at_merge": 0,
+        "q1_sync_lag": 4,
+        "q1_release_lag": 0,
+        "q1_image_behind_upstream": 4,
+        "q2_ours_past_the_pin": 0,
+        "q2_ours_past_the_pin_substantive": 0,
+    }
+    record = LL.make_record(
+        release, gap, "2026-08-17T09:12:00+08:00", 0)
+    assert record["lesson"]["outcome"] == \
+        "converged_at_boundary_with_late_upstream_drift"
+    assert record["convergence"]["round_converged"] is True
+    assert record["convergence"]["converged"] is False
+    assert record["convergence"]["live_sync_lag"] == 4
 
 
 def test_0530_captures_ll_after_gap_and_makes_capture_failure_fatal():

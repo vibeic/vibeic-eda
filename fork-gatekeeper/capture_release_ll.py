@@ -74,14 +74,20 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     status = release.get("status") or "unmeasured"
     failure = release.get("failure") if isinstance(release.get("failure"), dict) else {}
     sync_lag = gap.get("q1_sync_lag_at_merge")
+    live_sync_lag = gap.get("q1_sync_lag")
     if sync_lag is None:
-        sync_lag = gap.get("q1_sync_lag")
+        sync_lag = live_sync_lag
     image_lag = gap.get("q1_image_behind_upstream")
+    release_lag = gap.get("q1_release_lag")
     past_pin = gap.get("q2_ours_past_the_pin")
     measured = all(isinstance(v, int) for v in (sync_lag, image_lag, past_pin))
+    round_measured = all(isinstance(v, int)
+                         for v in (sync_lag, release_lag, past_pin))
     terminal_ok = status in {"published", "noop", "completed", "recorded"}
     converged = bool(measured and terminal_ok and sync_lag == 0
                      and image_lag == 0 and past_pin == 0)
+    round_converged = bool(round_measured and terminal_ok and sync_lag == 0
+                           and release_lag == 0 and past_pin == 0)
 
     if source_errors:
         outcome = "could_not_measure_inputs"
@@ -97,6 +103,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         outcome = "release_not_checked"
     elif converged:
         outcome = "converged"
+    elif (round_converged and isinstance(live_sync_lag, int)
+          and live_sync_lag > 0):
+        outcome = "converged_at_boundary_with_late_upstream_drift"
     elif not measured:
         outcome = "could_not_measure_convergence"
     else:
@@ -126,19 +135,26 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         },
         "convergence": {
             "measured": measured,
+            "round_measured": round_measured,
             "sync_lag_at_merge": sync_lag,
+            "live_sync_lag": live_sync_lag,
+            "release_lag": release_lag,
             "image_behind_upstream": image_lag,
             "ours_past_pin": past_pin,
             "ours_past_pin_substantive": gap.get(
-                "q2_ours_past_the_pin_substantive"),
+            "q2_ours_past_the_pin_substantive"),
             "converged": converged,
+            "round_converged": round_converged,
         },
         "lesson": {
             "trigger": category,
             "control": control,
             "outcome": outcome,
-            "principle": ("A fork sync is not delivery; convergence ends only "
-                          "when the published image pin reaches the fork tip."),
+            "principle": ("A fork sync is not delivery; the round converges "
+                          "when every commit seen at its merge boundary reaches "
+                          "the published image. Later upstream drift is retained "
+                          "as live lag for the next round, never rewritten as "
+                          "this round's failure or as zero."),
         },
         "source_errors": list(source_errors or []),
     }
@@ -189,9 +205,12 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "outcome": record["lesson"]["outcome"],
         "compose_attempts": len(record["release"]["compose_attempts"]),
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
+        "live_sync_lag": record["convergence"]["live_sync_lag"],
+        "release_lag": record["convergence"]["release_lag"],
         "image_behind_upstream": record["convergence"]["image_behind_upstream"],
         "ours_past_pin": record["convergence"]["ours_past_pin"],
         "converged": record["convergence"]["converged"],
+        "round_converged": record["convergence"]["round_converged"],
         "source_errors": record["source_errors"],
     }
     index = root / "index.jsonl"
