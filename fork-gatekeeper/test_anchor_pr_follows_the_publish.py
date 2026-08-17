@@ -40,6 +40,28 @@ def test_it_delegates_to_vibe_ics_own_anchor_tool():
         "list is exactly what drifts from the first")
 
 
+def test_anchor_worktree_has_an_empty_tree_for_diff_scoped_benchmark_gates(tmp_path):
+    """The corpus is untracked, so it is absent from a throwaway worktree.
+
+    The gate is still allowed to prove that this branch changed no benchmark
+    paths.  A real empty directory provides that context without borrowing the
+    primary checkout's unrelated HEAD through a symlink.
+    """
+    ok, note = P._prepare_anchor_gate_context(tmp_path)
+    assert ok is True, note
+    tree = tmp_path / P.BENCHMARK_TREE
+    assert tree.is_dir()
+    assert list(tree.iterdir()) == []
+    assert not tree.is_symlink()
+
+
+def test_anchor_gate_context_refuses_a_non_directory_collision(tmp_path):
+    (tmp_path / P.BENCHMARK_TREE).write_text("not a corpus")
+    ok, note = P._prepare_anchor_gate_context(tmp_path)
+    assert ok is False
+    assert "not a directory" in note
+
+
 def test_the_release_opens_the_anchor_pr_only_on_a_real_publish():
     """A LOCAL ONLY build has nothing to anchor TO. Pointing the repo at a tag
     nobody can pull is worse than leaving it behind one that resolves."""

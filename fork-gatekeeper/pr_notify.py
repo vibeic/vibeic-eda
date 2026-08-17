@@ -56,6 +56,7 @@ LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-o
 #: that covers 2 of them. Anything bumping the anchor must call this rather than
 #: re-derive where the version is written — see `open_anchor_pr`.
 ANCHOR_TOOL = "tools/vibeic-eda/sync_image_version.py"
+BENCHMARK_TREE = "benchmark-data"
 ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
 _PIN_RE = re.compile(r"(vibeic-eda:)\d+\.\d+\.\d+")
 
@@ -106,6 +107,33 @@ def _run(args, cwd=None):
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except Exception as e:  # noqa: BLE001
         return 1, f"{e.__class__.__name__}: {e}"
+
+
+def _prepare_anchor_gate_context(wt: Path) -> tuple[bool, str]:
+    """Give vibe-ic's push gate an honest benchmark-tree context.
+
+    ``benchmark-data`` is intentionally untracked and is therefore absent from
+    every throwaway worktree.  vibe-ic's pre-push gate nevertheless receives
+    ``--tree benchmark-data --changed-since origin/main``.  An absent path means
+    "the gate could not look" and correctly blocks; an empty, present path lets
+    the changed-since check prove the fact relevant to this anchor commit: it
+    changed no benchmark path, so there is no benchmark evidence to validate.
+
+    Do not symlink the primary checkout's corpus here.  The evidence checker
+    resolves a symlink before asking git for the owning worktree, which would
+    compare the primary checkout's unrelated HEAD instead of this anchor HEAD.
+    """
+    tree = wt / BENCHMARK_TREE
+    if tree.exists():
+        if tree.is_dir():
+            return True, "benchmark gate tree already present"
+        return False, f"{BENCHMARK_TREE} exists but is not a directory"
+    try:
+        tree.mkdir()
+    except OSError as exc:
+        return False, (f"could not prepare {BENCHMARK_TREE} for vibe-ic's push gate: "
+                       f"{exc.__class__.__name__}: {exc}")
+    return True, "prepared empty benchmark gate tree for changed-since validation"
 
 
 def _actionable(summary):
@@ -349,6 +377,9 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
         if rc != 0:
             return (False, f"worktree add failed: {out.strip()[:200]}")
     try:
+        context_ok, context_note = _prepare_anchor_gate_context(wt)
+        if not context_ok:
+            return (False, context_note)
         tool = wt / ANCHOR_TOOL
         if not tool.is_file():
             return (False, f"{ANCHOR_TOOL} not present in vibe-ic — cannot anchor")
