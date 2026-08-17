@@ -174,6 +174,8 @@ def test_ll_separates_late_upstream_drift_from_a_failed_round():
     assert record["convergence"]["round_converged"] is True
     assert record["convergence"]["converged"] is False
     assert record["convergence"]["live_sync_lag"] == 4
+    assert record["lesson"]["control"] == \
+        "single compose attempt; no retry needed"
 
 
 def test_0530_captures_ll_after_gap_and_makes_capture_failure_fatal():
