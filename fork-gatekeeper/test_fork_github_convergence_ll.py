@@ -1,8 +1,8 @@
 """The 05:30 LL retains GitHub fork convergence without inventing zero."""
 from __future__ import annotations
 
+import copy
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -11,20 +11,107 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capture_release_ll as LL  # noqa: E402
-import fork_github_convergence as C  # noqa: E402
 
 
 ROUND_AT = "2026-08-17T05:30:00+08:00"
-REGISTERED_FORKS = sorted(
-    entry["tool"] for entry in
-    json.loads((HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"])
+FORK_ENTRIES = json.loads(
+    (HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"]
+REGISTERED_FORKS = sorted(entry["tool"] for entry in FORK_ENTRIES)
+REGISTERED_REPOSITORIES = sorted(
+    f"vibeic/{entry['tool']}" for entry in FORK_ENTRIES)
+REQUIRED_REPOSITORIES = sorted(
+    REGISTERED_REPOSITORIES + ["vibeic/vibeic-eda"])
+UPSTREAM_BY_TOOL = {entry["tool"]: entry["upstream"]
+                    for entry in FORK_ENTRIES}
+SOURCE_KEYS = (
+    "exact_repository_issues", "exact_repository_pull_requests",
+    "fork_delivery_pull_requests", "viewer_upstream_issues",
+    "viewer_upstream_pull_requests", "round_upstream_pull_requests",
+)
+
+
+def _inventory_row(repository: str) -> dict:
+    registered = repository in REGISTERED_REPOSITORIES
+    return {
+        "repository": repository,
+        "scope": "registered_fork" if registered else "vibeic_eda",
+        "status": "complete",
+        "is_fork": registered,
+        "is_archived": False,
+        "has_issues_enabled": True,
+        "issues": {"outcome": "complete", "open_count": 0},
+        "pull_requests": {"outcome": "complete", "open_count": 0},
+    }
+
+
+def _recount(record: dict) -> None:
+    rows = {row["repository"].lower(): row
+            for row in record["inventory"]["repositories"]}
+    round_rows = {row["repository"].lower(): row
+                  for row in record["round_upstream"]["forks"]}
+    for row in rows.values():
+        row["issues"]["open_count"] = 0
+        row["pull_requests"]["open_count"] = 0
+    for row in round_rows.values():
+        row["open_count"] = 0
+    delivery = record["delivery"]["pull_requests"]
+    delivery.update(open_count=0, matched_count=0, excluded_count=0,
+                    excluded=[])
+    actor = record["upstream_actor"]
+    for field in ("issues", "pull_requests"):
+        actor[field].update(seen_count=0, matched_count=0)
+
+    by_source = {key: 0 for key in SOURCE_KEYS}
+    for item in record["items"]:
+        repo = item["repository"].lower()
+        kind = item["type"]
+        sources = item["sources"]
+        if "exact_repository_issues" in sources:
+            rows[repo]["issues"]["open_count"] += 1
+            by_source["exact_repository_issues"] += 1
+        if "exact_repository_pull_requests" in sources:
+            rows[repo]["pull_requests"]["open_count"] += 1
+            by_source["exact_repository_pull_requests"] += 1
+        if "fork_delivery_pull_requests" in sources:
+            delivery["open_count"] += 1
+            delivery["matched_count"] += 1
+            by_source["fork_delivery_pull_requests"] += 1
+        if "viewer_upstream" in sources:
+            actor[kind + "s"]["seen_count"] += 1
+            actor[kind + "s"]["matched_count"] += 1
+            by_source[f"viewer_upstream_{kind}s"] += 1
+        if "round_upstream_pull_requests" in sources:
+            round_rows[repo]["open_count"] += 1
+            by_source["round_upstream_pull_requests"] += 1
+
+    items = record["items"]
+    record["counts"] = {
+        "items": len(items),
+        "issues": sum(item["type"] == "issue" for item in items),
+        "pull_requests": sum(item["type"] == "pull_request" for item in items),
+        "registered_fork_items": sum(
+            "registered_fork" in item["scopes"] for item in items),
+        "upstream_items": sum("upstream" in item["scopes"] for item in items),
+        "vibeic_eda_items": sum(
+            "vibeic_eda" in item["scopes"] for item in items),
+        "fork_delivery_items": sum(
+            "fork_delivery" in item["scopes"] for item in items),
+        "by_source": by_source,
+    }
 
 
 def _fork_record(*, status="converged", started_at=None,
                  counts=None, items=None, source_errors=None) -> dict:
-    return {
+    catalog_repositories = [
+        {"repository": repository,
+         "is_fork": repository in REGISTERED_REPOSITORIES,
+         "is_archived": False, "has_issues_enabled": True}
+        for repository in sorted(
+            REQUIRED_REPOSITORIES + ["vibeic/vibe-ic"])
+    ]
+    record = {
         "program": "fork_github_convergence",
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": started_at or "2026-08-17T05:34:00+08:00",
         "completed_at": "2026-08-17T05:35:00+08:00",
         "actor": "reyerchu",
@@ -36,13 +123,55 @@ def _fork_record(*, status="converged", started_at=None,
             "started_at": "2026-08-17T05:30:01+08:00",
             "finished_at": "2026-08-17T05:33:00+08:00",
         },
+        "inventory": {
+            "status": "complete",
+            "catalog": {
+                "outcome": "complete",
+                "total_repositories": len(catalog_repositories),
+                "repositories": catalog_repositories,
+                "live_fork_repositories": list(REGISTERED_REPOSITORIES),
+                "unregistered_live_fork_repositories": [],
+            },
+            "canonical_registered_repositories": list(REGISTERED_REPOSITORIES),
+            "required_repositories": list(REQUIRED_REPOSITORIES),
+            "required_repository_count": len(REQUIRED_REPOSITORIES),
+            "completed_repository_count": len(REQUIRED_REPOSITORIES),
+            "repositories": [_inventory_row(repo)
+                             for repo in REQUIRED_REPOSITORIES],
+        },
+        "delivery": {
+            "repository": "vibeic/vibe-ic", "status": "complete",
+            "pr_head_patterns": sorted(LL.DELIVERY_HEAD_PATTERN_TEXT),
+            "issues": {
+                "outcome": "excluded_no_durable_producer_marker"},
+            "pull_requests": {
+                "outcome": "complete", "open_count": 0,
+                "matched_count": 0, "excluded_count": 0, "excluded": [],
+            },
+        },
+        "upstream_actor": {
+            "status": "complete",
+            "issues": {"outcome": "complete", "seen_count": 0,
+                       "matched_count": 0},
+            "pull_requests": {"outcome": "complete", "seen_count": 0,
+                              "matched_count": 0},
+        },
+        "round_upstream": {
+            "status": "complete", "required_fork_count": len(FORK_ENTRIES),
+            "completed_fork_count": len(FORK_ENTRIES),
+            "forks": [{"tool": entry["tool"],
+                       "repository": entry["upstream"],
+                       "outcome": "complete", "open_count": 0}
+                      for entry in FORK_ENTRIES],
+        },
         "status": status,
-        "counts": ({"items": 0, "issues": 0, "pull_requests": 0,
-                    "by_source": {"org_search_issues": 0}}
-                   if counts is None else counts),
         "items": [] if items is None else items,
         "source_errors": [] if source_errors is None else source_errors,
     }
+    _recount(record)
+    if counts is not None:
+        record["counts"] = counts
+    return record
 
 
 def _item(number=1) -> dict:
@@ -50,8 +179,82 @@ def _item(number=1) -> dict:
         "repository": "vibeic/yosys",
         "type": "pull_request",
         "number": number,
+        "title": "fix yosys",
         "url": f"https://github.com/vibeic/yosys/pull/{number}",
+        "author": "reyerchu", "head_owner": "vibeic",
+        "head_ref": f"fix-{number}", "base_ref": "main", "draft": False,
+        "updated_at": "2026-08-17T05:31:00+08:00",
+        "sources": ["exact_repository_pull_requests"],
+        "scopes": ["registered_fork"],
     }
+
+
+def _delivery_item(number=91, **updates) -> dict:
+    item = {
+        "repository": "vibeic/vibe-ic",
+        "type": "pull_request",
+        "number": number,
+        "title": "chore(image-anchor): adopt vibeic-eda 0.3.5",
+        "url": f"https://github.com/vibeic/vibe-ic/pull/{number}",
+        "author": "reyerchu",
+        "head_owner": "vibeic",
+        "head_ref": "eda-anchor-0.3.5",
+        "base_ref": "main",
+        "draft": False,
+        "updated_at": "2026-08-17T05:31:00+08:00",
+        "sources": ["fork_delivery_pull_requests"],
+        "scopes": ["fork_delivery"],
+        "delivery_kind": "anchor",
+        "delivery_anomalies": [],
+    }
+    item.update(updates)
+    kind = LL._delivery_kind(item["head_ref"])
+    if kind is not None and "delivery_anomalies" not in updates:
+        item["delivery_anomalies"] = LL._delivery_anomalies(item, kind)
+    return item
+
+
+def _upstream_item(number=1455) -> dict:
+    return {
+        "repository": "steveicarus/iverilog",
+        "type": "pull_request",
+        "number": number,
+        "title": "upstream pull request from the fork owner",
+        "url": f"https://github.com/steveicarus/iverilog/pull/{number}",
+        "author": "reyerchu",
+        "head_owner": "vibeic",
+        "head_ref": "upstream-fix",
+        "base_ref": "master",
+        "draft": False,
+        "updated_at": "2026-08-17T05:31:00+08:00",
+        "sources": ["round_upstream_pull_requests"],
+        "scopes": ["upstream"],
+    }
+
+
+def _excluded_delivery_item(number=92, **updates) -> dict:
+    item = {
+        "repository": "vibeic/vibe-ic",
+        "type": "pull_request",
+        "number": number,
+        "title": "unrelated pull request",
+        "url": f"https://github.com/vibeic/vibe-ic/pull/{number}",
+        "author": None,
+        "head_owner": "somebody-else",
+        "head_ref": "eda-anchor-0.3.5",
+        "base_ref": "main",
+        "draft": False,
+        "updated_at": "2026-08-17T05:31:00+08:00",
+        "reasons": ["head_owner_is_not_vibeic"],
+    }
+    item.update(updates)
+    return item
+
+
+def _validate_record(record: dict) -> tuple[dict | None, list[str]]:
+    return LL._validate_fork_github(
+        record, HERE / "fixture-fork-github.json", ROUND_AT,
+        HERE / "FORKS.json", "reyerchu")
 
 
 def _gap_record(**updates) -> dict:
@@ -110,6 +313,7 @@ def _capture(tmp_path: Path, fork_path: Path, *, gap_record=None
         "--release-json", str(tmp_path / "release-not-read.json"),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_path),
+        "--expected-github-actor", "reyerchu",
         "--round-at", ROUND_AT,
         "--tick-exit", "2",
         "--tick-state", "not_checked_pytest_norecord",
@@ -139,6 +343,9 @@ def test_cron_runs_checker_between_gap_and_ll_and_gates_on_its_rc():
 
     ll_arm = source[ll:source.index("LL=$?")]
     assert '--fork-github-json "${FORK_GH_JSON}"' in ll_arm
+    assert '--forks-json "${DIR}/FORKS.json"' in ll_arm
+    assert ('--expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}"'
+            in ll_arm)
     final = source[source.index("# 0 only when BOTH are clean"):]
     assert '[ "${FORK_GH}" -ne 0 ]' in final
 
@@ -166,16 +373,10 @@ def test_cron_clears_round_inputs_and_retention_cannot_fail_clean():
 
 
 def test_current_open_work_is_retained_with_exact_items(tmp_path, capsys):
-    item = {
-        "repository": "vibeic/yosys", "type": "pull_request", "number": 17,
-        "url": "https://github.com/vibeic/yosys/pull/17",
-    }
+    item = _item(17)
     fork = tmp_path / "fork.json"
     fork.write_text(json.dumps(_fork_record(
-        status="open",
-        counts={"items": 1, "issues": 0, "pull_requests": 1,
-                "by_source": {"org_search_pull_requests": 1}},
-        items=[item],
+        status="open", items=[item],
     )))
 
     rc, full, narrow = _capture(tmp_path, fork)
@@ -183,7 +384,7 @@ def test_current_open_work_is_retained_with_exact_items(tmp_path, capsys):
 
     assert rc == 0, "open is a valid measurement; FORK_GH=1 gates the cron"
     assert full["fork_github"]["program"] == "fork_github_convergence"
-    assert full["fork_github"]["schema_version"] == 1
+    assert full["fork_github"]["schema_version"] == 2
     assert full["fork_github"]["status"] == "open"
     assert full["fork_github"]["counts"]["pull_requests"] == 1
     assert full["fork_github"]["actor"] == "reyerchu"
@@ -192,6 +393,11 @@ def test_current_open_work_is_retained_with_exact_items(tmp_path, capsys):
     assert full["fork_github"]["items"] == [item]
     assert narrow["fork_github"]["items"] == [item]
     assert narrow["fork_github"]["round"]["run_id"] == "a" * 64
+    assert narrow["fork_github"]["inventory"][
+        "required_repository_count"] == 38
+    assert narrow["fork_github"]["delivery"]["status"] == "complete"
+    assert narrow["fork_github"]["round_upstream"][
+        "required_fork_count"] == 37
     assert narrow["fork_github"]["started_at"] >= ROUND_AT
     assert full["source_errors"] == []
 
@@ -200,7 +406,6 @@ def test_open_github_cannot_contradict_a_generic_converged_lesson():
     item = _item(7)
     github = _fork_record(
         status="open", items=[item],
-        counts={"items": 1, "issues": 0, "pull_requests": 1},
     )
     record = LL.make_record(
         {"status": "published", "compose_attempts": [{"exit_code": 0}]},
@@ -287,49 +492,35 @@ def test_gap_and_github_must_name_the_same_daily_round_nonce(tmp_path, capsys):
     assert full["convergence"]["converged"] is False
 
 
-def test_ll_accepts_the_real_checkers_nested_count_schema(tmp_path, capsys):
-    forks = tmp_path / "FORKS.json"
-    forks.write_text(json.dumps({
-        "org": "vibeic",
-        "forks": [{"tool": "yosys", "upstream": "YosysHQ/yosys"}],
-    }))
-    round_json = tmp_path / "round.json"
-    round_json.write_text(json.dumps({
-        "_round": {
-            "schema_version": 1,
-            "run_id": "a" * 64,
-            "started_at": "2026-08-17T05:30:01+08:00",
-            "finished_at": "2026-08-17T05:33:00+08:00",
-        },
-        "forks": [{
-            "fork": "yosys",
-            "upstream_pull_requests": {
-                "outcome": "complete",
-                "upstream_repository": "YosysHQ/yosys",
-                "fork_owner": "vibeic",
-                "open_count": 0,
-                "items": [],
-            },
-        }],
-    }))
+def test_self_consistent_forged_sidecar_actor_cannot_replace_cli_authority(
+        tmp_path, capsys):
+    fork = tmp_path / "fork.json"
+    record = _fork_record()
+    record.update(actor="attacker", expected_actor="attacker")
+    fork.write_text(json.dumps(record))
 
-    def empty_runner(operation, _query, _variables):
-        page = {
-            "totalCount": 0, "nodes": [],
-            "pageInfo": {"hasNextPage": False, "endCursor": None},
-        }
-        if operation.startswith("org_"):
-            page = dict(page, issueCount=page.pop("totalCount"))
-            return {"data": {"search": page}}
-        key = "issues" if operation == "viewer_issues" else "pullRequests"
-        return {"data": {"viewer": {"login": "reyerchu", key: page}}}
+    rc, full, narrow = _capture(tmp_path, fork)
+    capsys.readouterr()
 
-    actual, checker_rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=empty_runner,
-        now=lambda: datetime.fromisoformat("2026-08-17T05:34:00+08:00"),
-    )
-    assert checker_rc == 0
+    assert rc == 1
+    assert full["fork_github"] is None
+    assert narrow["fork_github"] is None
+    assert any("expected_actor does not match configured GitHub actor" in error
+               for error in full["source_errors"])
+    assert any("actor does not match configured GitHub actor" in error
+               for error in full["source_errors"])
+
+
+def test_ll_accepts_exact_v2_disabled_issue_evidence(tmp_path, capsys):
+    actual = _fork_record()
+    repo = "vibeic/yosys"
+    catalog = next(row for row in actual["inventory"]["catalog"]["repositories"]
+                   if row["repository"] == repo)
+    inventory = next(row for row in actual["inventory"]["repositories"]
+                     if row["repository"] == repo)
+    catalog["has_issues_enabled"] = False
+    inventory["has_issues_enabled"] = False
+    inventory["issues"] = {"outcome": "disabled", "open_count": 0}
     fork = tmp_path / "fork.json"
     fork.write_text(json.dumps(actual))
 
@@ -337,8 +528,170 @@ def test_ll_accepts_the_real_checkers_nested_count_schema(tmp_path, capsys):
     capsys.readouterr()
     assert rc == 0
     assert full["fork_github"]["counts"] == actual["counts"]
-    assert narrow["fork_github"]["counts"]["by_source"] == \
-        actual["counts"]["by_source"]
+    assert narrow["fork_github"]["inventory"] == actual["inventory"]
+
+
+def test_ll_accepts_and_retains_exact_delivery_anomalies():
+    item = _delivery_item(
+        base_ref="release", draft=True, title="manually changed title")
+    record = _fork_record(status="open", items=[item])
+
+    accepted, errors = _validate_record(record)
+
+    assert errors == []
+    assert accepted is not None
+    assert accepted["items"][0]["delivery_anomalies"] == [
+        "base_ref_is_not_main",
+        "draft_is_not_false",
+        "title_does_not_match_anchor_producer",
+    ]
+
+
+@pytest.mark.parametrize("anomalies", [
+    [],
+    ["base_ref_is_not_main", "draft_is_not_false"],
+    ["base_ref_is_not_main", "draft_is_not_false",
+     "title_does_not_match_anchor_producer", "invented"],
+])
+def test_ll_rejects_delivery_anomaly_drift(anomalies):
+    item = _delivery_item(
+        base_ref="release", draft=True, title="manually changed title",
+        delivery_anomalies=anomalies)
+    accepted, errors = _validate_record(
+        _fork_record(status="open", items=[item]))
+
+    assert accepted is None
+    assert any("violates producer identity" in error for error in errors)
+
+
+def test_ll_accepts_exact_audited_delivery_exclusion():
+    record = _fork_record()
+    excluded = _excluded_delivery_item()
+    record["delivery"]["pull_requests"].update(
+        open_count=1, matched_count=0, excluded_count=1,
+        excluded=[excluded])
+
+    accepted, errors = _validate_record(record)
+
+    assert errors == []
+    assert accepted is not None
+    assert accepted["delivery"]["pull_requests"]["excluded"] == [excluded]
+
+
+@pytest.mark.parametrize("updates", [
+    {"reasons": ["head_ref_is_not_a_delivery_producer_branch"]},
+    {"title": ""},
+    {"updated_at": "2026-08-17T05:31:00"},
+    {"type": "issue"},
+    {"base_ref": None},
+    {"draft": None},
+    {"author": ""},
+])
+def test_ll_rejects_malformed_or_misclassified_delivery_exclusion(updates):
+    record = _fork_record()
+    record["delivery"]["pull_requests"].update(
+        open_count=1, matched_count=0, excluded_count=1,
+        excluded=[_excluded_delivery_item(**updates)])
+
+    accepted, errors = _validate_record(record)
+
+    assert accepted is None
+    assert errors
+
+
+def _drop_inventory_row(record: dict) -> None:
+    record["inventory"]["repositories"].pop()
+
+
+def _duplicate_inventory_row(record: dict) -> None:
+    record["inventory"]["repositories"][-1] = copy.deepcopy(
+        record["inventory"]["repositories"][0])
+
+
+def _drop_required_identity(record: dict) -> None:
+    record["inventory"]["required_repositories"].pop()
+
+
+def _wrong_inventory_denominator(record: dict) -> None:
+    record["inventory"]["required_repository_count"] -= 1
+
+
+def _consistent_but_unregistered_live_fork(record: dict) -> None:
+    catalog = record["inventory"]["catalog"]
+    row = next(row for row in catalog["repositories"]
+               if row["repository"] == "vibeic/vibe-ic")
+    row["is_fork"] = True
+    catalog["live_fork_repositories"].append("vibeic/vibe-ic")
+    catalog["unregistered_live_fork_repositories"] = ["vibeic/vibe-ic"]
+
+
+def _disabled_issue_count_is_not_zero(record: dict) -> None:
+    row = record["inventory"]["repositories"][0]
+    catalog = next(
+        item for item in record["inventory"]["catalog"]["repositories"]
+        if item["repository"] == row["repository"])
+    row["has_issues_enabled"] = False
+    catalog["has_issues_enabled"] = False
+    row["issues"] = {"outcome": "disabled", "open_count": 1}
+
+
+def _drop_round_upstream_row(record: dict) -> None:
+    record["round_upstream"]["forks"].pop()
+
+
+def _shift_round_upstream_count(record: dict) -> None:
+    record["round_upstream"]["forks"][0]["open_count"] = 1
+    record["round_upstream"]["forks"][1]["open_count"] = 0
+    record["counts"]["by_source"]["round_upstream_pull_requests"] = 1
+
+
+def _actor_seen_less_than_matched(record: dict) -> None:
+    record["upstream_actor"]["pull_requests"].update(
+        seen_count=0, matched_count=1)
+    record["counts"]["by_source"]["viewer_upstream_pull_requests"] = 1
+
+
+def _source_count_drift(record: dict) -> None:
+    record["counts"]["by_source"]["exact_repository_issues"] = 1
+
+
+@pytest.mark.parametrize("mutation", [
+    _drop_inventory_row,
+    _duplicate_inventory_row,
+    _drop_required_identity,
+    _wrong_inventory_denominator,
+    _consistent_but_unregistered_live_fork,
+    _disabled_issue_count_is_not_zero,
+    _drop_round_upstream_row,
+    _shift_round_upstream_count,
+    _actor_seen_less_than_matched,
+    _source_count_drift,
+])
+def test_ll_rejects_incomplete_or_contradictory_v2_source_contract(mutation):
+    record = _fork_record()
+    mutation(record)
+
+    accepted, errors = _validate_record(record)
+
+    assert accepted is None
+    assert errors
+
+
+def test_ll_rejects_round_count_shifted_between_upstream_repositories():
+    record = _fork_record(status="open", items=[_upstream_item()])
+    right = next(
+        row for row in record["round_upstream"]["forks"]
+        if row["repository"].lower() == "steveicarus/iverilog")
+    wrong = next(
+        row for row in record["round_upstream"]["forks"]
+        if row["repository"].lower() != "steveicarus/iverilog")
+    right["open_count"] = 0
+    wrong["open_count"] = 1
+
+    accepted, errors = _validate_record(record)
+
+    assert accepted is None
+    assert any("retained items=" in error for error in errors)
 
 
 def test_stale_record_is_source_error_and_never_zero(tmp_path, capsys):
@@ -360,7 +713,7 @@ def test_stale_record_is_source_error_and_never_zero(tmp_path, capsys):
 
 @pytest.mark.parametrize("mutation", [
     lambda record: record.update(program="something_else"),
-    lambda record: record.update(schema_version=2),
+    lambda record: record.update(schema_version=1),
     lambda record: record.update(schema_version=True),
     lambda record: record.update(status="clean"),
     lambda record: record.update(actor="somebody-else"),

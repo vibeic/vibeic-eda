@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Hermetic proofs for the exact fork GitHub convergence collector."""
+"""Hermetic proofs for exact, search-index-independent fork GitHub evidence."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -11,564 +10,721 @@ from pathlib import Path
 
 import pytest
 
-
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location(
-    "fork_github_convergence_under_test", HERE / "fork_github_convergence.py")
-C = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-sys.modules[SPEC.name] = C
-SPEC.loader.exec_module(C)
+sys.path.insert(0, str(HERE))
+import fork_github_convergence as C  # noqa: E402
 
 
-UPDATED_AT = "2026-08-17T05:10:00+00:00"
 ROUND_AT = "2026-08-17T05:00:00+00:00"
+UPDATED_AT = "2026-08-17T05:10:00+00:00"
 RUN_ID = "a" * 64
+NOW = lambda: datetime(2026, 8, 17, 5, 30, tzinfo=timezone.utc)
 
 
-def _node(kind: str, repo: str, number: int, *, title: str | None = None,
-          **overrides):
-    pr = kind == "pull_request"
+def _issue(repo: str, number: int, *, title=None, **overrides):
     node = {
-        "__typename": "PullRequest" if pr else "Issue",
-        "number": number,
-        "title": title or f"item {number}",
-        "url": f"https://github.test/{repo}/{number}",
-        "author": {"login": "vibeic"},
+        "__typename": "Issue", "number": number,
+        "title": title or f"issue {number}",
+        "url": f"https://github.test/{repo}/issues/{number}",
+        "updatedAt": UPDATED_AT, "author": {"login": "vibeic"},
         "repository": {"nameWithOwner": repo},
-        "updatedAt": UPDATED_AT,
     }
-    if pr:
-        node.update(headRefName=f"fix-{number}",
-                    baseRefName="main", isDraft=False,
-                    headRepositoryOwner={"login": "vibeic"})
     node.update(overrides)
     return node
 
 
-def _noise_nodes(kind: str, start: int, count: int):
-    return [
-        _node(kind, f"elsewhere/noise-{number}", number)
-        for number in range(start, start + count)
-    ]
+def _pr(repo: str, number: int, *, head="fix", head_owner="vibeic",
+        base="main", draft=False, title=None, **overrides):
+    node = {
+        "__typename": "PullRequest", "number": number,
+        "title": title or f"PR {number}",
+        "url": f"https://github.test/{repo}/pull/{number}",
+        "updatedAt": UPDATED_AT, "author": {"login": "vibeic"},
+        "repository": {"nameWithOwner": repo},
+        "headRefName": head, "baseRefName": base, "isDraft": draft,
+        "headRepositoryOwner": ({"login": head_owner}
+                                if head_owner is not None else None),
+    }
+    node.update(overrides)
+    return node
 
 
-def _page(nodes, *, count=None, cursor=None, has_next=False,
-          count_field="totalCount"):
+def _connection(nodes=(), *, count=None, has_next=False, cursor=None):
+    nodes = list(nodes)
     return {
-        count_field: len(nodes) if count is None else count,
+        "totalCount": len(nodes) if count is None else count,
         "nodes": nodes,
         "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
     }
 
 
+def _repo(repo: str, *, issues=(), pulls=(), is_fork=True,
+          archived=False, issues_enabled=True,
+          issue_connection=None, pull_connection=None):
+    return {
+        "nameWithOwner": repo, "isFork": is_fork,
+        "isArchived": archived, "hasIssuesEnabled": issues_enabled,
+        "issues": issue_connection or _connection(issues),
+        "pullRequests": pull_connection or _connection(pulls),
+    }
+
+
+def _catalog(repositories, *, actor="reyerchu", count=None,
+             has_next=False, cursor=None):
+    repositories = list(repositories)
+    return {"data": {
+        "viewer": {"login": actor},
+        "organization": {
+            "login": "vibeic",
+            "repositories": {
+                "totalCount": len(repositories) if count is None else count,
+                "nodes": repositories,
+                "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            },
+        },
+    }}
+
+
+def _viewer(field: str, nodes=(), *, actor="reyerchu", **connection_kwargs):
+    return {"data": {"viewer": {
+        "login": actor, field: _connection(nodes, **connection_kwargs),
+    }}}
+
+
+def _repo_followup(repo: str, *, issues=None, pulls=None, actor="reyerchu"):
+    body = {"nameWithOwner": repo}
+    if issues is not None:
+        body["issues"] = issues
+    if pulls is not None:
+        body["pullRequests"] = pulls
+    return {"data": {"viewer": {"login": actor}, "repository": body}}
+
+
 class ScriptedRunner:
     def __init__(self, pages):
-        self.pages = pages
+        self.pages = dict(pages)
         self.calls = []
 
-    def __call__(self, operation, query, variables):
-        cursor = variables.get("cursor")
-        self.calls.append((operation, cursor, dict(variables)))
-        value = self.pages[(operation, cursor)]
+    @staticmethod
+    def key(operation, variables):
+        return (operation, variables.get("cursor"),
+                variables.get("issueCursor"),
+                variables.get("pullRequestCursor"))
+
+    def __call__(self, operation, _query, variables):
+        self.calls.append((operation, dict(variables)))
+        value = self.pages[self.key(operation, variables)]
         if isinstance(value, Exception):
             raise value
         return value
 
 
-def _org(page):
-    return {"data": {"search": page}}
-
-
-def _viewer(connection: str, page, *, actor="reyerchu"):
-    return {"data": {"viewer": {"login": actor, connection: page}}}
-
-
-def _empty_pages():
-    return {
-        ("org_issues", None): _org(
-            _page([], count_field="issueCount")),
-        ("org_pull_requests", None): _org(
-            _page([], count_field="issueCount")),
-        ("viewer_issues", None): _viewer("issues", _page([])),
-        ("viewer_pull_requests", None): _viewer("pullRequests", _page([])),
-    }
-
-
-def _measurement(tool: str, items=None, *, outcome="complete", **overrides):
-    items = [] if items is None else items
+def _measurement(tool: str, items=(), *, outcome="complete", **overrides):
+    items = list(items)
     value = {
-        "outcome": outcome,
-        "upstream_repository": f"up/{tool}",
-        "fork_owner": "vibeic",
-        "open_count": len(items),
-        "items": items,
+        "outcome": outcome, "upstream_repository": f"up/{tool}",
+        "fork_owner": "vibeic", "open_count": len(items), "items": items,
     }
     value.update(overrides)
     return value
 
 
-def _inputs(tmp_path: Path, *, tools=("alpha", "beta"), round_rows=None,
-            round_meta=None):
+def _round_pr(repo: str, number: int, **overrides):
+    item = {
+        "repository": repo, "type": "pull_request", "number": number,
+        "title": f"PR {number}",
+        "url": f"https://github.test/{repo}/pull/{number}",
+        "author": "vibeic", "head_owner": "vibeic",
+        "head_ref": "fix", "base_ref": "main", "draft": False,
+        "updated_at": UPDATED_AT,
+    }
+    item.update(overrides)
+    return item
+
+
+def _inputs(tmp_path: Path, *, tools=("alpha", "beta"), measurements=None):
     forks = tmp_path / "FORKS.json"
     forks.write_text(json.dumps({
-        "org": "vibeic",
-        "forks": [
+        "org": "vibeic", "forks": [
             {"tool": tool, "upstream": f"up/{tool}"} for tool in tools
         ],
     }), encoding="utf-8")
-    if round_rows is None:
-        round_rows = {
-            tool: {"upstream_pull_requests": _measurement(tool)}
-            for tool in tools
-        }
-    if round_meta is None:
-        round_meta = {
-            "schema_version": 1,
-            "run_id": RUN_ID,
+    measurements = measurements or {
+        tool: _measurement(tool) for tool in tools
+    }
+    payload = {
+        "_round": {
+            "schema_version": 1, "run_id": RUN_ID,
             "started_at": "2026-08-17T05:01:00+00:00",
             "finished_at": "2026-08-17T05:20:00+00:00",
-        }
-    payload = {"_round": round_meta, **round_rows}
+        },
+        **{tool: {"upstream_pull_requests": measurements.get(tool)}
+           for tool in tools},
+    }
     round_json = tmp_path / "round.json"
     round_json.write_text(json.dumps(payload), encoding="utf-8")
     return forks, round_json
 
 
-NOW = lambda: datetime(2026, 8, 17, 5, 30, tzinfo=timezone.utc)
-
-
-def test_exact_zero_requires_all_three_sources(tmp_path):
-    forks, round_json = _inputs(tmp_path)
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(_empty_pages()), now=NOW)
-    assert rc == 0
-    assert record == {
-        "schema_version": 1,
-        "program": "fork_github_convergence",
-        "started_at": "2026-08-17T05:30:00+00:00",
-        "completed_at": "2026-08-17T05:30:00+00:00",
-        "actor": "reyerchu",
-        "expected_actor": "reyerchu",
-        "round": {
-            "round_at": ROUND_AT,
-            "schema_version": 1,
-            "run_id": RUN_ID,
-            "started_at": "2026-08-17T05:01:00+00:00",
-            "finished_at": "2026-08-17T05:20:00+00:00",
-        },
-        "status": "converged",
-        "counts": {
-            "items": 0, "issues": 0, "pull_requests": 0,
-            "registered_fork_items": 0, "upstream_items": 0,
-            "vibeic_eda_items": 0, "out_of_registry_org_items": 0,
-            "by_source": {
-                "org_search_issues": 0,
-                "org_search_pull_requests": 0,
-                "viewer_issues_matched": 0,
-                "viewer_pull_requests_matched": 0,
-                "round_upstream_pull_requests": 0,
-            },
-        },
-        "items": [],
-        "source_errors": [],
-    }
-
-
-def test_paginates_retains_out_of_registry_and_deduplicates_sources(tmp_path):
-    forks, round_json = _inputs(tmp_path, round_rows={
-        "alpha": {"upstream_pull_requests": _measurement("alpha", [
-            {"number": 20, "title": "item 20",
-             "url": "https://github.test/up/alpha/20",
-             "head_ref": "fix-20", "base_ref": "main", "draft": False,
-             "updated_at": UPDATED_AT},
-        ])},
-        "beta": {"upstream_pull_requests": _measurement("beta")},
-    })
-    viewer_pr_page_1 = [
-        _node("pull_request", "vibeic/alpha", 2),
-        _node("pull_request", "up/alpha", 20),
-        *_noise_nodes("pull_request", 1000, 98),
+def _required_nodes(*, alpha_issues=(), alpha_pulls=(), delivery_pulls=(),
+                    alpha_issue_connection=None, alpha_pull_connection=None,
+                    beta_issues_enabled=False, beta_issues=()):
+    return [
+        _repo("vibeic/alpha", issues=alpha_issues, pulls=alpha_pulls,
+              issue_connection=alpha_issue_connection,
+              pull_connection=alpha_pull_connection),
+        # Control for the production edge: issue-disabled + exact zero is a
+        # typed complete answer, not a missing source.
+        _repo("vibeic/beta", issues=beta_issues,
+              issues_enabled=beta_issues_enabled),
+        _repo("vibeic/vibeic-eda", is_fork=False),
+        _repo("vibeic/vibe-ic", pulls=delivery_pulls, is_fork=False),
     ]
-    pages = {
-        ("org_issues", None): _org(_page(
-            [_node("issue", "vibeic/alpha", 1),
-             _node("issue", "vibeic/not-registered", 9),
-             _node("issue", "vibeic/vibeic-eda", 10)],
-            count_field="issueCount")),
-        ("org_pull_requests", None): _org(_page(
-            [_node("pull_request", "vibeic/alpha", 2)],
-            count_field="issueCount")),
-        # This global viewer issue is deliberately outside the target fleet.
-        ("viewer_issues", None): _viewer("issues", _page(
-            [_node("issue", "someone/unrelated", 77)])),
-        ("viewer_pull_requests", None): _viewer("pullRequests", _page(
-            viewer_pr_page_1, count=101, cursor="viewer-pr-page-2",
-            has_next=True)),
-        ("viewer_pull_requests", "viewer-pr-page-2"): _viewer(
-            "pullRequests", _page(
-                _noise_nodes("pull_request", 2000, 1), count=101)),
+
+
+def _base_pages(nodes=None):
+    nodes = _required_nodes() if nodes is None else nodes
+    return {
+        ("organization.repositories", None, None, None): _catalog(nodes),
+        ("viewer_upstream.issues", None, None, None): _viewer("issues"),
+        ("viewer_upstream.pull_requests", None, None, None):
+            _viewer("pullRequests"),
     }
-    runner = ScriptedRunner(pages)
+
+
+def _collect(tmp_path, *, pages=None, tools=("alpha", "beta"),
+             measurements=None, expected_actor="reyerchu"):
+    forks, round_json = _inputs(
+        tmp_path, tools=tools, measurements=measurements)
+    runner = ScriptedRunner(_base_pages() if pages is None else pages)
     record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=runner, now=NOW)
+        forks, round_json, round_at=ROUND_AT,
+        expected_actor=expected_actor, runner=runner, now=NOW)
+    return record, rc, runner
+
+
+def test_exact_zero_uses_one_catalog_request_not_search_or_2x_repo_calls(tmp_path):
+    record, rc, runner = _collect(tmp_path)
+
+    assert rc == 0 and record["status"] == "converged"
+    assert record["schema_version"] == 2
+    assert [op for op, _ in runner.calls] == [
+        "organization.repositories", "viewer_upstream.issues",
+        "viewer_upstream.pull_requests",
+    ]
+    assert not any("search" in op for op, _ in runner.calls)
+    inventory = record["inventory"]
+    assert inventory["status"] == "complete"
+    assert inventory["required_repositories"] == [
+        "vibeic/alpha", "vibeic/beta", "vibeic/vibeic-eda"]
+    assert inventory["required_repository_count"] == 3
+    assert inventory["completed_repository_count"] == 3
+    beta = next(row for row in inventory["repositories"]
+                if row["repository"] == "vibeic/beta")
+    assert beta["has_issues_enabled"] is False
+    assert beta["issues"] == {"outcome": "disabled", "open_count": 0}
+    assert record["delivery"]["status"] == "complete"
+    assert record["delivery"]["issues"] == {
+        "outcome": "excluded_no_durable_producer_marker"}
+    assert record["round_upstream"]["completed_fork_count"] == 2
+    assert record["source_errors"] == []
+
+
+def test_exact_repo_connections_find_items_that_search_can_falsely_report_zero(
+        tmp_path):
+    nodes = _required_nodes(
+        alpha_issues=[_issue("vibeic/alpha", 7)],
+        alpha_pulls=[_pr("vibeic/alpha", 8)])
+    record, rc, _runner = _collect(tmp_path, pages=_base_pages(nodes))
 
     assert rc == 1 and record["status"] == "open"
-    assert record["counts"]["items"] == 5
-    assert record["counts"]["out_of_registry_org_items"] == 1
-    assert record["counts"]["vibeic_eda_items"] == 1
-    assert [(op, cursor) for op, cursor, _ in runner.calls
-            if op == "viewer_pull_requests"] == [
-                ("viewer_pull_requests", None),
-                ("viewer_pull_requests", "viewer-pr-page-2")]
-
-    fork_pr = next(x for x in record["items"]
-                   if (x["repository"], x["number"]) == ("vibeic/alpha", 2))
-    assert fork_pr["sources"] == ["org_search", "viewer"]
-    upstream_pr = next(x for x in record["items"]
-                       if (x["repository"], x["number"]) == ("up/alpha", 20))
-    assert upstream_pr["sources"] == [
-        "round_upstream_pull_requests", "viewer"]
+    assert {(item["repository"], item["type"], item["number"])
+            for item in record["items"]} == {
+                ("vibeic/alpha", "issue", 7),
+                ("vibeic/alpha", "pull_request", 8),
+            }
+    assert record["counts"]["registered_fork_items"] == 2
+    assert record["counts"]["by_source"]["exact_repository_issues"] == 1
+    assert record["counts"]["by_source"][
+        "exact_repository_pull_requests"] == 1
 
 
-@pytest.mark.parametrize("measurement", [
-    None,
-    _measurement("alpha", outcome="norecord"),
-    {"outcome": "complete"},
-])
-def test_missing_or_incomplete_round_measurement_is_never_zero(tmp_path,
-                                                               measurement):
-    rows = {"alpha": {}}
-    if measurement is not None:
-        rows["alpha"]["upstream_pull_requests"] = measurement
-    forks, round_json = _inputs(tmp_path, tools=("alpha",), round_rows=rows)
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(_empty_pages()), now=NOW)
+def test_only_nonfinal_repo_connection_gets_a_followup_request(tmp_path):
+    first = [_issue("vibeic/alpha", number) for number in range(1, 101)]
+    nodes = _required_nodes(alpha_issue_connection=_connection(
+        first, count=101, has_next=True, cursor="issue-page-2"))
+    pages = _base_pages(nodes)
+    pages[("repository.vibeic/alpha.open_items", None,
+           "issue-page-2", None)] = _repo_followup(
+               "vibeic/alpha", issues=_connection(
+                   [_issue("vibeic/alpha", 101)], count=101))
+
+    record, rc, runner = _collect(tmp_path, pages=pages)
+
+    assert rc == 1 and record["counts"]["issues"] == 101
+    followup = next(variables for operation, variables in runner.calls
+                    if operation == "repository.vibeic/alpha.open_items")
+    assert followup["includeIssues"] is True
+    assert followup["includePullRequests"] is False
+    assert followup["issueCursor"] == "issue-page-2"
+
+
+def test_repo_followup_partial_data_with_graphql_errors_is_norecord(tmp_path):
+    first = [_issue("vibeic/alpha", number) for number in range(1, 101)]
+    nodes = _required_nodes(alpha_issue_connection=_connection(
+        first, count=101, has_next=True, cursor="issue-page-2"))
+    pages = _base_pages(nodes)
+    partial = _repo_followup(
+        "vibeic/alpha", issues=_connection(
+            [_issue("vibeic/alpha", 101)], count=101))
+    partial["errors"] = [{
+        "message": "partial backend failure",
+        "path": ["repository", "issues"],
+    }]
+    pages[("repository.vibeic/alpha.open_items", None,
+           "issue-page-2", None)] = partial
+
+    record, rc, _ = _collect(tmp_path, pages=pages)
+
     assert rc == 2 and record["status"] == "norecord"
-    assert record["source_errors"]
-    assert "upstream_pull_requests" in record["source_errors"][0]["source"]
+    assert record["inventory"]["status"] == "norecord"
+    assert any(error["source"] == "repository.vibeic/alpha.open_items"
+               and "GraphQL errors" in error["error"]
+               for error in record["source_errors"])
 
 
-@pytest.mark.parametrize("overrides,needle", [
-    ({"upstream_repository": "wrong/repo"}, "upstream_repository"),
-    ({"fork_owner": "someone-else"}, "fork_owner"),
-    ({"fork_owner": "VIBEIC"}, "fork_owner"),
-    ({"open_count": True}, "non-negative integer"),
-    ({"open_count": -1}, "non-negative integer"),
-    ({"open_count": 1}, "items has 0 row"),
-    ({"items": None}, "items is not a list"),
-])
-def test_round_producer_envelope_must_prove_what_it_measured(
-        tmp_path, overrides, needle):
-    measurement = _measurement("alpha")
-    measurement.update(overrides)
-    forks, round_json = _inputs(
-        tmp_path, tools=("alpha",),
-        round_rows={"alpha": {"upstream_pull_requests": measurement}})
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(_empty_pages()), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    error = next(e["error"] for e in record["source_errors"]
-                 if e["source"].endswith("upstream_pull_requests"))
-    assert needle in error
+def test_pull_request_connection_is_independently_fully_paginated(tmp_path):
+    first = [_pr("vibeic/alpha", number) for number in range(1, 101)]
+    nodes = _required_nodes(alpha_pull_connection=_connection(
+        first, count=101, has_next=True, cursor="pr-page-2"))
+    pages = _base_pages(nodes)
+    pages[("repository.vibeic/alpha.open_items", None,
+           None, "pr-page-2")] = _repo_followup(
+               "vibeic/alpha", pulls=_connection(
+                   [_pr("vibeic/alpha", 101)], count=101))
+
+    record, rc, runner = _collect(tmp_path, pages=pages)
+
+    assert rc == 1 and record["counts"]["pull_requests"] == 101
+    followup = next(variables for operation, variables in runner.calls
+                    if operation == "repository.vibeic/alpha.open_items")
+    assert followup["includeIssues"] is False
+    assert followup["includePullRequests"] is True
+    assert followup["pullRequestCursor"] == "pr-page-2"
 
 
-def test_one_graphql_failure_makes_partial_open_evidence_norecord(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("org_issues", None)] = RuntimeError("network vanished")
-    pages[("org_pull_requests", None)] = _org(_page(
-        [_node("pull_request", "vibeic/alpha", 4)],
-        count_field="issueCount"))
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    assert record["counts"]["items"] == 1  # known evidence is still retained
-    assert any(e["source"] == "org_issues" for e in record["source_errors"])
+def test_catalog_is_fully_paginated_and_keeps_one_exact_denominator(tmp_path):
+    nodes = _required_nodes() + [
+        _repo(f"vibeic/nonfork-{number}", is_fork=False)
+        for number in range(97)
+    ]
+    assert len(nodes) == 101
+    pages = _base_pages()
+    pages[("organization.repositories", None, None, None)] = _catalog(
+        nodes[:100], count=101, has_next=True, cursor="catalog-page-2")
+    pages[("organization.repositories", "catalog-page-2", None, None)] = \
+        _catalog(nodes[100:], count=101)
 
+    record, rc, runner = _collect(tmp_path, pages=pages)
 
-@pytest.mark.parametrize("bad_page,needle", [
-    ({"issueCount": 0, "nodes": []}, "pageInfo"),
-    (_page([], count=1000, count_field="issueCount"), "1000-result cap"),
-    (_page([], count=1, count_field="issueCount"), "fetched 0 nodes"),
-    (_page([], count=0, cursor="p2", has_next=True,
-           count_field="issueCount"), "issueCount=0 but hasNextPage"),
-    (_page(_noise_nodes("issue", 1, 101), count=101,
-           count_field="issueCount"), "maximum is 100"),
-    (_page(_noise_nodes("issue", 1, 99), count=100, cursor="p2",
-           has_next=True, count_field="issueCount"),
-     "non-final page has 99 nodes"),
-])
-def test_malformed_or_capped_search_is_norecord(tmp_path, bad_page, needle):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("org_issues", None)] = _org(bad_page)
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    error = next(e["error"] for e in record["source_errors"]
-                 if e["source"] == "org_issues")
-    assert needle in error
-
-
-def test_cursor_loop_is_detected_instead_of_hanging_or_claiming_zero(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("viewer_issues", None)] = _viewer("issues", _page(
-        _noise_nodes("issue", 1, 100), count=300,
-        cursor="again", has_next=True))
-    pages[("viewer_issues", "again")] = _viewer("issues", _page(
-        _noise_nodes("issue", 101, 100), count=300,
-        cursor="again", has_next=True))
-    record, rc = C.collect(forks, round_json,
-                           round_at=ROUND_AT, expected_actor="reyerchu",
-                           runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    assert "cursor loop" in next(e["error"] for e in record["source_errors"]
-                                 if e["source"] == "viewer_issues")
-
-
-def test_viewer_is_fully_paginated_even_when_every_item_is_filtered(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("viewer_pull_requests", None)] = _viewer("pullRequests", _page(
-        _noise_nodes("pull_request", 1, 100), count=101,
-        cursor="p2", has_next=True))
-    pages[("viewer_pull_requests", "p2")] = _viewer("pullRequests", _page(
-        _noise_nodes("pull_request", 101, 1), count=101))
-    runner = ScriptedRunner(pages)
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=runner, now=NOW)
-    assert rc == 0 and record["status"] == "converged"
-    assert [(op, cursor) for op, cursor, _ in runner.calls
-            if op == "viewer_pull_requests"] == [
-                ("viewer_pull_requests", None),
-                ("viewer_pull_requests", "p2"),
-            ]
-
-
-def test_duplicate_identity_across_pages_is_norecord_even_when_filtered(
-        tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    first_page = _noise_nodes("issue", 1, 100)
-    pages = _empty_pages()
-    pages[("viewer_issues", None)] = _viewer("issues", _page(
-        first_page, count=101, cursor="p2", has_next=True))
-    pages[("viewer_issues", "p2")] = _viewer("issues", _page(
-        [first_page[0]], count=101))
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    error = next(e["error"] for e in record["source_errors"]
-                 if e["source"] == "viewer_issues")
-    assert "duplicate item identity across pages" in error
-
-
-def test_cli_writes_the_current_record_and_returns_status(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    out = tmp_path / "nested" / "convergence.json"
-    rc = C.main([
-        "--forks-json", str(forks),
-        "--round-json", str(round_json),
-        "--round-at", ROUND_AT,
-        "--expected-actor", "reyerchu",
-        "--json", str(out),
-    ], runner=ScriptedRunner(_empty_pages()), now=NOW)
     assert rc == 0
-    record = json.loads(out.read_text())
-    assert record["program"] == "fork_github_convergence"
-    assert record["status"] == "converged"
+    assert record["inventory"]["catalog"]["total_repositories"] == 101
+    assert [op for op, _ in runner.calls].count(
+        "organization.repositories") == 2
 
 
-def test_yesterdays_complete_zero_cannot_be_laundered_into_this_round(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",), round_meta={
-        "schema_version": 1,
-        "run_id": "b" * 64,
-        "started_at": "2026-08-16T05:01:00+00:00",
-        "finished_at": "2026-08-16T05:20:00+00:00",
-    })
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(_empty_pages()), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    error = next(e["error"] for e in record["source_errors"]
-                 if e["source"] == "round_json.provenance")
-    assert "predates --round-at" in error
-    assert record["round"]["run_id"] is None
-
-
-@pytest.mark.parametrize("round_meta,needle", [
-    ({}, "schema_version"),
-    ({"schema_version": 1, "run_id": "short",
-      "started_at": "2026-08-17T05:01:00+00:00",
-      "finished_at": "2026-08-17T05:20:00+00:00"}, "run_id"),
-    ({"schema_version": 1, "run_id": RUN_ID,
-      "started_at": "2026-08-17T05:20:00+00:00",
-      "finished_at": "2026-08-17T05:01:00+00:00"}, "predates started_at"),
-    ({"schema_version": 1, "run_id": RUN_ID,
-      "started_at": "2026-08-17T05:31:00+00:00",
-      "finished_at": "2026-08-17T05:32:00+00:00"},
-     "started_at is after collector started_at"),
-    ({"schema_version": 1, "run_id": RUN_ID,
-      "started_at": "2026-08-17T05:20:00+00:00",
-      "finished_at": "2026-08-17T05:31:00+00:00"},
-     "finished_at is after collector started_at"),
+@pytest.mark.parametrize("second_page", [
+    pytest.param("duplicate", id="duplicate-repository"),
+    pytest.param("count-drift", id="total-count-drift"),
+    pytest.param("cursor-loop", id="cursor-loop"),
 ])
-def test_malformed_round_provenance_is_norecord(tmp_path, round_meta, needle):
-    forks, round_json = _inputs(
-        tmp_path, tools=("alpha",), round_meta=round_meta)
+def test_catalog_pagination_corruption_is_norecord(tmp_path, second_page):
+    nodes = _required_nodes() + [
+        _repo(f"vibeic/nonfork-{number}", is_fork=False)
+        for number in range(96)
+    ]
+    assert len(nodes) == 100
+    pages = _base_pages()
+    pages[("organization.repositories", None, None, None)] = _catalog(
+        nodes, count=101, has_next=True, cursor="catalog-page-2")
+    if second_page == "duplicate":
+        tail = _catalog([nodes[0]], count=101)
+    elif second_page == "count-drift":
+        tail = _catalog([_repo("vibeic/nonfork-last", is_fork=False)],
+                        count=102)
+    else:
+        tail = _catalog([_repo("vibeic/nonfork-last", is_fork=False)],
+                        count=101, has_next=True, cursor="catalog-page-2")
+    pages[("organization.repositories", "catalog-page-2", None, None)] = tail
+
+    record, rc, _ = _collect(tmp_path, pages=pages)
+
+    assert rc == 2 and record["status"] == "norecord"
+    assert record["inventory"]["catalog"]["outcome"] == "norecord"
+
+
+def test_required_source_failure_freezes_later_network_and_is_never_zero(tmp_path):
+    nodes = _required_nodes(alpha_issue_connection={"totalCount": 0})
+    pages = _base_pages(nodes)
+    record, rc, runner = _collect(tmp_path, pages=pages)
+
+    assert rc == 2 and record["status"] == "norecord"
+    assert [op for op, _ in runner.calls] == ["organization.repositories"]
+    assert record["inventory"]["completed_repository_count"] == 0
+    assert record["delivery"]["status"] == "norecord"
+    assert record["upstream_actor"]["status"] == "norecord"
+    assert record["source_errors"]
+
+
+def test_issue_disabled_zero_is_complete_but_disabled_nonzero_is_norecord(
+        tmp_path):
+    clean, clean_rc, _ = _collect(tmp_path)
+    assert clean_rc == 0
+    assert next(row for row in clean["inventory"]["repositories"]
+                if row["repository"] == "vibeic/beta")["issues"][
+                    "outcome"] == "disabled"
+
+    nodes = _required_nodes(
+        beta_issues_enabled=False,
+        beta_issues=[_issue("vibeic/beta", 1)])
+    bad, bad_rc, _ = _collect(tmp_path, pages=_base_pages(nodes))
+    assert bad_rc == 2 and bad["status"] == "norecord"
+    assert any("hasIssuesEnabled=false" in error["error"]
+               for error in bad["source_errors"])
+
+
+def test_nonfork_canonical_watch_mirror_is_accepted(tmp_path):
+    nodes = _required_nodes()
+    nodes[1]["isFork"] = False  # the icsprout55-style watch-only mirror shape
+    record, rc, _ = _collect(tmp_path, pages=_base_pages(nodes))
+    assert rc == 0
+    beta = next(row for row in record["inventory"]["repositories"]
+                if row["repository"] == "vibeic/beta")
+    assert beta["is_fork"] is False and beta["status"] == "complete"
+
+
+def test_catalog_discovers_unregistered_live_fork_and_blocks_zero(tmp_path):
+    nodes = _required_nodes() + [_repo("vibeic/forgotten")]
+    record, rc, _ = _collect(tmp_path, pages=_base_pages(nodes))
+    assert rc == 2 and record["inventory"]["status"] == "norecord"
+    assert record["inventory"]["catalog"][
+        "unregistered_live_fork_repositories"] == ["vibeic/forgotten"]
+    assert any("absent from FORKS.json" in error["error"]
+               for error in record["source_errors"])
+
+
+def test_delivery_scope_uses_exact_producer_identity_and_retains_exclusions(
+        tmp_path):
+    delivery_prs = [
+        _pr("vibeic/vibe-ic", 1, head="eda-anchor-0.3.5",
+            title="wrong title", base="wrong", draft=True),
+        _pr("vibeic/vibe-ic", 2, head="eda-fork-sync-2026-08-17",
+            title="[eda-fork] 2026-08-17: sync"),
+        _pr("vibeic/vibe-ic", 3, head="eda-fork-assess-2026-08-17",
+            title=("[eda-fork] 2026-08-17: upstream release assessment — "
+                   "1 tool(s) to review")),
+        _pr("vibeic/vibe-ic", 4, head="eda-fork-random"),
+        _pr("vibeic/vibe-ic", 5, head="eda-anchor-0.3.6",
+            head_owner="someone"),
+        _pr("vibeic/vibe-ic", 6, head="codex/unrelated"),
+    ]
+    record, rc, _ = _collect(
+        tmp_path, pages=_base_pages(_required_nodes(
+            delivery_pulls=delivery_prs)))
+
+    assert rc == 1 and record["status"] == "open"
+    delivery = record["delivery"]["pull_requests"]
+    assert (delivery["open_count"], delivery["matched_count"],
+            delivery["excluded_count"]) == (6, 3, 3)
+    assert delivery["matched_count"] + delivery["excluded_count"] == \
+        delivery["open_count"]
+    assert {row["number"] for row in delivery["excluded"]} == {4, 5, 6}
+    included = [item for item in record["items"]
+                if "fork_delivery" in item["scopes"]]
+    assert {item["delivery_kind"] for item in included} == {
+        "anchor", "sync", "assessment"}
+    anchor = next(item for item in included if item["delivery_kind"] == "anchor")
+    assert set(anchor["delivery_anomalies"]) == {
+        "base_ref_is_not_main", "draft_is_not_false",
+        "title_does_not_match_anchor_producer",
+    }
+    assert record["counts"]["fork_delivery_items"] == 3
+
+
+def test_unrelated_vibe_ic_backlog_does_not_gate_fork_convergence(tmp_path):
+    nodes = _required_nodes(delivery_pulls=[
+        _pr("vibeic/vibe-ic", 99, head="codex/plugin-work"),
+    ])
+    record, rc, _ = _collect(tmp_path, pages=_base_pages(nodes))
+
+    assert rc == 0 and record["status"] == "converged"
+    delivery = record["delivery"]["pull_requests"]
+    assert delivery["open_count"] == 1
+    assert delivery["matched_count"] == 0
+    assert delivery["excluded_count"] == 1
+    assert record["counts"]["fork_delivery_items"] == 0
+
+
+def test_viewer_upstream_inventory_is_preserved_and_filters_unrelated(tmp_path):
+    pages = _base_pages()
+    pages[("viewer_upstream.issues", None, None, None)] = _viewer("issues", [
+        _issue("up/alpha", 20), _issue("someone/unrelated", 21),
+    ])
+    pages[("viewer_upstream.pull_requests", None, None, None)] = _viewer(
+        "pullRequests", [_pr("up/beta", 22),
+                         _pr("someone/unrelated", 23)])
+    record, rc, _ = _collect(tmp_path, pages=pages)
+
+    assert rc == 1
+    assert {(item["repository"], item["number"])
+            for item in record["items"]} == {("up/alpha", 20), ("up/beta", 22)}
+    assert record["upstream_actor"]["issues"] == {
+        "outcome": "complete", "seen_count": 2, "matched_count": 1}
+    assert record["counts"]["upstream_items"] == 2
+
+
+def test_viewer_is_fully_paginated_even_when_first_page_is_all_filtered(
+        tmp_path):
+    first = [_issue("someone/unrelated", number)
+             for number in range(1, 101)]
+    pages = _base_pages()
+    pages[("viewer_upstream.issues", None, None, None)] = _viewer(
+        "issues", first, count=101, has_next=True, cursor="viewer-page-2")
+    pages[("viewer_upstream.issues", "viewer-page-2", None, None)] = \
+        _viewer("issues", [_issue("up/alpha", 101)], count=101)
+
+    record, rc, runner = _collect(tmp_path, pages=pages)
+
+    assert rc == 1
+    assert record["upstream_actor"]["issues"] == {
+        "outcome": "complete", "seen_count": 101, "matched_count": 1}
+    assert ("viewer_upstream.issues", "viewer-page-2", None, None) in [
+        ScriptedRunner.key(operation, variables)
+        for operation, variables in runner.calls]
+
+
+@pytest.mark.parametrize("fault", [
+    pytest.param("duplicate", id="duplicate-across-pages"),
+    pytest.param("count-drift", id="count-drift"),
+    pytest.param("cursor-loop", id="cursor-loop"),
+])
+def test_viewer_pagination_corruption_is_norecord(tmp_path, fault):
+    first = [_issue("someone/unrelated", number)
+             for number in range(1, 101)]
+    pages = _base_pages()
+    pages[("viewer_upstream.issues", None, None, None)] = _viewer(
+        "issues", first, count=101, has_next=True, cursor="viewer-page-2")
+    if fault == "duplicate":
+        tail = _viewer("issues", [first[0]], count=101)
+    elif fault == "count-drift":
+        tail = _viewer("issues", [_issue("up/alpha", 101)], count=102)
+    else:
+        tail = _viewer("issues", [_issue("up/alpha", 101)], count=101,
+                       has_next=True, cursor="viewer-page-2")
+    pages[("viewer_upstream.issues", "viewer-page-2", None, None)] = tail
+
+    record, rc, _ = _collect(tmp_path, pages=pages)
+
+    assert rc == 2 and record["status"] == "norecord"
+    assert record["upstream_actor"]["status"] == "norecord"
+
+
+def test_viewer_failure_is_norecord_and_second_long_request_is_not_started(
+        tmp_path):
+    pages = _base_pages()
+    pages[("viewer_upstream.issues", None, None, None)] = RuntimeError(
+        "transport vanished")
+    record, rc, runner = _collect(tmp_path, pages=pages)
+
+    assert rc == 2 and record["upstream_actor"]["status"] == "norecord"
+    assert "viewer_upstream.pull_requests" not in [op for op, _ in runner.calls]
+
+
+def test_round_upstream_source_is_explicit_and_missing_row_is_norecord(tmp_path):
+    measurements = {"alpha": _measurement("alpha"), "beta": None}
+    record, rc, _ = _collect(tmp_path, measurements=measurements)
+
+    assert rc == 2
+    assert record["round_upstream"]["required_fork_count"] == 2
+    assert record["round_upstream"]["completed_fork_count"] == 1
+    beta = next(row for row in record["round_upstream"]["forks"]
+                if row["tool"] == "beta")
+    assert beta["outcome"] == "norecord" and beta["open_count"] is None
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param("upstream_repository", "wrong/repository", id="wrong-repo"),
+    pytest.param("fork_owner", "someone", id="wrong-fork-owner"),
+    pytest.param("open_count", 1, id="count-list-mismatch"),
+    pytest.param("items", "not-a-list", id="items-not-list"),
+    pytest.param("outcome", "norecord", id="incomplete-outcome"),
+])
+def test_round_producer_envelope_cannot_launder_zero(
+        tmp_path, field, value):
+    alpha = _measurement("alpha")
+    alpha[field] = value
+    record, rc, _ = _collect(tmp_path, measurements={
+        "alpha": alpha, "beta": _measurement("beta")})
+
+    assert rc == 2 and record["status"] == "norecord"
+    row = next(row for row in record["round_upstream"]["forks"]
+               if row["tool"] == "alpha")
+    assert row["outcome"] == "norecord"
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param("title", None, id="missing-title"),
+    pytest.param("url", None, id="missing-url"),
+    pytest.param("head_ref", None, id="missing-head-ref"),
+    pytest.param("base_ref", None, id="missing-base-ref"),
+    pytest.param("draft", None, id="missing-draft"),
+    pytest.param("updated_at", None, id="missing-updated-at"),
+])
+def test_round_pr_requires_actionable_normalized_fields(tmp_path, field, value):
+    item = _round_pr("up/alpha", 1)
+    item[field] = value
+    record, rc, _ = _collect(tmp_path, measurements={
+        "alpha": _measurement("alpha", [item]),
+        "beta": _measurement("beta"),
+    })
+    assert rc == 2 and record["status"] == "norecord"
+
+
+def test_conflicting_viewer_and_round_duplicate_is_norecord(tmp_path):
+    pages = _base_pages()
+    pages[("viewer_upstream.pull_requests", None, None, None)] = _viewer(
+        "pullRequests", [_pr("up/alpha", 1, title="viewer title")])
+    record, rc, _ = _collect(tmp_path, pages=pages, measurements={
+        "alpha": _measurement("alpha", [
+            _round_pr("up/alpha", 1, title="round title")]),
+        "beta": _measurement("beta"),
+    })
+    assert rc == 2 and record["status"] == "norecord"
+    assert any("conflicting duplicate" in error["error"]
+               for error in record["source_errors"])
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    pytest.param("run_id", "short", id="weak-run-id"),
+    pytest.param("started_at", "2026-08-17T04:59:59+00:00",
+                 id="prior-round"),
+    pytest.param("finished_at", "2026-08-17T05:31:00+00:00",
+                 id="future-finish"),
+    pytest.param("finished_at", "2026-08-17T05:00:30+00:00",
+                 id="finish-before-start"),
+])
+def test_malformed_round_provenance_is_norecord(tmp_path, field, value):
+    forks, round_json = _inputs(tmp_path)
+    payload = json.loads(round_json.read_text(encoding="utf-8"))
+    payload["_round"][field] = value
+    round_json.write_text(json.dumps(payload), encoding="utf-8")
     record, rc = C.collect(
         forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(_empty_pages()), now=NOW)
+        runner=ScriptedRunner(_base_pages()), now=NOW)
     assert rc == 2 and record["status"] == "norecord"
-    assert needle in next(e["error"] for e in record["source_errors"]
-                          if e["source"] == "round_json.provenance")
+    assert any(error["source"] == "round_json.provenance"
+               for error in record["source_errors"])
 
 
-def test_wrong_authenticated_viewer_is_norecord_not_zero(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("viewer_issues", None)] = _viewer(
-        "issues", _page([]), actor="wrong-account")
-    pages[("viewer_pull_requests", None)] = _viewer(
-        "pullRequests", _page([]), actor="wrong-account")
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    assert record["actor"] == "wrong-account"
-    assert any("is not expected actor" in e["error"]
-               for e in record["source_errors"])
+def test_wrong_authenticated_actor_is_norecord_not_zero(tmp_path):
+    nodes = _required_nodes()
+    pages = _base_pages(nodes)
+    pages[("organization.repositories", None, None, None)] = _catalog(
+        nodes, actor="wrong")
+    record, rc, _ = _collect(tmp_path, pages=pages)
+    assert rc == 2 and record["actor"] == "wrong"
+    assert any("expected actor" in error["error"]
+               for error in record["source_errors"])
 
 
-@pytest.mark.parametrize("expected_actor", [None, "", " reyerchu", "reyerchu "])
-def test_expected_actor_is_mandatory_even_for_direct_collection(
+@pytest.mark.parametrize("expected_actor", [None, "", " reyerchu "])
+def test_expected_actor_is_mandatory_for_direct_collection(
         tmp_path, expected_actor):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor=expected_actor,
-        runner=ScriptedRunner(_empty_pages()), now=NOW)
+    record, rc, _ = _collect(tmp_path, expected_actor=expected_actor)
     assert rc == 2 and record["status"] == "norecord"
-    assert any(e["source"] == "viewer.identity"
-               and "non-empty exact login" in e["error"]
-               for e in record["source_errors"])
+    assert any(error["source"] == "viewer.identity"
+               for error in record["source_errors"])
 
 
-def test_cli_without_expected_actor_writes_norecord(
-        tmp_path, monkeypatch):
-    monkeypatch.delenv("GK_GITHUB_ACTOR", raising=False)
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
+def test_malformed_catalog_page_is_norecord_not_empty_inventory(tmp_path):
+    nodes = _required_nodes()
+    answer = _catalog(nodes)
+    del answer["data"]["organization"]["repositories"]["pageInfo"]
+    record, rc, _ = _collect(tmp_path, pages={
+        ("organization.repositories", None, None, None): answer,
+    })
+    assert rc == 2
+    assert record["inventory"]["catalog"]["outcome"] == "norecord"
+    assert record["inventory"]["completed_repository_count"] == 0
+
+
+@pytest.mark.parametrize("graphql_errors", [
+    pytest.param([{
+        "message": "partial backend failure",
+        "path": ["organization", "repositories"],
+    }], id="partial-data-with-errors"),
+    pytest.param({"message": "not-an-errors-list"},
+                 id="malformed-errors-field"),
+])
+def test_catalog_graphql_errors_are_norecord_not_exact_zero(
+        tmp_path, graphql_errors):
+    answer = _catalog(_required_nodes())
+    answer["errors"] = graphql_errors
+
+    record, rc, _ = _collect(tmp_path, pages={
+        ("organization.repositories", None, None, None): answer,
+    })
+
+    assert rc == 2 and record["status"] == "norecord"
+    assert record["inventory"]["catalog"]["outcome"] == "norecord"
+    assert record["inventory"]["completed_repository_count"] == 0
+    assert any(error["source"] == "organization.repositories"
+               and "GraphQL" in error["error"]
+               for error in record["source_errors"])
+
+
+def test_transport_deadline_is_typed_no_answer(monkeypatch):
+    def timed_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("gh", 3)
+
+    monkeypatch.setattr(C.subprocess, "run", timed_out)
+    runner = C.GhGraphQLRunner(3)
+    with pytest.raises(C.SourceFailure, match="formed no answer"):
+        runner("organization.repositories", "query", {})
+
+
+def test_main_writes_v2_json_atomically(tmp_path):
+    forks, round_json = _inputs(tmp_path)
+    runner = ScriptedRunner(_base_pages())
     out = tmp_path / "convergence.json"
     rc = C.main([
-        "--forks-json", str(forks),
-        "--round-json", str(round_json),
-        "--round-at", ROUND_AT,
+        "--forks-json", str(forks), "--round-json", str(round_json),
+        "--round-at", ROUND_AT, "--expected-actor", "reyerchu",
         "--json", str(out),
-    ], runner=ScriptedRunner(_empty_pages()), now=NOW)
-    assert rc == 2
-    record = json.loads(out.read_text())
-    assert record["status"] == "norecord"
-    assert any(e["source"] == "viewer.identity"
-               for e in record["source_errors"])
+    ], runner=runner, now=NOW)
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 0 and record["schema_version"] == 2
+    assert not list(tmp_path.glob(".convergence.json.*"))
 
 
-def test_viewer_identity_must_remain_stable_across_pages(tmp_path):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("viewer_issues", None)] = _viewer(
-        "issues", _page(_noise_nodes("issue", 1, 100), count=101,
-                        cursor="p2", has_next=True))
-    pages[("viewer_issues", "p2")] = _viewer(
-        "issues", _page(_noise_nodes("issue", 101, 1), count=101),
-        actor="other-viewer")
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(pages), now=NOW)
+def test_cli_without_expected_actor_writes_norecord(tmp_path, monkeypatch):
+    monkeypatch.delenv("GK_GITHUB_ACTOR", raising=False)
+    forks, round_json = _inputs(tmp_path)
+    out = tmp_path / "convergence.json"
+    rc = C.main([
+        "--forks-json", str(forks), "--round-json", str(round_json),
+        "--round-at", ROUND_AT, "--json", str(out),
+    ], runner=ScriptedRunner(_base_pages()), now=NOW)
+    record = json.loads(out.read_text(encoding="utf-8"))
     assert rc == 2 and record["status"] == "norecord"
-    assert "authenticated viewer changed" in next(
-        e["error"] for e in record["source_errors"]
-        if e["source"] == "viewer_issues")
+    assert record["expected_actor"] is None
 
 
-@pytest.mark.parametrize("override,field", [
-    ({"title": "different title"}, "title"),
-    ({"url": "https://github.test/different"}, "url"),
-    ({"headRefName": "different-head"}, "head_ref"),
-    ({"baseRefName": "different-base"}, "base_ref"),
-    ({"isDraft": True}, "draft"),
-    ({"updatedAt": "2026-08-17T05:11:00+00:00"}, "updated_at"),
-])
-def test_conflicting_duplicate_details_are_norecord(tmp_path, override, field):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    pages = _empty_pages()
-    pages[("org_pull_requests", None)] = _org(_page(
-        [_node("pull_request", "vibeic/alpha", 7)],
-        count_field="issueCount"))
-    pages[("viewer_pull_requests", None)] = _viewer("pullRequests", _page([
-        _node("pull_request", "vibeic/alpha", 7, **override),
-    ]))
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(pages), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    error = next(e["error"] for e in record["source_errors"]
-                 if e["source"] == "viewer_pull_requests")
-    assert "conflicting duplicate" in error and field in error
-
-
-@pytest.mark.parametrize("field,value", [
-    ("head_ref", None),
-    ("base_ref", ""),
-    ("draft", 0),
-    ("updated_at", "not-a-timestamp"),
-])
-def test_complete_round_pr_requires_actionable_fields(
-        tmp_path, field, value):
-    item = {
-        "number": 3,
-        "title": "upstream change",
-        "url": "https://github.test/up/alpha/3",
-        "head_ref": "fix-3",
-        "base_ref": "main",
-        "draft": False,
-        "updated_at": UPDATED_AT,
-    }
-    item[field] = value
-    forks, round_json = _inputs(tmp_path, tools=("alpha",), round_rows={
-        "alpha": {"upstream_pull_requests": _measurement("alpha", [item])},
-    })
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=ScriptedRunner(_empty_pages()), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    assert any(e["source"].endswith("upstream_pull_requests")
-               for e in record["source_errors"])
-
-
-def test_gh_deadline_timeout_forms_norecord_and_never_an_issue_verdict(
-        tmp_path, monkeypatch):
-    forks, round_json = _inputs(tmp_path, tools=("alpha",))
-    seen_timeouts = []
-
-    def timeout_run(*args, **kwargs):
-        seen_timeouts.append(kwargs.get("timeout"))
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-
-    monkeypatch.setattr(C.subprocess, "run", timeout_run)
-    record, rc = C.collect(
-        forks, round_json, round_at=ROUND_AT, expected_actor="reyerchu",
-        runner=C.GhGraphQLRunner(3.25), now=NOW)
-    assert rc == 2 and record["status"] == "norecord"
-    assert record["items"] == []
-    assert seen_timeouts == [3.25, 3.25, 3.25, 3.25]
-    assert all("formed no answer" in e["error"]
-               for e in record["source_errors"]
-               if e["source"].startswith(("org_", "viewer_")))
+def test_source_contains_no_search_index_authority():
+    source = (HERE / "fork_github_convergence.py").read_text(encoding="utf-8")
+    assert "ORG_SEARCH_QUERY" not in source
+    assert "org_search_issues" not in source
+    assert "org_search_pull_requests" not in source
+    assert "out_of_registry_org_items" not in source
+    assert '"out_of_registry_org"' not in source
+    assert "organization.repositories" in source

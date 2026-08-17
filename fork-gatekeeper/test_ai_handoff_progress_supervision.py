@@ -14,9 +14,13 @@ import capture_release_ll as LL  # noqa: E402
 
 
 _HERE = Path(__file__).resolve().parent
-_REGISTERED_FORKS = sorted(
-    entry["tool"] for entry in
-    json.loads((_HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"])
+_FORK_ENTRIES = json.loads(
+    (_HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"]
+_REGISTERED_FORKS = sorted(entry["tool"] for entry in _FORK_ENTRIES)
+_REGISTERED_REPOSITORIES = sorted(
+    f"vibeic/{entry['tool']}" for entry in _FORK_ENTRIES)
+_REQUIRED_REPOSITORIES = sorted(
+    _REGISTERED_REPOSITORIES + ["vibeic/vibeic-eda"])
 
 
 CASE = {
@@ -234,9 +238,19 @@ def _gap_record() -> dict:
 
 
 def _fork_github_record(*, status="converged", started_at=None) -> dict:
+    catalog_repositories = [
+        {
+            "repository": repository,
+            "is_fork": repository in _REGISTERED_REPOSITORIES,
+            "is_archived": False,
+            "has_issues_enabled": True,
+        }
+        for repository in sorted(
+            _REQUIRED_REPOSITORIES + ["vibeic/vibe-ic"])
+    ]
     return {
         "program": "fork_github_convergence",
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": started_at or "2026-08-17T05:32:00+08:00",
         "completed_at": "2026-08-17T05:33:00+08:00",
         "actor": "reyerchu",
@@ -248,9 +262,87 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
             "started_at": "2026-08-17T05:30:01+08:00",
             "finished_at": "2026-08-17T05:31:00+08:00",
         },
+        "inventory": {
+            "status": "complete",
+            "catalog": {
+                "outcome": "complete",
+                "total_repositories": len(catalog_repositories),
+                "repositories": catalog_repositories,
+                "live_fork_repositories": list(_REGISTERED_REPOSITORIES),
+                "unregistered_live_fork_repositories": [],
+            },
+            "canonical_registered_repositories": list(
+                _REGISTERED_REPOSITORIES),
+            "required_repositories": list(_REQUIRED_REPOSITORIES),
+            "required_repository_count": len(_REQUIRED_REPOSITORIES),
+            "completed_repository_count": len(_REQUIRED_REPOSITORIES),
+            "repositories": [
+                {
+                    "repository": repository,
+                    "scope": (
+                        "registered_fork"
+                        if repository in _REGISTERED_REPOSITORIES
+                        else "vibeic_eda"
+                    ),
+                    "status": "complete",
+                    "is_fork": repository in _REGISTERED_REPOSITORIES,
+                    "is_archived": False,
+                    "has_issues_enabled": True,
+                    "issues": {"outcome": "complete", "open_count": 0},
+                    "pull_requests": {
+                        "outcome": "complete", "open_count": 0},
+                }
+                for repository in _REQUIRED_REPOSITORIES
+            ],
+        },
+        "delivery": {
+            "repository": "vibeic/vibe-ic",
+            "status": "complete",
+            "pr_head_patterns": sorted(LL.DELIVERY_HEAD_PATTERN_TEXT),
+            "issues": {
+                "outcome": "excluded_no_durable_producer_marker"},
+            "pull_requests": {
+                "outcome": "complete", "open_count": 0,
+                "matched_count": 0, "excluded_count": 0, "excluded": [],
+            },
+        },
+        "upstream_actor": {
+            "status": "complete",
+            "issues": {
+                "outcome": "complete", "seen_count": 0,
+                "matched_count": 0},
+            "pull_requests": {
+                "outcome": "complete", "seen_count": 0,
+                "matched_count": 0},
+        },
+        "round_upstream": {
+            "status": "complete",
+            "required_fork_count": len(_FORK_ENTRIES),
+            "completed_fork_count": len(_FORK_ENTRIES),
+            "forks": [
+                {
+                    "tool": entry["tool"],
+                    "repository": entry["upstream"],
+                    "outcome": "complete",
+                    "open_count": 0,
+                }
+                for entry in _FORK_ENTRIES
+            ],
+        },
         "status": status,
-        "counts": {"items": 0, "issues": 0, "pull_requests": 0,
-                   "by_source": {"org_search_issues": 0}},
+        "counts": {
+            "items": 0, "issues": 0, "pull_requests": 0,
+            "registered_fork_items": 0, "upstream_items": 0,
+            "vibeic_eda_items": 0, "fork_delivery_items": 0,
+            "by_source": {
+                "exact_repository_issues": 0,
+                "exact_repository_pull_requests": 0,
+                "fork_delivery_pull_requests": 0,
+                "viewer_upstream_issues": 0,
+                "viewer_upstream_pull_requests": 0,
+                "round_upstream_pull_requests": 0,
+            },
+        },
         "items": [],
         "source_errors": [],
     }
@@ -292,6 +384,7 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
         "--release-json", str(old_release),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
         "--tick-exit", "2",
@@ -350,6 +443,7 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
         "--release-json", str(release),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
         "--tick-exit", "1", "--tick-state", "ran",
@@ -381,6 +475,7 @@ def _capture_ran_tick(tmp_path: Path, release: dict,
         "--release-json", str(release_path),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
+        "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic_path),
         "--round-at", "2026-08-17T05:30:00+08:00",
         "--tick-exit", "0", "--tick-state", "ran",
