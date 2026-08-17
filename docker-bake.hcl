@@ -44,19 +44,19 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
-variable "SV2V_REF"    { default = "6662fa5da71f87797598060f17728b284b99a9fc" }
-variable "SV2V_RECIPE" { default = "a942c0" }
+variable "SV2V_REF"    { default = "1a89e8b986135a5e4951d06a308c05d44e5a4146" }
+variable "SV2V_RECIPE" { default = "abacc3" }
 variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
-variable "OPENROAD_RECIPE" { default = "89f352" }
+variable "OPENROAD_RECIPE" { default = "1aa5ce" }
 variable "YOSYS_RECIPE" { default = "b42b6c" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "19b4e7" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
-variable "IVERILOG_RECIPE" { default = "ba388c" }
+variable "IVERILOG_RECIPE" { default = "cfa83d" }
 variable "KLAYOUT_RECIPE" { default = "cbbc4b" }
 variable "VERILATOR_RECIPE" { default = "9337a7" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
@@ -73,7 +73,7 @@ variable "SV_ELAB_RECIPE" { default = "06cea9" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "20844d66624e237f39f82feb423f3671a0288cc5" }
+variable "OPENROAD_REF"    { default = "bf95df3fec262653e1427664576af70704352c89" }
 variable "YOSYS_REF"       { default = "798e7fdc276f11c913725e9985221538189e2c38" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -87,7 +87,7 @@ variable "NETGEN_REF"      { default = "b7941fafb91317b6a5845d9e9765cea278aa31c3
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "aa3183b7eb155e054fec9b2794297f1fbbdbc027" }
+variable "IVERILOG_REF"    { default = "10a16b5d30e9cc402bbfc2b338eb76c6b7e12eb0" }
 variable "KLAYOUT_REF"     { default = "08cf213ad18e737b4aa7995d2de580110524203f" }
 variable "VERILATOR_REF"   { default = "095502531e9998cdce67ad96895783f513ea5080" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }

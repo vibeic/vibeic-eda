@@ -30,12 +30,12 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:20844d6-89f352
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:bf95df3-1aa5ce
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:798e7fd-b42b6c
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:aa3183b-ba388c
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:10a16b5-cfa83d
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:08cf213-cbbc4b
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:0955025-9337a7
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
@@ -45,7 +45,7 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e3291f8-d13e6c
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
 # would otherwise have shipped nothing.
-ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:6662fa5-a942c0
+ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:1a89e8b-abacc3
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:714d1bb-adea1b
 ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22f2a25-a9f473
 
@@ -147,7 +147,7 @@ ARG COCOTB_REF=77b89e60f4346d1b8c4d3eb5e7cd37c0f6af07c2  # branch master -- the 
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
-ARG PYUVM_REF=663f0852c7b7990b89b40cc7709fbf690415cef1  # master tip. Advanced from
+ARG PYUVM_REF=8a8c8116e41978368c61b112ad45af2c33189e63  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
