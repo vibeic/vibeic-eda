@@ -99,6 +99,49 @@ def _graph(tmp_path: Path, delivered: str) -> tuple[Path, Path, str]:
     return clone, origin, source_tip
 
 
+def _already_carried_merge_graph(tmp_path: Path, *, merge_only_change: bool):
+    """A topic merge whose ordinary commits are patch-equivalent on target.
+
+    The shape matches Trilinos' maintained image branch: both sides' patches
+    are on the shipping line, but the topic's last maintenance merge is not an
+    ancestor of that line.  ``merge_only_change`` plants content directly in
+    the merge commit, which git-cherry cannot report and the gate must retain.
+    """
+    repo = tmp_path / ("evil-merge" if merge_only_change else "plain-merge")
+    _git(tmp_path, "init", "-q", "--initial-branch=master", str(repo))
+    _git(repo, "config", "user.email", "vibeic@example.invalid")
+    _git(repo, "config", "user.name", "vibeic bot")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    base = _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "topic")
+    (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+    feature = _commit(repo, "feature")
+
+    _git(repo, "checkout", "-q", "-b", "side", base)
+    (repo / "side.txt").write_text("side\n", encoding="utf-8")
+    side = _commit(repo, "side")
+
+    _git(repo, "checkout", "-q", "topic")
+    _git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+    if merge_only_change:
+        (repo / "merge-only.txt").write_text(
+            "not represented by either parent\n", encoding="utf-8")
+    merge = _commit(repo, "merge side into topic")
+
+    _git(repo, "checkout", "-q", "-b", "target", base)
+    (repo / "target-only.txt").write_text("different parent\n",
+                                            encoding="utf-8")
+    _commit(repo, "target moved independently")
+    _git(repo, "cherry-pick", feature)
+    _git(repo, "cherry-pick", side)
+    assert _git(repo, "merge-base", "--is-ancestor", merge, "target",
+                check=False).returncode == 1
+    assert all(line.startswith("- ") for line in
+               _git(repo, "cherry", "target", "topic").stdout.splitlines())
+    return repo, merge
+
+
 def _open_pr_evidence() -> dict:
     return {
         "outcome": "complete",
@@ -140,6 +183,62 @@ def test_remote_ancestry_skips_stale_local_conflict_and_keeps_open_pr_branch(
     remote = _git(tmp_path, "ls-remote", str(origin),
                   f"refs/heads/{BRANCH}").stdout.split()
     assert remote and remote[0] == source_tip
+
+
+@pytest.mark.parametrize("keep_cached_origin_head", [True, False])
+def test_remote_default_repairs_a_mismatched_local_main_name(
+        tmp_path, keep_cached_origin_head):
+    clone, _origin, source_tip = _graph(tmp_path, "ancestry")
+    # The checkout kept/renamed its local line to `main`, while the fork still
+    # publishes only `master`.  This was the shape previously measured on an
+    # ASAP7 mirror.  Absence of origin/main must not manufacture an AI case.
+    _git(clone, "branch", "-m", "master", "main")
+    if not keep_cached_origin_head:
+        _git(clone, "remote", "set-head", "origin", "-d")
+    assert _git(clone, "show-ref", "--verify", "--quiet",
+                "refs/remotes/origin/main", check=False).returncode != 0
+    assert _git(clone, "merge-base", "--is-ancestor", source_tip,
+                "origin/master", check=False).returncode == 0
+    rep = {}
+
+    D.step2_ours(["git", "-C", str(clone)], "main", rep)
+
+    assert rep["merged"] == []
+    assert rep["conflicted"] == []
+    assert "merge_unmeasurable" not in rep
+    assert rep["ours_remote_mainline"]["ref"] == "origin/master"
+    assert rep["ours_remote_mainline"]["method"] == "live_remote_head"
+    assert rep["ours_remote_mainline"]["remote_head_ref"] == (
+        "refs/heads/master")
+    assert rep["ours_branch_evidence"][0]["covered_by"] == "origin/master"
+
+
+def test_remote_default_race_is_norecord_not_a_guessed_fallback(
+        tmp_path, monkeypatch):
+    clone, _origin, _source_tip = _graph(tmp_path, "ancestry")
+    _git(clone, "branch", "-m", "master", "main")
+    real_sh = D.sh
+
+    def raced_remote_head(*args, **kwargs):
+        if "ls-remote" in args:
+            return subprocess.CompletedProcess(
+                args, 0,
+                "ref: refs/heads/master\tHEAD\n" + "f" * 40 + "\tHEAD\n",
+                "",
+            )
+        return real_sh(*args, **kwargs)
+
+    monkeypatch.setattr(D, "sh", raced_remote_head)
+
+    target, evidence = D._authoritative_origin_mainline(
+        ["git", "-C", str(clone)], "main")
+
+    assert target is None
+    assert evidence["outcome"] == "norecord"
+    assert evidence["stage"] == "origin_mainline"
+    assert evidence["remote_head_tip"] == "f" * 40
+    assert evidence["candidates"][-1]["ref"] == "origin/master"
+    assert evidence["candidates"][-1]["tip"] != "f" * 40
 
 
 def test_remote_patch_equivalence_skips_stale_local_conflict(tmp_path):
@@ -224,6 +323,8 @@ def test_step2_git_cherry_failure_or_malformed_output_is_norecord(
             return subprocess.CompletedProcess(
                 args, cherry_rc, cherry_stdout,
                 "fatal: comparison failed" if cherry_rc else "")
+        if "rev-parse" in args:
+            return subprocess.CompletedProcess(args, 0, "a" * 40 + "\n", "")
         raise AssertionError(f"invalid cherry evidence reached {args}")
 
     monkeypatch.setattr(D, "sh", command)
@@ -239,7 +340,7 @@ def test_step2_git_cherry_failure_or_malformed_output_is_norecord(
     assert sum("cherry" in args for args in commands) == 2
 
 
-def test_empty_cherry_walk_with_nonancestral_merge_commit_is_norecord(
+def test_empty_cherry_walk_with_unproven_merge_commit_is_norecord(
         monkeypatch):
     merge_sha = "a" * 40
 
@@ -259,4 +360,43 @@ def test_empty_cherry_walk_with_nonancestral_merge_commit_is_norecord(
 
     assert unique is None
     assert evidence["outcome"] == "norecord"
-    assert evidence["stage"] == "merge_commit_patch_equivalence"
+    assert evidence["stage"] == "merge_parents"
+
+
+def test_clean_automatic_merge_with_carried_patches_is_already_carried(
+        tmp_path):
+    repo, merge = _already_carried_merge_graph(
+        tmp_path, merge_only_change=False)
+
+    unique, evidence = D._branch_work_against(
+        ["git", "-C", str(repo)], "target", "topic")
+
+    assert unique == []
+    assert evidence["outcome"] == "complete"
+    assert evidence["method"] == "patch_equivalence_with_automatic_merges"
+    assert evidence["merge_proofs"] == [{
+        "commit": merge,
+        "parents_rc": 0,
+        "merge_tree_rc": 0,
+        "committed_tree_rc": 0,
+        "recreated_tree": evidence["merge_proofs"][0]["committed_tree"],
+        "committed_tree": evidence["merge_proofs"][0]["committed_tree"],
+        "outcome": "complete",
+        "method": "automatic_merge_tree",
+    }]
+
+
+def test_merge_only_content_remains_norecord_even_when_cherry_is_empty(
+        tmp_path):
+    repo, merge = _already_carried_merge_graph(
+        tmp_path, merge_only_change=True)
+
+    unique, evidence = D._branch_work_against(
+        ["git", "-C", str(repo)], "target", "topic")
+
+    assert unique is None
+    assert evidence["outcome"] == "norecord"
+    assert evidence["stage"] == "merge_tree_equivalence"
+    assert evidence["merge_proofs"][0]["commit"] == merge
+    assert (evidence["merge_proofs"][0]["recreated_tree"]
+            != evidence["merge_proofs"][0]["committed_tree"])
