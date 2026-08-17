@@ -132,7 +132,8 @@ def _render_metrics(rows, element: str = "forkMetrics") -> str:
     # ONLY the JS placeholders are substituted. The HTML ones are irrelevant to the
     # arithmetic and left alone, so this cannot accidentally supply a rendered value.
     body = (body.replace("__DATA__", json.dumps(rows))
-                .replace("__REPORT__", "{}").replace("__ENH__", "{}")
+                .replace("__REPORT__", "{}").replace("__RELEASE__", "null")
+                .replace("__ENH__", "{}")
                 # An unsubstituted placeholder is a ReferenceError that kills the
                 # WHOLE page script, so this fixture must fill every one. That is
                 # how this test caught `__NTOOLS__` being added upstream of it.

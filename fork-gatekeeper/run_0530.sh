@@ -27,8 +27,9 @@ if ! flock -n 9; then
     exit 0
 fi
 
+ROUND_AT="$(date -Is)"
 {
-  echo "════════ $(date -Is) 05:30 round ════════"
+  echo "════════ ${ROUND_AT} 05:30 round ════════"
 } >> "${LOG}"
 
 # Step 1-4 + the AI half. --ai-timeout is generous: the gatekeeper may have to
@@ -146,6 +147,21 @@ python3 "${DIR}/fork_gap_report.py" \
 GAP=$?
 echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
 
+# CAPTURE THE LEARNING LOOP, NOT ONLY THE LOG.  A release failure used to leave
+# yesterday's successful daily-release.json in place and the text log was the
+# only way to reconstruct that the image compose had died on DNS.  This join is
+# deliberately after fork_gap_report: an error message says what broke, while
+# the measured gap says what consequence survived the round.  Every morning —
+# success, self-healed retry, deterministic refusal, or missing evidence — gets
+# one retained row under release-ll/ for later policy and dashboard audits.
+python3 "${DIR}/capture_release_ll.py" \
+    --state-dir "${GK_STATE_DIR}" \
+    --release-json "${GK_STATE_DIR}/daily-release.json" \
+    --gap-json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" \
+    --round-at "${ROUND_AT}" --tick-exit "${TICK}" >> "${LOG}" 2>&1
+LL=$?
+echo "[$(date -Is)] capture_release_ll exit ${LL}" >> "${LOG}"
+
 python3 "${DIR}/check_ledger_is_fresh.py" \
     --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/ledger_freshness.json" >> "${LOG}" 2>&1
 FRESH=$?
@@ -198,5 +214,5 @@ fi
 # human", which is information, not noise.
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
-   || [ "${TESTS}" -ne 0 ] || [ "${GAP_FATAL}" -ne 0 ]; then exit 1; fi
+   || [ "${TESTS}" -ne 0 ] || [ "${GAP_FATAL}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
 exit 0
