@@ -47,14 +47,19 @@ Exit: 0 released or nothing to do, 1 something needed a human, 2 nothing checked
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
@@ -154,6 +159,138 @@ def log_limit_effective(builder: Optional[str] = None) -> Optional[bool]:
 COMPOSE_TIMEOUT = 5400
 TOOL_BUILD_TIMEOUT = 10800
 
+#: A network outage in the registry compose must not turn a completely-built
+#: release into tomorrow's work.  BuildKit cache makes these retries cheap: the
+#: tool artefacts have already been pushed and unchanged compose stages are
+#: reused.  Five attempts span eight minutes of DNS/transport recovery time,
+#: while an unclassified (usually deterministic) failure still gets exactly the
+#: one defence-in-depth retry the release had before this policy existed.
+COMPOSE_TRANSIENT_ATTEMPTS = 5
+COMPOSE_RETRY_DELAYS = (15, 45, 120, 300)
+STREAM_TAIL_CHARS = 128 * 1024
+
+_TRANSIENT_FAILURES = (
+    ("dns", ("could not resolve host", "temporary failure in name resolution",
+             "timeout while contacting dns servers", "server misbehaving")),
+    ("network_timeout", ("i/o timeout", "connection timed out",
+                         "tls handshake timeout", "context deadline exceeded")),
+    ("network_reset", ("connection reset by peer", "unexpected eof",
+                       "the remote end hung up unexpectedly", "rpc failed")),
+    ("service_unavailable", ("http 429", "http 502", "http 503", "http 504",
+                             "too many requests", "service unavailable")),
+    ("build_timeout", ("timed out after",)),
+)
+_EXTENDED_RETRY_CATEGORIES = {
+    "dns", "network_timeout", "network_reset", "service_unavailable",
+}
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_json(path: str | Path, value: dict) -> None:
+    """Replace a JSON sidecar atomically, including on a failed run.
+
+    The old release wrote `--json` only at the bottom of the success path.  A
+    failure therefore left yesterday's successful object at the live path.  A
+    consumer could not distinguish "today passed" from "today returned before
+    writing".  A running record is already more honest than that stale pass;
+    every known exit below replaces it again with its terminal state.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _finish(result: dict, json_path: Optional[str], rc: int, status: str,
+            failure: Optional[dict] = None) -> int:
+    result["status"] = status
+    result["exit_code"] = rc
+    result["finished_at"] = _utcnow()
+    if failure is not None:
+        result["failure"] = failure
+    else:
+        result.pop("failure", None)
+    if json_path:
+        _atomic_json(json_path, result)
+    return rc
+
+
+def transient_failure_category(text: str) -> Optional[str]:
+    """Classify only errors for which waiting can change the answer."""
+    low = (text or "").lower()
+    for category, needles in _TRANSIENT_FAILURES:
+        if any(needle in low for needle in needles):
+            return category
+    return None
+
+
+def _one_line_error(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for marker in ("fatal:", "error:", "timed out"):
+        hit = next((ln for ln in reversed(lines) if marker in ln.lower()), None)
+        if hit:
+            return hit[-1200:]
+    return (lines[-1] if lines else "command failed without diagnostic output")[-1200:]
+
+
+def compose_with_retries(bake: List[str], root: Path,
+                         run: Optional[Callable] = None,
+                         sleep: Optional[Callable[[float], None]] = None,
+                         max_transient_attempts: int = COMPOSE_TRANSIENT_ATTEMPTS,
+                         delays: Tuple[int, ...] = COMPOSE_RETRY_DELAYS,
+                         ) -> Tuple[int, str, List[dict]]:
+    """Compose with bounded, classified retries and return an audit trail.
+
+    Unclassified failures get one retry, preserving the previous defence in
+    depth without multiplying a deterministic 90-minute failure.  Transport,
+    DNS and BuildKit timeout signatures get the longer bounded policy.  The
+    exact same command is rerun, so already-pushed artefacts and BuildKit cache
+    are reused rather than rebuilt.
+    """
+    sleeper = sleep or time.sleep
+    history: List[dict] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        started = _utcnow()
+        if run is None:
+            rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
+                             timeout=COMPOSE_TIMEOUT)
+        else:
+            rc, _, err = run(bake, cwd=root, stream=True, env=BUILD_ENV,
+                             timeout=COMPOSE_TIMEOUT)
+        category = transient_failure_category(err)
+        history.append({
+            "attempt": attempt,
+            "started_at": started,
+            "finished_at": _utcnow(),
+            "exit_code": rc,
+            "category": category,
+            "summary": None if rc == 0 else _one_line_error(err),
+        })
+        if rc == 0:
+            return rc, err, history
+
+        # A 90-minute BuildKit wedge is worth one clean restart, not five; the
+        # extended window is exclusively for failures whose diagnostic names a
+        # network condition.  This keeps the self-healing path bounded in wall
+        # time as well as in attempt count.
+        limit = (max_transient_attempts
+                 if category in _EXTENDED_RETRY_CATEGORIES else 2)
+        if attempt >= limit:
+            return rc, err, history
+        delay = delays[min(attempt - 1, len(delays) - 1)] if delays else 0
+        history[-1]["retry_in_seconds"] = delay
+        why = category or "unclassified defence-in-depth retry"
+        print(f"  compose attempt {attempt}/{limit} failed ({why}); "
+              f"retrying in {delay}s with built artefacts and cache intact",
+              flush=True)
+        sleeper(delay)
+
 
 def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
     """Run a command. `stream=True` lets its output through to OUR stdout.
@@ -181,9 +318,53 @@ def _sh(cmd, cwd=None, timeout=7200, stream=False, env=None):
         full.update(env)
     try:
         if stream:
+            # Tee the merged stream to the live log AND keep a bounded tail.
+            # The tail is what lets the retry policy distinguish the DNS error
+            # observed on 2026-08-17 from a deterministic Dockerfile failure.
+            # `subprocess.run` with inherited descriptors could stream, or it
+            # could capture, but not both; returning a placeholder erased the
+            # only evidence the caller needed to decide whether waiting helps.
             sys.stdout.flush()
-            p = subprocess.run(cmd, cwd=cwd, timeout=timeout, env=full)
-            return p.returncode, "", "(output streamed to the log above)"
+            proc = subprocess.Popen(
+                cmd, cwd=cwd, env=full, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, errors="replace",
+                bufsize=1, start_new_session=True,
+            )
+            tail: deque[str] = deque()
+            tail_size = 0
+
+            def pump() -> None:
+                nonlocal tail_size
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    tail.append(line)
+                    tail_size += len(line)
+                    while tail and tail_size > STREAM_TAIL_CHARS:
+                        tail_size -= len(tail.popleft())
+
+            reader = threading.Thread(target=pump, name="build-log-tee",
+                                      daemon=True)
+            reader.start()
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    proc.wait(timeout=10)
+                except Exception:                              # noqa: BLE001
+                    proc.kill()
+                    proc.wait()
+                reader.join(timeout=10)
+                captured = "".join(tail)
+                return 1, "", (captured + "\n" +
+                    f"TIMED OUT after {timeout}s with no exit. This is the "
+                    f"signature recorded in vibeic-eda#26: buildx alive, no "
+                    f"compiler running, no disk write, no network. Treated as "
+                    f"a failure so the release stops instead of hanging.")
+            reader.join(timeout=10)
+            return rc, "", "".join(tail)
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                            timeout=timeout, env=full)
         return p.returncode, p.stdout, p.stderr
@@ -814,9 +995,28 @@ def main(argv=None) -> int:
                          "match the VERSION file, because the record describes "
                          "the tree it is written from.")
     a = ap.parse_args(argv)
+    root = Path(a.eda_root)
+    result = {
+        "program": "daily_release",
+        "schema_version": 2,
+        "status": "running",
+        "started_at": _utcnow(),
+        "moved": [],
+        "upstream_bump_available": [],
+        "undecidable": [],
+        "unresolved": [],
+        "built": [],
+        "version": None,
+        "compose_attempts": [],
+    }
+    # Replace yesterday's terminal record before doing anything that can return
+    # early.  A crash can now leave "running" (incomplete and visibly so), never
+    # a prior day's success masquerading as this run's answer.
+    if a.json:
+        _atomic_json(a.json, result)
 
     if a.record_release:
-        root = Path(a.eda_root)
+        result["mode"] = "record-release"
         # The record is computed FROM THE TREE, so recording a version this tree
         # is not is recording a pin set that version was never built from — the
         # #51 defect with the numbers swapped.
@@ -827,7 +1027,11 @@ def main(argv=None) -> int:
                   f"says {cur!r}. The record is computed from THIS tree; "
                   f"writing another version's name onto it records a pin set "
                   f"that version was never built from.", file=sys.stderr)
-            return RC_NEEDS_HUMAN
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "record-release", "category": "version_mismatch",
+                "retryable": False,
+                "summary": f"VERSION says {cur!r}, not {a.record_release!r}",
+            })
         rec = write_released_record(root, a.record_release, bake_targets(root))
         print(f"RELEASED.json <- {rec['version']} "
               f"fingerprint={rec['pins_fingerprint']} "
@@ -836,18 +1040,25 @@ def main(argv=None) -> int:
               "published image was built from it — `check_release_recorded` "
               "asks the registry, and the image's own "
               "/vibeic/provenance/*.json name the refs it actually used.")
-        return RC_OK
+        result["version"] = {"to": a.record_release}
+        return _finish(result, a.json, RC_OK, "recorded")
 
     if a.smoke_only:
+        result["mode"] = "smoke-only"
         bad = smoke_image(a.smoke_only)
         for b in bad:
             print(f"  FAIL {b['tool']}: {b['cmd']}\n    {b['err']}",
                   file=sys.stderr)
         print(f"smoke: {len(SMOKE) - len(bad)}/{len(SMOKE)} tools run in "
               f"{a.smoke_only}")
-        return RC_NEEDS_HUMAN if bad else RC_OK
-
-    root = Path(a.eda_root)
+        result["smoke_failures"] = bad
+        if bad:
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "smoke", "category": "tool_smoke",
+                "retryable": False,
+                "summary": f"{len(bad)} tool(s) failed smoke",
+            })
+        return _finish(result, a.json, RC_OK, "smoke_passed")
 
     # COHERENCE BEFORE ANYTHING ELSE (vibeic-eda#75 follow-up). A pin stated
     # three different ways must state the same thing before it is worth asking
@@ -875,7 +1086,10 @@ def main(argv=None) -> int:
             sys.stdout.write(checked.stdout)
             sys.stderr.write(checked.stderr)
             print(f"[REFUSED] {refusal}", file=sys.stderr)
-            return RC_NEEDS_HUMAN
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "source_guard", "category": guard,
+                "retryable": False, "summary": refusal,
+            })
 
     pins = pinned_refs(root)
     args_of = ref_arg_names(root)
@@ -883,7 +1097,10 @@ def main(argv=None) -> int:
     if not pins:
         print("[NOT CHECKED] no pins found — nothing was released, which is not "
               "a clean result", file=sys.stderr)
-        return RC_NOTHING
+        return _finish(result, a.json, RC_NOTHING, "not_checked", {
+            "stage": "pin_discovery", "category": "no_pins",
+            "retryable": False, "summary": "no pins found",
+        })
 
     # Resolution goes through `check_one`, which VERIFIES the branch contains the
     # pin. An earlier version called `build_branch` — which ranks branches by
@@ -1011,10 +1228,12 @@ def main(argv=None) -> int:
     for u in unresolved:
         print(f"  {u['repo']:<20} UNRESOLVED — {u['why']}", file=sys.stderr)
 
-    result = {"program": "daily_release", "moved": moved,
-              "upstream_bump_available": upstream_bump,
-              "undecidable": undecidable,
-              "unresolved": unresolved, "built": [], "version": None}
+    result.update({"moved": moved,
+                   "upstream_bump_available": upstream_bump,
+                   "undecidable": undecidable,
+                   "unresolved": unresolved})
+    if a.json:
+        _atomic_json(a.json, result)
 
     # THE COMPOSED IMAGE IS AN ARTEFACT TOO. Checking only the per-tool
     # artefacts left the exact hole this program is about, one level up: after a
@@ -1155,7 +1374,11 @@ def main(argv=None) -> int:
                     print(f"[FAIL] {t} did not build; the release stops here so "
                           f"a broken tool is not tagged as a version:\n"
                           f"{err[-1500:]}", file=sys.stderr)
-                    return RC_NEEDS_HUMAN
+                    return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                        "stage": "tool_build", "category": "build_failed",
+                        "retryable": bool(transient_failure_category(err)),
+                        "tool": t, "summary": _one_line_error(err),
+                    })
                 result["built"].append(t)
             # COMPOSE THE IMAGE. Building the tool artefacts is not the
             # delivery — the image is what anyone runs, and a tool rebuilt
@@ -1190,6 +1413,8 @@ def main(argv=None) -> int:
             # `:latest` onto an image that has not passed the smoke yet.
             old, new = peek_version(root)
             tag = f"ghcr.io/vibeic/vibeic-eda:{new}"
+            result["version_candidate"] = {"from": old, "to": new,
+                                           "tag": tag}
             print(f"  composing {tag} from the pinned artefacts …", flush=True)
             # `--progress plain` because the default TTY renderer emits almost
             # nothing to a redirected log. A compose that wedged after
@@ -1200,19 +1425,8 @@ def main(argv=None) -> int:
             bake = ["docker", "buildx", "bake", *bflag, "-f",
                     str(root / "docker-bake.hcl"), "--load", "--progress",
                     "plain", "--set", f"eda.tags={tag}", "eda"]
-            rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
-                             timeout=COMPOSE_TIMEOUT)
-            if rc != 0:
-                print("  registry compose failed once; retrying before "
-                      "downgrading (a transient must not cost reproducibility)",
-                      flush=True)
-                # The RETRY needs the deadline more than the first attempt does,
-                # not less: it runs after something already went wrong, and an
-                # unbounded retry turns a failure into a hang. Found by the
-                # wiring test, which is the whole reason that test asserts about
-                # every call site instead of the one I was editing.
-                rc, _, err = _sh(bake, cwd=root, stream=True, env=BUILD_ENV,
-                                 timeout=COMPOSE_TIMEOUT)
+            rc, err, attempts = compose_with_retries(bake, root)
+            result["compose_attempts"] = attempts
             if rc != 0:
                 # NO LOCAL FALLBACK. There used to be one — compose `eda-local`,
                 # which redirects each tool to a freshly built target — and it
@@ -1228,11 +1442,19 @@ def main(argv=None) -> int:
                 # one loud failure into two quiet ones and, when it did work, it
                 # produced an image that could not be reproduced anywhere else.
                 # A failed compose is a failed release, said once, loudly.
-                print(f"[FAIL] the image did not compose after a retry; no "
+                last = attempts[-1] if attempts else {}
+                print(f"[FAIL] the image did not compose after "
+                      f"{len(attempts)} attempt(s); no "
                       f"version was cut, so nothing claims to be a release:"
                       f"\n{err[-6000:]}", file=sys.stderr)
                 result["registry_composed"] = False
-                return RC_NEEDS_HUMAN
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "compose",
+                    "category": last.get("category") or "compose_failed",
+                    "retryable": bool(last.get("category")),
+                    "attempts": len(attempts),
+                    "summary": last.get("summary") or _one_line_error(err),
+                })
             result["registry_composed"] = True
 
             # A LOCAL build can be runnable and still be impossible to PULL.
@@ -1256,7 +1478,11 @@ def main(argv=None) -> int:
                 print(f"[FAIL] composed image could not be made publishable; the tag was "
                       f"removed and NO version was cut:\n{(derr or dout).strip()}",
                       file=sys.stderr)
-                return RC_NEEDS_HUMAN
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "image_depth", "category": "unpublishable_depth",
+                    "retryable": False,
+                    "summary": _one_line_error(derr or dout),
+                })
             print(f"  depth: {dout.strip()}")
 
             # SMOKE BEFORE THE VERSION IS REAL. A tag is a claim, and cutting one
@@ -1273,7 +1499,11 @@ def main(argv=None) -> int:
                 for b in bad:
                     print(f"    {b['tool']}: {b['cmd']}\n      {b['err']}",
                           file=sys.stderr)
-                return RC_NEEDS_HUMAN
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "smoke", "category": "tool_smoke",
+                    "retryable": False,
+                    "summary": f"{len(bad)} tool(s) failed smoke",
+                })
             print(f"  smoke: all {len(SMOKE)} tools run in {tag}")
 
             prc, _, perr = _sh(["docker", "push", tag], timeout=7200)
@@ -1354,25 +1584,33 @@ def main(argv=None) -> int:
                 result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
                 result["anchor_pr"]["note"] = _anote
 
-    if a.json:
-        Path(a.json).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.json).write_text(json.dumps(result, indent=2) + "\n",
-                                encoding="utf-8")
-
     if unresolved:
         print(f"[NEEDS HUMAN] {len(unresolved)} pin(s) could not be resolved; "
               f"they were left alone and are NOT in this release", file=sys.stderr)
-        return RC_NEEDS_HUMAN
+        return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+            "stage": "pin_resolution", "category": "unresolved_pins",
+            "retryable": False,
+            "summary": f"{len(unresolved)} pin(s) could not be resolved",
+        })
     if not moved and not absent and not unreleased:
         print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
               "and this pin set is already released — nothing to do")
+        return _finish(result, a.json, RC_OK, "noop")
     elif a.dry_run:
         # A release follows from ANY of the three, not from `unreleased` alone —
         # an absent artefact means the image cannot already contain it.
         print(f"[DRY RUN] would move {len(moved)} pin(s), build {len(absent)} "
               f"absent artefact(s), and "
               f"{'cut a release' if (moved or absent or unreleased) else 'cut no release'}")
-    return RC_OK
+        return _finish(result, a.json, RC_OK, "dry_run")
+    if result.get("pushed") is False:
+        return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+            "stage": "push", "category": "push_failed",
+            "retryable": True,
+            "summary": "candidate image exists only on the build host",
+        })
+    status = "published" if result.get("pushed") else "completed"
+    return _finish(result, a.json, RC_OK, status)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ import inventory  # noqa: E402 — the tool inventory, measured at build time
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 REPORTS = STATE / "reports"
+RELEASE_STATE = STATE / "daily-release.json"
 DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or gk_state.PRODUCTION_PAGE)
 
 # --- NDA redaction at the publish boundary (BINDING) ---------------------------
@@ -88,6 +89,24 @@ def _latest_report() -> dict | None:
         return gk_state.strip_provenance(json.loads(js[-1].read_text()))
     except json.JSONDecodeError:
         return None
+
+
+def _release_state() -> dict | None:
+    """This morning's release terminal state, never inferred from yesterday.
+
+    `daily_release` schema v2 replaces this file at start and at every known
+    exit.  Older records have no status and are ignored: absence of a terminal
+    verdict is not licence to manufacture a blocker or a pass.
+    """
+    try:
+        value = json.loads(RELEASE_STATE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if (not isinstance(value, dict)
+            or value.get("program") != "daily_release"
+            or not value.get("status")):
+        return None
+    return gk_state.strip_provenance(value)
 
 
 # The per-tool enhancement backlog (capability matrix vs commercial EDA). Unlike the
@@ -224,6 +243,8 @@ STYLE = """<style>
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
 .fork-stale{background:#3a1d1d;border:1px solid #7a3030;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
 .fork-stale b{color:#fff}
+.fork-release{background:#3a1d1d;border:1px solid #a74747;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
+.fork-release b{color:#fff}.fork-release code{color:#fff;background:#241414;padding:.1rem .3rem;border-radius:4px}
 .fork-kpi.is-stale{border-color:#7a3030;background:#221316}
 .fork-kpi.is-stale .n{color:#ff9d9d}
 .fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
@@ -339,6 +360,7 @@ __NAV__
         </div>
 
         <div class="fork-stale" id="forkStale" hidden></div>
+        <div class="fork-release" id="forkRelease" hidden></div>
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
 
@@ -367,6 +389,7 @@ __FOOTER__
 <script>
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
+const RELEASE = __RELEASE__;
 const ENH = __ENH__;
 // How many tools the IMAGE ships, measured by listing /foss/tools inside it.
 // `null` when the image could not be inspected -- never 0, because "we could
@@ -918,6 +941,30 @@ function enhBlock(tool){
     staleEl.innerHTML = `<span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>`;
     staleEl.hidden = false;
   }
+  // RELEASE LAG MUST NAME ITS BLOCKER.  The fork rows can show that a pin did
+  // not reach the image, but they cannot say whether the release is building,
+  // retrying DNS, or failed a deterministic gate.  That answer comes from the
+  // release program's own terminal record, not by interpreting the count.
+  const releaseEl = document.getElementById("forkRelease");
+  const releaseStatus = RELEASE && RELEASE.status;
+  if (releaseEl && ["failed", "not_checked", "running"].includes(releaseStatus)) {
+    const failure = RELEASE.failure || {};
+    const stage = failure.stage || "unknown stage";
+    const category = String(failure.category || "unknown cause").replaceAll("_", " ");
+    const target = ((RELEASE.version_candidate||{}).to)
+                || ((RELEASE.version||{}).to) || "next image";
+    const attempts = (RELEASE.compose_attempts||[]).length;
+    const retry = attempts ? ` after ${attempts} compose attempt${attempts===1?'':'s'}` : "";
+    const retryZh = attempts ? `（compose 已嘗試 ${attempts} 次）` : "";
+    const en = releaseStatus === "running"
+      ? `Release record did not reach a terminal state. The 05:30 process stopped while preparing ${target}; do not read the release lag as an unexplained queue.`
+      : `Release ${target} is blocked at ${stage}: ${category}${retry}. No version was published, so the lag below remains real.`;
+    const zh = releaseStatus === "running"
+      ? `Release 紀錄沒有抵達終態。05:30 流程在準備 ${target} 時中止；下方 release lag 不是一個沒有原因的佇列。`
+      : `Release ${target} 卡在 ${stage}：${category}${retryZh}。沒有發布任何版本，所以下方 lag 仍然是真實未收斂。`;
+    releaseEl.innerHTML = `<span data-en="${esc(en)}" data-zh="${esc(zh)}">${esc(en)}</span>`;
+    releaseEl.hidden = false;
+  }
   // CONTENTS ASSERTIONS — STATED, NOT SUBTRACTED (vibeic-eda#81). These rows leave
   // the gap count above because there is no ref for the artefact to be behind. They
   // are printed here, WITH their number, for the reason `fork_gap_report` prints its
@@ -1436,6 +1483,7 @@ def build(out: Path):
                               "Render one somewhere else with --out /tmp/page.html")
     ledgers = _load_ledgers()
     report = _latest_report()
+    release = _release_state()
     enh = _load_enh()
     # Measured now, not pasted. If it cannot be measured the section says so
     # rather than vanishing: a section that disappears on failure looks exactly
@@ -1475,7 +1523,8 @@ def build(out: Path):
             .replace("__DATA__", data)
             .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
             .replace("__PINNOTES__", json.dumps(PIN_NOTES, ensure_ascii=False))
-            .replace("__REPORT__", json.dumps(report, ensure_ascii=False)))
+            .replace("__REPORT__", json.dumps(report, ensure_ascii=False))
+            .replace("__RELEASE__", json.dumps(release, ensure_ascii=False)))
     html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
     out.write_text(html)
     enh_rows = sum(len(v.get("rows", [])) for v in enh.values())

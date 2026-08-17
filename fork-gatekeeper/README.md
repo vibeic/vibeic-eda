@@ -187,6 +187,34 @@ Retention is best-effort by construction — `round_record.write` returns its
 errors instead of raising, because retention that could take a round down would
 be a worse defect than the one it closes.
 
+### Release self-healing and the 05:30 learning loop
+
+The compose step classifies DNS, transport reset/timeout, and registry 429/5xx
+failures as transient. It retries the exact registry compose up to five times
+with `15, 45, 120, 300` second backoff. Tool artefacts have already been pushed
+at that point, so retries reuse them and BuildKit cache; they do not repeat tool
+builds. An unclassified failure and a 90-minute BuildKit wedge get only one
+defence-in-depth retry, keeping deterministic failures bounded.
+
+`daily-release.json` is schema-versioned and atomically replaced at the start
+and every known exit. A crash can leave `status: running`, never yesterday's
+`status: published`; the public forks page renders `failed`, `not_checked`, and
+interrupted `running` records as the release-lag blocker.
+
+After `fork_gap_report`, `run_0530.sh` invokes `capture_release_ll.py`. Every
+morning it joins the terminal release evidence to the measured sync/image/pin
+lag and retains:
+
+* `release-ll/latest.json` — latest full LL record;
+* `release-ll/rounds/<stamp>.json` — full evidence, 400 days by default
+  (`GK_RELEASE_LL_KEEP_DAYS`);
+* `release-ll/index.jsonl` — narrow append-only outcome history, never pruned.
+
+The captured lesson is deterministic evidence — trigger, retry control,
+attempts, outcome, and final lag — not prose inferred from a log. Missing or
+pre-schema inputs make the capture fail and therefore make the 05:30 round fail;
+they never become a clean LL row.
+
 ## Merging upstream into a "restoration" branch (e.g. Trilinos epetra-restored)
 
 A handful of forks carry a branch that exists to **revert** a class of upstream

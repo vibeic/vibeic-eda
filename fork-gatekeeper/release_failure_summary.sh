@@ -3,11 +3,11 @@
 # FAILED. run_tick.sh's [release] block uses `head -1` for the common, PASSING
 # case -- right there, wrong here.
 #
-# daily_release.py's compose runs with `_sh(stream=True)`, which deliberately
-# does NOT capture buildx's output (vibeic-eda#26: capturing hid a real wedge
-# behind a silent buffer). Streamed output inherits daily_release.py's own
-# stdout/stderr, which run_tick.sh has already redirected into the same file
-# this script reads -- so the true cause IS in that file, just not on line 1
+# daily_release.py's compose runs with `_sh(stream=True)`, which tees buildx's
+# output live while retaining only a bounded tail for transient classification
+# (vibeic-eda#26: capture-without-streaming hid a real wedge behind a silent
+# buffer). The complete stream still reaches the file this script reads, so the
+# true cause IS in that file, not only in the bounded programmatic tail and not on line 1
 # and not matched by run_tick.sh's existing `VERSION|building|composing|
 # UNRESOLVED|FAIL` grep: docker buildx's own failure vocabulary is
 # "ERROR: failed to solve: ...", and lowercase "failed" does not match the
