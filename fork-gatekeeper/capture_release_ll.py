@@ -145,8 +145,6 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "compose_attempts": attempts,
             "failure": failure or None,
             "anchor_pr": anchor_pr,
-            "delivery_complete": (None if anchor_pr is None
-                                  else bool(terminal_ok and anchor_pr.get("ok") is True)),
             "tick_exit": tick_exit,
         },
         "convergence": {
@@ -221,7 +219,6 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "outcome": record["lesson"]["outcome"],
         "compose_attempts": len(record["release"]["compose_attempts"]),
         "anchor_pr_ok": (record["release"]["anchor_pr"] or {}).get("ok"),
-        "delivery_complete": record["release"]["delivery_complete"],
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
         "live_sync_lag": record["convergence"]["live_sync_lag"],
         "release_lag": record["convergence"]["release_lag"],
