@@ -567,8 +567,83 @@ def _branches_an_image_pin_depends_on(g, eda_root=None):
     return keep
 
 
+def _branch_work_against(g, target, branch):
+    """Return branch commits whose patches are absent from one mainline.
+
+    ``[]`` is an affirmative answer: the branch tip is already an ancestor of
+    ``target``, or every non-merge patch on it is equivalent there. ``None`` is
+    NORECORD.  In particular, a failed or malformed ``git cherry`` must never
+    turn into the reassuring empty list that the old ``out()`` call produced.
+
+    ``git cherry`` deliberately ignores merge commits.  Its empty output is
+    therefore not enough when a non-ancestral merge commit remains in the
+    range: such a merge can carry conflict-resolution content of its own.  That
+    shape stays unmeasured and cannot authorize skipping the branch or handing
+    a manufactured conflict to AI.
+    """
+    evidence = {"target": target, "branch": branch}
+    ancestor = sh(*g, "merge-base", "--is-ancestor", branch, target)
+    evidence["ancestry_rc"] = ancestor.returncode
+    if ancestor.returncode == 0:
+        evidence.update(outcome="complete", method="ancestry",
+                        outstanding_count=0)
+        return [], evidence
+    if ancestor.returncode != 1:
+        evidence.update(
+            outcome="norecord", stage="ancestry",
+            detail=("could not compare branch ancestry: "
+                    + _first_error_line(ancestor)),
+        )
+        return None, evidence
+
+    unique, cherry, why = _cherry_probe(g, target, branch)
+    evidence["cherry_rc"] = cherry.returncode
+    if unique is None:
+        evidence.update(
+            outcome="norecord", stage="git_cherry",
+            detail=why or "git cherry formed no valid answer",
+        )
+        return None, evidence
+    if unique:
+        evidence.update(outcome="complete", method="outstanding_patches",
+                        outstanding_count=len(unique))
+        return unique, evidence
+
+    # No unique non-merge patches.  Prove that the non-ancestral range did not
+    # disappear merely because git-cherry omits merge commits.
+    merges = sh(*g, "rev-list", "--merges", f"{target}..{branch}")
+    evidence["merge_scan_rc"] = merges.returncode
+    merge_ids = [line.strip().lower()
+                 for line in (merges.stdout or "").splitlines()
+                 if line.strip()]
+    if merges.returncode != 0:
+        evidence.update(
+            outcome="norecord", stage="merge_commit_scan",
+            detail=("could not inspect non-ancestral merge commits: "
+                    + _first_error_line(merges)),
+        )
+        return None, evidence
+    if any(_FULL_OBJECT_ID.fullmatch(commit) is None for commit in merge_ids):
+        evidence.update(
+            outcome="norecord", stage="merge_commit_scan",
+            detail="git rev-list returned malformed merge-commit evidence",
+        )
+        return None, evidence
+    if merge_ids:
+        evidence.update(
+            outcome="norecord", stage="merge_commit_patch_equivalence",
+            detail=(f"{len(merge_ids)} non-ancestral merge commit(s) are not "
+                    "covered by git cherry's patch-equivalence walk"),
+        )
+        return None, evidence
+
+    evidence.update(outcome="complete", method="patch_equivalence",
+                    outstanding_count=0)
+    return [], evidence
+
+
 def step2_ours(g, main, rep):
-    """Our branches -> master, by patch equivalence."""
+    """Our branches -> master, against local and authoritative remote lines."""
     brs = _fork_branches(g, main)
     if brs is None:
         # NOT `[]`. An unanswerable question rendered as "this fork has no
@@ -594,18 +669,110 @@ def step2_ours(g, main, rep):
         return
     merged, conflicted, empty = [], [], []
     for b in brs:
-        cherry = out(*g, "cherry", main, b)
-        new = [l.split()[1] for l in cherry.splitlines() if l.startswith("+")]
+        checks = []
+        local_unique, local_check = _branch_work_against(g, main, b)
+        checks.append(local_check)
+        if local_unique == []:
+            empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": main, "checks": checks,
+            })
+            continue
+
+        # `_fork_branches` refreshed origin immediately before returning this
+        # list.  Its mainline ref is therefore the authoritative fork state for
+        # this round, while the checked-out local main may predate a merge that
+        # already delivered the branch.  Measured on iverilog: local master was
+        # 93b302f, origin/master was 5d87083, and source tip 14d106f was already
+        # its ancestor. Comparing only to local manufactured a two-commit
+        # conflict and an unnecessary AI case; the same-tree repair later
+        # adopted the remote and proved that work had been present all along.
+        remote_main = f"origin/{main}"
+        remote_unique, remote_check = _branch_work_against(
+            g, remote_main, b)
+        checks.append(remote_check)
+        if remote_unique == []:
+            empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": remote_main, "checks": checks,
+            })
+            continue
+
+        if local_unique is None or remote_unique is None:
+            failed = next(check for check in checks
+                          if check.get("outcome") != "complete")
+            rep.setdefault("merge_unmeasurable", []).append({
+                "branch": b,
+                "commits": None,
+                "outcome": "unmeasurable",
+                "rc": (failed.get("cherry_rc")
+                       if failed.get("stage") == "git_cherry"
+                       else failed.get("ancestry_rc")
+                       if failed.get("stage") == "ancestry"
+                       else failed.get("merge_scan_rc")),
+                "stage": failed.get("stage"),
+                "detail": failed.get("detail"),
+                "comparisons": checks,
+            })
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "norecord", "checks": checks,
+            })
+            rep["needs_human"] = True
+            continue
+
+        # A patch carried by either mainline is not truly stranded branch work.
+        # Only commits absent from BOTH are candidates for consolidation.
+        remote_absent = set(remote_unique)
+        new = [commit for commit in local_unique if commit in remote_absent]
         if not new:
             empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "already_carried",
+                "covered_by": f"{main} or {remote_main}", "checks": checks,
+            })
             continue
         # only OUR commits are a reason to merge; an unmerged upstream commit
         # on a stale branch is not work, it is history.
-        mine = [s for s in new if any(o in out(*g, "log", "-1", "--format=%an", s).lower()
-                                      for o in OURS)]
+        mine = []
+        author_unknown = None
+        for commit in new:
+            author = sh(*g, "log", "-1", "--format=%an", commit)
+            author_name = (author.stdout or "").strip().lower()
+            if author.returncode != 0 or not author_name:
+                author_unknown = {
+                    "commit": commit, "rc": author.returncode,
+                    "detail": (_first_error_line(author)
+                               if author.returncode else
+                               "git log returned an empty author"),
+                }
+                break
+            if any(owner in author_name for owner in OURS):
+                mine.append(commit)
+        if author_unknown is not None:
+            rep.setdefault("merge_unmeasurable", []).append({
+                "branch": b, "commits": None, "outcome": "unmeasurable",
+                "rc": author_unknown["rc"], "stage": "commit_author",
+                "detail": author_unknown["detail"],
+                "commit": author_unknown["commit"],
+                "comparisons": checks,
+            })
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "norecord", "checks": checks,
+            })
+            rep["needs_human"] = True
+            continue
         if not mine:
             empty.append(b)
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": "no_owned_work", "checks": checks,
+            })
             continue
+        rep.setdefault("ours_branch_evidence", []).append({
+            "branch": b, "outcome": "outstanding",
+            "commits": len(mine), "checks": checks,
+        })
         r = sh(*g, "merge", "--no-edit", "-m",
                f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b,
                progress=True)
