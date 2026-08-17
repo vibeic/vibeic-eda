@@ -18,6 +18,9 @@ sys.path.insert(0, str(HERE))
 import build_page as B                                          # noqa: E402
 import capture_release_ll as LL                                 # noqa: E402
 import daily_release as R                                       # noqa: E402
+from test_fork_github_convergence_ll import (                   # noqa: E402
+    _fork_record as _valid_fork_github_record,
+)
 
 
 def test_dns_failure_retries_until_success_without_changing_the_command(tmp_path):
@@ -144,21 +147,10 @@ def _gap(image=31, past=3):
 
 
 def _fork_github_zero():
-    return {
-        "program": "fork_github_convergence", "schema_version": 1,
-        "started_at": "2026-08-17T06:02:00+08:00",
-        "completed_at": "2026-08-17T06:03:00+08:00",
-        "actor": "reyerchu", "expected_actor": "reyerchu",
-        "round": {
-            "round_at": "2026-08-17T05:30:00+08:00",
-            "schema_version": 1, "run_id": "a" * 64,
-            "started_at": "2026-08-17T05:30:01+08:00",
-            "finished_at": "2026-08-17T05:59:00+08:00",
-        },
-        "status": "converged",
-        "counts": {"items": 0, "issues": 0, "pull_requests": 0},
-        "items": [], "source_errors": [],
-    }
+    # Reuse the exact schema-v2 denominator fixture.  A hand-written three-count
+    # stub is precisely the false-zero shape this release/LL regression now
+    # exists to reject.
+    return _valid_fork_github_record()
 
 
 def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):

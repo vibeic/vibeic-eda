@@ -30,6 +30,19 @@ from typing import Optional
 import gk_state
 
 KEEP_DAYS = int(os.environ.get("GK_RELEASE_LL_KEEP_DAYS", "400"))
+GITHUB_ORG = "vibeic"
+VIBEIC_EDA_REPOSITORY = "vibeic/vibeic-eda"
+VIBEIC_DELIVERY_REPOSITORY = "vibeic/vibe-ic"
+DELIVERY_HEAD_PATTERNS = (
+    re.compile(r"^eda-anchor-(\d+\.\d+\.\d+)$"),
+    re.compile(r"^eda-fork-sync-(\d{4}-\d{2}-\d{2})$"),
+    re.compile(r"^eda-fork-assess-(\d{4}-\d{2}-\d{2})$"),
+)
+DELIVERY_HEAD_PATTERN_TEXT = {
+    r"^eda-anchor-(\d+\.\d+\.\d+)$",
+    r"^eda-fork-sync-(\d{4}-\d{2}-\d{2})$",
+    r"^eda-fork-assess-(\d{4}-\d{2}-\d{2})$",
+}
 
 
 def _read(path: Path) -> tuple[Optional[dict], Optional[str]]:
@@ -109,6 +122,66 @@ def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _valid_repository(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split("/")
+    return (len(parts) == 2 and all(parts)
+            and all(part.strip() == part for part in parts)
+            and not any(any(char.isspace() for char in part)
+                        for part in parts))
+
+
+def _github_registry(path: Path) -> tuple[Optional[dict], list[str]]:
+    """Independently derive the GitHub repository denominators from FORKS."""
+    errors: list[str] = []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, [f"could not read GitHub fleet registry {path}: "
+                      f"{type(exc).__name__}: {exc}"]
+    entries = value.get("forks") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or value.get("org") != GITHUB_ORG:
+        errors.append(f"GitHub fleet registry org is not {GITHUB_ORG}")
+    if not isinstance(entries, list):
+        return None, errors + [f"GitHub fleet registry {path} has no forks list"]
+    registered: list[str] = []
+    upstream: list[str] = []
+    tools: list[str] = []
+    for pos, entry in enumerate(entries):
+        tool = entry.get("tool") if isinstance(entry, dict) else None
+        parent = entry.get("upstream") if isinstance(entry, dict) else None
+        if (not isinstance(tool, str) or not tool or tool.strip() != tool
+                or "/" in tool or any(char.isspace() for char in tool)):
+            errors.append(f"GitHub fleet forks[{pos}].tool is malformed")
+            continue
+        if not _valid_repository(parent):
+            errors.append(f"GitHub fleet forks[{pos}].upstream is malformed")
+            continue
+        tools.append(tool)
+        registered.append(f"{GITHUB_ORG}/{tool}")
+        upstream.append(parent)
+    for label, values in (("tool", tools), ("registered repository", registered)):
+        duplicates = sorted(
+            value for value in set(item.lower() for item in values)
+            if sum(item.lower() == value for item in values) > 1)
+        if duplicates:
+            errors.append(f"GitHub fleet has duplicate {label}(s): "
+                          + ", ".join(duplicates))
+    if not registered:
+        errors.append("GitHub fleet registry is empty")
+    if errors:
+        return None, errors
+    canonical = sorted(registered, key=str.lower)
+    return {
+        "tools": sorted(tools, key=str.lower),
+        "registered": canonical,
+        "required": sorted(canonical + [VIBEIC_EDA_REPOSITORY], key=str.lower),
+        "upstream": sorted(set(upstream), key=str.lower),
+        "upstream_by_tool": dict(zip(tools, upstream)),
+    }, []
+
+
 def _fork_github_summary(record: Optional[dict]) -> Optional[dict]:
     """Keep the checker's answer verbatim enough to audit every open item.
 
@@ -127,22 +200,664 @@ def _fork_github_summary(record: Optional[dict]) -> Optional[dict]:
         "actor": record["actor"],
         "expected_actor": record["expected_actor"],
         "round": dict(record["round"]),
+        "inventory": record["inventory"],
+        "delivery": record["delivery"],
+        "upstream_actor": record["upstream_actor"],
+        "round_upstream": record["round_upstream"],
         "counts": dict(record["counts"]),
         "items": [dict(item) for item in record["items"]],
         "source_errors": [dict(error) for error in record["source_errors"]],
     }
 
 
-def _validate_fork_github(record: dict, path: Path, round_at: str
+def _nonnegative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _exact_string_identities(name: str, value: object, expected: list[str],
+                             errors: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        errors.append(f"{name} is not a list")
+        return []
+    if any(not isinstance(item, str) or not item or item.strip() != item
+           for item in value):
+        errors.append(f"{name} contains a malformed identity")
+        return []
+    lowered = [item.lower() for item in value]
+    duplicates = sorted(item for item in set(lowered)
+                        if lowered.count(item) > 1)
+    if duplicates:
+        errors.append(f"{name} contains duplicate identities: "
+                      + ", ".join(duplicates))
+    actual_set = set(lowered)
+    expected_set = {item.lower() for item in expected}
+    missing = sorted(expected_set - actual_set)
+    unexpected = sorted(actual_set - expected_set)
+    if missing:
+        errors.append(f"{name} is missing: " + ", ".join(missing))
+    if unexpected:
+        errors.append(f"{name} has unexpected identities: "
+                      + ", ".join(unexpected))
+    if len(value) != len(expected):
+        errors.append(f"{name} count is {len(value)}, expected {len(expected)}")
+    return value
+
+
+def _connection_evidence(value: object, name: str, errors: list[str], *,
+                         allow_disabled: bool = False
+                         ) -> tuple[str | None, Optional[int]]:
+    if not isinstance(value, dict):
+        errors.append(f"{name} is not an object")
+        return None, None
+    outcome = value.get("outcome")
+    count = value.get("open_count")
+    allowed = {"complete", "norecord"}
+    if allow_disabled:
+        allowed.add("disabled")
+    if outcome not in allowed:
+        errors.append(f"{name}.outcome={outcome!r} is malformed")
+        return None, None
+    if outcome == "norecord":
+        if count is not None:
+            errors.append(f"{name}.open_count must be null for norecord")
+        return outcome, None
+    if not _nonnegative_int(count):
+        errors.append(f"{name}.open_count is not a non-negative integer")
+        return outcome, None
+    if outcome == "disabled" and count != 0:
+        errors.append(f"{name}.disabled must have open_count=0")
+    return outcome, count
+
+
+def _delivery_kind(head_ref: object) -> Optional[str]:
+    if not isinstance(head_ref, str):
+        return None
+    names = ("anchor", "sync", "assessment")
+    for name, pattern in zip(names, DELIVERY_HEAD_PATTERNS):
+        if pattern.fullmatch(head_ref):
+            return name
+    return None
+
+
+def _delivery_exclusion_reasons(item: dict) -> list[str]:
+    if item.get("head_owner") != GITHUB_ORG:
+        return ["head_owner_is_not_vibeic"]
+    if not isinstance(item.get("head_ref"), str):
+        return ["head_ref_is_missing"]
+    if _delivery_kind(item["head_ref"]) is None:
+        return ["head_ref_is_not_a_delivery_producer_branch"]
+    return []
+
+
+def _delivery_anomalies(item: dict, kind: str) -> list[str]:
+    anomalies: list[str] = []
+    if item.get("base_ref") != "main":
+        anomalies.append("base_ref_is_not_main")
+    if item.get("draft") is not False:
+        anomalies.append("draft_is_not_false")
+    head_ref = item.get("head_ref")
+    pattern = DELIVERY_HEAD_PATTERNS[("anchor", "sync", "assessment").index(kind)]
+    match = pattern.fullmatch(head_ref) if isinstance(head_ref, str) else None
+    token = match.group(1) if match is not None else ""
+    title = item.get("title")
+    if kind == "anchor":
+        if title != f"chore(image-anchor): adopt vibeic-eda {token}":
+            anomalies.append("title_does_not_match_anchor_producer")
+    elif kind == "sync":
+        if (not isinstance(title, str)
+                or not title.startswith(f"[eda-fork] {token}: ")):
+            anomalies.append("title_does_not_match_sync_producer")
+    elif (not isinstance(title, str)
+          or not title.startswith(
+              f"[eda-fork] {token}: upstream release assessment — ")):
+        anomalies.append("title_does_not_match_assessment_producer")
+    return anomalies
+
+
+def _validate_github_v2_sources(record: dict, items: list[dict],
+                                registry: dict, errors: list[str]) -> bool:
+    """Recompute every v2 denominator and source count from retained facts."""
+    canonical = registry["registered"]
+    required = registry["required"]
+    canonical_keys = {repo.lower() for repo in canonical}
+    required_keys = {repo.lower() for repo in required}
+    upstream_keys = {repo.lower() for repo in registry["upstream"]}
+    expected_by_tool = {tool.lower(): repo for tool, repo in
+                        registry["upstream_by_tool"].items()}
+
+    item_by_repo_type: dict[tuple[str, str], list[dict]] = {}
+    for item in items:
+        repository = item.get("repository")
+        kind = item.get("type")
+        if isinstance(repository, str) and isinstance(kind, str):
+            item_by_repo_type.setdefault((repository.lower(), kind), []).append(item)
+
+    inventory = record.get("inventory")
+    inventory_complete = False
+    inventory_issue_total = 0
+    inventory_pr_total = 0
+    if not isinstance(inventory, dict):
+        errors.append("inventory is not an object")
+    else:
+        _exact_string_identities(
+            "inventory.canonical_registered_repositories",
+            inventory.get("canonical_registered_repositories"), canonical,
+            errors)
+        _exact_string_identities(
+            "inventory.required_repositories",
+            inventory.get("required_repositories"), required, errors)
+        if inventory.get("required_repository_count") != len(required):
+            errors.append(
+                "inventory.required_repository_count does not equal the "
+                "canonical required denominator")
+
+        catalog = inventory.get("catalog")
+        catalog_complete = False
+        catalog_unregistered: list[str] = []
+        catalog_by_repo: dict[str, dict] = {}
+        if not isinstance(catalog, dict):
+            errors.append("inventory.catalog is not an object")
+        elif catalog.get("outcome") == "norecord":
+            for field in ("total_repositories", "repositories",
+                          "live_fork_repositories",
+                          "unregistered_live_fork_repositories"):
+                if catalog.get(field) is not None:
+                    errors.append(
+                        f"inventory.catalog.{field} must be null for norecord")
+        elif catalog.get("outcome") != "complete":
+            errors.append("inventory.catalog.outcome is malformed")
+        else:
+            catalog_rows = catalog.get("repositories")
+            if not isinstance(catalog_rows, list):
+                errors.append("inventory.catalog.repositories is not a list")
+            else:
+                for pos, row in enumerate(catalog_rows):
+                    repo = row.get("repository") if isinstance(row, dict) else None
+                    if (not _valid_repository(repo)
+                            or not isinstance(row.get("is_fork"), bool)
+                            or not isinstance(row.get("is_archived"), bool)
+                            or not isinstance(
+                                row.get("has_issues_enabled"), bool)):
+                        errors.append(
+                            f"inventory.catalog.repositories[{pos}] is malformed")
+                        continue
+                    key = repo.lower()
+                    if key in catalog_by_repo:
+                        errors.append(
+                            f"inventory.catalog.repositories duplicates {repo}")
+                    catalog_by_repo[key] = row
+                if catalog.get("total_repositories") != len(catalog_rows):
+                    errors.append(
+                        "inventory.catalog.total_repositories does not equal "
+                        "the catalog row count")
+                catalog_required = required_keys | {VIBEIC_DELIVERY_REPOSITORY}
+                missing = sorted(catalog_required - set(catalog_by_repo))
+                if missing:
+                    errors.append("inventory.catalog misses required repositories: "
+                                  + ", ".join(missing))
+                derived_live = sorted(
+                    row["repository"] for row in catalog_by_repo.values()
+                    if row["is_fork"] and not row["is_archived"])
+                _exact_string_identities(
+                    "inventory.catalog.live_fork_repositories",
+                    catalog.get("live_fork_repositories"), derived_live, errors)
+                derived_unregistered = sorted(
+                    repo for repo in derived_live
+                    if repo.lower() not in canonical_keys)
+                catalog_unregistered = _exact_string_identities(
+                    "inventory.catalog.unregistered_live_fork_repositories",
+                    catalog.get("unregistered_live_fork_repositories"),
+                    derived_unregistered, errors)
+                catalog_complete = True
+
+        rows = inventory.get("repositories")
+        row_by_repo: dict[str, dict] = {}
+        completed = 0
+        if not isinstance(rows, list):
+            errors.append("inventory.repositories is not a list")
+        else:
+            identities = [row.get("repository") if isinstance(row, dict) else None
+                          for row in rows]
+            if all(isinstance(repo, str) for repo in identities):
+                _exact_string_identities(
+                    "inventory.repositories", identities, required, errors)
+            else:
+                errors.append("inventory.repositories has malformed identity")
+            for pos, row in enumerate(rows):
+                if not isinstance(row, dict):
+                    errors.append(f"inventory.repositories[{pos}] is not an object")
+                    continue
+                repo = row.get("repository")
+                if not isinstance(repo, str):
+                    continue
+                key = repo.lower()
+                if key in row_by_repo:
+                    continue
+                row_by_repo[key] = row
+                expected_scope = ("registered_fork" if key in canonical_keys
+                                  else "vibeic_eda")
+                if row.get("scope") != expected_scope:
+                    errors.append(f"inventory row {repo} has wrong scope")
+                status = row.get("status")
+                if status not in {"complete", "norecord"}:
+                    errors.append(f"inventory row {repo} status is malformed")
+                issue_outcome, issue_count = _connection_evidence(
+                    row.get("issues"), f"inventory row {repo}.issues", errors,
+                    allow_disabled=True)
+                pr_outcome, pr_count = _connection_evidence(
+                    row.get("pull_requests"),
+                    f"inventory row {repo}.pull_requests", errors)
+                if status == "complete":
+                    completed += 1
+                    for boolean in ("is_fork", "is_archived",
+                                    "has_issues_enabled"):
+                        if not isinstance(row.get(boolean), bool):
+                            errors.append(
+                                f"inventory row {repo}.{boolean} is malformed")
+                    expected_issue_outcome = (
+                        "complete" if row.get("has_issues_enabled") is True
+                        else "disabled")
+                    if issue_outcome != expected_issue_outcome:
+                        errors.append(
+                            f"inventory row {repo} issue outcome contradicts "
+                            "has_issues_enabled")
+                    if pr_outcome != "complete":
+                        errors.append(
+                            f"inventory row {repo} PR connection is incomplete")
+                    catalog_row = catalog_by_repo.get(key)
+                    if catalog_row is not None:
+                        for field in ("is_fork", "is_archived",
+                                      "has_issues_enabled"):
+                            if row.get(field) != catalog_row.get(field):
+                                errors.append(
+                                    f"inventory row {repo}.{field} contradicts "
+                                    "the exact catalog")
+                    actual_issues = sum(
+                        "exact_repository_issues" in item.get("sources", [])
+                        for item in item_by_repo_type.get((key, "issue"), []))
+                    actual_prs = sum(
+                        "exact_repository_pull_requests"
+                        in item.get("sources", [])
+                        for item in item_by_repo_type.get(
+                            (key, "pull_request"), []))
+                    if issue_count != actual_issues:
+                        errors.append(
+                            f"inventory row {repo} issue count={issue_count!r}, "
+                            f"retained items={actual_issues}")
+                    if pr_count != actual_prs:
+                        errors.append(
+                            f"inventory row {repo} PR count={pr_count!r}, "
+                            f"retained items={actual_prs}")
+                    inventory_issue_total += issue_count or 0
+                    inventory_pr_total += pr_count or 0
+                else:
+                    if issue_outcome != "norecord" or pr_outcome != "norecord":
+                        errors.append(
+                            f"inventory row {repo} norecord has a measured connection")
+                    for field in ("is_fork", "is_archived",
+                                  "has_issues_enabled"):
+                        if row.get(field) is not None:
+                            errors.append(
+                                f"inventory row {repo}.{field} must be null "
+                                "for norecord")
+        if inventory.get("completed_repository_count") != completed:
+            errors.append(
+                "inventory.completed_repository_count contradicts rows")
+        derived_inventory_complete = (
+            catalog_complete and not catalog_unregistered
+            and len(row_by_repo) == len(required) and completed == len(required))
+        expected_status = "complete" if derived_inventory_complete else "norecord"
+        if inventory.get("status") != expected_status:
+            errors.append(
+                f"inventory.status={inventory.get('status')!r}, expected "
+                f"{expected_status}")
+        inventory_complete = derived_inventory_complete
+
+    delivery = record.get("delivery")
+    delivery_complete = False
+    delivery_matched = 0
+    if not isinstance(delivery, dict):
+        errors.append("delivery is not an object")
+    else:
+        if delivery.get("repository") != VIBEIC_DELIVERY_REPOSITORY:
+            errors.append("delivery.repository is not vibeic/vibe-ic")
+        patterns = delivery.get("pr_head_patterns")
+        if (not isinstance(patterns, list)
+                or any(not isinstance(pattern, str) for pattern in patterns)
+                or set(patterns) != DELIVERY_HEAD_PATTERN_TEXT
+                or len(patterns) != len(DELIVERY_HEAD_PATTERN_TEXT)):
+            errors.append("delivery.pr_head_patterns is not the exact producer set")
+        if delivery.get("issues") != {
+                "outcome": "excluded_no_durable_producer_marker"}:
+            errors.append("delivery.issues is not explicitly excluded")
+        pulls = delivery.get("pull_requests")
+        pulls_complete = False
+        if not isinstance(pulls, dict):
+            errors.append("delivery.pull_requests is not an object")
+        elif pulls.get("outcome") == "norecord":
+            for field in ("open_count", "matched_count", "excluded_count",
+                          "excluded"):
+                if pulls.get(field) is not None:
+                    errors.append(
+                        f"delivery.pull_requests.{field} must be null for norecord")
+        elif pulls.get("outcome") != "complete":
+            errors.append("delivery.pull_requests.outcome is malformed")
+        else:
+            open_count = pulls.get("open_count")
+            matched_count = pulls.get("matched_count")
+            excluded_count = pulls.get("excluded_count")
+            excluded = pulls.get("excluded")
+            if not all(_nonnegative_int(value) for value in
+                       (open_count, matched_count, excluded_count)):
+                errors.append("delivery PR counts are malformed")
+            if not isinstance(excluded, list):
+                errors.append("delivery.pull_requests.excluded is not a list")
+                excluded = []
+            if excluded_count != len(excluded):
+                errors.append("delivery excluded_count contradicts excluded rows")
+            if (_nonnegative_int(open_count) and _nonnegative_int(matched_count)
+                    and _nonnegative_int(excluded_count)
+                    and open_count != matched_count + excluded_count):
+                errors.append(
+                    "delivery included+excluded does not equal total open PRs")
+            excluded_ids: set[tuple[str, int]] = set()
+            for pos, item in enumerate(excluded):
+                repo = item.get("repository") if isinstance(item, dict) else None
+                number = item.get("number") if isinstance(item, dict) else None
+                reasons = item.get("reasons") if isinstance(item, dict) else None
+                if (repo != VIBEIC_DELIVERY_REPOSITORY
+                        or not _nonnegative_int(number) or number == 0
+                        or not isinstance(reasons, list) or not reasons
+                        or any(not isinstance(reason, str) or not reason
+                               for reason in reasons)):
+                    errors.append(
+                        f"delivery excluded row {pos} is malformed")
+                    continue
+                identity = (repo.lower(), number)
+                if identity in excluded_ids:
+                    errors.append("delivery excluded rows contain a duplicate")
+                excluded_ids.add(identity)
+                if (not isinstance(item.get("title"), str)
+                        or not item["title"]
+                        or not isinstance(item.get("url"), str)
+                        or not item["url"]
+                        or item.get("type") != "pull_request"
+                        or (item.get("author") is not None
+                            and (not isinstance(item.get("author"), str)
+                                 or not item["author"]))
+                        or (item.get("head_owner") is not None
+                            and (not isinstance(item.get("head_owner"), str)
+                                 or not item["head_owner"]))
+                        or (item.get("head_ref") is not None
+                            and (not isinstance(item.get("head_ref"), str)
+                                 or not item["head_ref"]))
+                        or not isinstance(item.get("base_ref"), str)
+                        or not item["base_ref"]
+                        or not isinstance(item.get("draft"), bool)
+                        or _strict_when(item.get("updated_at")) is None):
+                    errors.append(
+                        f"delivery excluded PR #{number} is not normalized")
+                expected_reasons = _delivery_exclusion_reasons(item)
+                if reasons != expected_reasons:
+                    errors.append(
+                        f"delivery excluded PR #{number} reasons contradict "
+                        "producer identity")
+            matched_items = [item for item in items
+                             if "fork_delivery" in item.get("scopes", [])]
+            delivery_matched = len(matched_items)
+            if matched_count != delivery_matched:
+                errors.append(
+                    "delivery matched_count contradicts retained delivery items")
+            matched_ids: set[tuple[str, int]] = set()
+            for item in matched_items:
+                repo, number = item.get("repository"), item.get("number")
+                identity = (str(repo).lower(), number)
+                if identity in excluded_ids:
+                    errors.append("delivery PR appears in both matched and excluded")
+                matched_ids.add(identity)
+                kind = _delivery_kind(item.get("head_ref"))
+                if (repo != VIBEIC_DELIVERY_REPOSITORY
+                        or item.get("type") != "pull_request"
+                        or item.get("head_owner") != GITHUB_ORG or kind is None
+                        or item.get("delivery_kind") != kind
+                        or item.get("delivery_anomalies")
+                        != _delivery_anomalies(item, kind or "anchor")):
+                    errors.append(
+                        f"delivery matched PR #{number!r} violates producer identity")
+            pulls_complete = True
+        delivery_complete = pulls_complete
+        expected_delivery_status = (
+            "complete" if pulls_complete else "norecord")
+        if delivery.get("status") != expected_delivery_status:
+            errors.append(
+                f"delivery.status={delivery.get('status')!r}, expected "
+                f"{expected_delivery_status}")
+
+    actor = record.get("upstream_actor")
+    actor_complete = False
+    actor_counts = {"issues": 0, "pull_requests": 0}
+    if not isinstance(actor, dict):
+        errors.append("upstream_actor is not an object")
+    else:
+        part_complete = []
+        for field in ("issues", "pull_requests"):
+            value = actor.get(field)
+            if not isinstance(value, dict):
+                errors.append(f"upstream_actor.{field} is not an object")
+                part_complete.append(False)
+                continue
+            outcome = value.get("outcome")
+            seen, matched = value.get("seen_count"), value.get("matched_count")
+            if outcome == "complete":
+                okay = (_nonnegative_int(seen) and _nonnegative_int(matched)
+                        and matched <= seen)
+                if not okay:
+                    errors.append(f"upstream_actor.{field} counts are malformed")
+                actor_counts[field] = matched if _nonnegative_int(matched) else 0
+                part_complete.append(okay)
+            elif outcome == "norecord":
+                if seen is not None or matched is not None:
+                    errors.append(
+                        f"upstream_actor.{field} norecord counts must be null")
+                part_complete.append(False)
+            else:
+                errors.append(f"upstream_actor.{field}.outcome is malformed")
+                part_complete.append(False)
+        actor_complete = all(part_complete) and len(part_complete) == 2
+        expected_actor_status = "complete" if actor_complete else "norecord"
+        if actor.get("status") != expected_actor_status:
+            errors.append("upstream_actor.status contradicts connections")
+
+    round_upstream = record.get("round_upstream")
+    round_complete = False
+    round_total = 0
+    if not isinstance(round_upstream, dict):
+        errors.append("round_upstream is not an object")
+    else:
+        if round_upstream.get("required_fork_count") != len(canonical):
+            errors.append("round_upstream.required_fork_count is wrong")
+        rows = round_upstream.get("forks")
+        row_tools: list[str] = []
+        complete_rows = 0
+        if not isinstance(rows, list):
+            errors.append("round_upstream.forks is not a list")
+        else:
+            for pos, row in enumerate(rows):
+                tool = row.get("tool") if isinstance(row, dict) else None
+                if not isinstance(tool, str):
+                    errors.append(f"round_upstream.forks[{pos}] has no tool")
+                    continue
+                row_tools.append(tool)
+                expected_repo = expected_by_tool.get(tool.lower())
+                if (not isinstance(row.get("repository"), str)
+                        or expected_repo is None
+                        or row["repository"].lower() != expected_repo.lower()):
+                    errors.append(f"round_upstream row {tool} repository is wrong")
+                outcome, count = _connection_evidence(
+                    {"outcome": row.get("outcome"),
+                     "open_count": row.get("open_count")},
+                    f"round_upstream row {tool}", errors)
+                if outcome == "complete":
+                    complete_rows += 1
+                    round_total += count or 0
+                    retained = sum(
+                        item.get("repository", "").lower()
+                        == str(expected_repo).lower()
+                        and "round_upstream_pull_requests"
+                        in item.get("sources", [])
+                        for item in items
+                    )
+                    if count != retained:
+                        errors.append(
+                            f"round_upstream row {tool} count={count!r}, "
+                            f"retained items={retained}")
+            _exact_string_identities(
+                "round_upstream.forks", row_tools, registry["tools"], errors)
+        if round_upstream.get("completed_fork_count") != complete_rows:
+            errors.append("round_upstream.completed_fork_count contradicts rows")
+        round_complete = complete_rows == len(canonical)
+        expected_round_status = "complete" if round_complete else "norecord"
+        if round_upstream.get("status") != expected_round_status:
+            errors.append("round_upstream.status contradicts rows")
+
+    counts = record.get("counts")
+    if isinstance(counts, dict):
+        by_source = counts.get("by_source")
+        expected_sources = {
+            "exact_repository_issues": inventory_issue_total,
+            "exact_repository_pull_requests": inventory_pr_total,
+            "fork_delivery_pull_requests": delivery_matched,
+            "viewer_upstream_issues": actor_counts["issues"],
+            "viewer_upstream_pull_requests": actor_counts["pull_requests"],
+            "round_upstream_pull_requests": round_total,
+        }
+        if by_source != expected_sources:
+            errors.append("counts.by_source contradicts exact source evidence")
+        expected_scope_counts = {
+            "registered_fork_items": sum(
+                "registered_fork" in item.get("scopes", []) for item in items),
+            "upstream_items": sum(
+                "upstream" in item.get("scopes", []) for item in items),
+            "vibeic_eda_items": sum(
+                "vibeic_eda" in item.get("scopes", []) for item in items),
+            "fork_delivery_items": sum(
+                "fork_delivery" in item.get("scopes", []) for item in items),
+        }
+        for field, expected in expected_scope_counts.items():
+            if counts.get(field) != expected:
+                errors.append(f"counts.{field}={counts.get(field)!r}, "
+                              f"expected {expected}")
+        item_source_counts = {
+            "exact_repository_issues": sum(
+                item.get("type") == "issue"
+                and "exact_repository_issues" in item.get("sources", [])
+                for item in items),
+            "exact_repository_pull_requests": sum(
+                item.get("type") == "pull_request"
+                and "exact_repository_pull_requests" in item.get("sources", [])
+                for item in items),
+            "fork_delivery_pull_requests": sum(
+                "fork_delivery_pull_requests" in item.get("sources", [])
+                for item in items),
+            "viewer_upstream_issues": sum(
+                item.get("type") == "issue"
+                and "viewer_upstream" in item.get("sources", [])
+                for item in items),
+            "viewer_upstream_pull_requests": sum(
+                item.get("type") == "pull_request"
+                and "viewer_upstream" in item.get("sources", [])
+                for item in items),
+            "round_upstream_pull_requests": sum(
+                "round_upstream_pull_requests" in item.get("sources", [])
+                for item in items),
+        }
+        for field in ("exact_repository_issues",
+                      "exact_repository_pull_requests",
+                      "fork_delivery_pull_requests",
+                      "viewer_upstream_issues",
+                      "viewer_upstream_pull_requests"):
+            if item_source_counts[field] != expected_sources[field]:
+                errors.append(
+                    f"{field} retained item count contradicts source evidence")
+        if len(registry["upstream"]) != len(registry["tools"]):
+            errors.append(
+                "round_upstream schema cannot prove per-tool counts for a "
+                "shared upstream repository")
+        elif (item_source_counts["round_upstream_pull_requests"]
+              != expected_sources["round_upstream_pull_requests"]):
+            errors.append(
+                "round_upstream retained item count contradicts source evidence")
+
+    # Every retained item must itself name a source and scope consistent with
+    # the independently derived repository sets.
+    allowed_sources = {
+        "exact_repository_issues", "exact_repository_pull_requests",
+        "fork_delivery_pull_requests", "viewer_upstream",
+        "round_upstream_pull_requests",
+    }
+    allowed_scopes = {
+        "registered_fork", "upstream", "vibeic_eda", "fork_delivery",
+    }
+    for item in items:
+        repo = str(item.get("repository", "")).lower()
+        sources, scopes = item.get("sources"), item.get("scopes")
+        if (not isinstance(sources, list) or not sources
+                or any(not isinstance(source, str) for source in sources)
+                or len(sources) != len(set(sources))
+                or any(source not in allowed_sources for source in sources)):
+            errors.append(
+                f"item {repo} #{item.get('number')} has malformed sources")
+            continue
+        if (not isinstance(scopes, list) or not scopes
+                or any(not isinstance(scope, str) for scope in scopes)
+                or len(scopes) != len(set(scopes))
+                or any(scope not in allowed_scopes for scope in scopes)):
+            errors.append(
+                f"item {repo} #{item.get('number')} has malformed scopes")
+            continue
+        membership = set()
+        if repo in canonical_keys:
+            membership.add("registered_fork")
+        if repo in upstream_keys:
+            membership.add("upstream")
+        if repo == VIBEIC_EDA_REPOSITORY:
+            membership.add("vibeic_eda")
+        if repo == VIBEIC_DELIVERY_REPOSITORY:
+            membership.add("fork_delivery")
+        if set(scopes) != membership:
+            errors.append(
+                f"item {repo} #{item.get('number')} scopes contradict repository")
+        if "exact_repository_issues" in sources and item.get("type") != "issue":
+            errors.append("exact_repository_issues contains a non-issue")
+        if ("exact_repository_pull_requests" in sources
+                and item.get("type") != "pull_request"):
+            errors.append("exact_repository_pull_requests contains a non-PR")
+        if "fork_delivery_pull_requests" in sources \
+                and "fork_delivery" not in scopes:
+            errors.append("fork delivery source lacks fork_delivery scope")
+        if "viewer_upstream" in sources and "upstream" not in scopes:
+            errors.append("viewer upstream source lacks upstream scope")
+        if "round_upstream_pull_requests" in sources \
+                and "upstream" not in scopes:
+            errors.append("round upstream source lacks upstream scope")
+
+    return (inventory_complete and delivery_complete and actor_complete
+            and round_complete)
+
+
+def _validate_fork_github(record: dict, path: Path, round_at: str,
+                          forks_json: Path, configured_actor: str
                           ) -> tuple[Optional[dict], list[str]]:
     """Validate provenance, shape and freshness before retaining the answer."""
     errors: list[str] = []
+    registry, registry_errors = _github_registry(forks_json)
+    errors.extend(registry_errors)
     observed_now = datetime.now(timezone.utc)
     if record.get("program") != "fork_github_convergence":
         errors.append("program is not fork_github_convergence")
     if (type(record.get("schema_version")) is not int
-            or record["schema_version"] != 1):
-        errors.append("schema_version is not 1")
+            or record["schema_version"] != 2):
+        errors.append("schema_version is not 2")
     if record.get("status") not in {"converged", "open", "norecord"}:
         errors.append("status is not converged, open, or norecord")
 
@@ -169,12 +884,29 @@ def _validate_fork_github(record: dict, path: Path, round_at: str
     actor = record.get("actor")
     expected_actor = record.get("expected_actor")
     status = record.get("status")
+    configured_identity = (
+        configured_actor.casefold()
+        if isinstance(configured_actor, str)
+        and configured_actor
+        and configured_actor.strip() == configured_actor
+        and re.fullmatch(r"[A-Za-z0-9-]{1,39}", configured_actor)
+        else None
+    )
+    if configured_identity is None:
+        errors.append("configured GitHub actor is malformed")
     if actor is not None and (not isinstance(actor, str) or not actor):
         errors.append("actor is malformed")
     if not isinstance(expected_actor, str) or not expected_actor:
         errors.append("expected_actor is missing or malformed")
-    elif status in {"converged", "open"} and actor != expected_actor:
-        errors.append("actor does not match expected_actor")
+    elif (configured_identity is not None
+          and expected_actor.casefold() != configured_identity):
+        errors.append(
+            "expected_actor does not match configured GitHub actor")
+    if isinstance(actor, str) and configured_identity is not None \
+            and actor.casefold() != configured_identity:
+        errors.append("actor does not match configured GitHub actor")
+    elif status in {"converged", "open"} and not isinstance(actor, str):
+        errors.append("actor is missing for a measured GitHub result")
     round_source = record.get("round")
     if not isinstance(round_source, dict):
         errors.append("round is not an object")
@@ -216,6 +948,12 @@ def _validate_fork_github(record: dict, path: Path, round_at: str
     counts_valid = isinstance(counts, dict) and valid_count_tree(counts)
     if not counts_valid:
         errors.append("counts is not an object tree of non-negative integers")
+    elif set(counts) != {
+            "items", "issues", "pull_requests", "registered_fork_items",
+            "upstream_items", "vibeic_eda_items", "fork_delivery_items",
+            "by_source"}:
+        counts_valid = False
+        errors.append("counts does not have the exact schema-v2 key set")
     items = record.get("items")
     items_valid = isinstance(items, list)
     identities: set[tuple[str, str, int]] = set()
@@ -229,16 +967,37 @@ def _validate_fork_github(record: dict, path: Path, round_at: str
             kind = item.get("type")
             number = item.get("number")
             url = item.get("url")
+            title = item.get("title")
+            updated_at = _strict_when(item.get("updated_at"))
+            author = item.get("author")
             repo_parts = repo.split("/") if isinstance(repo, str) else []
             if (len(repo_parts) != 2 or not all(repo_parts)
                     or any(part.strip() != part for part in repo_parts)
                     or kind not in {"issue", "pull_request"}
                     or type(number) is not int or number <= 0
-                    or not isinstance(url, str) or not url):
+                    or not isinstance(url, str) or not url
+                    or not isinstance(title, str) or not title
+                    or updated_at is None
+                    or (author is not None
+                        and (not isinstance(author, str) or not author))):
                 items_valid = False
                 errors.append(
-                    f"items[{pos}] has no valid repository/type/number/url identity")
+                    f"items[{pos}] has no valid normalized identity")
                 continue
+            if kind == "pull_request":
+                if (not isinstance(item.get("head_owner"), str)
+                        or not item["head_owner"]
+                        or not isinstance(item.get("head_ref"), str)
+                        or not item["head_ref"]
+                        or not isinstance(item.get("base_ref"), str)
+                        or not item["base_ref"]
+                        or not isinstance(item.get("draft"), bool)):
+                    items_valid = False
+                    errors.append(f"items[{pos}] has malformed PR details")
+            elif any(item.get(field) is not None for field in
+                     ("head_owner", "head_ref", "base_ref", "draft")):
+                items_valid = False
+                errors.append(f"items[{pos}] issue carries PR-only details")
             identity = (repo.lower(), kind, number)
             if identity in identities:
                 items_valid = False
@@ -259,6 +1018,11 @@ def _validate_fork_github(record: dict, path: Path, round_at: str
                 errors.append(
                     f"counts.{name}={counts.get(name)!r}, expected {expected}")
 
+    sources_complete = False
+    if registry is not None and items_valid:
+        sources_complete = _validate_github_v2_sources(
+            record, items, registry, errors)
+
     upstream_errors = record.get("source_errors")
     source_errors_valid = (
         isinstance(upstream_errors, list)
@@ -275,9 +1039,12 @@ def _validate_fork_github(record: dict, path: Path, round_at: str
     if (status in {"converged", "open", "norecord"}
             and items_valid and source_errors_valid):
         consistent = (
-            (status == "converged" and not items and not upstream_errors)
-            or (status == "open" and bool(items) and not upstream_errors)
-            or (status == "norecord" and bool(upstream_errors))
+            (status == "converged" and not items and not upstream_errors
+             and sources_complete)
+            or (status == "open" and bool(items) and not upstream_errors
+                and sources_complete)
+            or (status == "norecord"
+                and (bool(upstream_errors) or not sources_complete))
         )
         if not consistent:
             errors.append(
@@ -766,6 +1533,10 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
             "actor": fork_github.get("actor"),
             "expected_actor": fork_github.get("expected_actor"),
             "round": fork_github.get("round"),
+            "inventory": fork_github.get("inventory"),
+            "delivery": fork_github.get("delivery"),
+            "upstream_actor": fork_github.get("upstream_actor"),
+            "round_upstream": fork_github.get("round_upstream"),
             "counts": fork_github.get("counts"),
             "items": fork_github.get("items"),
             "source_errors": fork_github.get("source_errors"),
@@ -786,6 +1557,10 @@ def main(argv=None) -> int:
     ap.add_argument("--release-json", type=Path, required=True)
     ap.add_argument("--gap-json", type=Path, required=True)
     ap.add_argument("--fork-github-json", type=Path, required=True)
+    ap.add_argument(
+        "--expected-github-actor", required=True,
+        help="independently configured GitHub login that both actor fields "
+             "in the convergence sidecar must match")
     ap.add_argument("--forks-json", type=Path,
                     default=Path(__file__).resolve().parent / "FORKS.json",
                     help="canonical registered fleet used to independently "
@@ -833,7 +1608,8 @@ def main(argv=None) -> int:
     else:
         assert fork_github_raw is not None
         fork_github, fork_github_errors = _validate_fork_github(
-            fork_github_raw, a.fork_github_json, a.round_at)
+            fork_github_raw, a.fork_github_json, a.round_at, a.forks_json,
+            a.expected_github_actor)
     provenance_errors: list[str] = []
     if gap is not None and fork_github is not None:
         gap_run_id = gap["source"]["_round"]["run_id"]

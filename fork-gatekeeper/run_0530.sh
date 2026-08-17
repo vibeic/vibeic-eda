@@ -260,6 +260,8 @@ python3 "${DIR}/capture_release_ll.py" \
     --release-json "${GK_STATE_DIR}/daily-release.json" \
     --gap-json "${GAP_JSON}" \
     --fork-github-json "${FORK_GH_JSON}" \
+    --forks-json "${DIR}/FORKS.json" \
+    --expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}" \
     --semantic-pytest-json "${PYTEST_RETAINED}" \
     --round-at "${ROUND_AT}" --tick-exit "${TICK}" \
     --tick-state "${TICK_STATE}" >> "${LOG}" 2>&1

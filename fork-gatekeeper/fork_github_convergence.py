@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Exact GitHub issue/PR convergence record for the fork fleet.
 
-Zero is a strong statement here: it is emitted only after all paginated GitHub
-connections and every fork's round-local upstream-PR measurement are complete.
-Any missing page, malformed cursor, search-cap boundary, or absent fork row is
-``norecord`` rather than an invented zero.
+Zero is a strong statement here. It is emitted only after an authoritative,
+paginated ``organization.repositories`` catalog proves the denominator; every
+required repository's direct issue/PR connections are complete; the expected
+actor's upstream connections are complete; and every fork's round-local
+upstream-PR measurement is complete. GitHub's eventually-consistent search
+index is deliberately not an authority. Any missing page, malformed cursor, or
+absent source is ``norecord`` rather than an invented zero.
 
 Each fork row's ``upstream_pull_requests`` envelope is load-bearing too.  It
 must contain ``outcome``, ``upstream_repository``, ``fork_owner``,
 ``open_count``, and ``items``; the declared count must equal the list length.
 This prevents a producer that queried the wrong repository (or never formed a
-list) from laundering ``complete + []`` into convergence.
+list) from laundering ``complete + []`` into convergence. The separate
+``vibeic/vibe-ic`` delivery scope admits only producer-owned branch identities;
+unrelated plugin PRs are retained as exclusions and never gate fork delivery.
 """
 from __future__ import annotations
 
@@ -28,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROGRAM = "fork_github_convergence"
 ORG = "vibeic"
 RC_CONVERGED = 0
@@ -38,28 +43,90 @@ DEFAULT_GH_REQUEST_DEADLINE_S = 120.0
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 
 
-ORG_SEARCH_QUERY = r"""
-query ForkConvergenceOrgSearch($queryString: String!, $cursor: String) {
-  search(query: $queryString, type: ISSUE, first: 100, after: $cursor) {
-    issueCount
-    nodes {
-      __typename
-      ... on Issue {
-        number title url updatedAt
+ORG_REPOSITORIES_QUERY = r"""
+query ForkConvergenceOrgRepositories($organization: String!, $cursor: String) {
+  viewer {
+    login
+  }
+  organization(login: $organization) {
+    login
+    repositories(first: 100, after: $cursor,
+                 orderBy: {field: NAME, direction: ASC}) {
+      totalCount
+      nodes {
+        nameWithOwner
+        isFork
+        isArchived
+        hasIssuesEnabled
+        issues(states: OPEN, first: 100) {
+          totalCount
+          nodes {
+            __typename number title url updatedAt
+            author { login }
+            repository { nameWithOwner }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+        pullRequests(states: OPEN, first: 100) {
+          totalCount
+          nodes {
+            __typename number title url headRefName baseRefName isDraft updatedAt
+            author { login }
+            headRepositoryOwner { login }
+            repository { nameWithOwner }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+REPOSITORY_OPEN_ITEMS_QUERY = r"""
+query ForkConvergenceRepositoryOpenItems(
+  $owner: String!, $name: String!,
+  $issueCursor: String, $pullRequestCursor: String,
+  $includeIssues: Boolean!, $includePullRequests: Boolean!
+) {
+  viewer {
+    login
+  }
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    issues(states: OPEN, first: 100, after: $issueCursor)
+      @include(if: $includeIssues) {
+      totalCount
+      nodes {
+        __typename number title url updatedAt
         author { login }
         repository { nameWithOwner }
       }
-      ... on PullRequest {
-        number title url headRefName baseRefName isDraft updatedAt
+      pageInfo { hasNextPage endCursor }
+    }
+    pullRequests(states: OPEN, first: 100, after: $pullRequestCursor)
+      @include(if: $includePullRequests) {
+      totalCount
+      nodes {
+        __typename number title url headRefName baseRefName isDraft updatedAt
         author { login }
         headRepositoryOwner { login }
         repository { nameWithOwner }
       }
+      pageInfo { hasNextPage endCursor }
     }
-    pageInfo { hasNextPage endCursor }
   }
 }
 """
+
+VIBEIC_EDA_REPOSITORY = "vibeic/vibeic-eda"
+DELIVERY_REPOSITORY = "vibeic/vibe-ic"
+DELIVERY_PR_HEAD_PATTERNS = {
+    "anchor": re.compile(r"^eda-anchor-(\d+\.\d+\.\d+)$"),
+    "sync": re.compile(r"^eda-fork-sync-(\d{4}-\d{2}-\d{2})$"),
+    "assessment": re.compile(r"^eda-fork-assess-(\d{4}-\d{2}-\d{2})$"),
+}
 
 VIEWER_ISSUES_QUERY = r"""
 query ForkConvergenceViewerIssues($cursor: String) {
@@ -216,13 +283,25 @@ def _mapping(value: Any, context: str) -> Mapping[str, Any]:
     return value
 
 
+def _graphql_root(response: Mapping[str, Any], operation: str
+                  ) -> Mapping[str, Any]:
+    """Reject every malformed or partial GraphQL answer before using data."""
+    root = _mapping(response, operation)
+    if "errors" in root:
+        errors = root["errors"]
+        if not isinstance(errors, list):
+            raise SourceFailure(
+                f"{operation}: malformed GraphQL errors field")
+        if errors:
+            raise SourceFailure(
+                f"{operation}: GraphQL errors: "
+                + " ".join(str(errors).split())[:500])
+    return root
+
+
 def _connection(response: Mapping[str, Any], path: Sequence[str],
                 operation: str) -> Mapping[str, Any]:
-    root = _mapping(response, operation)
-    if root.get("errors"):
-        raise SourceFailure(
-            f"{operation}: GraphQL errors: "
-            + " ".join(str(root["errors"]).split())[:500])
+    root = _graphql_root(response, operation)
     cur: Any = root.get("data")
     for name in path:
         cur = _mapping(cur, f"{operation}.data path").get(name)
@@ -231,7 +310,7 @@ def _connection(response: Mapping[str, Any], path: Sequence[str],
 
 def paginate_connection(runner: Runner, *, operation: str, query: str,
                         variables: Mapping[str, Any], path: Sequence[str],
-                        count_field: str, search_cap: bool = False,
+                        count_field: str,
                         page_validator: Callable[[Mapping[str, Any], str], None]
                         | None = None,
                         ) -> list[Mapping[str, Any]]:
@@ -264,10 +343,6 @@ def paginate_connection(runner: Runner, *, operation: str, query: str,
             raise SourceFailure(f"{operation}: malformed {count_field}")
         if expected_count is None:
             expected_count = count
-            if search_cap and count >= 1000:
-                raise SourceFailure(
-                    f"{operation}: search count {count} reaches GitHub's "
-                    "1000-result cap; completeness is unknowable")
         elif count != expected_count:
             raise SourceFailure(
                 f"{operation}: {count_field} changed during pagination "
@@ -331,6 +406,251 @@ def paginate_connection(runner: Runner, *, operation: str, query: str,
             f"{operation}: fetched {len(nodes)} nodes but {count_field} is "
             f"{expected_count}")
     return nodes
+
+
+@dataclass
+class _OpenConnection:
+    field: str
+    typename: str
+    count: int | None = None
+    nodes: list[Mapping[str, Any]] | None = None
+    cursor: str | None = None
+    complete: bool = False
+    seen_cursors: set[str | None] | None = None
+    identities: set[tuple[str, str, int]] | None = None
+
+    def __post_init__(self) -> None:
+        self.nodes = []
+        self.seen_cursors = {None}
+        self.identities = set()
+
+
+@dataclass(frozen=True)
+class _CatalogRepository:
+    repository: str
+    is_fork: bool
+    is_archived: bool
+    has_issues_enabled: bool
+    issues_page: Mapping[str, Any]
+    pull_requests_page: Mapping[str, Any]
+
+
+def _accept_open_page(state: _OpenConnection, value: Any, *,
+                      operation: str, expected_repo: str) -> None:
+    """Consume one exact repository connection page into mutable evidence."""
+    conn = _mapping(value, f"{operation}.{state.field}")
+    count = conn.get("totalCount")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise SourceFailure(f"{operation}.{state.field}: malformed totalCount")
+    if state.count is None:
+        state.count = count
+    elif count != state.count:
+        raise SourceFailure(
+            f"{operation}.{state.field}: totalCount changed during pagination "
+            f"({state.count} -> {count})")
+    page_nodes = conn.get("nodes")
+    if not isinstance(page_nodes, list) or any(
+            not isinstance(node, dict) for node in page_nodes):
+        raise SourceFailure(f"{operation}.{state.field}: malformed nodes list")
+    if len(page_nodes) > 100:
+        raise SourceFailure(
+            f"{operation}.{state.field}: page has more than 100 nodes")
+    page_info = conn.get("pageInfo")
+    if not isinstance(page_info, dict):
+        raise SourceFailure(
+            f"{operation}.{state.field}: missing/malformed pageInfo")
+    has_next = page_info.get("hasNextPage")
+    end_cursor = page_info.get("endCursor")
+    if not isinstance(has_next, bool):
+        raise SourceFailure(
+            f"{operation}.{state.field}: malformed hasNextPage")
+    if has_next:
+        if count == 0 or len(page_nodes) != 100:
+            raise SourceFailure(
+                f"{operation}.{state.field}: non-final page is not exactly 100")
+        if not isinstance(end_cursor, str) or not end_cursor:
+            raise SourceFailure(
+                f"{operation}.{state.field}: no usable endCursor")
+        assert state.seen_cursors is not None
+        if end_cursor in state.seen_cursors:
+            raise SourceFailure(
+                f"{operation}.{state.field}: cursor loop at {end_cursor!r}")
+
+    assert state.identities is not None and state.nodes is not None
+    for node in page_nodes:
+        repo = ((node.get("repository") or {}).get("nameWithOwner")
+                if isinstance(node.get("repository"), dict) else None)
+        number = node.get("number")
+        if (node.get("__typename") != state.typename
+                or not isinstance(repo, str)
+                or repo.lower() != expected_repo.lower()
+                or isinstance(number, bool) or not isinstance(number, int)
+                or number <= 0):
+            raise SourceFailure(
+                f"{operation}.{state.field}: node lacks the exact repository "
+                "item identity")
+        identity = (repo.lower(), state.typename, number)
+        if identity in state.identities:
+            raise SourceFailure(
+                f"{operation}.{state.field}: duplicate item {repo} #{number}")
+        state.identities.add(identity)
+    state.nodes.extend(page_nodes)
+    state.complete = not has_next
+    state.cursor = end_cursor if has_next else None
+    if state.complete and len(state.nodes) != state.count:
+        raise SourceFailure(
+            f"{operation}.{state.field}: fetched {len(state.nodes)} nodes but "
+            f"totalCount is {state.count}")
+
+
+def _finish_repository_pages(
+        runner: Runner, entry: _CatalogRepository,
+        validate_response: Callable[[Mapping[str, Any], str, str], None],
+        *, include_issues: bool = True,
+        ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """Finish both connections, querying only whichever one has another page."""
+    operation = f"repository.{entry.repository}.open_items"
+    issues = _OpenConnection("issues", "Issue")
+    pulls = _OpenConnection("pullRequests", "PullRequest")
+    if include_issues:
+        _accept_open_page(issues, entry.issues_page, operation=operation,
+                          expected_repo=entry.repository)
+    else:
+        issues.complete = True
+        issues.count = 0
+    _accept_open_page(pulls, entry.pull_requests_page, operation=operation,
+                      expected_repo=entry.repository)
+    if include_issues and not entry.has_issues_enabled and issues.count != 0:
+        raise SourceFailure(
+            f"{operation}.issues: hasIssuesEnabled=false but totalCount is "
+            f"{issues.count}")
+    while not (issues.complete and pulls.complete):
+        issue_active = not issues.complete
+        pull_active = not pulls.complete
+        for state, active in ((issues, issue_active), (pulls, pull_active)):
+            if active:
+                assert state.cursor is not None and state.seen_cursors is not None
+                if state.cursor in state.seen_cursors:
+                    raise SourceFailure(
+                        f"{operation}.{state.field}: cursor loop at "
+                        f"{state.cursor!r}")
+                state.seen_cursors.add(state.cursor)
+        owner, name = entry.repository.split("/", 1)
+        variables = {
+            "owner": owner, "name": name,
+            "issueCursor": issues.cursor if issue_active else None,
+            "pullRequestCursor": pulls.cursor if pull_active else None,
+            "includeIssues": issue_active,
+            "includePullRequests": pull_active,
+        }
+        try:
+            response = runner(operation, REPOSITORY_OPEN_ITEMS_QUERY, variables)
+        except SourceFailure:
+            raise
+        except Exception as exc:
+            raise SourceFailure(
+                f"{operation}: runner failed: {type(exc).__name__}: {exc}") from exc
+        validate_response(response, operation, entry.repository)
+        repo = _mapping(_mapping(response, operation).get("data"),
+                        f"{operation}.data").get("repository")
+        repo_obj = _mapping(repo, f"{operation}.repository")
+        if issue_active:
+            _accept_open_page(issues, repo_obj.get("issues"),
+                              operation=operation,
+                              expected_repo=entry.repository)
+        if pull_active:
+            _accept_open_page(pulls, repo_obj.get("pullRequests"),
+                              operation=operation,
+                              expected_repo=entry.repository)
+    assert issues.nodes is not None and pulls.nodes is not None
+    return issues.nodes, pulls.nodes
+
+
+def _catalog_repositories(
+        runner: Runner,
+        validate_response: Callable[[Mapping[str, Any], str], None],
+        ) -> tuple[int, dict[str, _CatalogRepository]]:
+    """Read the exact organization repository denominator and first item pages."""
+    operation = "organization.repositories"
+    cursor: str | None = None
+    seen_cursors: set[str | None] = set()
+    expected_count: int | None = None
+    repositories: dict[str, _CatalogRepository] = {}
+    while True:
+        if cursor in seen_cursors:
+            raise SourceFailure(f"{operation}: cursor loop at {cursor!r}")
+        seen_cursors.add(cursor)
+        try:
+            response = runner(
+                operation, ORG_REPOSITORIES_QUERY,
+                {"organization": ORG, "cursor": cursor})
+        except SourceFailure:
+            raise
+        except Exception as exc:
+            raise SourceFailure(
+                f"{operation}: runner failed: {type(exc).__name__}: {exc}") from exc
+        validate_response(response, operation)
+        data = _mapping(_mapping(response, operation).get("data"),
+                        f"{operation}.data")
+        organization = _mapping(data.get("organization"),
+                                f"{operation}.organization")
+        if organization.get("login") != ORG:
+            raise SourceFailure(
+                f"{operation}: organization login is not {ORG!r}")
+        conn = _mapping(organization.get("repositories"),
+                        f"{operation}.repositories")
+        count = conn.get("totalCount")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise SourceFailure(f"{operation}: malformed totalCount")
+        if expected_count is None:
+            expected_count = count
+        elif count != expected_count:
+            raise SourceFailure(
+                f"{operation}: totalCount changed ({expected_count} -> {count})")
+        nodes = conn.get("nodes")
+        if not isinstance(nodes, list) or any(
+                not isinstance(node, dict) for node in nodes):
+            raise SourceFailure(f"{operation}: malformed nodes list")
+        if len(nodes) > 100:
+            raise SourceFailure(f"{operation}: page has more than 100 nodes")
+        page_info = conn.get("pageInfo")
+        if not isinstance(page_info, dict):
+            raise SourceFailure(f"{operation}: missing/malformed pageInfo")
+        has_next = page_info.get("hasNextPage")
+        end_cursor = page_info.get("endCursor")
+        if not isinstance(has_next, bool):
+            raise SourceFailure(f"{operation}: malformed hasNextPage")
+        if has_next and (len(nodes) != 100 or not isinstance(end_cursor, str)
+                         or not end_cursor):
+            raise SourceFailure(f"{operation}: malformed non-final page")
+        for node in nodes:
+            repo = node.get("nameWithOwner")
+            is_fork, is_archived = node.get("isFork"), node.get("isArchived")
+            has_issues = node.get("hasIssuesEnabled")
+            if (not _valid_slug(repo)
+                    or not repo.lower().startswith(f"{ORG}/")
+                    or not isinstance(is_fork, bool)
+                    or not isinstance(is_archived, bool)
+                    or not isinstance(has_issues, bool)):
+                raise SourceFailure(f"{operation}: malformed repository node")
+            key = repo.lower()
+            if key in repositories:
+                raise SourceFailure(f"{operation}: duplicate repository {repo}")
+            repositories[key] = _CatalogRepository(
+                repo, is_fork, is_archived, has_issues,
+                _mapping(node.get("issues"), f"{operation}.{repo}.issues"),
+                _mapping(node.get("pullRequests"),
+                         f"{operation}.{repo}.pullRequests"),
+            )
+        if not has_next:
+            break
+        cursor = end_cursor
+    assert expected_count is not None
+    if len(repositories) != expected_count:
+        raise SourceFailure(
+            f"{operation}: fetched {len(repositories)} repositories but "
+            f"totalCount is {expected_count}")
+    return expected_count, repositories
 
 
 def _login(value: Any) -> str | None:
@@ -442,6 +762,82 @@ def normalize_graphql_item(node: Mapping[str, Any], expected_type: str,
     }
 
 
+def normalize_delivery_pr(node: Mapping[str, Any], operation: str
+                          ) -> dict[str, Any]:
+    """Normalize a vibe-ic PR without letting unrelated malformed PRs veto us.
+
+    Stable repository/number/url/title/time identity remains mandatory. Head
+    details are retained even when absent or wrong so the producer predicate
+    can exclude the row with an exact reason. A PR that *does* match the
+    producer-owned head remains unfinished even if its title/base/draft drifted;
+    those discrepancies are anomalies, not a way to escape the gate.
+    """
+    if node.get("__typename") != "PullRequest":
+        raise SourceFailure(f"{operation}: delivery node is not a PullRequest")
+    repo = ((node.get("repository") or {}).get("nameWithOwner")
+            if isinstance(node.get("repository"), dict) else None)
+    number, title, url = node.get("number"), node.get("title"), node.get("url")
+    if (not isinstance(repo, str) or repo.lower() != DELIVERY_REPOSITORY
+            or isinstance(number, bool) or not isinstance(number, int)
+            or number <= 0 or not isinstance(title, str) or not title
+            or not isinstance(url, str) or not url):
+        raise SourceFailure(f"{operation}: malformed delivery PR identity")
+    _, updated_at = _timestamp(
+        node.get("updatedAt"), f"{operation}: PR #{number} updatedAt")
+    return {
+        "repository": DELIVERY_REPOSITORY,
+        "type": "pull_request",
+        "number": number,
+        "title": title,
+        "url": url,
+        "author": _login(node.get("author")),
+        "head_owner": _login(node.get("headRepositoryOwner")),
+        "head_ref": node.get("headRefName"),
+        "base_ref": node.get("baseRefName"),
+        "draft": node.get("isDraft"),
+        "updated_at": updated_at,
+    }
+
+
+def delivery_pr_decision(item: Mapping[str, Any]) -> tuple[str | None, list[str]]:
+    """Return producer kind (or None) and auditable exclusion/anomaly reasons."""
+    if item.get("head_owner") != ORG:
+        return None, ["head_owner_is_not_vibeic"]
+    head_ref = item.get("head_ref")
+    if not isinstance(head_ref, str):
+        return None, ["head_ref_is_missing"]
+    matched: tuple[str, re.Match[str]] | None = None
+    for kind, pattern in DELIVERY_PR_HEAD_PATTERNS.items():
+        match = pattern.fullmatch(head_ref)
+        if match is not None:
+            matched = (kind, match)
+            break
+    if matched is None:
+        return None, ["head_ref_is_not_a_delivery_producer_branch"]
+
+    kind, match = matched
+    anomalies: list[str] = []
+    if item.get("base_ref") != "main":
+        anomalies.append("base_ref_is_not_main")
+    if item.get("draft") is not False:
+        anomalies.append("draft_is_not_false")
+    title = item.get("title")
+    token = match.group(1)
+    if kind == "anchor":
+        expected = f"chore(image-anchor): adopt vibeic-eda {token}"
+        if title != expected:
+            anomalies.append("title_does_not_match_anchor_producer")
+    elif kind == "sync":
+        if not isinstance(title, str) or not title.startswith(
+                f"[eda-fork] {token}: "):
+            anomalies.append("title_does_not_match_sync_producer")
+    elif (not isinstance(title, str)
+          or not title.startswith(
+              f"[eda-fork] {token}: upstream release assessment — ")):
+        anomalies.append("title_does_not_match_assessment_producer")
+    return kind, anomalies
+
+
 def _round_rows(raw: Any) -> Mapping[str, Mapping[str, Any]]:
     if not isinstance(raw, dict):
         raise SourceFailure("round_json: root is not an object")
@@ -541,7 +937,7 @@ def normalize_round_pr(item: Any, expected_repo: str,
     }
 
 
-def _scopes(repo: str, registry: Registry, *, org_source: bool = False) -> list[str]:
+def _scopes(repo: str, registry: Registry) -> list[str]:
     key = repo.lower()
     result: list[str] = []
     if key in registry.registered_repos:
@@ -550,10 +946,6 @@ def _scopes(repo: str, registry: Registry, *, org_source: bool = False) -> list[
         result.append("upstream")
     if key == f"{ORG}/vibeic-eda":
         result.append("vibeic_eda")
-    if (org_source and key.startswith(f"{ORG}/")
-            and key not in registry.registered_repos
-            and key != f"{ORG}/vibeic-eda"):
-        result.append("out_of_registry_org")
     return result
 
 
@@ -617,10 +1009,11 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "finished_at": None,
     }
     source_counts = {
-        "org_search_issues": 0,
-        "org_search_pull_requests": 0,
-        "viewer_issues_matched": 0,
-        "viewer_pull_requests_matched": 0,
+        "exact_repository_issues": 0,
+        "exact_repository_pull_requests": 0,
+        "fork_delivery_pull_requests": 0,
+        "viewer_upstream_issues": 0,
+        "viewer_upstream_pull_requests": 0,
         "round_upstream_pull_requests": 0,
     }
 
@@ -650,9 +1043,7 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
 
     def validate_viewer(response: Mapping[str, Any], operation: str) -> None:
         nonlocal viewer_actor
-        root = _mapping(response, operation)
-        if root.get("errors"):
-            return  # _connection preserves the actual GraphQL error below.
+        root = _graphql_root(response, operation)
         data = _mapping(root.get("data"), f"{operation}.data")
         viewer = _mapping(data.get("viewer"), f"{operation}.data.viewer")
         actor = viewer.get("login")
@@ -671,121 +1062,327 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
                 f"{operation}: authenticated viewer {actor!r} is not "
                 f"expected actor {expected_actor!r}")
 
-    if registry is not None:
-        org_specs = (
-            ("org_issues", "issue", "is:issue", "org_search_issues"),
-            ("org_pull_requests", "pull_request", "is:pr",
-             "org_search_pull_requests"),
-        )
-        for operation, kind, qualifier, count_name in org_specs:
-            try:
-                nodes = paginate_connection(
-                    runner, operation=operation, query=ORG_SEARCH_QUERY,
-                    variables={"queryString": f"org:{ORG} is:open {qualifier}"},
-                    path=("search",), count_field="issueCount", search_cap=True)
-                for node in nodes:
-                    item = normalize_graphql_item(node, kind, operation)
-                    if not item["repository"].lower().startswith(f"{ORG}/"):
-                        raise SourceFailure(
-                            f"{operation}: non-{ORG} repository in org search")
-                    acc.add(item, "org_search",
-                            _scopes(item["repository"], registry, org_source=True))
-                source_counts[count_name] = len(nodes)
-            except SourceFailure as exc:
-                errors.append({"source": operation, "error": str(exc)})
+    canonical_repositories = (sorted(registry.registered_repos.values(),
+                                     key=str.lower)
+                              if registry is not None else [])
+    required_repositories = sorted(
+        canonical_repositories + [VIBEIC_EDA_REPOSITORY], key=str.lower)
+    catalog_record: dict[str, Any] = {
+        "outcome": "norecord", "total_repositories": None,
+        "repositories": None, "live_fork_repositories": None,
+        "unregistered_live_fork_repositories": None,
+    }
+    inventory_rows: list[dict[str, Any]] = []
+    catalog_entries: dict[str, _CatalogRepository] = {}
+    inventory_problem = False
+    network_frozen = registry is None
 
+    def validate_catalog(response: Mapping[str, Any], operation: str) -> None:
+        validate_viewer(response, operation)
+
+    def validate_repository(response: Mapping[str, Any], operation: str,
+                            expected_repo: str) -> None:
+        validate_viewer(response, operation)
+        root = _mapping(response, operation)
+        if root.get("errors"):
+            return
+        data = _mapping(root.get("data"), f"{operation}.data")
+        repo = _mapping(data.get("repository"), f"{operation}.repository")
+        actual = repo.get("nameWithOwner")
+        if not isinstance(actual, str) or actual.lower() != expected_repo.lower():
+            raise SourceFailure(
+                f"{operation}: repository identity {actual!r} is not "
+                f"{expected_repo!r}")
+
+    if registry is not None:
+        try:
+            total, catalog_entries = _catalog_repositories(
+                runner, validate_catalog)
+            catalog_list = [{
+                "repository": entry.repository,
+                "is_fork": entry.is_fork,
+                "is_archived": entry.is_archived,
+                "has_issues_enabled": entry.has_issues_enabled,
+            } for entry in sorted(catalog_entries.values(),
+                                  key=lambda entry: entry.repository.lower())]
+            live_forks = sorted(
+                (entry.repository for entry in catalog_entries.values()
+                 if entry.is_fork and not entry.is_archived), key=str.lower)
+            unregistered = sorted(
+                (repo for repo in live_forks
+                 if repo.lower() not in registry.registered_repos), key=str.lower)
+            catalog_record = {
+                "outcome": "complete", "total_repositories": total,
+                "repositories": catalog_list,
+                "live_fork_repositories": live_forks,
+                "unregistered_live_fork_repositories": unregistered,
+            }
+            missing = [repo for repo in required_repositories
+                       if repo.lower() not in catalog_entries]
+            if missing:
+                inventory_problem = True
+                errors.append({
+                    "source": "organization.repositories",
+                    "error": "required repositories absent from exact catalog: "
+                             + ", ".join(missing),
+                })
+            if unregistered:
+                inventory_problem = True
+                errors.append({
+                    "source": "organization.repositories",
+                    "error": "live forks absent from FORKS.json: "
+                             + ", ".join(unregistered),
+                })
+        except SourceFailure as exc:
+            inventory_problem = True
+            network_frozen = True
+            errors.append({"source": "organization.repositories",
+                           "error": str(exc)})
+
+        for repository in required_repositories:
+            scope = ("registered_fork"
+                     if repository.lower() in registry.registered_repos
+                     else "vibeic_eda")
+            empty = {
+                "repository": repository, "scope": scope, "status": "norecord",
+                "is_fork": None, "is_archived": None,
+                "has_issues_enabled": None,
+                "issues": {"outcome": "norecord", "open_count": None},
+                "pull_requests": {"outcome": "norecord", "open_count": None},
+            }
+            entry = catalog_entries.get(repository.lower())
+            if network_frozen or entry is None:
+                inventory_rows.append(empty)
+                continue
+            try:
+                issue_nodes, pr_nodes = _finish_repository_pages(
+                    runner, entry, validate_repository)
+                normalized_issues = [normalize_graphql_item(
+                    node, "issue", f"repository.{repository}.issues")
+                    for node in issue_nodes]
+                normalized_prs = [normalize_graphql_item(
+                    node, "pull_request",
+                    f"repository.{repository}.pull_requests")
+                    for node in pr_nodes]
+                item_scopes = _scopes(repository, registry)
+                for item in normalized_issues:
+                    acc.add(item, "exact_repository_issues", item_scopes)
+                for item in normalized_prs:
+                    acc.add(item, "exact_repository_pull_requests", item_scopes)
+                source_counts["exact_repository_issues"] += len(
+                    normalized_issues)
+                source_counts["exact_repository_pull_requests"] += len(
+                    normalized_prs)
+                inventory_rows.append({
+                    "repository": entry.repository, "scope": scope,
+                    "status": "complete", "is_fork": entry.is_fork,
+                    "is_archived": entry.is_archived,
+                    "has_issues_enabled": entry.has_issues_enabled,
+                    "issues": {
+                        "outcome": ("complete" if entry.has_issues_enabled
+                                    else "disabled"),
+                        "open_count": len(normalized_issues),
+                    },
+                    "pull_requests": {
+                        "outcome": "complete",
+                        "open_count": len(normalized_prs),
+                    },
+                })
+            except SourceFailure as exc:
+                inventory_problem = True
+                network_frozen = True
+                errors.append({
+                    "source": f"repository.{repository}.open_items",
+                    "error": str(exc),
+                })
+                inventory_rows.append(empty)
+
+    completed_inventory = sum(row["status"] == "complete"
+                              for row in inventory_rows)
+    inventory = {
+        "status": ("complete" if registry is not None
+                   and not inventory_problem
+                   and completed_inventory == len(required_repositories)
+                   else "norecord"),
+        "catalog": catalog_record,
+        "canonical_registered_repositories": canonical_repositories,
+        "required_repositories": required_repositories,
+        "required_repository_count": len(required_repositories),
+        "completed_repository_count": completed_inventory,
+        "repositories": inventory_rows,
+    }
+
+    delivery = {
+        "repository": DELIVERY_REPOSITORY,
+        "status": "norecord",
+        "pr_head_patterns": [pattern.pattern
+                             for pattern in DELIVERY_PR_HEAD_PATTERNS.values()],
+        "issues": {"outcome": "excluded_no_durable_producer_marker"},
+        "pull_requests": {
+            "outcome": "norecord", "open_count": None,
+            "matched_count": None, "excluded_count": None, "excluded": None,
+        },
+    }
+    if registry is not None and not network_frozen:
+        entry = catalog_entries.get(DELIVERY_REPOSITORY)
+        if entry is None:
+            errors.append({"source": "fork_delivery.pull_requests",
+                           "error": "vibeic/vibe-ic absent from exact catalog"})
+            network_frozen = True
+        else:
+            try:
+                _ignored_issues, pr_nodes = _finish_repository_pages(
+                    runner, entry, validate_repository, include_issues=False)
+                excluded: list[dict[str, Any]] = []
+                matched = 0
+                for node in pr_nodes:
+                    item = normalize_delivery_pr(
+                        node, "fork_delivery.pull_requests")
+                    kind, reasons = delivery_pr_decision(item)
+                    if kind is None:
+                        excluded.append({**item, "reasons": reasons})
+                        continue
+                    delivered = {**item, "delivery_kind": kind,
+                                 "delivery_anomalies": reasons}
+                    acc.add(delivered, "fork_delivery_pull_requests",
+                            ["fork_delivery"])
+                    matched += 1
+                source_counts["fork_delivery_pull_requests"] = matched
+                delivery.update(status="complete", pull_requests={
+                    "outcome": "complete", "open_count": len(pr_nodes),
+                    "matched_count": matched,
+                    "excluded_count": len(excluded), "excluded": excluded,
+                })
+            except SourceFailure as exc:
+                network_frozen = True
+                errors.append({"source": "fork_delivery.pull_requests",
+                               "error": str(exc)})
+
+    upstream_actor = {
+        "status": "norecord",
+        "issues": {"outcome": "norecord", "seen_count": None,
+                   "matched_count": None},
+        "pull_requests": {"outcome": "norecord", "seen_count": None,
+                          "matched_count": None},
+    }
+    if registry is not None and not network_frozen:
+        actor_parts: dict[str, dict[str, Any]] = {}
         viewer_specs = (
-            ("viewer_issues", "issue", VIEWER_ISSUES_QUERY, "issues",
-             "viewer_issues_matched"),
-            ("viewer_pull_requests", "pull_request", VIEWER_PRS_QUERY,
-             "pullRequests", "viewer_pull_requests_matched"),
+            ("viewer_upstream.issues", "issue", VIEWER_ISSUES_QUERY, "issues",
+             "viewer_upstream_issues"),
+            ("viewer_upstream.pull_requests", "pull_request", VIEWER_PRS_QUERY,
+             "pullRequests", "viewer_upstream_pull_requests"),
         )
-        target_repos = set(registry.registered_repos) | set(registry.upstream_repos)
         for operation, kind, query, connection_name, count_name in viewer_specs:
+            if network_frozen:
+                break
             try:
                 nodes = paginate_connection(
                     runner, operation=operation, query=query, variables={},
                     path=("viewer", connection_name), count_field="totalCount",
                     page_validator=validate_viewer)
-                matched = 0
+                matched_items = []
                 for node in nodes:
-                    item = normalize_graphql_item(node, kind, operation)
-                    if item["repository"].lower() not in target_repos:
+                    repo = ((node.get("repository") or {}).get("nameWithOwner")
+                            if isinstance(node.get("repository"), dict) else None)
+                    if not isinstance(repo, str) \
+                            or repo.lower() not in registry.upstream_repos:
                         continue
-                    matched += 1
-                    acc.add(item, "viewer",
+                    matched_items.append(normalize_graphql_item(
+                        node, kind, operation))
+                for item in matched_items:
+                    acc.add(item, "viewer_upstream",
                             _scopes(item["repository"], registry))
-                source_counts[count_name] = matched
+                source_counts[count_name] = len(matched_items)
+                actor_parts[connection_name] = {
+                    "outcome": "complete", "seen_count": len(nodes),
+                    "matched_count": len(matched_items),
+                }
             except SourceFailure as exc:
+                network_frozen = True
                 errors.append({"source": operation, "error": str(exc)})
+        if len(actor_parts) == 2:
+            upstream_actor = {
+                "status": "complete", "issues": actor_parts["issues"],
+                "pull_requests": actor_parts["pullRequests"],
+            }
 
-        if rows is not None:
-            for tool in registry.tools:
-                source = f"round.{tool}.upstream_pull_requests"
-                row = rows.get(tool.lower())
-                measurement = row.get("upstream_pull_requests") \
-                    if isinstance(row, dict) else None
-                if not isinstance(measurement, dict):
+    round_rows: list[dict[str, Any]] = []
+    if registry is not None:
+        for tool in registry.tools:
+            source = f"round.{tool}.upstream_pull_requests"
+            expected_upstream = registry.upstream_by_tool[tool]
+            round_row = {"tool": tool, "repository": expected_upstream,
+                         "outcome": "norecord", "open_count": None}
+            row = rows.get(tool.lower()) if rows is not None else None
+            measurement = row.get("upstream_pull_requests") \
+                if isinstance(row, dict) else None
+            if not isinstance(measurement, dict):
+                if rows is not None:
                     errors.append({
                         "source": source,
                         "error": "missing repo measurement; zero is unknowable",
                     })
-                    continue
-                outcome = measurement.get("outcome")
-                measured_upstream = measurement.get("upstream_repository")
-                fork_owner = measurement.get("fork_owner")
-                open_count = measurement.get("open_count")
-                measured_items = measurement.get("items")
-                expected_upstream = registry.upstream_by_tool[tool]
-                envelope_errors = []
-                if (not isinstance(measured_upstream, str)
-                        or measured_upstream.lower() != expected_upstream.lower()):
-                    envelope_errors.append(
-                        f"upstream_repository={measured_upstream!r}, expected "
-                        f"{expected_upstream!r}")
-                if fork_owner != ORG:
-                    envelope_errors.append(
-                        f"fork_owner={fork_owner!r}, expected {ORG!r}")
-                if (isinstance(open_count, bool) or not isinstance(open_count, int)
-                        or open_count < 0):
-                    envelope_errors.append(
-                        f"open_count={open_count!r} is not a non-negative integer")
-                if not isinstance(measured_items, list):
-                    envelope_errors.append("items is not a list")
-                elif (isinstance(open_count, int)
-                      and not isinstance(open_count, bool)
-                      and open_count != len(measured_items)):
-                    envelope_errors.append(
-                        f"open_count={open_count} but items has "
-                        f"{len(measured_items)} row(s)")
-                if envelope_errors:
-                    errors.append({"source": source,
-                                   "error": "; ".join(envelope_errors)})
-                    continue
-                if outcome != "complete":
-                    errors.append({
-                        "source": source,
-                        "error": (f"outcome={outcome!r}; expected complete"
-                                  if outcome in ("norecord", None)
-                                  else f"malformed outcome {outcome!r}"),
-                    })
-                    continue
-                try:
-                    for raw_item in measured_items:
-                        item = normalize_round_pr(
-                            raw_item, expected_upstream, source)
-                        acc.add(item, "round_upstream_pull_requests",
-                                _scopes(item["repository"], registry))
-                        source_counts["round_upstream_pull_requests"] += 1
-                except SourceFailure as exc:
-                    errors.append({"source": source, "error": str(exc)})
-    else:
-        errors.extend([
-            {"source": "org_search",
-             "error": "not attempted because forks_json is unusable"},
-            {"source": "viewer",
-             "error": "not attempted because forks_json is unusable"},
-        ])
+                round_rows.append(round_row)
+                continue
+            outcome = measurement.get("outcome")
+            measured_upstream = measurement.get("upstream_repository")
+            fork_owner = measurement.get("fork_owner")
+            open_count = measurement.get("open_count")
+            measured_items = measurement.get("items")
+            envelope_errors = []
+            if (not isinstance(measured_upstream, str)
+                    or measured_upstream.lower() != expected_upstream.lower()):
+                envelope_errors.append(
+                    f"upstream_repository={measured_upstream!r}, expected "
+                    f"{expected_upstream!r}")
+            if fork_owner != ORG:
+                envelope_errors.append(
+                    f"fork_owner={fork_owner!r}, expected {ORG!r}")
+            if (isinstance(open_count, bool) or not isinstance(open_count, int)
+                    or open_count < 0):
+                envelope_errors.append(
+                    f"open_count={open_count!r} is not a non-negative integer")
+            if not isinstance(measured_items, list):
+                envelope_errors.append("items is not a list")
+            elif (isinstance(open_count, int) and not isinstance(open_count, bool)
+                  and open_count != len(measured_items)):
+                envelope_errors.append(
+                    f"open_count={open_count} but items has "
+                    f"{len(measured_items)} row(s)")
+            if outcome != "complete":
+                envelope_errors.append(f"outcome={outcome!r}; expected complete")
+            if envelope_errors:
+                errors.append({"source": source,
+                               "error": "; ".join(envelope_errors)})
+                round_rows.append(round_row)
+                continue
+            try:
+                normalized = [normalize_round_pr(
+                    raw_item, expected_upstream, source)
+                    for raw_item in measured_items]
+                for item in normalized:
+                    acc.add(item, "round_upstream_pull_requests",
+                            _scopes(item["repository"], registry))
+                source_counts["round_upstream_pull_requests"] += len(normalized)
+                round_rows.append({"tool": tool,
+                                   "repository": expected_upstream,
+                                   "outcome": "complete",
+                                   "open_count": len(normalized)})
+            except SourceFailure as exc:
+                errors.append({"source": source, "error": str(exc)})
+                round_rows.append(round_row)
+
+    round_upstream = {
+        "status": ("complete" if registry is not None and rows is not None
+                   and len(round_rows) == len(canonical_repositories)
+                   and all(row["outcome"] == "complete" for row in round_rows)
+                   else "norecord"),
+        "required_fork_count": len(canonical_repositories),
+        "completed_fork_count": sum(row["outcome"] == "complete"
+                                    for row in round_rows),
+        "forks": round_rows,
+    }
 
     items = acc.items()
     issue_count = sum(item["type"] == "issue" for item in items)
@@ -799,8 +1396,8 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "upstream_items": sum("upstream" in item["scopes"] for item in items),
         "vibeic_eda_items": sum(
             "vibeic_eda" in item["scopes"] for item in items),
-        "out_of_registry_org_items": sum(
-            "out_of_registry_org" in item["scopes"] for item in items),
+        "fork_delivery_items": sum(
+            "fork_delivery" in item["scopes"] for item in items),
         "by_source": source_counts,
     }
     if errors:
@@ -817,6 +1414,10 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "actor": viewer_actor,
         "expected_actor": expected_actor,
         "round": round_provenance,
+        "inventory": inventory,
+        "delivery": delivery,
+        "upstream_actor": upstream_actor,
+        "round_upstream": round_upstream,
         "status": status,
         "counts": counts,
         "items": items,
