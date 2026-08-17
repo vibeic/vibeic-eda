@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -412,6 +413,11 @@ def _tick_fleet(tmp_path: Path, selftest_body: str):
     dirp = root / "fork-gatekeeper"
     dirp.mkdir(parents=True)
     shutil.copy2(TICK, dirp / "run_tick.sh")
+    shutil.copy2(HERE / "check_ai_release_authorization.py",
+                 dirp / "check_ai_release_authorization.py")
+    (dirp / "FORKS.json").write_text(json.dumps({
+        "org": "vibeic", "forks": [{"tool": "Demo"}],
+    }))
     (root / "RELEASED.json").write_text('{"version": "0.0.1-test"}\n')
     for name in ("check_fork_only.py", "check_pins_agree.py",
                  "check_dockerfile_layer_budget.py", "check_doc_counts.py",
@@ -431,10 +437,51 @@ def _tick_fleet(tmp_path: Path, selftest_body: str):
     return dirp / "run_tick.sh", env
 
 
+def _authorized_tick(script: Path, env: dict):
+    state = Path(env["GK_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    boundary = datetime.now(timezone.utc) - timedelta(seconds=2)
+    started = boundary + timedelta(seconds=1)
+    run_id = "a" * 64
+    round_json = state / "daily_0530.json"
+    round_json.write_text(json.dumps({
+        "Demo": {
+            "main": "main", "conflicted": [],
+            "upstream_merge_outcome": "natural_success",
+        },
+        "_ai_decisions": {
+            "cases": 0, "invoked": False, "cleared": True,
+            "verified": True,
+        },
+        "_round": {
+            "schema_version": 1, "run_id": run_id,
+            "started_at": started.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "applied": True,
+        },
+    }))
+    capability = "e" * 64
+    args = [
+        "--ai-round-json", str(round_json),
+        "--ai-forks-json", str(script.parent / "FORKS.json"),
+        "--ai-round-at", boundary.isoformat(),
+        "--ai-run-id", run_id,
+        "--ai-capability", capability,
+    ]
+    (state / f"ai-release-handoff.{capability}.json").write_text(json.dumps({
+        "schema_version": 1, "capability": capability,
+        "parent_pid": os.getpid(), "round_json": str(round_json),
+        "forks_json": str(script.parent / "FORKS.json"),
+        "round_at": boundary.isoformat(), "run_id": run_id,
+    }))
+    return subprocess.run(
+        ["bash", str(script), *args], env=env, capture_output=True,
+        text=True, timeout=900)
+
+
 def _run_tick(tmp_path: Path, selftest_body: str):
     script, env = _tick_fleet(tmp_path, selftest_body)
-    return subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                          text=True, timeout=900)
+    return _authorized_tick(script, env)
 
 
 def _exiting(rc: int, msg: str = "") -> str:
@@ -469,8 +516,7 @@ def test_the_whole_tick_goes_red_when_the_driver_is_absent(tmp_path):
     """A deleted driver must not read as a clean day."""
     script, env = _tick_fleet(tmp_path, _OK_STUB)
     (script.parent / "check_fork_selftests.py").unlink()
-    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                       text=True, timeout=900)
+    p = _authorized_tick(script, env)
     assert p.returncode == 8, f"{p.returncode}\n{p.stdout[-2500:]}"
     assert "nothing was checked" in p.stdout
     assert not (tmp_path / "release-invoked").exists(), (
@@ -483,8 +529,7 @@ def test_a_red_source_guard_blocks_release_but_not_the_round_report(tmp_path):
     script, env = _tick_fleet(tmp_path, _OK_STUB)
     _stub(script.parent.parent / "tools" / "check_pins_agree.py",
           _exiting(1, "pin disagreement"))
-    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                       text=True, timeout=900)
+    p = _authorized_tick(script, env)
     assert p.returncode == 3, f"{p.returncode}\n{p.stdout[-2500:]}"
     assert "[blocking] REFUSE daily_release" in p.stdout
     assert "[done] gatekeeper tick exit 3" in p.stdout, (
@@ -497,8 +542,7 @@ def test_a_non_clean_merge_round_cannot_release_a_partial_fleet(tmp_path):
     script, env = _tick_fleet(tmp_path, _OK_STUB)
     _stub(script.parent / "daily_merge.py",
           _exiting(1, "POST_MERGE_CHECK_UNMEASURABLE"))
-    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                       text=True, timeout=900)
+    p = _authorized_tick(script, env)
     assert p.returncode == 4, f"{p.returncode}\n{p.stdout[-2500:]}"
     assert "[blocking] REFUSE daily_release" in p.stdout
     assert not (tmp_path / "release-invoked").exists(), (

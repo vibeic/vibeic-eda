@@ -3693,25 +3693,85 @@ def test_the_cron_reaches_the_same_state_dir_it_did_before_and_declares_itself()
     source text would pass against a script that no longer runs.
     """
     import subprocess
+    from datetime import datetime, timedelta, timezone
     script = Path(__file__).resolve().parent / "run_tick.sh"
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
+        state_dir = home / ".cache" / "eda-fork-gatekeeper"
+        state_dir.mkdir(parents=True)
+        boundary = datetime.now(timezone.utc) - timedelta(seconds=2)
+        started = boundary + timedelta(seconds=1)
+        run_id = "a" * 64
+        round_json = state_dir / "daily_0530.json"
+        registry_path = script.parent / "FORKS.json"
+        registry = json.loads(registry_path.read_text())
+        round_record = {
+            entry["tool"]: {
+                "main": "main", "conflicted": [],
+                "upstream_merge_outcome": "natural_success",
+            }
+            for entry in registry["forks"]
+        }
+        round_record.update({
+            "_ai_decisions": {
+                "cases": 0, "invoked": False, "cleared": True,
+                "verified": True,
+            },
+            "_round": {
+                "schema_version": 1, "run_id": run_id,
+                "started_at": started.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "applied": True,
+            },
+        })
+        round_json.write_text(json.dumps(round_record))
+        capability = "e" * 64
+        (state_dir / f"ai-release-handoff.{capability}.json").write_text(
+            json.dumps({
+                "schema_version": 1, "capability": capability,
+                "parent_pid": os.getpid(), "round_json": str(round_json),
+                "forks_json": str(registry_path),
+                "round_at": boundary.isoformat(), "run_id": run_id,
+            }))
+        tick_args = [
+            "--ai-round-json", str(round_json),
+            "--ai-forks-json", str(registry_path),
+            "--ai-round-at", boundary.isoformat(),
+            "--ai-run-id", run_id,
+            "--ai-capability", capability,
+        ]
         # run_tick.sh OVERWRITES PATH with ${HOME}/.local/bin first, so that is where a
         # stub has to live for the script's own resolution to find it.
         binx = home / ".local" / "bin"
         binx.mkdir(parents=True)
         seen = home / "env.txt"
-        (binx / "python3").write_text(
-            f'#!/bin/sh\nprintf "%s\\n%s\\n" "$GK_STATE_DIR" "$GK_PRODUCTION_WRITER" '
-            f'> "{seen}"\n')
+        # The current-round authorization boundary is deliberately real. Other
+        # Python programs remain no-ops because this test is about the runner's
+        # environment, not their behavior.
+        (binx / "python3").write_text(f'''#!/bin/sh
+case "$1" in
+  -)
+    case "$2" in
+      "{state_dir}"/ai-release-handoff.*|"{state_dir}"/ai-release-authorization.json.tick-recheck.*)
+        exec "{sys.executable}" "$@"
+        ;;
+    esac
+    ;;
+  */check_ai_release_authorization.py)
+    exec "{sys.executable}" "$@"
+    ;;
+esac
+printf "%s\\n%s\\n" "$GK_STATE_DIR" "$GK_PRODUCTION_WRITER" > "{seen}"
+''')
         (binx / "gh").write_text('#!/bin/sh\necho gho_stub\n')
         for f in (binx / "python3", binx / "gh"):
             f.chmod(0o755)
         # PATH here only has to find `bash`; the script overwrites PATH with its own
         # (${HOME}/.local/bin first) before it resolves anything else.
-        r = subprocess.run(["bash", str(script)], capture_output=True, text=True,
-                           timeout=120,
-                           env={"HOME": str(home), "PATH": f"{binx}:/usr/bin:/bin"})
+        r = subprocess.run(["bash", str(script), *tick_args],
+                           capture_output=True, text=True, timeout=120,
+                           env={"HOME": str(home),
+                                "PATH": f"{binx}:/usr/bin:/bin"})
         # RAN TO COMPLETION, not "was green" (changed 2026-08-05, vibeic-eda#88).
         #
         # `python3` here is a stub that writes one file and exits 0, so EVERY check

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,14 +44,33 @@ DELIVERY_HEAD_PATTERN_TEXT = {
     r"^eda-fork-sync-(\d{4}-\d{2}-\d{2})$",
     r"^eda-fork-assess-(\d{4}-\d{2}-\d{2})$",
 }
+AI_AUTHORIZATION_PROGRAM = "check_ai_release_authorization"
+AI_AUTHORIZATION_SCHEMA_VERSION = 1
+
+
+def _json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-finite JSON number {value!r}")
 
 
 def _read(path: Path) -> tuple[Optional[dict], Optional[str]]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object,
+            parse_constant=_reject_json_constant,
+        )
     except FileNotFoundError:
         return None, f"missing {path.name}"
-    except (json.JSONDecodeError, OSError) as exc:
+    except (OSError, ValueError) as exc:
         return None, f"unreadable {path.name}: {type(exc).__name__}: {exc}"
     if not isinstance(value, dict):
         return None, f"{path.name} is not a JSON object"
@@ -120,6 +140,194 @@ def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
             "total_runtime_ceiling_seconds"),
         "progress": progress if isinstance(progress, dict) else None,
     }
+
+
+def _validate_ai_authorization(record: dict, path: Path, round_at: str,
+                               forks_json: Path
+                               ) -> tuple[Optional[dict], list[str]]:
+    """Validate the exact pre-release AI postcondition used by this round.
+
+    A valid ``blocked`` record is evidence, not a source error.  ``norecord``
+    and malformed records remain explicit third states and make LL capture
+    non-clean; neither may inherit an earlier authorization.
+    """
+    errors: list[str] = []
+    now = datetime.now(timezone.utc)
+    if record.get("program") != AI_AUTHORIZATION_PROGRAM:
+        errors.append(f"program is not {AI_AUTHORIZATION_PROGRAM}")
+    if (type(record.get("schema_version")) is not int
+            or record["schema_version"] != AI_AUTHORIZATION_SCHEMA_VERSION):
+        errors.append(
+            f"schema_version is not {AI_AUTHORIZATION_SCHEMA_VERSION}")
+    status = record.get("status")
+    if status not in {"authorized", "blocked", "norecord"}:
+        errors.append("status is not authorized, blocked, or norecord")
+    boundary = _strict_when(round_at)
+    checked = _strict_when(record.get("checked_at"))
+    source_boundary = _strict_when(record.get("round_at"))
+    if boundary is None:
+        errors.append("the 05:30 round boundary is malformed")
+    if checked is None:
+        errors.append("checked_at is missing or malformed")
+    elif boundary is not None and checked < boundary:
+        errors.append("checked_at predates this 05:30 round")
+    elif checked > now:
+        errors.append("checked_at is in the future")
+    if source_boundary is None:
+        errors.append("round_at is missing or malformed")
+    elif boundary is not None and source_boundary != boundary:
+        errors.append("round_at does not match this 05:30 round")
+    if not isinstance(record.get("source"), str) or not record["source"]:
+        errors.append("source is missing")
+
+    registered, registry_hash, fleet_errors = _registered_fleet(forks_json)
+    errors.extend(fleet_errors)
+    claimed_forks = record.get("registered_forks")
+    claimed_count = record.get("registered_count")
+    if claimed_forks != registered:
+        errors.append("registered_forks does not exactly match canonical fleet")
+    if type(claimed_count) is not int or claimed_count != len(registered):
+        errors.append("registered_count does not match canonical fleet")
+    registry = record.get("registry")
+    if not isinstance(registry, dict):
+        errors.append("registry is not an object")
+    else:
+        if registry.get("source") != str(forks_json):
+            errors.append("registry.source does not name canonical --forks-json")
+        if registry_hash is None or registry.get("sha256") != registry_hash:
+            errors.append("registry.sha256 does not match canonical --forks-json")
+
+    source_errors = record.get("source_errors")
+    reasons = record.get("reasons")
+    if (not isinstance(source_errors, list)
+            or any(not isinstance(item, str) or not item
+                   for item in source_errors)):
+        errors.append("source_errors is not a list of non-empty strings")
+        source_errors = []
+    if (not isinstance(reasons, list)
+            or any(not isinstance(item, str) or not item for item in reasons)):
+        errors.append("reasons is not a list of non-empty strings")
+        reasons = []
+
+    # NORECORD is itself a retained fact. Its missing round fields must not be
+    # laundered into malformed-record noise, but it still makes capture fail.
+    if status == "norecord":
+        if not source_errors:
+            errors.append("norecord has no source error")
+        return record, errors + [
+            f"{path.name} reports NORECORD: "
+            + "; ".join(source_errors or reasons or ["unknown cause"])
+        ]
+
+    meta = record.get("round")
+    if not isinstance(meta, dict):
+        errors.append("round is not an object")
+        meta = {}
+    if type(meta.get("schema_version")) is not int or meta.get("schema_version") != 1:
+        errors.append("round.schema_version is not 1")
+    run_id = meta.get("run_id")
+    if (not isinstance(run_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", run_id)):
+        errors.append("round.run_id is missing or malformed")
+    started = _strict_when(meta.get("started_at"))
+    finished = _strict_when(meta.get("finished_at"))
+    if started is None or finished is None:
+        errors.append("round started_at/finished_at is missing or malformed")
+    else:
+        if boundary is not None and started < boundary:
+            errors.append("round.started_at predates this 05:30 round")
+        if finished < started:
+            errors.append("round.finished_at precedes started_at")
+        if checked is not None and finished > checked:
+            errors.append("round.finished_at is after authorization check")
+    if meta.get("applied") is not True:
+        errors.append("round.applied is not true")
+
+    count = record.get("case_count")
+    verified_count = record.get("verified_count")
+    unverified_count = record.get("unverified_count")
+    for name, value in (("case_count", count),
+                        ("verified_count", verified_count),
+                        ("unverified_count", unverified_count)):
+        if type(value) is not int or value < 0:
+            errors.append(f"{name} is not a non-negative integer")
+    results = record.get("case_results")
+    if not isinstance(results, list):
+        errors.append("case_results is not a list")
+        results = []
+    identities: list[tuple[str, str]] = []
+    true_count = 0
+    for pos, result in enumerate(results):
+        if not isinstance(result, dict):
+            errors.append(f"case_results[{pos}] is not an object")
+            continue
+        fork, branch = result.get("fork"), result.get("branch")
+        if (not isinstance(fork, str) or not fork or fork.strip() != fork
+                or not isinstance(branch, str) or not branch
+                or branch.strip() != branch):
+            errors.append(f"case_results[{pos}] has malformed identity")
+            continue
+        if type(result.get("verified")) is not bool:
+            errors.append(f"case_results[{pos}].verified is not boolean")
+            continue
+        mainline = result.get("mainline")
+        source_tip = result.get("source_tip")
+        published_tip = result.get("published_tip")
+        reason = result.get("reason")
+        if (not isinstance(mainline, str) or not mainline
+                or mainline.strip() != mainline):
+            errors.append(f"case_results[{pos}].mainline is malformed")
+        if (not isinstance(source_tip, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", source_tip)):
+            errors.append(f"case_results[{pos}].source_tip is malformed")
+        if (result["verified"] and
+                (not isinstance(published_tip, str)
+                 or not re.fullmatch(r"[0-9a-f]{40}", published_tip))):
+            errors.append(f"case_results[{pos}].published_tip is malformed")
+        if not isinstance(reason, str) or not reason:
+            errors.append(f"case_results[{pos}].reason is malformed")
+        identities.append((fork, branch))
+        true_count += int(result["verified"])
+    duplicates = sorted(
+        key for key in set(identities) if identities.count(key) > 1)
+    if duplicates:
+        errors.append("case_results has duplicate identity")
+    if type(count) is int and count != len(results):
+        errors.append("case_count does not equal case_results length")
+    if type(verified_count) is int and verified_count != true_count:
+        errors.append("verified_count contradicts case_results")
+    false_count = len(results) - true_count
+    if type(unverified_count) is int and unverified_count != false_count:
+        errors.append("unverified_count contradicts case_results")
+
+    fully_verified = bool(
+        type(count) is int and count == len(results)
+        and true_count == count and false_count == 0)
+    transport = record.get("transport")
+    transport_authorized = bool(
+        count == 0
+        or (isinstance(transport, dict)
+            and transport.get("invoked") is True
+            and transport.get("outcome") == "natural"
+            and type(transport.get("rc")) is int
+            and transport.get("rc") == 0))
+    fully_authorized = fully_verified and transport_authorized
+    if status == "authorized":
+        if not fully_authorized:
+            errors.append(
+                "authorized status contradicts case_results or AI transport")
+        if reasons or source_errors:
+            errors.append("authorized status carries reasons/source_errors")
+    elif status == "blocked":
+        if fully_authorized:
+            errors.append("blocked status contradicts fully authorized cases")
+        if not reasons:
+            errors.append("blocked status has no reason")
+        if source_errors:
+            errors.append("blocked status carries source_errors")
+    if errors:
+        return None, [f"{path.name} is invalid: " + "; ".join(errors)]
+    return record, []
 
 
 def _valid_repository(value: object) -> bool:
@@ -1062,33 +1270,263 @@ def _validate_fork_github(record: dict, path: Path, round_at: str,
     return summary, source_errors
 
 
-def _registered_fleet(path: Path) -> tuple[list[str], list[str]]:
+def _registered_fleet(
+        path: Path) -> tuple[list[str], Optional[str], list[str]]:
     """Read the canonical fleet independently of the gap producer."""
     errors: list[str] = []
     tools: list[str] = []
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return [], [f"could not read registered fleet {path}: "
-                    f"{type(exc).__name__}: {exc}"]
+        raw = path.read_bytes()
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        return [], None, [f"could not read registered fleet {path}: "
+                          f"{type(exc).__name__}: {exc}"]
+    digest = hashlib.sha256(raw).hexdigest()
     entries = value.get("forks") if isinstance(value, dict) else None
     if not isinstance(entries, list):
-        return [], [f"registered fleet {path} has no forks list"]
+        return [], digest, [f"registered fleet {path} has no forks list"]
     for pos, entry in enumerate(entries):
         tool = entry.get("tool") if isinstance(entry, dict) else None
-        if (not isinstance(tool, str) or not tool
-                or tool.strip() != tool):
+        if (not isinstance(tool, str) or not tool or tool.strip() != tool
+                or "/" in tool or any(char.isspace() for char in tool)):
             errors.append(
                 f"registered fleet forks[{pos}].tool is malformed")
             continue
         tools.append(tool)
-    duplicates = sorted(tool for tool in set(tools) if tools.count(tool) > 1)
+    folded: dict[str, list[str]] = {}
+    for tool in tools:
+        folded.setdefault(tool.casefold(), []).append(tool)
+    duplicates = sorted(
+        names[0] for names in folded.values() if len(names) > 1)
     if duplicates:
         errors.append("registered fleet has duplicate tool(s): "
                       + ", ".join(duplicates))
     if not tools:
         errors.append("registered fleet is empty")
-    return sorted(tools), errors
+    return sorted(tools), digest, errors
+
+
+def _validate_gap_arithmetic(record: dict, merge_tips: object,
+                             errors: list[str]) -> None:
+    """Recompute every gap headline from its retained per-fork rows.
+
+    The gap producer intentionally retains both its rows and its aggregates.
+    The rows are the evidence; a self-asserted zero in an aggregate is not.
+    Keep this implementation aligned with ``fork_gap_report.analyse`` so the
+    LL consumer independently catches omitted, unknown, or rewritten work.
+    """
+    rows = record.get("rows")
+    if not isinstance(rows, list):
+        return
+
+    numeric_fields = (
+        "sync_lag", "sync_lag_at_merge", "release_lag", "image_behind",
+        "ours_unshipped", "ours_unshipped_substantive",
+    )
+    clean_rows: list[dict] = []
+    for pos, row in enumerate(rows):
+        if not isinstance(row, dict):
+            # The denominator check reports this too, but arithmetic must not
+            # try to derive a plausible zero from an unusable row.
+            errors.append(f"rows[{pos}] is not an object")
+            continue
+        tool = row.get("tool")
+        label = tool if isinstance(tool, str) and tool else f"rows[{pos}]"
+        required_fields = {
+            "integrated", "ahead", "pin", "pin_disagreement", "kind",
+            "asserted_contents", "sync_lag", "sync_lag_at_merge",
+            "release_lag", "image_behind", "ours_unshipped",
+            "ours_unshipped_substantive", "unshipped_commits", "tip_state",
+            "tip_note",
+        }
+        missing_fields = sorted(required_fields - set(row))
+        if missing_fields:
+            errors.append(
+                f"{label} is missing arithmetic evidence field(s): "
+                + ", ".join(missing_fields))
+        if type(row.get("integrated")) is not bool:
+            errors.append(f"{label}.integrated is not a boolean")
+        ahead = row.get("ahead")
+        if ahead is not None and (type(ahead) is not int or ahead < 0):
+            errors.append(
+                f"{label}.ahead is not null or a non-negative integer")
+
+        kind = row.get("kind")
+        if kind not in {"pin", "contents_assertion"}:
+            errors.append(f"{label}.kind is malformed")
+        pin = row.get("pin")
+        if pin is not None and (
+                not isinstance(pin, str) or not pin
+                or pin.strip() != pin):
+            errors.append(f"{label}.pin is malformed")
+        if row.get("pin_disagreement") is not None:
+            errors.append(f"{label}.pin_disagreement is not empty")
+
+        for field in numeric_fields:
+            value = row.get(field)
+            if value is not None and (type(value) is not int or value < 0):
+                errors.append(
+                    f"{label}.{field} is not null or a non-negative integer")
+
+        tip_state = row.get("tip_state")
+        if tip_state not in {None, "current", "behind", "undetermined",
+                             "no_claim"}:
+            errors.append(f"{label}.tip_state is malformed")
+        tip_note = row.get("tip_note")
+        if tip_note is not None and not isinstance(tip_note, str):
+            errors.append(f"{label}.tip_note is malformed")
+
+        asserted_contents = row.get("asserted_contents")
+        if kind == "contents_assertion":
+            if (not isinstance(asserted_contents, str)
+                    or not asserted_contents):
+                errors.append(f"{label}.asserted_contents is malformed")
+            if pin is not None:
+                errors.append(f"{label} contents assertion unexpectedly has a pin")
+            if (any(row.get(field) is not None for field in numeric_fields)
+                    or row.get("unshipped_commits") != []
+                    or tip_state is not None or tip_note is not None):
+                errors.append(
+                    f"{label} contents assertion carries measurement evidence")
+        elif asserted_contents is not None:
+            errors.append(f"{label} pin row carries asserted_contents")
+
+        commits = row.get("unshipped_commits")
+        commits_valid = isinstance(commits, list)
+        if not commits_valid:
+            errors.append(f"{label}.unshipped_commits is not a list")
+            commits = []
+        else:
+            for commit_pos, commit in enumerate(commits):
+                if not isinstance(commit, dict):
+                    commits_valid = False
+                    errors.append(
+                        f"{label}.unshipped_commits[{commit_pos}] is not an object")
+                elif commit.get("merge") is not False:
+                    commits_valid = False
+                    errors.append(
+                        f"{label}.unshipped_commits[{commit_pos}] is not a "
+                        "substantive non-merge commit")
+
+        ours = row.get("ours_unshipped")
+        substantive = row.get("ours_unshipped_substantive")
+        if ours is None:
+            if substantive is not None or commits:
+                errors.append(
+                    f"{label} has unshipped detail without a measured total")
+        elif type(ours) is int and ours >= 0:
+            if type(substantive) is not int or substantive < 0:
+                errors.append(
+                    f"{label}.ours_unshipped_substantive is not measured")
+            else:
+                if substantive > ours:
+                    errors.append(
+                        f"{label}.ours_unshipped_substantive exceeds "
+                        "ours_unshipped")
+                if commits_valid and substantive != len(commits):
+                    errors.append(
+                        f"{label}.ours_unshipped_substantive contradicts "
+                        "unshipped_commits")
+
+        image_behind = row.get("image_behind")
+        if type(image_behind) is int and image_behind >= 0:
+            if not isinstance(pin, str) or not pin:
+                errors.append(f"{label} measured image lag without a pin")
+            for field in ("sync_lag", "sync_lag_at_merge", "release_lag",
+                          "ours_unshipped", "ours_unshipped_substantive"):
+                value = row.get(field)
+                if type(value) is not int or value < 0:
+                    errors.append(f"{label}.{field} is not measured")
+            merge_ref = row.get("merge_ref_seen")
+            expected_tip = (merge_tips.get(tool)
+                            if isinstance(merge_tips, dict) else None)
+            if merge_ref != expected_tip:
+                errors.append(
+                    f"{label}.merge_ref_seen does not match merge_tips_seen")
+
+        clean_rows.append(row)
+
+    measurable = [row for row in clean_rows
+                  if type(row.get("image_behind")) is int
+                  and row["image_behind"] >= 0]
+    asserted = [row for row in clean_rows
+                if row.get("kind") == "contents_assertion"]
+    unmeasured = [row for row in clean_rows
+                  if row.get("image_behind") is None
+                  and row.get("integrated") is True
+                  and row.get("kind") != "contents_assertion"]
+    not_built = [row for row in clean_rows
+                 if row.get("integrated") is False
+                 and row.get("kind") != "contents_assertion"]
+    stranded = [row for row in not_built
+                if type(row.get("ahead")) is int and row["ahead"] > 0]
+
+    unshipped_commits: list[dict] = []
+    for row in clean_rows:
+        commits = row.get("unshipped_commits")
+        if not isinstance(commits, list):
+            continue
+        for commit in commits:
+            if isinstance(commit, dict):
+                unshipped_commits.append(dict(commit, tool=row.get("tool")))
+
+    def sum_field(source_rows: list[dict], field: str) -> int:
+        return sum(row.get(field) or 0 for row in source_rows
+                   if (row.get(field) is None
+                       or type(row.get(field)) is int))
+
+    derived = {
+        "assertions": [
+            {"tool": row.get("tool"),
+             "contents": row.get("asserted_contents")}
+            for row in asserted
+        ],
+        "q1_image_behind_upstream": sum_field(measurable, "image_behind"),
+        "q1_forks_behind": sum(bool(row.get("image_behind"))
+                               for row in measurable),
+        "q1_sync_lag": sum_field(measurable, "sync_lag"),
+        "q1_sync_lag_at_merge": sum_field(
+            measurable, "sync_lag_at_merge"),
+        "q1_unmeasured_at_merge": [
+            row.get("tool") for row in measurable
+            if row.get("sync_lag_at_merge") is None
+        ],
+        "q1_release_lag": sum_field(measurable, "release_lag"),
+        "q1_unmeasured": [row.get("tool") for row in unmeasured],
+        "q2_forks_not_built_from_ours": [
+            row.get("tool") for row in not_built
+        ],
+        "q2_unmeasured_stranded": [
+            row.get("tool") for row in not_built
+            if (type(row.get("ahead")) is not int
+                or row["ahead"] < 0)
+        ],
+        "q2_our_commits_stranded": sum_field(stranded, "ahead"),
+        "q2_ours_past_the_pin": sum_field(clean_rows, "ours_unshipped"),
+        "q2_ours_past_the_pin_substantive": sum_field(
+            clean_rows, "ours_unshipped_substantive"),
+        "q2_unshipped_commits": unshipped_commits,
+        "q2_unmeasured_ship": [
+            row.get("tool") for row in clean_rows
+            if row.get("integrated") is True and row.get("pin")
+            and row.get("ours_unshipped") is None
+        ],
+        "tip_rejected": [
+            {"tool": row.get("tool"), "why": row.get("tip_note")}
+            for row in clean_rows if row.get("tip_state") == "behind"
+        ],
+        "tip_unverified": [
+            {"tool": row.get("tool"), "why": row.get("tip_note")}
+            for row in clean_rows if row.get("tip_state") == "undetermined"
+        ],
+    }
+    for name, expected_value in derived.items():
+        if record.get(name) != expected_value:
+            errors.append(f"{name} contradicts retained per-fork rows")
 
 
 def _validate_gap(record: dict, path: Path, round_at: str,
@@ -1194,7 +1632,7 @@ def _validate_gap(record: dict, path: Path, round_at: str,
             "q2_ours_past_the_pin_substantive exceeds q2_ours_past_the_pin")
 
     for name in ("q1_unmeasured", "q1_unmeasured_at_merge",
-                 "q2_unmeasured_ship"):
+                 "q2_unmeasured_ship", "q2_unmeasured_stranded"):
         value = record.get(name)
         if not isinstance(value, list):
             errors.append(f"{name} is not a list")
@@ -1209,7 +1647,8 @@ def _validate_gap(record: dict, path: Path, round_at: str,
     # status string and numeric zero are not evidence that all registered forks
     # were present; the LL record must reject a sidecar with one omitted row
     # even if somebody forged its status back to ``complete``.
-    expected, fleet_manifest_errors = _registered_fleet(forks_json)
+    expected, _registry_hash, fleet_manifest_errors = _registered_fleet(
+        forks_json)
     errors.extend(fleet_manifest_errors)
 
     def exact_tool_list(name: str, value: object) -> None:
@@ -1264,6 +1703,8 @@ def _validate_gap(record: dict, path: Path, round_at: str,
     if record.get("fleet_errors") != []:
         errors.append("fleet_errors is not an empty list")
 
+    _validate_gap_arithmetic(record, merge_tips, errors)
+
     not_built = record.get("q2_forks_not_built_from_ours")
     if isinstance(not_built, list):
         bad_not_built = [tool for tool in not_built
@@ -1291,7 +1732,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
                 source_errors: Optional[list[str]] = None,
                 semantic_pytest: Optional[dict] = None,
                 tick_state: str = "ran",
-                fork_github: Optional[dict] = None) -> dict:
+                fork_github: Optional[dict] = None,
+                ai_authorization: Optional[dict] = None) -> dict:
     release = release or {}
     gap = gap or {}
     attempts = release.get("compose_attempts") or []
@@ -1328,10 +1770,17 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     fork_github_status = (fork_github.get("status")
                           if isinstance(fork_github, dict) else None)
     github_converged = fork_github_status == "converged"
+    # ``None`` keeps the pure helper backwards-compatible for callers that are
+    # testing unrelated LL arithmetic. Production always passes a validated
+    # sidecar (including an explicit ``norecord`` on read failure).
+    ai_status = (ai_authorization.get("status")
+                 if isinstance(ai_authorization, dict) else None)
+    ai_authorized = ai_authorization is None or ai_status == "authorized"
     inputs_authoritative = not source_errors
     tick_authorized = tick_state == "ran" and tick_exit == 0
     whole_round_clear = bool(
         tick_authorized and not anchor_blocked
+        and ai_authorized
         and isinstance(stranded, int) and stranded == 0)
     converged = bool(delivery_converged and github_converged
                      and inputs_authoritative and whole_round_clear)
@@ -1340,6 +1789,10 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
 
     if source_errors:
         outcome = "could_not_measure_inputs"
+    elif ai_status == "blocked" and status == "not_checked":
+        outcome = "release_blocked_by_unverified_ai_decision"
+    elif ai_status == "blocked":
+        outcome = "finished_without_ai_authorization"
     elif anchor_blocked:
         # Publishing and advancing the consumer's immutable anchor are two
         # delivery hops.  Keep the image convergence arithmetic intact, but do
@@ -1374,6 +1827,10 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     selftest = _selftest_summary(semantic_pytest)
     category = (failure.get("category")
                 or ("anchor_pr" if anchor_blocked else None))
+    if ai_status == "blocked" and category is None:
+        category = "ai_postcondition_unverified"
+    elif ai_status == "norecord" and category is None:
+        category = "ai_authorization_norecord"
     if tick_state == "ran" and tick_exit != 0 and category is None:
         category = "release_tick_nonzero"
     if tick_state != "ran":
@@ -1381,6 +1838,10 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             category = "stale_round_code"
         elif tick_state == "not_checked_round_code_norecord":
             category = "round_code_norecord"
+        elif tick_state == "not_checked_ai_unverified":
+            category = "ai_postcondition_unverified"
+        elif tick_state == "not_checked_ai_norecord":
+            category = "ai_authorization_norecord"
         elif selftest and selftest["status"] == "red":
             category = "pytest_red"
         elif selftest and selftest["status"] == "norecord":
@@ -1390,9 +1851,14 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             category = "release_tick_not_checked"
     control = None
     if tick_state != "ran":
-        control = (
-            "do not invoke the release tick without current code and a "
-            "complete green semantic pytest record")
+        if tick_state.startswith("not_checked_ai_"):
+            control = (
+                "do not invoke the release tick until every AI conflict has "
+                "a current verified published-mainline postcondition")
+        else:
+            control = (
+                "do not invoke the release tick without current code and a "
+                "complete green semantic pytest record")
     elif anchor_blocked:
         control = (
             "retain the published image; refuse to bypass the anchor "
@@ -1424,6 +1890,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "tick_state": tick_state,
         },
         "selftest": selftest,
+        "ai_authorization": ai_authorization,
         "fork_github": _fork_github_summary(fork_github),
         "convergence": {
             "measured": measured,
@@ -1439,6 +1906,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "delivery_converged": delivery_converged,
             "delivery_round_converged": delivery_round_converged,
             "tick_authorized": tick_authorized,
+            "ai_authorized": ai_authorized,
             "anchor_complete": not anchor_blocked,
             "converged": converged,
             "round_converged": round_converged,
@@ -1507,6 +1975,9 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "tick_state": record["release"].get("tick_state"),
         "selftest_status": (record.get("selftest") or {}).get("status"),
         "selftest_outcome": (record.get("selftest") or {}).get("outcome"),
+        # Retain the exact normalized postconditions, not only a boolean. A
+        # later clean round must not erase which source tip was still pending.
+        "ai_authorization": record.get("ai_authorization"),
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
         "live_sync_lag": record["convergence"]["live_sync_lag"],
         "release_lag": record["convergence"]["release_lag"],
@@ -1518,6 +1989,7 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "delivery_round_converged": record["convergence"][
             "delivery_round_converged"],
         "tick_authorized": record["convergence"]["tick_authorized"],
+        "ai_authorized": record["convergence"]["ai_authorized"],
         "anchor_complete": record["convergence"]["anchor_complete"],
         "converged": record["convergence"]["converged"],
         "round_converged": record["convergence"]["round_converged"],
@@ -1557,6 +2029,7 @@ def main(argv=None) -> int:
     ap.add_argument("--release-json", type=Path, required=True)
     ap.add_argument("--gap-json", type=Path, required=True)
     ap.add_argument("--fork-github-json", type=Path, required=True)
+    ap.add_argument("--ai-authorization-json", type=Path, required=True)
     ap.add_argument(
         "--expected-github-actor", required=True,
         help="independently configured GitHub login that both actor fields "
@@ -1571,6 +2044,7 @@ def main(argv=None) -> int:
     ap.add_argument("--tick-state", default="ran", choices=(
         "ran", "not_checked_pytest_red", "not_checked_pytest_norecord",
         "not_checked_stale_round_code", "not_checked_round_code_norecord",
+        "not_checked_ai_unverified", "not_checked_ai_norecord",
     ))
     a = ap.parse_args(argv)
     observed_now = datetime.now(timezone.utc)
@@ -1610,6 +2084,32 @@ def main(argv=None) -> int:
         fork_github, fork_github_errors = _validate_fork_github(
             fork_github_raw, a.fork_github_json, a.round_at, a.forks_json,
             a.expected_github_actor)
+    ai_raw, ai_read_err = _read(a.ai_authorization_json)
+    if ai_read_err is not None:
+        ai_authorization = {
+            "program": AI_AUTHORIZATION_PROGRAM,
+            "schema_version": AI_AUTHORIZATION_SCHEMA_VERSION,
+            "status": "norecord",
+            "round_at": a.round_at,
+            "source_errors": [ai_read_err],
+            "reasons": [ai_read_err],
+            "case_results": [],
+        }
+        ai_errors = [ai_read_err]
+    else:
+        assert ai_raw is not None
+        ai_authorization, ai_errors = _validate_ai_authorization(
+            ai_raw, a.ai_authorization_json, a.round_at, a.forks_json)
+        if ai_authorization is None:
+            ai_authorization = {
+                "program": AI_AUTHORIZATION_PROGRAM,
+                "schema_version": AI_AUTHORIZATION_SCHEMA_VERSION,
+                "status": "norecord",
+                "round_at": a.round_at,
+                "source_errors": list(ai_errors),
+                "reasons": list(ai_errors),
+                "case_results": [],
+            }
     provenance_errors: list[str] = []
     if gap is not None and fork_github is not None:
         gap_run_id = gap["source"]["_round"]["run_id"]
@@ -1618,6 +2118,22 @@ def main(argv=None) -> int:
             provenance_errors.append(
                 "fork_gap.json and fork-github-convergence.json name different "
                 "daily_0530 run_id values")
+    if (gap is not None and isinstance(ai_authorization.get("round"), dict)):
+        gap_run_id = gap["source"]["_round"]["run_id"]
+        ai_run_id = ai_authorization["round"].get("run_id")
+        if gap_run_id != ai_run_id:
+            provenance_errors.append(
+                "fork_gap.json and ai-release-authorization.json name "
+                "different daily_0530 run_id values")
+    if (fork_github is not None
+            and isinstance(ai_authorization.get("round"), dict)):
+        github_run_id = fork_github["round"]["run_id"]
+        ai_run_id = ai_authorization["round"].get("run_id")
+        if github_run_id != ai_run_id:
+            provenance_errors.append(
+                "fork-github-convergence.json and "
+                "ai-release-authorization.json name different daily_0530 "
+                "run_id values")
     if release_err is None and (release.get("program") != "daily_release"
                                 or not release.get("status")):
         release_err = ("daily-release.json has no current-run status; it is "
@@ -1676,11 +2192,12 @@ def main(argv=None) -> int:
     errors = [e for e in (release_err, semantic_err) if e]
     errors.extend(gap_errors)
     errors.extend(fork_github_errors)
+    errors.extend(ai_errors)
     errors.extend(provenance_errors)
     record = make_record(
         release, gap, a.round_at, a.tick_exit, errors,
         semantic_pytest=semantic, tick_state=a.tick_state,
-        fork_github=fork_github,
+        fork_github=fork_github, ai_authorization=ai_authorization,
     )
     written = retain(record, a.state_dir)
     print("release LL: "
@@ -1689,6 +2206,8 @@ def main(argv=None) -> int:
           f"ours past pin {record['convergence']['ours_past_pin']} · "
           f"fork GitHub "
           f"{(record.get('fork_github') or {}).get('status', 'unmeasured')} · "
+          f"AI authorization "
+          f"{(record.get('ai_authorization') or {}).get('status', 'unmeasured')} · "
           f"retained {written['stamp']}")
     if errors:
         for err in errors:

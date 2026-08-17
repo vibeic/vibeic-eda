@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_tick.sh — one daily EDA-fork gatekeeper round (cron entrypoint).
+# run_tick.sh — the release-capable inner half of the daily EDA-fork round.
 #
 # Mirrors the awesome-open-ic enrich cron: flock so rounds never overlap, a fixed
 # headless PATH/HOME, and gh OAuth resolved to GH_TOKEN (the vibeic org rejects
@@ -7,8 +7,39 @@
 # gatekeeper tick, which re-seeds ledgers, decides merge/defer/clean per fork, writes
 # the daily report, and regenerates the vibeic.ai monitor page.
 #
-# Scheduled by cron at 05:30 Asia/Taipei (UTC+8). Safe to run by hand.
+# Invoked by run_0530.sh after that wrapper has produced this round's merge and
+# AI-delivery evidence.  It deliberately refuses a direct/manual invocation:
+# releasing without the wrapper's one-use, current-round authorization context
+# would let yesterday's green record bypass today's unresolved AI conflict.
 set -uo pipefail
+
+AI_ROUND_JSON=""
+AI_FORKS_JSON=""
+AI_ROUND_AT=""
+AI_RUN_ID=""
+AI_CAPABILITY=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --ai-round-json|--ai-forks-json|--ai-round-at|--ai-run-id|--ai-capability)
+            if [ "$#" -lt 2 ]; then
+                echo "[fatal] $1 requires a value" >&2
+                exit 2
+            fi
+            case "$1" in
+                --ai-round-json) AI_ROUND_JSON="$2" ;;
+                --ai-forks-json) AI_FORKS_JSON="$2" ;;
+                --ai-round-at) AI_ROUND_AT="$2" ;;
+                --ai-run-id) AI_RUN_ID="$2" ;;
+                --ai-capability) AI_CAPABILITY="$2" ;;
+            esac
+            shift 2
+            ;;
+        *)
+            echo "[fatal] unknown run_tick argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 
 export PATH="${HOME}/.local/bin:/home/reyerchu/.nvm/versions/node/v22.22.0/bin:/usr/local/bin:/usr/bin:/bin"
 export HOME="${HOME:-/home/reyerchu}"
@@ -38,6 +69,174 @@ if ! flock -n 9; then
     log "[skip] another gatekeeper round is running"
     exit 0
 fi
+
+# --- CURRENT-ROUND AI RELEASE CAPABILITY -------------------------------------
+#
+# This is repeated here, at the process that can actually invoke daily_release.
+# The outer wrapper's check is useful for deciding whether to start this tick,
+# but cannot protect this entrypoint from a direct invocation or a second stale
+# cron line.  The wrapper therefore creates an unguessable, one-use handoff bound
+# to its exact round path, registry, timestamp, run nonce, and parent PID.  Claim
+# it atomically, validate that context, then independently re-run the canonical
+# checker.  Missing/replayed context and every nonzero checker result stop before
+# GitHub auth, daily_merge, or any release mutation.
+CANONICAL_AI_ROUND_JSON="${GK_STATE_DIR}/daily_0530.json"
+CANONICAL_AI_FORKS_JSON="${DIR}/FORKS.json"
+AI_AUTH_JSON="${GK_STATE_DIR}/ai-release-authorization.json"
+AI_HANDOFF=""
+AI_HANDOFF_CLAIM=""
+AI_RECHECK_JSON=""
+
+cleanup_ai_release_context() {
+    [ -n "${AI_HANDOFF_CLAIM}" ] && rm -f -- "${AI_HANDOFF_CLAIM}"
+    [ -n "${AI_RECHECK_JSON}" ] && rm -f -- "${AI_RECHECK_JSON}"
+}
+trap cleanup_ai_release_context EXIT
+
+if [ "${AI_ROUND_JSON}" != "${CANONICAL_AI_ROUND_JSON}" ] \
+   || [ "${AI_FORKS_JSON}" != "${CANONICAL_AI_FORKS_JSON}" ] \
+   || [ -z "${AI_ROUND_AT}" ] \
+   || [[ ! "${AI_RUN_ID}" =~ ^[A-Za-z0-9_-]{32,256}$ ]] \
+   || [[ ! "${AI_CAPABILITY}" =~ ^[0-9a-f]{64}$ ]]; then
+    log "[fatal] no valid current-round AI release context; invoke run_0530.sh, not run_tick.sh directly"
+    exit 2
+fi
+if [ ! -f "${DIR}/check_ai_release_authorization.py" ]; then
+    log "[fatal] AI release authorization checker is missing; daily_release is blocked"
+    exit 9
+fi
+
+AI_HANDOFF="${GK_STATE_DIR}/ai-release-handoff.${AI_CAPABILITY}.json"
+AI_HANDOFF_CLAIM="${AI_HANDOFF}.claimed.$$"
+if [ -e "${AI_HANDOFF_CLAIM}" ] \
+   || ! mv -- "${AI_HANDOFF}" "${AI_HANDOFF_CLAIM}"; then
+    log "[fatal] current-round AI release capability is missing or already consumed; daily_release is blocked"
+    exit 9
+fi
+
+if ! python3 - "${AI_HANDOFF_CLAIM}" "${AI_CAPABILITY}" "${PPID}" \
+        "${AI_ROUND_JSON}" "${AI_FORKS_JSON}" "${AI_ROUND_AT}" \
+        "${AI_RUN_ID}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value):
+    raise ValueError(f"non-finite JSON number {value!r}")
+
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"),
+                   object_pairs_hook=strict_object,
+                   parse_constant=reject_constant)
+expected = {
+    "schema_version": 1,
+    "capability": sys.argv[2],
+    "parent_pid": int(sys.argv[3]),
+    "round_json": sys.argv[4],
+    "forks_json": sys.argv[5],
+    "round_at": sys.argv[6],
+    "run_id": sys.argv[7],
+}
+if value != expected:
+    raise SystemExit("AI release handoff does not exactly match this process")
+
+round_record = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"),
+                          object_pairs_hook=strict_object,
+                          parse_constant=reject_constant)
+meta = round_record.get("_round") if isinstance(round_record, dict) else None
+if not isinstance(meta, dict) or meta.get("run_id") != sys.argv[7]:
+    raise SystemExit("AI release handoff run_id does not match daily_0530.json")
+PY
+then
+    log "[fatal] current-round AI release capability is malformed, stale, or for another parent; daily_release is blocked"
+    exit 9
+fi
+
+# The capability has now done its one job.  Remove the claimed file before the
+# expensive work; the EXIT trap is defence in depth for every earlier return.
+rm -f -- "${AI_HANDOFF_CLAIM}"
+AI_HANDOFF_CLAIM=""
+AI_RECHECK_JSON="${AI_AUTH_JSON}.tick-recheck.$$"
+rm -f -- "${AI_RECHECK_JSON}"
+python3 "${DIR}/check_ai_release_authorization.py" \
+    --round-json "${AI_ROUND_JSON}" \
+    --forks-json "${AI_FORKS_JSON}" \
+    --round-at "${AI_ROUND_AT}" --json "${AI_RECHECK_JSON}" \
+    >> "${LOG}" 2>&1
+AI_AUTH_RC=$?
+
+# A zero process status alone is not enough: retain and inspect the exact record
+# produced by this re-check, including the wrapper's nonce.  Replacement is a
+# same-directory rename, so LL readers see the earlier complete record or this
+# complete record, never a partially-written authorization.
+AI_RECHECK_OK=0
+if [ -f "${AI_RECHECK_JSON}" ]; then
+    if [ "${AI_AUTH_RC}" -eq 0 ]; then
+        python3 - "${AI_RECHECK_JSON}" "${AI_ROUND_JSON}" \
+            "${AI_FORKS_JSON}" "${AI_ROUND_AT}" "${AI_RUN_ID}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def strict_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value):
+    raise ValueError(f"non-finite JSON number {value!r}")
+
+
+value = json.loads(
+    Path(sys.argv[1]).read_text(encoding="utf-8"),
+    object_pairs_hook=strict_object, parse_constant=reject_constant)
+round_meta = value.get("round") if isinstance(value, dict) else None
+registry = value.get("registry") if isinstance(value, dict) else None
+if not (
+    value.get("program") == "check_ai_release_authorization"
+    and value.get("status") == "authorized"
+    and value.get("source") == sys.argv[2]
+    and isinstance(registry, dict) and registry.get("source") == sys.argv[3]
+    and value.get("round_at") == sys.argv[4]
+    and isinstance(round_meta, dict) and round_meta.get("run_id") == sys.argv[5]
+):
+    raise SystemExit("AI authorization record contradicts current handoff")
+PY
+        AI_RECHECK_OK=$?
+    fi
+    if mv -f -- "${AI_RECHECK_JSON}" "${AI_AUTH_JSON}"; then
+        AI_RECHECK_JSON=""
+    else
+        AI_RECHECK_OK=1
+    fi
+else
+    # Do not leave the wrapper's earlier green record behind after an inner
+    # checker that formed no record at all.
+    rm -f -- "${AI_AUTH_JSON}"
+    AI_RECHECK_OK=1
+fi
+if [ "${AI_AUTH_RC}" -ne 0 ] || [ "${AI_RECHECK_OK}" -ne 0 ]; then
+    log "[fatal] current-round AI release authorization refused (checker rc=${AI_AUTH_RC}); daily_release is blocked"
+    exit 9
+fi
+log "[blocking] current-round AI release authorization re-verified (${AI_RUN_ID})"
+# --- END CURRENT-ROUND AI RELEASE CAPABILITY ---------------------------------
 
 # gh OAuth token → GH_TOKEN (headless), like the enrich cron.
 TOKEN="$(gh auth token 2>/dev/null || true)"

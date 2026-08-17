@@ -29,8 +29,10 @@ exits non-zero for some unrelated reason.
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -55,6 +57,11 @@ def _fleet(tmp_path: Path, cap: str | None) -> tuple[Path, dict]:
     dirp.mkdir(parents=True)
 
     shutil.copy2(TICK, dirp / "run_tick.sh")
+    shutil.copy2(HERE / "check_ai_release_authorization.py",
+                 dirp / "check_ai_release_authorization.py")
+    (dirp / "FORKS.json").write_text(json.dumps({
+        "org": "vibeic", "forks": [{"tool": "Demo"}],
+    }))
     (root / "RELEASED.json").write_text('{"version": "0.0.1-test"}\n')
 
     # Everything whose status the tick folds into its own exit code.
@@ -78,10 +85,51 @@ def _fleet(tmp_path: Path, cap: str | None) -> tuple[Path, dict]:
     return dirp / "run_tick.sh", env
 
 
+def _authorized_tick(script: Path, env: dict):
+    state = Path(env["GK_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    boundary = datetime.now(timezone.utc) - timedelta(seconds=2)
+    started = boundary + timedelta(seconds=1)
+    run_id = "a" * 64
+    round_json = state / "daily_0530.json"
+    round_json.write_text(json.dumps({
+        "Demo": {
+            "main": "main", "conflicted": [],
+            "upstream_merge_outcome": "natural_success",
+        },
+        "_ai_decisions": {
+            "cases": 0, "invoked": False, "cleared": True,
+            "verified": True,
+        },
+        "_round": {
+            "schema_version": 1, "run_id": run_id,
+            "started_at": started.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "applied": True,
+        },
+    }))
+    capability = "e" * 64
+    args = [
+        "--ai-round-json", str(round_json),
+        "--ai-forks-json", str(script.parent / "FORKS.json"),
+        "--ai-round-at", boundary.isoformat(),
+        "--ai-run-id", run_id,
+        "--ai-capability", capability,
+    ]
+    (state / f"ai-release-handoff.{capability}.json").write_text(json.dumps({
+        "schema_version": 1, "capability": capability,
+        "parent_pid": os.getpid(), "round_json": str(round_json),
+        "forks_json": str(script.parent / "FORKS.json"),
+        "round_at": boundary.isoformat(), "run_id": run_id,
+    }))
+    return subprocess.run(
+        ["bash", str(script), *args], env=env, capture_output=True,
+        text=True, timeout=900)
+
+
 def _run(tmp_path, cap):
     script, env = _fleet(tmp_path, cap)
-    p = subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                       text=True, timeout=900)
+    p = _authorized_tick(script, env)
     return p
 
 
