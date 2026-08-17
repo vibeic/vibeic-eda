@@ -113,8 +113,10 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
 
     category = failure.get("category")
     control = None
-    if attempts:
+    if failed_attempts:
         control = "classified bounded retry; reuse pushed artefacts and BuildKit cache"
+    elif attempts:
+        control = "single compose attempt; no retry needed"
     elif failure:
         control = "fail closed; publish no version and retain the terminal cause"
 
