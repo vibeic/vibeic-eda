@@ -86,6 +86,16 @@ def _run(rows, monkeypatch, baseline=None):
     monkeypatch.setattr(F, "_UNPINNED_BASELINE",
                         _SYNTHETIC_BASELINE if baseline is None else baseline)
     monkeypatch.setattr(F, "analyse", lambda *a, **k: rep)
+    # This helper isolates the not-built-from exit ladder from ledger I/O. Its
+    # synthetic rows therefore also supply a synthetic exact-cover proof; fleet
+    # denominator behavior is exercised by test_fork_gap_round_provenance.
+    tools = sorted(r["tool"] for r in rows)
+    monkeypatch.setattr(F, "_fleet_evidence", lambda *a, **k: {
+        "registered_forks": tools,
+        "ledger_forks": tools,
+        "merge_tips_seen": {},
+        "fleet_errors": [],
+    })
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = F.main(["--no-fetch"])

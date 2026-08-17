@@ -35,6 +35,14 @@ ROUND_AT="$(date -Is)"
 # Step 1-4 + the AI half.  The gatekeeper may read real code across several
 # forks, so elapsed runtime is not a verdict.  This is a ZERO-PROGRESS grace:
 # stream-json/tool activity renews it, and a progressing turn runs to completion.
+# A crash before daily_0530 writes its terminal round must leave NO record for
+# downstream GitHub convergence. Otherwise yesterday's merge evidence can be
+# read under today's checker timestamp and impersonate a current measurement.
+INPUT_CLEAR=0
+if ! rm -f "${GK_STATE_DIR}/daily_0530.json"; then
+    INPUT_CLEAR=1
+    echo "[$(date -Is)] could not clear daily_0530.json — downstream provenance must reject any surviving record" >> "${LOG}"
+fi
 python3 "${DIR}/daily_0530.py" --apply \
         --ai-stall-grace "${GK_AI_STALL_GRACE:-5400}" \
         --json "${GK_STATE_DIR}/daily_0530.json" >> "${LOG}" 2>&1
@@ -188,11 +196,57 @@ fi
 # identically 0, and "behind" was read as one number when it is two (SYNC lag vs
 # RELEASE lag, which need opposite fixes). Both mistakes produced a reassuring
 # answer. A measurement that has to be remembered is not a measurement.
+GAP_JSON="${GK_STATE_DIR}/fork_gap.json"
+# As with daily_0530.json above, a producer crash must expose MISSING, not leave
+# yesterday's valid sidecar available to today's LL and sync verdict.
+if ! rm -f "${GAP_JSON}"; then
+    INPUT_CLEAR=1
+    echo "[$(date -Is)] could not clear ${GAP_JSON} — forced dirty-input failure" >> "${LOG}"
+fi
 python3 "${DIR}/fork_gap_report.py" \
-    --merge-evidence "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/daily_0530.json" \
-    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" >> "${LOG}" 2>&1
+    --merge-evidence "${GK_STATE_DIR}/daily_0530.json" \
+    --round-at "${ROUND_AT}" \
+    --json "${GAP_JSON}" >> "${LOG}" 2>&1
 GAP=$?
 echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
+
+# GitHub convergence is a separate delivery boundary from commit/image lag:
+# every fork issue and PR that remains open after this round is unfinished work,
+# while a failed API read is NORECORD, never an invented zero. Clear the live
+# sidecar first so a checker that cannot start cannot leave yesterday's answer
+# available to the LL capture. Keep the exact round artefact beside semantic
+# pytest evidence for post-mortem audit.
+FORK_GH_JSON="${GK_STATE_DIR}/fork-github-convergence.json"
+if ! rm -f "${FORK_GH_JSON}"; then
+    INPUT_CLEAR=1
+    echo "[$(date -Is)] could not clear ${FORK_GH_JSON} — forced dirty-input failure" >> "${LOG}"
+fi
+python3 "${DIR}/fork_github_convergence.py" \
+    --forks-json "${DIR}/FORKS.json" \
+    --round-json "${GK_STATE_DIR}/daily_0530.json" \
+    --round-at "${ROUND_AT}" \
+    --expected-actor "${GK_GITHUB_ACTOR:-reyerchu}" \
+    --json "${FORK_GH_JSON}" >> "${LOG}" 2>&1
+FORK_GH=$?
+echo "[$(date -Is)] fork_github_convergence exit ${FORK_GH} (0=exact-zero, 1=open work, 2=NORECORD)" >> "${LOG}"
+FORK_GH_RETAINED="${GK_STATE_DIR}/rounds/${PYTEST_STAMP}/fork-github-convergence.json"
+FORK_GH_RETAIN_TMP="${FORK_GH_RETAINED}.tmp.$$"
+if [ -f "${FORK_GH_JSON}" ]; then
+    # Copy to a same-directory temporary, then rename: readers see the old full
+    # record or the new full record, never a partial cp. Retention is evidence,
+    # so failure overrides even an otherwise-clean checker result to NORECORD.
+    if ! cp "${FORK_GH_JSON}" "${FORK_GH_RETAIN_TMP}" \
+       || ! mv "${FORK_GH_RETAIN_TMP}" "${FORK_GH_RETAINED}"; then
+        if ! rm -f "${FORK_GH_RETAIN_TMP}"; then
+            echo "[$(date -Is)] fork_github_convergence retention temp cleanup failed: ${FORK_GH_RETAIN_TMP}" >> "${LOG}"
+        fi
+        FORK_GH=2
+        echo "[$(date -Is)] fork_github_convergence retention failed — forced NORECORD" >> "${LOG}"
+    fi
+else
+    FORK_GH=2
+    echo "[$(date -Is)] fork_github_convergence wrote no JSON — forced NORECORD" >> "${LOG}"
+fi
 
 # CAPTURE THE LEARNING LOOP, NOT ONLY THE LOG.  A release failure used to leave
 # yesterday's successful daily-release.json in place and the text log was the
@@ -204,7 +258,8 @@ echo "[$(date -Is)] fork_gap_report exit ${GAP}" >> "${LOG}"
 python3 "${DIR}/capture_release_ll.py" \
     --state-dir "${GK_STATE_DIR}" \
     --release-json "${GK_STATE_DIR}/daily-release.json" \
-    --gap-json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json" \
+    --gap-json "${GAP_JSON}" \
+    --fork-github-json "${FORK_GH_JSON}" \
     --semantic-pytest-json "${PYTEST_RETAINED}" \
     --round-at "${ROUND_AT}" --tick-exit "${TICK}" \
     --tick-state "${TICK_STATE}" >> "${LOG}" 2>&1
@@ -241,15 +296,45 @@ echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
 SYNC_LAG=$(python3 -c "
 import json,sys
 try:
-    d=json.load(open('${STATE:-$HOME/.cache/eda-fork-gatekeeper}/fork_gap.json'))
+    d=json.load(open('${GAP_JSON}'))
     v=d.get('q1_sync_lag_at_merge')
     if v is None: v=d.get('q1_sync_lag')
     print(v if v is not None else 'unmeasured')
 except Exception:
     print('unmeasured')
 " 2>/dev/null)
-if [ "${SYNC_LAG}" = "unmeasured" ]; then
+STRANDED=$(python3 -c "
+import json
+try:
+    d=json.load(open('${GAP_JSON}'))
+    v=d.get('q2_our_commits_stranded')
+    print(v if isinstance(v, int) and not isinstance(v, bool) else 'unmeasured')
+except Exception:
+    print('unmeasured')
+" 2>/dev/null)
+PAST_PIN_SUBSTANTIVE=$(python3 -c "
+import json
+try:
+    d=json.load(open('${GAP_JSON}'))
+    v=d.get('q2_ours_past_the_pin_substantive')
+    print(v if isinstance(v, int) and not isinstance(v, bool) else 'unmeasured')
+except Exception:
+    print('unmeasured')
+" 2>/dev/null)
+if [ "${GAP}" -ge 2 ]; then
+    echo "[$(date -Is)] CONVERGENCE: fork_gap_report produced NORECORD/incomplete evidence (exit ${GAP}) — a numeric partial sum is not an authoritative zero" >> "${LOG}"
+    GAP_FATAL=1
+elif [ "${SYNC_LAG}" = "unmeasured" ]; then
     echo "[$(date -Is)] CONVERGENCE: sync lag COULD NOT BE MEASURED (fork_gap_report exit ${GAP}) — that is not zero, and the round is not clean" >> "${LOG}"
+    GAP_FATAL=1
+elif [ "${STRANDED}" = "unmeasured" ] || [ "${PAST_PIN_SUBSTANTIVE}" = "unmeasured" ]; then
+    echo "[$(date -Is)] CONVERGENCE: fork delivery state COULD NOT BE MEASURED — unknown stranded/past-pin work is not zero" >> "${LOG}"
+    GAP_FATAL=1
+elif [ "${STRANDED}" -ne 0 ] 2>/dev/null; then
+    echo "[$(date -Is)] CONVERGENCE: FAILED — ${STRANDED} commit(s) are stranded in patched forks the image cannot build from" >> "${LOG}"
+    GAP_FATAL=1
+elif [ "${PAST_PIN_SUBSTANTIVE}" -ne 0 ] 2>/dev/null; then
+    echo "[$(date -Is)] CONVERGENCE: FAILED — ${PAST_PIN_SUBSTANTIVE} substantive own commit(s) remain past the image pin" >> "${LOG}"
     GAP_FATAL=1
 elif [ "${SYNC_LAG}" -ne 0 ] 2>/dev/null; then
     echo "[$(date -Is)] CONVERGENCE: FAILED — ${SYNC_LAG} commit(s) this round SAW upstream and did not take. Merging upstream into our line is this round's primary duty; it did not happen. (Measured against each fork's upstream_evidence.tip_seen — the tip its own fetch resolved before merging — NOT a fresh fetch, which moves during the ~1h release phase. The live drift is q1_sync_lag in fork_gap.json and is reported there, not here.)" >> "${LOG}"
@@ -259,9 +344,12 @@ else
     GAP_FATAL=0
 fi
 
-# 0 only when BOTH are clean; the six steps' own 1 means "a case still needs a
-# human", which is information, not noise.
+# 0 only when BOTH are clean: the delivery pipeline and every
+# evidence/convergence boundary. The six steps' own 1 means "a case still needs
+# a human", which is information, not noise.
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
-   || [ "${TESTS}" -ne 0 ] || [ "${GAP_FATAL}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
+   || [ "${TESTS}" -ne 0 ] || [ "${INPUT_CLEAR}" -ne 0 ] \
+   || [ "${GAP_FATAL}" -ne 0 ] \
+   || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
 exit 0

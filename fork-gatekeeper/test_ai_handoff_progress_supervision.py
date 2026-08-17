@@ -13,6 +13,12 @@ import daily_0530 as D  # noqa: E402
 import capture_release_ll as LL  # noqa: E402
 
 
+_HERE = Path(__file__).resolve().parent
+_REGISTERED_FORKS = sorted(
+    entry["tool"] for entry in
+    json.loads((_HERE / "FORKS.json").read_text(encoding="utf-8"))["forks"])
+
+
 CASE = {
     "branch": "origin/vibeic/topic",
     "direction": "our branch -> our mainline",
@@ -184,11 +190,69 @@ def _semantic_record(*, rc: int, outcome: str) -> dict:
 
 def _gap_record() -> dict:
     return {
+        "program": "fork_gap_report",
+        "schema_version": 1,
+        "started_at": "2026-08-17T06:00:00+08:00",
+        "completed_at": "2026-08-17T06:01:00+08:00",
+        "status": "complete",
+        "source": {
+            "kind": "daily_0530_merge_round",
+            "merge_evidence": "/state/daily_0530.json",
+            "round_at": "2026-08-17T05:30:00+08:00",
+            "_round": {
+                "schema_version": 1,
+                "run_id": "a" * 64,
+                "started_at": "2026-08-17T05:30:01+08:00",
+                "finished_at": "2026-08-17T05:59:00+08:00",
+                "applied": True,
+            },
+        },
+        "source_errors": [],
         "q1_sync_lag_at_merge": 0,
+        "q1_unmeasured_at_merge": [],
         "q1_sync_lag": 0,
         "q1_release_lag": 0,
         "q1_image_behind_upstream": 0,
+        "q1_forks_behind": 0,
+        "q1_unmeasured": [],
+        "q2_forks_not_built_from_ours": [],
+        "q2_our_commits_stranded": 0,
         "q2_ours_past_the_pin": 0,
+        "q2_ours_past_the_pin_substantive": 0,
+        "q2_unshipped_commits": [],
+        "q2_unmeasured_ship": [],
+        "tip_rejected": [],
+        "tip_unverified": [],
+        "registered_forks": _REGISTERED_FORKS,
+        "ledger_forks": _REGISTERED_FORKS,
+        "merge_tips_seen": {tool: "b" * 40
+                            for tool in _REGISTERED_FORKS},
+        "fleet_errors": [],
+        "rows": [{"tool": tool} for tool in _REGISTERED_FORKS],
+        "measured_with_fetch": True,
+    }
+
+
+def _fork_github_record(*, status="converged", started_at=None) -> dict:
+    return {
+        "program": "fork_github_convergence",
+        "schema_version": 1,
+        "started_at": started_at or "2026-08-17T05:32:00+08:00",
+        "completed_at": "2026-08-17T05:33:00+08:00",
+        "actor": "reyerchu",
+        "expected_actor": "reyerchu",
+        "round": {
+            "round_at": "2026-08-17T05:30:00+08:00",
+            "schema_version": 1,
+            "run_id": "a" * 64,
+            "started_at": "2026-08-17T05:30:01+08:00",
+            "finished_at": "2026-08-17T05:31:00+08:00",
+        },
+        "status": status,
+        "counts": {"items": 0, "issues": 0, "pull_requests": 0,
+                   "by_source": {"org_search_issues": 0}},
+        "items": [],
+        "source_errors": [],
     }
 
 
@@ -220,11 +284,14 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     semantic.write_text(json.dumps(_semantic_record(rc=2, outcome="stalled")))
     gap = tmp_path / "gap.json"
     gap.write_text(json.dumps(_gap_record()))
+    fork_github = tmp_path / "fork-github.json"
+    fork_github.write_text(json.dumps(_fork_github_record()))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(old_release),
         "--gap-json", str(gap),
+        "--fork-github-json", str(fork_github),
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
         "--tick-exit", "2",
@@ -275,11 +342,14 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
     semantic.write_text(json.dumps(_semantic_record(rc=0, outcome="natural")))
     gap = tmp_path / "gap.json"
     gap.write_text(json.dumps(_gap_record()))
+    fork_github = tmp_path / "fork-github.json"
+    fork_github.write_text(json.dumps(_fork_github_record()))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(release),
         "--gap-json", str(gap),
+        "--fork-github-json", str(fork_github),
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
         "--tick-exit", "1", "--tick-state", "ran",
@@ -293,3 +363,67 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
     assert record["lesson"]["outcome"] == "could_not_measure_inputs"
     assert any("predates this 05:30 round" in e
                for e in record["source_errors"])
+
+
+def _capture_ran_tick(tmp_path: Path, release: dict,
+                      semantic: dict) -> tuple[int, dict]:
+    release_path = tmp_path / "daily-release.json"
+    release_path.write_text(json.dumps(release))
+    semantic_path = tmp_path / "semantic.json"
+    semantic_path.write_text(json.dumps(semantic))
+    gap = tmp_path / "gap.json"
+    gap.write_text(json.dumps(_gap_record()))
+    fork_github = tmp_path / "fork-github.json"
+    fork_github.write_text(json.dumps(_fork_github_record()))
+
+    rc = LL.main([
+        "--state-dir", str(tmp_path / "state"),
+        "--release-json", str(release_path),
+        "--gap-json", str(gap),
+        "--fork-github-json", str(fork_github),
+        "--semantic-pytest-json", str(semantic_path),
+        "--round-at", "2026-08-17T05:30:00+08:00",
+        "--tick-exit", "0", "--tick-state", "ran",
+    ])
+    record = json.loads(
+        (tmp_path / "state" / "release-ll" / "latest.json").read_text())
+    return rc, record
+
+
+def test_future_release_evidence_cannot_make_the_ll_green(tmp_path, capsys):
+    release = {
+        "program": "daily_release", "schema_version": 2,
+        "status": "published",
+        "started_at": "2099-08-17T05:31:00+08:00",
+        "finished_at": "2099-08-17T05:32:00+08:00",
+        "version": {"to": "0.3.5"},
+    }
+    rc, record = _capture_ran_tick(
+        tmp_path, release, _semantic_record(rc=0, outcome="natural"))
+    capsys.readouterr()
+
+    assert rc == 1
+    assert record["release"]["status"] == "unmeasured"
+    assert record["convergence"]["converged"] is False
+    assert any("daily-release.json is dated in the future" in error
+               for error in record["source_errors"])
+
+
+def test_future_semantic_evidence_cannot_make_the_ll_green(tmp_path, capsys):
+    release = {
+        "program": "daily_release", "schema_version": 2,
+        "status": "published",
+        "started_at": "2026-08-17T05:34:00+08:00",
+        "finished_at": "2026-08-17T05:35:00+08:00",
+        "version": {"to": "0.3.5"},
+    }
+    semantic = _semantic_record(rc=0, outcome="natural")
+    semantic["started_at"] = "2099-08-17T05:31:00+08:00"
+    rc, record = _capture_ran_tick(tmp_path, release, semantic)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert record["selftest"] is None
+    assert record["convergence"]["converged"] is False
+    assert any("semantic.json is dated in the future" in error
+               for error in record["source_errors"])

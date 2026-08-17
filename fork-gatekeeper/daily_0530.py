@@ -75,7 +75,7 @@ whose stream/tool/CPU signals all stay flat for the stall grace is stopped.
 Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
 from __future__ import annotations
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, secrets, subprocess, sys
 from datetime import datetime
 from pathlib import Path
 
@@ -96,6 +96,9 @@ from daily_merge import post_merge_checks, run_post_merge_checks
 FORKS = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
 EDA = Path("/home/reyerchu/vibeic-eda")
 OURS = ("reyer", "vibeic")
+# Destructive fork cleanup is scoped to the organisation this gate owns.  A
+# valid-looking GitHub URL for some other owner is not evidence about our PRs.
+FORK_OWNER = "vibeic"
 
 
 #: `sh` never got an answer to a deliberately short request/probe, or could not
@@ -110,6 +113,10 @@ LS_REMOTE_TIMEOUT_S = 120
 #: becoming a claim about how long a healthy operation "should" take.
 GIT_STALL_GRACE_S = float(os.environ.get("GK_GIT_STALL_GRACE", "300"))
 GIT_PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "1"))
+# GitHub REST calls below are request/response probes, not long-running work.
+# This deadline can only produce NORECORD; it is never translated into "no PR"
+# or any merge/prune verdict.
+GITHUB_API_TIMEOUT_S = float(os.environ.get("GK_GITHUB_API_TIMEOUT", "180"))
 
 
 def sh(*a, cwd=None, timeout=None, progress=False,
@@ -196,9 +203,10 @@ def mainline(g):
     return None
 
 
-def image_pins(eda_root=None):
+def image_pins(eda_root=None, *, fail_closed=False):
     """`{lowercased tool name: pinned sha}` for every fork an image Dockerfile
-    pins, or `{}` when they could not be read.
+    pins, or `{}` when they could not be read.  Destructive callers pass
+    ``fail_closed=True`` and receive ``None`` for that latter state instead.
 
     Retained per round (vibeic-eda#85) because "what did the round decide" is
     only half a record — WHICH COMMIT the shipping image was pinned at that
@@ -219,9 +227,13 @@ def image_pins(eda_root=None):
     try:
         import discover_forks                                # noqa: PLC0415
         eda_root = Path(eda_root if eda_root is not None else EDA)
+        if fail_closed and not eda_root.is_dir():
+            raise FileNotFoundError(f"EDA root is not readable: {eda_root}")
         files = list((Path(eda_root) / "tools").glob("*/Dockerfile"))
         if (Path(eda_root) / "Dockerfile").is_file():
             files.append(Path(eda_root) / "Dockerfile")
+        if fail_closed and not files:
+            raise FileNotFoundError(f"no Dockerfiles below {eda_root}")
         pins = {}
         for f in files:
             for tool, rec in discover_forks.parse_dockerfile_pins(
@@ -231,7 +243,7 @@ def image_pins(eda_root=None):
                     pins[str(tool).lower()] = ref
         return pins
     except Exception:                                       # noqa: BLE001
-        return {}
+        return None if fail_closed else {}
 
 
 # ── A COMPARISON IS ONLY AS GOOD AS THE REF IT IS MADE AGAINST ───────────────
@@ -495,9 +507,12 @@ def _fork_branches(g, main):
     # fork's default branch is `master`; the comparison was against the local
     # name and the remote default did not match it.
     protected_names = {"main", "master", main.split("/")[-1]}
+    refs = sh(*g, "for-each-ref", "--format=%(refname:short)",
+              "refs/remotes/origin")
+    if refs.returncode != 0:
+        return None
     out_b = []
-    for b in out(*g, "for-each-ref", "--format=%(refname:short)",
-                 "refs/remotes/origin").splitlines():
+    for b in (refs.stdout or "").splitlines():
         b = b.strip()
         # A bare `origin` is the remote ref itself, not a branch. The same dry
         # run offered it for deletion on eight forks.
@@ -511,8 +526,8 @@ def _fork_branches(g, main):
     return out_b
 
 
-def _branches_an_image_pin_depends_on(g, eda_root=EDA):
-    """Branches that contain a commit some image Dockerfile pins.
+def _branches_an_image_pin_depends_on(g, eda_root=None):
+    """Branches that contain this fork's own image pin, if it has one.
 
     Deleting one of these is how a pin becomes an orphan: the commit survives
     only as long as a branch reaches it, and afterwards the image builds from
@@ -523,18 +538,17 @@ def _branches_an_image_pin_depends_on(g, eda_root=EDA):
     which is the branch `NGSPICE_REF` points into. Pruning it would have
     manufactured a second cocotb.
     """
-    pins = set()
     try:
-        files = list((eda_root / "tools").glob("*/Dockerfile"))
-        if (eda_root / "Dockerfile").is_file():
-            files.append(eda_root / "Dockerfile")
-        for f in files:
-            for m in re.finditer(r"^ARG\s+\w*REF\w*=([0-9a-f]{7,40})",
-                                 f.read_text(errors="replace"), re.M):
-                pins.add(m.group(1))
-    except Exception:                                       # noqa: BLE001
-        return None          # cannot tell -> caller must not delete anything
-    if not pins:
+        repo_path = Path(g[g.index("-C") + 1])
+        repo_name = repo_path.name.lower()
+    except (ValueError, IndexError, TypeError):
+        return None
+    pins = image_pins(
+        eda_root if eda_root is not None else EDA, fail_closed=True)
+    if pins is None:
+        return None
+    pin = pins.get(repo_name)
+    if not pin:
         return set()
     keep = set()
     brs = _fork_branches(g, mainline(g) or "master")
@@ -542,10 +556,14 @@ def _branches_an_image_pin_depends_on(g, eda_root=EDA):
         return None          # could not list the branches -> cannot tell which
                              # ones a pin needs -> caller must not delete any
     for b in brs:
-        for p in pins:
-            if sh(*g, "merge-base", "--is-ancestor", p, b).returncode == 0:
-                keep.add(b)
-                break
+        ancestor = sh(*g, "merge-base", "--is-ancestor", pin, b)
+        if ancestor.returncode == 0:
+            keep.add(b)
+        elif ancestor.returncode != 1:
+            # rc=1 is git's measured "not an ancestor".  Missing objects,
+            # corrupt refs, and process failures use other codes and make pin
+            # reachability unknown; unknown cannot authorize deletion.
+            return None
     return keep
 
 
@@ -645,7 +663,173 @@ def step2_ours(g, main, rep):
     rep["carried_nothing_new"] = len(empty)
 
 
-def _branches_serving_an_open_upstream_pr(g):
+def _remote_slug(url):
+    """Return ``owner/repository`` for the Git remote spellings we accept."""
+    u = (url or "").strip().removesuffix(".git")
+    if u.startswith("git@") and ":" in u:
+        u = u.split(":", 1)[-1]
+    parts = [p for p in u.split("/") if p]
+    slug = "/".join(parts[-2:]) if len(parts) >= 2 else ""
+    return slug if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", slug) else ""
+
+
+def _is_github_remote(url):
+    u = (url or "").strip().lower()
+    return (u.startswith("git@github.com:")
+            or re.match(r"^(https?|git|ssh)://(?:git@)?github\.com/", u)
+            is not None)
+
+
+def _pr_norecord(upstream, owner, reason, *, rc=None):
+    """The one fail-closed shape for incomplete upstream-PR evidence."""
+    row = {
+        "outcome": "norecord",
+        "upstream_repository": upstream or None,
+        "fork_owner": owner or None,
+        "open_count": None,
+        "items": [],
+        "reason": reason,
+    }
+    if rc is not None:
+        row["rc"] = rc
+    return row
+
+
+def _parse_upstream_pr_pages(raw, upstream, owner):
+    """Validate and flatten ``gh api --paginate --slurp`` evidence.
+
+    A flat list is the old first-page-only shape and is rejected.  Every page,
+    every PR, and every field used by the deletion guard must be present with
+    its API type.  Partial evidence is NORECORD; it is never equivalent to
+    "there are no matching PRs".
+    """
+    try:
+        pages = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"response is not complete JSON: {exc}") from exc
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("paginated response must be a non-empty list of pages")
+    if any(not isinstance(page, list) for page in pages):
+        raise ValueError("paginated response is not an array of page arrays")
+    # `gh api --paginate` follows GitHub's Link header; it does not need a
+    # synthetic empty page to terminate.  Accepting `[100 rows, []]` would let
+    # a fabricated/truncated second page turn 100 foreign PRs into an asserted
+    # zero for our owner.  The one legitimate empty result is the single `[[]]`
+    # response for a repository with no open PRs.
+    if len(pages) > 1 and not pages[-1]:
+        raise ValueError("paginated response has a synthetic empty final page")
+
+    items, seen = [], set()
+    for page_i, page in enumerate(pages):
+        if len(page) > 100:
+            raise ValueError(f"page {page_i + 1} exceeds per_page=100")
+        if page_i < len(pages) - 1 and len(page) != 100:
+            raise ValueError(f"non-final page {page_i + 1} is partial")
+        for item_i, pr in enumerate(page):
+            where = f"page {page_i + 1} item {item_i + 1}"
+            if not isinstance(pr, dict):
+                raise ValueError(f"{where} is not an object")
+            number = pr.get("number")
+            url = pr.get("html_url")
+            title = pr.get("title")
+            state = pr.get("state")
+            draft = pr.get("draft")
+            updated = pr.get("updated_at")
+            head, base = pr.get("head"), pr.get("base")
+            if type(number) is not int or number <= 0:       # bool is not an id
+                raise ValueError(f"{where}.number is not a positive integer")
+            if number in seen:
+                raise ValueError(f"pull request #{number} occurs more than once")
+            seen.add(number)
+            if not isinstance(url, str) or not url:
+                raise ValueError(f"{where}.html_url is missing")
+            if not isinstance(title, str):
+                raise ValueError(f"{where}.title is missing")
+            if state != "open":
+                raise ValueError(f"{where}.state is not open")
+            if type(draft) is not bool:
+                raise ValueError(f"{where}.draft is not boolean")
+            if not isinstance(updated, str) or not updated:
+                raise ValueError(f"{where}.updated_at is missing")
+            try:
+                stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{where}.updated_at is malformed") from exc
+            if stamp.tzinfo is None:
+                raise ValueError(f"{where}.updated_at has no timezone")
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                raise ValueError(f"{where}.head/base is missing")
+            head_ref, base_ref = head.get("ref"), base.get("ref")
+            repo = head.get("repo")
+            login = (((repo or {}).get("owner") or {}).get("login")
+                     if isinstance(repo, dict) else None)
+            if not isinstance(head_ref, str) or not head_ref:
+                raise ValueError(f"{where}.head.ref is missing")
+            if not isinstance(base_ref, str) or not base_ref:
+                raise ValueError(f"{where}.base.ref is missing")
+            if not isinstance(login, str) or not login:
+                raise ValueError(f"{where}.head.repo.owner.login is missing")
+            if login.lower() != owner.lower():
+                continue
+            items.append({
+                "number": number,
+                "url": url,
+                "title": title,
+                "head_ref": head_ref,
+                "base_ref": base_ref,
+                "draft": draft,
+                "updated_at": updated,
+            })
+    return {
+        "outcome": "complete",
+        "upstream_repository": upstream,
+        "fork_owner": owner,
+        "open_count": len(items),
+        "items": items,
+    }
+
+
+def _upstream_pull_request_evidence(g):
+    """Return exact, retained evidence for our open PRs against upstream."""
+    origin = out(*g, "remote", "get-url", "origin")
+    upstream_url = out(*g, "remote", "get-url", "upstream")
+    upstream = _remote_slug(upstream_url)
+    origin_slug = _remote_slug(origin)
+    owner = origin_slug.split("/", 1)[0] if origin_slug else ""
+    if not upstream or not owner:
+        return _pr_norecord(
+            upstream, owner,
+            "could not derive upstream repository and fork owner from remotes")
+    upstream_is_github = _is_github_remote(upstream_url)
+    origin_is_github = _is_github_remote(origin)
+    if not upstream_is_github or not origin_is_github:
+        return _pr_norecord(
+            upstream, owner,
+            "origin and upstream are not both GitHub repositories; a local "
+            "remote is not evidence that GitHub has zero open pull requests")
+    if owner.lower() != FORK_OWNER:
+        return _pr_norecord(
+            upstream, owner,
+            f"origin owner is {owner!r}, not the managed {FORK_OWNER!r}; "
+            "refusing to use another owner's PRs as destructive evidence")
+
+    endpoint = f"repos/{upstream}/pulls?state=open&per_page=100"
+    result = sh("gh", "api", endpoint, "--paginate", "--slurp",
+                timeout=GITHUB_API_TIMEOUT_S)
+    if result.returncode != 0:
+        return _pr_norecord(
+            upstream, owner,
+            f"GitHub pagination failed: {_first_error_line(result)}",
+            rc=result.returncode)
+    try:
+        return _parse_upstream_pr_pages(result.stdout, upstream, owner)
+    except ValueError as exc:
+        return _pr_norecord(
+            upstream, owner, f"GitHub pagination evidence invalid: {exc}",
+            rc=result.returncode)
+
+
+def _branches_serving_an_open_upstream_pr(g, evidence=None):
     """Branch names that an OPEN pull request upstream uses as its head.
 
     `git cherry` answers "is this work already in main". That is the right
@@ -660,36 +844,37 @@ def _branches_serving_an_open_upstream_pr(g):
     head_ref_deleted in the same second, by us, with no maintainer involved. It
     was the only upstream PR we had.
 
-    So ask GitHub, not git. Failure to reach the API returns None, and the
-    caller then prunes NOTHING: a branch kept by mistake costs a line of
+    So ask GitHub, not git. Failure or incomplete pagination returns None, and
+    the caller then prunes NOTHING: a branch kept by mistake costs a line of
     clutter, a branch deleted by mistake costs an upstream contribution.
+
+    The optional evidence argument lets ``step4_prune`` reuse the structured
+    row already retained by ``main_``.  Calling this historical helper with
+    only ``g`` remains supported and still returns ``set``/``None``.
     """
-    origin = out(*g, "remote", "get-url", "origin")
-    upstream = out(*g, "remote", "get-url", "upstream")
-    if not origin or not upstream:
-        return set()          # no upstream to have filed a PR against
-
-    def _slug(url):
-        u = url.strip().removesuffix(".git")
-        if u.startswith("git@"):
-            u = u.split(":", 1)[-1]
-        parts = [p for p in u.split("/") if p]
-        return "/".join(parts[-2:]) if len(parts) >= 2 else ""
-
-    up, org = _slug(upstream), _slug(origin).split("/")[0]
-    if not up or not org:
-        return set()
-
-    r = sh("gh", "api", f"repos/{up}/pulls?state=open&per_page=100")
-    if r.returncode:
-        return None           # cannot tell -> caller must not delete anything
-    try:
-        prs = json.loads(r.stdout)
-    except ValueError:
+    if evidence is None:
+        evidence = _upstream_pull_request_evidence(g)
+    if (not isinstance(evidence, dict)
+            or evidence.get("outcome") != "complete"):
         return None
-    return {p["head"]["ref"] for p in prs
-            if ((p.get("head") or {}).get("repo") or {}).get("owner", {})
-            .get("login", "").lower() == org.lower()}
+    items = evidence.get("items")
+    count = evidence.get("open_count")
+    if (not isinstance(evidence.get("upstream_repository"), str)
+            or not evidence.get("upstream_repository")
+            or not isinstance(evidence.get("fork_owner"), str)
+            or not evidence.get("fork_owner")
+            or evidence.get("fork_owner", "").lower() != FORK_OWNER
+            or type(count) is not int or count < 0
+            or not isinstance(items, list) or count != len(items)):
+        return None
+    refs = set()
+    for item in items:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("head_ref"), str)
+                or not item.get("head_ref")):
+            return None
+        refs.add(item["head_ref"])
+    return refs
 
 
 def _is_ours_to_delete(g, b):
@@ -712,6 +897,49 @@ def _is_ours_to_delete(g, b):
     return any(o in au for o in OURS)
 
 
+_FULL_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+
+def _ref_tip(g, ref):
+    """Return one proven full commit id and the command evidence.
+
+    Abbreviated ids are unsuitable for `--force-with-lease`: the full expected
+    remote value is the deletion boundary's compare-and-swap token.
+    """
+    result = sh(*g, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    value = (result.stdout or "").strip().lower()
+    if result.returncode != 0 or not _FULL_OBJECT_ID.fullmatch(value):
+        return None, result
+    return value, result
+
+
+def _cherry_probe(g, main, branch):
+    """Return (unique commits, command, reason); unknown is never empty."""
+    result = sh(*g, "cherry", main, branch)
+    if result.returncode != 0:
+        return None, result, _first_error_line(result)
+    lines = [line.strip() for line in (result.stdout or "").splitlines()
+             if line.strip()]
+    if any(re.fullmatch(r"[+-] [0-9a-fA-F]{40,64}(?: .*)?", line) is None
+           for line in lines):
+        return None, result, "git cherry returned malformed output"
+    return [line.split()[1].lower() for line in lines
+            if line.startswith("+")], result, ""
+
+
+def _prune_failure(rep, row, stage, reason):
+    """Retain a fail-closed destructive-boundary outcome in the round."""
+    row.update({"outcome": "retained", "blocked_at": stage, "reason": reason})
+    rep.setdefault("prune_rechecks", []).append(row)
+    rep.setdefault("prune_retained", []).append({
+        "branch": row.get("branch"),
+        "expected_tip": row.get("expected_tip"),
+        "blocked_at": stage,
+        "reason": reason,
+    })
+    rep["needs_human"] = True
+
+
 def step4_prune(g, main, rep, apply):
     """Delete only what git itself says holds nothing unique -- AND what is not
     serving an open upstream PR -- AND what we created in the first place."""
@@ -726,6 +954,19 @@ def step4_prune(g, main, rep, apply):
                                 "rather than delete against a stale listing")
         rep["needs_human"] = True
         return
+    evidence = rep.get("upstream_pull_requests")
+    if not isinstance(evidence, dict):
+        evidence = _upstream_pull_request_evidence(g)
+        rep["upstream_pull_requests"] = evidence
+    protected = _branches_serving_an_open_upstream_pr(g, evidence)
+    if protected is None:
+        rep["pruned"] = []
+        reason = evidence.get("reason", "incomplete upstream PR evidence")
+        rep["prune_skipped"] = (
+            f"upstream PR evidence is NORECORD ({reason}); pruned nothing "
+            "rather than risk closing an open contribution")
+        rep["needs_human"] = True
+        return
     brs = [b for b in listed if _is_ours_to_delete(g, b)]
     pinned = _branches_an_image_pin_depends_on(g)
     if pinned is None:
@@ -737,46 +978,226 @@ def step4_prune(g, main, rep, apply):
     if pinned:
         rep["prune_pin_protected"] = sorted(pinned)
     brs = [b for b in brs if b not in pinned]
-    protected = _branches_serving_an_open_upstream_pr(g)
-    if protected is None:
-        rep["pruned"] = []
-        rep["prune_skipped"] = ("could not reach the GitHub API to check for "
-                                "open upstream PRs; pruned nothing rather than "
-                                "risk closing one")
-        rep["needs_human"] = True
-        return
     if protected:
         rep["prune_protected"] = sorted(protected)
-    gone = []
+    candidates = []
+    planning_failures = []
     for b in brs:
-        cherry = out(*g, "cherry", main, b)
-        if [l for l in cherry.splitlines() if l.startswith("+")]:
-            continue                      # still holds unique work — keep
         if (b in protected
                 or b.split("/", 1)[-1] in protected):
             continue                      # head of an open upstream PR — keep
-        if apply:
-            # `b` may be a remote-tracking name (origin/x) with no local ref.
-            local = b.split("/", 1)[-1] if b.startswith("origin/") else b
-            sh(*g, "branch", "-D", local)
-            deleted = sh(*g, "push", "--progress", "origin", "--delete", local,
-                         progress=True)
-            if deleted.returncode == 0:
-                gone.append(b)
+        unique, cherry, why = _cherry_probe(g, main, b)
+        if unique is None:
+            planning_failures.append({
+                "branch": b, "stage": "git_cherry", "rc": cherry.returncode,
+                "detail": why,
+            })
+            continue
+        if unique:
+            continue                      # still holds unique work — keep
+        expected_tip, tip_read = _ref_tip(g, b)
+        if expected_tip is None:
+            planning_failures.append({
+                "branch": b, "stage": "branch_tip",
+                "rc": tip_read.returncode,
+                "detail": (_first_error_line(tip_read)
+                           if tip_read.returncode else
+                           "rev-parse did not return a full object id"),
+            })
+            continue
+        candidates.append((b, expected_tip))
+
+    # One unmeasured candidate makes the destructive plan incomplete.  Do not
+    # partially execute a plan whose branch set was not fully classified.
+    if planning_failures:
+        rep["pruned"] = []
+        rep["prune_plan_blocked"] = planning_failures
+        rep["prune_skipped"] = (
+            "branch deletion planning was incomplete; git cherry or the "
+            "candidate tip could not be proved, so nothing was deleted")
+        rep["needs_human"] = True
+        return
+
+    if not apply:
+        rep["pruned"] = [branch for branch, _tip in candidates]
+        rep["prune_candidate_tips"] = {
+            branch: tip for branch, tip in candidates}
+        return
+
+    gone = []
+    for b, expected_tip in candidates:
+        local = b.split("/", 1)[-1] if b.startswith("origin/") else b
+        boundary = {"branch": b, "expected_tip": expected_tip}
+
+        # Everything that justified the plan can change while merge/check/push
+        # runs.  Fetch first, then re-prove every predicate.  The final push is
+        # still protected by the expected SHA lease, so a remote move after
+        # this fetch cannot be deleted by the race winner.
+        fetched, fetch_why = _fetch(g, "origin", "--prune")
+        boundary["fetch"] = "complete" if fetched else "norecord"
+        if not fetched:
+            _prune_failure(rep, boundary, "fresh_fetch", fetch_why)
+            continue
+
+        observed_tip, tip_read = _ref_tip(g, b)
+        boundary["observed_tip"] = observed_tip
+        if observed_tip is None:
+            _prune_failure(
+                rep, boundary, "branch_exists",
+                f"fresh origin ref is absent or unreadable (rc={tip_read.returncode}: "
+                f"{_first_error_line(tip_read)})")
+            continue
+        if observed_tip != expected_tip:
+            _prune_failure(
+                rep, boundary, "branch_tip",
+                f"branch moved from {expected_tip} to {observed_tip}")
+            continue
+
+        # Re-read Dockerfile pins at the destructive boundary.  This helper
+        # refreshes origin while classifying reachability, so prove the branch
+        # SHA once more after it returns.
+        fresh_pinned = _branches_an_image_pin_depends_on(g)
+        if fresh_pinned is None:
+            _prune_failure(rep, boundary, "image_pins",
+                           "image pin dependencies became unmeasurable")
+            continue
+        observed_after_pins, tip_read = _ref_tip(g, b)
+        boundary["observed_tip_after_pins"] = observed_after_pins
+        if observed_after_pins is None or observed_after_pins != expected_tip:
+            detail = ("branch disappeared while image pins were rechecked"
+                      if observed_after_pins is None else
+                      f"branch moved from {expected_tip} to "
+                      f"{observed_after_pins} while image pins were rechecked")
+            _prune_failure(rep, boundary, "branch_tip_after_pins", detail)
+            continue
+        if b in fresh_pinned or local in fresh_pinned:
+            boundary["image_pin_dependency"] = True
+            _prune_failure(
+                rep, boundary, "image_pin_dependency",
+                "branch now carries an image pin and must be retained")
+            current = set(rep.get("prune_pin_protected") or [])
+            current.add(b)
+            rep["prune_pin_protected"] = sorted(current)
+            continue
+        boundary["image_pin_dependency"] = False
+
+        unique, cherry, why = _cherry_probe(g, main, b)
+        boundary["cherry_rc"] = cherry.returncode
+        if unique is None:
+            _prune_failure(rep, boundary, "git_cherry", why)
+            continue
+        boundary["unique_commits"] = unique
+        if unique:
+            _prune_failure(
+                rep, boundary, "unique_commits",
+                f"branch now carries {len(unique)} unique commit(s)")
+            continue
+
+        # The first PR measurement may be minutes old after merge/check/push.
+        # Re-measure immediately before EACH irreversible remote deletion: a PR
+        # opened during this round must not have its head branch deleted (which
+        # closes the PR). There is no transactional GitHub API for query+delete,
+        # so this is the narrowest attainable race window.
+        fresh = _upstream_pull_request_evidence(g)
+        fresh_protected = _branches_serving_an_open_upstream_pr(g, fresh)
+        recheck = {
+            "branch": b,
+            "outcome": fresh.get("outcome") if isinstance(fresh, dict) else None,
+            "open_count": (fresh.get("open_count")
+                           if isinstance(fresh, dict) else None),
+        }
+        if fresh_protected is None:
+            recheck["reason"] = (fresh.get("reason")
+                                 if isinstance(fresh, dict)
+                                 else "malformed recheck evidence")
+            rep.setdefault("prune_pr_rechecks", []).append(recheck)
+            rep["prune_skipped"] = (
+                f"upstream PR recheck became NORECORD before deleting {b}; "
+                "stopped pruning rather than risk closing a new contribution")
+            rep["needs_human"] = True
+            boundary["pr_outcome"] = "norecord"
+            _prune_failure(
+                rep, boundary, "upstream_prs",
+                recheck.get("reason", "malformed recheck evidence"))
+            continue
+        if b in fresh_protected or local in fresh_protected:
+            recheck["protected"] = True
+            rep.setdefault("prune_pr_rechecks", []).append(recheck)
+            current = set(rep.get("prune_protected") or [])
+            current.add(local)
+            rep["prune_protected"] = sorted(current)
+            boundary.update({"outcome": "retained", "blocked_at": "open_pr",
+                             "reason": "branch is the head of an open upstream PR"})
+            rep.setdefault("prune_rechecks", []).append(boundary)
+            continue
+        recheck["protected"] = False
+        rep.setdefault("prune_pr_rechecks", []).append(recheck)
+
+        # Delete the REMOTE first with an exact expected-SHA lease.  This is a
+        # compare-and-swap, not a force override: a branch that moves after the
+        # recheck is preserved by the server.  No local ref is touched before
+        # the remote confirms deletion.
+        deleted = sh(
+            *g, "push", "--progress",
+            f"--force-with-lease=refs/heads/{local}:{expected_tip}",
+            "origin", f":refs/heads/{local}", progress=True)
+        if deleted.returncode == 0:
+            gone.append(b)
+            boundary["remote_delete"] = "complete"
+        else:
+            rep.setdefault("prune_push_blocked", []).append({
+                "branch": b,
+                "outcome": ("stalled" if
+                            deleted.returncode == watchdog.RC_STALLED
+                            else "natural_failure"),
+                "rc": deleted.returncode,
+                "detail": (_first_error_line(deleted) if
+                           deleted.returncode != watchdog.RC_STALLED else
+                           "no forward progress; remote deletion UNKNOWN"),
+            })
+            rep["needs_human"] = True
+            _prune_failure(
+                rep, boundary, "remote_delete_lease",
+                "remote deletion did not complete under the expected-SHA lease")
+            continue
+
+        # A local branch is separate state.  Remove it only if it still equals
+        # the remote tip proved above, using update-ref's old-value argument as
+        # a second lease.  A locally advanced branch is preserved verbatim.
+        local_tip, local_read = _ref_tip(g, f"refs/heads/{local}")
+        if local_tip is None:
+            if local_read.returncode in (1, 128) and not local_read.stdout:
+                boundary["local_delete"] = "not_present"
             else:
-                rep.setdefault("prune_push_blocked", []).append({
-                    "branch": b,
-                    "outcome": ("stalled" if
-                                deleted.returncode == watchdog.RC_STALLED
-                                else "natural_failure"),
-                    "rc": deleted.returncode,
-                    "detail": (_first_error_line(deleted) if
-                               deleted.returncode != watchdog.RC_STALLED else
-                               "no forward progress; remote deletion UNKNOWN"),
+                boundary["local_delete"] = "preserved_unmeasurable"
+                rep.setdefault("prune_local_preserved", []).append({
+                    "branch": local, "reason": "local tip could not be read",
+                    "rc": local_read.returncode,
                 })
                 rep["needs_human"] = True
+        elif local_tip != expected_tip:
+            boundary["local_delete"] = "preserved_changed"
+            rep.setdefault("prune_local_preserved", []).append({
+                "branch": local, "expected_tip": expected_tip,
+                "local_tip": local_tip,
+                "reason": "local branch differs from the proven remote tip",
+            })
+            rep["needs_human"] = True
         else:
-            gone.append(b)
+            local_deleted = sh(
+                *g, "update-ref", "-d", f"refs/heads/{local}", expected_tip)
+            if local_deleted.returncode == 0:
+                boundary["local_delete"] = "complete"
+            else:
+                boundary["local_delete"] = "preserved_lease_failure"
+                rep.setdefault("prune_local_preserved", []).append({
+                    "branch": local, "expected_tip": expected_tip,
+                    "reason": _first_error_line(local_deleted),
+                    "rc": local_deleted.returncode,
+                })
+                rep["needs_human"] = True
+        boundary["outcome"] = "remote_deleted"
+        rep.setdefault("prune_rechecks", []).append(boundary)
     rep["pruned"] = gone
 
 
@@ -788,6 +1209,26 @@ def _claude_bin():
                        capture_output=True, text=True)
     p = r.stdout.strip()
     return p if p else None
+
+
+def _atomic_json(path, value):
+    """Publish one complete JSON object or leave the previous object intact."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as fh:
+            json.dump(value, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _handoff_brief(cases) -> str:
@@ -1155,23 +1596,39 @@ def main_(argv=None) -> int:
         return 2
 
     started_at = datetime.now().astimezone()
+    run_id = secrets.token_hex(16)
     pins = image_pins()
     report, needs_human = {}, False
     for d in sorted(FORKS.iterdir()):
         if not (d / ".git").is_dir():
             continue
         g = ["git", "-C", str(d)]
+        upstream_prs = _upstream_pull_request_evidence(g)
+        pr_norecord = upstream_prs.get("outcome") != "complete"
         main = mainline(g)
         if not main:
-            report[d.name] = {"error": "no main/master", "pin": pins.get(d.name.lower())}
+            report[d.name] = {
+                "error": "no main/master",
+                "pin": pins.get(d.name.lower()),
+                "needs_human": True,
+                "upstream_pull_requests": upstream_prs,
+            }
+            needs_human = True
             continue
         if out(*g, "status", "--porcelain", "-uno", "--ignore-submodules=all"):
             report[d.name] = {"error": "dirty worktree — skipped, nothing discarded",
-                              "pin": pins.get(d.name.lower())}
+                              "pin": pins.get(d.name.lower()),
+                              "needs_human": True,
+                              "upstream_pull_requests": upstream_prs}
             needs_human = True
             continue
+        # Step 4 owns the PR-evidence verdict for a usable checkout: it records
+        # NORECORD and refuses pruning.  Other early-exit paths below already
+        # carry their own actionable failure.  Keeping transport evidence here
+        # does not by itself replace the step's retained decision.
         rep = {"main": main, "needs_human": False,
-               "pin": pins.get(d.name.lower())}
+               "pin": pins.get(d.name.lower()),
+               "upstream_pull_requests": upstream_prs}
         if args.apply:
             checkout = sh(*g, "checkout", main, progress=True)
             if checkout.returncode != 0:
@@ -1329,10 +1786,7 @@ def main_(argv=None) -> int:
     if _ai_needs_attention(ai):
         needs_human = True
 
-    if args.json:
-        Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
-
-    # RETAIN THE ROUND (vibeic-eda#85). The `--json` write above is a SINGLE
+    # RETAIN THE ROUND (vibeic-eda#85). The live `--json` path is a SINGLE
     # path that every morning overwrites, so the only record of what a round
     # decided was the record of the most recent one. This keeps a dated copy
     # beside it and appends the narrow per-fork rows that answer "has this ever
@@ -1340,9 +1794,18 @@ def main_(argv=None) -> int:
     # that could take the round down would be a worse defect than the one it
     # closes, so `round_record.write` returns its errors and they are printed,
     # never raised.
-    report["_round"] = {"started_at": started_at.isoformat(),
-                        "finished_at": datetime.now().astimezone().isoformat(),
-                        "applied": bool(args.apply)}
+    report["_round"] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "started_at": started_at.isoformat(),
+        "finished_at": datetime.now().astimezone().isoformat(),
+        "applied": bool(args.apply),
+    }
+    # The live sidecar is an input to two later verdicts. Publish the same
+    # nonce/timestamp-bearing object the retained round receives, atomically;
+    # otherwise yesterday's body can be laundered under today's collector time.
+    if args.json:
+        _atomic_json(Path(args.json), report)
     _ret = round_record.write(report, gk_state.state_dir(), when=started_at)
     if _ret.get("error"):
         print(f"  round record NOT retained: {_ret['error']}", file=sys.stderr)

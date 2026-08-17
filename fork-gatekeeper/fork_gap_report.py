@@ -59,6 +59,7 @@ EXIT
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -88,6 +89,9 @@ FETCH_STALL_GRACE_S = float(
     os.environ.get("GK_GAP_FETCH_STALL_GRACE", "300")
 )
 FETCH_PROGRESS_POLL_S = float(os.environ.get("GK_GIT_PROGRESS_POLL", "1"))
+
+PROGRAM = "fork_gap_report"
+SCHEMA_VERSION = 1
 
 
 def _run(repo: Path, *args: str, timeout: Optional[int] = 60,
@@ -611,7 +615,8 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
 
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
-            merge_evidence: Optional[dict] = None) -> dict:
+            merge_evidence: Optional[dict] = None,
+            require_merge_evidence: bool = False) -> dict:
     pins = pins_from_dockerfiles(repo)
     assertions = assertions_from_dockerfiles(repo)
     rows: List[dict] = []
@@ -621,6 +626,12 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         try:
             led = json.loads(lf.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            continue
+        # Fleet coverage is validated independently by ``_fleet_evidence``.
+        # Keep analysis total on a malformed JSON value so the producer can
+        # retain an INCOMPLETE record naming the bad row instead of crashing
+        # before it writes any evidence at all.
+        if not isinstance(led, dict):
             continue
         tool = led.get("tool") or lf.stem
         clone = forks_root / tool
@@ -752,9 +763,18 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         if seen:
             row["sync_lag_at_merge"] = count(clone, tip, seen)
             row["merge_ref_seen"] = seen
+        elif require_merge_evidence:
+            # A current 05:30 verdict is about the upstream tip THIS merge
+            # round saw.  The live tip is a different goalpost and cannot fill
+            # a missing round observation without turning absence into a
+            # plausible zero.  Fleet validation below names the exact missing
+            # identity and makes the report INCOMPLETE/rc=2.
+            row["sync_lag_at_merge"] = None
+            row["merge_ref_seen"] = None
         else:
-            # No evidence for this fork in this round: fall back to the live
-            # number rather than silently scoring it 0.
+            # Standalone legacy diagnostics have no round contract. Keep their
+            # conservative live-lag fallback, but production passes
+            # require_merge_evidence=True and can never take this branch.
             row["sync_lag_at_merge"] = row["sync_lag"]
             row["merge_ref_seen"] = None
         if row["pin"]:
@@ -800,6 +820,8 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         "q1_sync_lag": sum(r["sync_lag"] or 0 for r in measurable),
         "q1_sync_lag_at_merge": sum(r.get("sync_lag_at_merge") or 0
                                     for r in measurable),
+        "q1_unmeasured_at_merge": [r["tool"] for r in measurable
+                                    if r.get("sync_lag_at_merge") is None],
         "q1_release_lag": sum(r["release_lag"] or 0 for r in measurable),
         "q1_unmeasured": [r["tool"] for r in unmeasured],
         "q2_forks_not_built_from_ours": [r["tool"] for r in not_built],
@@ -906,12 +928,303 @@ def declared_not_built_from(forks_json: Path) -> Dict[str, str]:
     return out
 
 
+def _fleet_evidence(forks_json: Path, ledger: Path, rows: object,
+                    merge_evidence: Optional[dict] = None,
+                    require_merge_evidence: bool = False) -> dict:
+    """Prove that this report covered the exact registered fork fleet.
+
+    The headline numbers are sums, so an empty or partial ledger otherwise has
+    the most dangerous possible answer: zero.  The denominator is the set of
+    tools registered in ``FORKS.json``.  We independently compare both inputs
+    to that set: the ledger rows that were available and the rows ``analyse``
+    actually emitted.  A deliberately unintegrated ``not_built_from`` fork is
+    still a valid row in both sets; this guard is about coverage, not whether a
+    fork is an image input.
+
+    Lists retain duplicate identities rather than silently converting to sets,
+    so the retained sidecar contains enough evidence for the LL consumer to
+    repeat the exact-cover check itself.
+    """
+    errors: List[str] = []
+    registered: List[str] = []
+    try:
+        manifest = json.loads(forks_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        manifest = None
+        errors.append(
+            f"could not read registered fleet {forks_json}: "
+            f"{type(exc).__name__}: {exc}")
+    if manifest is not None:
+        entries = manifest.get("forks") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list):
+            errors.append("registered fleet forks is not a list")
+        else:
+            for pos, entry in enumerate(entries):
+                tool = entry.get("tool") if isinstance(entry, dict) else None
+                if (not isinstance(tool, str) or not tool
+                        or tool.strip() != tool):
+                    errors.append(
+                        f"registered fleet forks[{pos}].tool is malformed")
+                    continue
+                registered.append(tool)
+            if not registered:
+                errors.append("registered fleet is empty")
+
+    duplicate_registered = sorted(
+        tool for tool in set(registered) if registered.count(tool) > 1)
+    if duplicate_registered:
+        errors.append("registered fleet has duplicate tool(s): "
+                      + ", ".join(duplicate_registered))
+
+    ledger_forks: List[str] = []
+    for path in sorted(ledger.glob("*.json")):
+        if path.name == "index.json":
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            errors.append(
+                f"ledger row {path.name} is unreadable: "
+                f"{type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"ledger row {path.name} is not an object")
+            continue
+        tool = value.get("tool")
+        if (not isinstance(tool, str) or not tool
+                or tool.strip() != tool):
+            errors.append(f"ledger row {path.name} has malformed tool identity")
+            continue
+        if type(value.get("integrated")) is not bool:
+            errors.append(f"ledger row {path.name} has malformed integrated flag")
+        ledger_forks.append(tool)
+
+    row_forks: List[str] = []
+    if not isinstance(rows, list):
+        errors.append("analysis rows is not a list")
+    else:
+        for pos, row in enumerate(rows):
+            tool = row.get("tool") if isinstance(row, dict) else None
+            if (not isinstance(tool, str) or not tool
+                    or tool.strip() != tool):
+                errors.append(f"analysis rows[{pos}].tool is malformed")
+                continue
+            row_forks.append(tool)
+
+    def exact_cover(label: str, actual: List[str]) -> None:
+        duplicates = sorted(
+            tool for tool in set(actual) if actual.count(tool) > 1)
+        if duplicates:
+            errors.append(f"{label} has duplicate tool(s): "
+                          + ", ".join(duplicates))
+        missing = sorted(set(registered) - set(actual))
+        unexpected = sorted(set(actual) - set(registered))
+        if missing:
+            errors.append(f"{label} is missing registered tool(s): "
+                          + ", ".join(missing))
+        if unexpected:
+            errors.append(f"{label} has unexpected tool(s): "
+                          + ", ".join(unexpected))
+        # This also closes malformed/duplicate edge cases in which the sets
+        # happen to match but the denominator cardinality does not.
+        if len(actual) != len(registered):
+            errors.append(
+                f"{label} count is {len(actual)}, expected {len(registered)}")
+
+    exact_cover("ledger", ledger_forks)
+    exact_cover("analysis rows", row_forks)
+
+    merge_tips_seen: Dict[str, str] = {}
+    if require_merge_evidence:
+        if not isinstance(merge_evidence, dict):
+            errors.append("current round merge evidence is not an object")
+        else:
+            evidence_rows = sorted(
+                key for key in merge_evidence
+                if isinstance(key, str) and not key.startswith("_"))
+            exact_cover("merge evidence", evidence_rows)
+            for tool in sorted(set(registered)):
+                value = merge_evidence.get(tool)
+                upstream = (value.get("upstream_evidence")
+                            if isinstance(value, dict) else None)
+                tip = (upstream.get("tip_seen")
+                       if isinstance(upstream, dict) else None)
+                if (not isinstance(tip, str)
+                        or not re.fullmatch(r"[0-9a-f]{40}", tip)):
+                    errors.append(
+                        f"merge evidence {tool}.upstream_evidence.tip_seen "
+                        "is missing or malformed")
+                    continue
+                merge_tips_seen[tool] = tip
+            exact_cover("merge tip_seen", list(merge_tips_seen))
+    return {
+        "registered_forks": sorted(registered),
+        "ledger_forks": sorted(ledger_forks),
+        "merge_tips_seen": dict(sorted(merge_tips_seen.items())),
+        "fleet_errors": errors,
+    }
+
+
+def _strict_when(value: object) -> Optional[datetime]:
+    """Parse an evidence timestamp without turning malformed input into now."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _atomic_json(path: Path, value: dict) -> None:
+    """Publish one whole report or no report; never expose a partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _envelope(payload: dict, *, started_at: datetime, status: str,
+              source: dict, source_errors: List[str]) -> dict:
+    """Attach the producer and round provenance to the measured payload."""
+    record = dict(payload)
+    record.update({
+        "program": PROGRAM,
+        "schema_version": SCHEMA_VERSION,
+        "started_at": started_at.isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "source": source,
+        "source_errors": list(source_errors),
+    })
+    return record
+
+
+def _write_norecord(path: Optional[Path], *, started_at: datetime,
+                    source: dict, error: str) -> None:
+    """Retain why there is no measurement without manufacturing zero counts."""
+    if path is None:
+        return
+    _atomic_json(path, _envelope({}, started_at=started_at, status="norecord",
+                                source=source, source_errors=[error]))
+
+
+def _round_source(merge_evidence: Optional[Path], round_at: Optional[str],
+                  report_started: datetime
+                  ) -> tuple[Optional[dict], dict, Optional[str]]:
+    """Read merge evidence and, when requested, prove it belongs to this round.
+
+    ``--round-at`` is the production contract.  Without it the command remains
+    useful as a standalone/legacy diagnostic and preserves the old conservative
+    live-lag fallback.  With it, an unreadable file or an absent/stale ``_round``
+    is a typed NORECORD; it may not be replaced by a live number that happens to
+    be zero.
+    """
+    source = {
+        "kind": ("daily_0530_merge_round" if round_at is not None
+                 else "standalone"),
+        "merge_evidence": (str(merge_evidence)
+                           if merge_evidence is not None else None),
+        "round_at": round_at,
+        "_round": None,
+    }
+    if merge_evidence is None:
+        if round_at is not None:
+            return None, source, (
+                "--round-at requires --merge-evidence from this daily_0530 round")
+        return None, source, None
+
+    try:
+        evidence = json.loads(merge_evidence.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        error = (f"could not read --merge-evidence {merge_evidence}: "
+                 f"{type(exc).__name__}: {exc}")
+        return None, source, error
+    if not isinstance(evidence, dict):
+        error = f"--merge-evidence {merge_evidence} is not a JSON object"
+        return None, source, error
+
+    round_meta = evidence.get("_round")
+    if isinstance(round_meta, dict):
+        source["_round"] = {
+            "schema_version": round_meta.get("schema_version"),
+            "run_id": round_meta.get("run_id"),
+            "started_at": round_meta.get("started_at"),
+            "finished_at": round_meta.get("finished_at"),
+            "applied": round_meta.get("applied"),
+        }
+    if round_at is None:
+        return evidence, source, None
+
+    boundary = _strict_when(round_at)
+    if boundary is None:
+        return None, source, "--round-at is missing a valid ISO-8601 timestamp"
+    if not isinstance(round_meta, dict):
+        return None, source, (
+            f"--merge-evidence {merge_evidence} has no _round provenance")
+    if (type(round_meta.get("schema_version")) is not int
+            or round_meta["schema_version"] != 1):
+        return None, source, "merge evidence _round.schema_version is not 1"
+    run_id = round_meta.get("run_id")
+    if (not isinstance(run_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", run_id)):
+        return None, source, "merge evidence _round.run_id is missing or malformed"
+    merge_started = _strict_when(round_meta.get("started_at"))
+    merge_finished = _strict_when(round_meta.get("finished_at"))
+    if merge_started is None or merge_finished is None:
+        return None, source, (
+            "merge evidence _round.started_at/finished_at is missing or malformed")
+    if merge_started < boundary:
+        return None, source, (
+            "merge evidence _round.started_at predates this 05:30 round")
+    if merge_finished < merge_started:
+        return None, source, (
+            "merge evidence _round.finished_at precedes _round.started_at")
+    if merge_finished > report_started:
+        return None, source, (
+            "merge evidence claims to finish after fork_gap_report started")
+    if round_meta.get("applied") is not True:
+        return None, source, (
+            "merge evidence _round.applied is not true; no applied merge round "
+            "was proved")
+    return evidence, source, None
+
+
+def _measurement_incomplete(rep: dict) -> bool:
+    """Return true when any per-question third-state evidence remains open."""
+    disagreed = [r for r in rep.get("rows", [])
+                 if isinstance(r, dict) and r.get("pin_disagreement")]
+    return bool(not isinstance(rep.get("registered_forks"), list)
+                or not isinstance(rep.get("ledger_forks"), list)
+                or not isinstance(rep.get("merge_tips_seen"), dict)
+                or not isinstance(rep.get("fleet_errors"), list)
+                or rep.get("fleet_errors")
+                or rep.get("q1_unmeasured")
+                or rep.get("q1_unmeasured_at_merge")
+                or rep.get("q2_unmeasured_ship")
+                or rep.get("tip_rejected")
+                or disagreed)
+
+
 def main(argv=None) -> int:
+    started_at = datetime.now(timezone.utc)
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", type=Path, default=Path("/home/reyerchu/vibeic-eda"))
     ap.add_argument("--forks-root", type=Path, default=Path("/home/reyerchu/vibe-ic-forks"))
     ap.add_argument("--ledger", type=Path,
                     default=Path.home() / ".cache/eda-fork-gatekeeper/ledger")
+    ap.add_argument("--forks-json", type=Path,
+                    default=Path(__file__).resolve().parent / "FORKS.json",
+                    help="canonical registered fleet; ledger and measured rows "
+                         "must cover this exact tool identity set")
     ap.add_argument("--no-fetch", action="store_true")
     ap.add_argument("--json", type=Path, default=None)
     ap.add_argument("--merge-evidence", type=Path, default=None,
@@ -921,24 +1234,44 @@ def main(argv=None) -> int:
                          "q1_sync_lag_at_merge is measured against. Without it "
                          "that field falls back to the live lag, so a missing "
                          "file cannot silently score the round clean.")
+    ap.add_argument("--round-at", default=None,
+                    help="ISO-8601 start of the invoking 05:30 round. When "
+                         "present, --merge-evidence must contain a current, "
+                         "completed, applied _round; stale or missing provenance "
+                         "is NORECORD rather than a live-lag fallback.")
     a = ap.parse_args(argv)
 
+    mev, source, evidence_error = _round_source(
+        a.merge_evidence, a.round_at, started_at)
+    if evidence_error:
+        if a.round_at is not None:
+            print(f"fork_gap_report: rc=2 NOT MEASURED — {evidence_error}")
+            _write_norecord(a.json, started_at=started_at, source=source,
+                            error=evidence_error)
+            return 2
+        # Standalone use keeps the historical conservative fallback, but says
+        # exactly why merge-boundary evidence was unavailable.
+        print(f"fork_gap_report: {evidence_error}; sync_lag_at_merge falls "
+              "back to the live lag")
+
     if not a.ledger.is_dir():
-        print("fork_gap_report: rc=2 NOT MEASURED — no ledger"); return 2
-    mev = None
-    if a.merge_evidence:
-        try:
-            mev = json.loads(a.merge_evidence.read_text())
-        except Exception as exc:                                   # noqa: BLE001
-            # NOT fatal, and NOT silent: without it every row falls back to the
-            # live lag, which is the stricter direction.
-            print(f"fork_gap_report: could not read --merge-evidence "
-                  f"{a.merge_evidence} ({exc}); sync_lag_at_merge falls back "
-                  f"to the live lag")
-    rep = analyse(a.repo, a.forks_root, a.ledger, not a.no_fetch, mev)
+        error = f"no ledger at {a.ledger}"
+        print(f"fork_gap_report: rc=2 NOT MEASURED — {error}")
+        _write_norecord(a.json, started_at=started_at, source=source,
+                        error=error)
+        return 2
+    current_round = a.round_at is not None
+    payload = analyse(
+        a.repo, a.forks_root, a.ledger, not a.no_fetch, mev,
+        require_merge_evidence=current_round)
+    payload.update(_fleet_evidence(a.forks_json, a.ledger,
+                                   payload.get("rows"), mev,
+                                   require_merge_evidence=current_round))
+    status = "incomplete" if _measurement_incomplete(payload) else "complete"
+    rep = _envelope(payload, started_at=started_at, status=status,
+                    source=source, source_errors=[])
     if a.json:
-        a.json.parent.mkdir(parents=True, exist_ok=True)
-        a.json.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        _atomic_json(a.json, rep)
 
     # `.get`, not `[...]`: a stubbed `rep` (the exit-ladder tests replace
     # `analyse` wholesale to test `main` in isolation from it) is not obliged to
@@ -1000,11 +1333,14 @@ def main(argv=None) -> int:
     for r in rep["tip_unverified"]:
         print(f"  LEDGER BRANCH UNVERIFIED {r['tool']}: {r['why']}")
 
+    for error in rep["fleet_errors"]:
+        print(f"  FLEET NOT MEASURED: {error}")
+
     unmeasured = (rep["q1_unmeasured"] + rep["q2_unmeasured_ship"]
                   + [r["tool"] for r in disagreed])
     if unmeasured:
         print(f"  NOT MEASURED (never counted as zero) : {', '.join(sorted(set(unmeasured)))}")
-    if unmeasured or rep["tip_rejected"]:
+    if rep["status"] != "complete":
         return 2
     # #60 — a fork carrying a patch it cannot ship. No baseline excuses this:
     # the baseline covers "not built from", not "patched and unshippable".
@@ -1042,7 +1378,7 @@ def main(argv=None) -> int:
     # still fails, which is the case the baseline mechanism exists for. Only a
     # fork carrying a written reason is excused, and it is still PRINTED, so the
     # state stays visible rather than becoming invisible by being accepted.
-    _declared = declared_not_built_from(Path(__file__).resolve().parent / "FORKS.json")
+    _declared = declared_not_built_from(a.forks_json)
     _unpinned = set(rep["q2_forks_not_built_from_ours"])
     for _t in sorted(set(_declared) & _unpinned):
         _why = _declared[_t]

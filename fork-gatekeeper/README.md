@@ -211,9 +211,13 @@ and every known exit. A crash can leave `status: running`, never yesterday's
 `status: published`; the public forks page renders `failed`, `not_checked`, and
 interrupted `running` records as the release-lag blocker.
 
-After `fork_gap_report`, `run_0530.sh` invokes `capture_release_ll.py`. Every
-morning it joins the terminal release evidence to the measured sync/image/pin
-lag and retains:
+After `fork_gap_report`, `run_0530.sh` runs `fork_github_convergence.py`, then
+invokes `capture_release_ll.py`. The GitHub check has three states: exit 0 is an
+authoritative zero open issues/PRs, exit 1 is measured open work, and exit 2 is
+NORECORD. Its live JSON and a timestamped round copy are retained; a failed API
+read can therefore never be rendered as zero. Every morning LL joins that
+answer and its exact item references to the terminal release evidence and the
+measured sync/image/pin lag, then retains:
 
 * `release-ll/latest.json` — latest full LL record;
 * `release-ll/rounds/<stamp>.json` — full evidence, 400 days by default
@@ -227,11 +231,33 @@ block release, but remain distinct facts; a stalled suite is retained as
 `not_checked` and never reads the live `daily-release.json`, which may still be
 yesterday's terminal record. Even when the tick did run, the release record's
 `started_at` must fall inside this 05:30 round before LL will accept it.
+`fork_gap_report` likewise publishes `program/schema_version/started_at/
+completed_at` and the exact `daily_0530._round` nonce it measured. The cron
+passes its own `--round-at`; missing, stale, non-applied, or malformed merge
+provenance is exit 2 even when the rows that did answer sum to numeric zero.
+The producer and LL independently require exact coverage of every tool in
+`FORKS.json`: one ledger row, one analysis row, and (for a cron round) one
+40-hex `upstream_evidence.tip_seen` per registered fork. Empty or partial
+fleets are therefore incomplete, never an all-zero report. LL accepts only a
+fetching, complete gap record with every unmeasured list empty. The fork-GitHub
+record is accepted only when
+`program=fork_github_convergence`, `schema_version=1`, its authenticated actor
+matches the configured expected actor, its round nonce/timestamps match this
+round, its status is `converged|open|norecord`, and its `started_at` is at or
+after the same round boundary.
 
 The captured lesson is deterministic evidence — trigger, retry control,
-attempts, outcome, and final lag — not prose inferred from a log. Missing or
-pre-schema inputs make the capture fail and therefore make the 05:30 round fail;
-they never become a clean LL row.
+attempts, outcome, final lag, and the fork-GitHub counts/items/source errors —
+not prose inferred from a log. Missing, stale, malformed, or pre-schema inputs
+make the capture fail and therefore make the 05:30 round fail; they are retained
+as source errors and never become a clean or zero LL row.
+
+LL's generic `converged` and `round_converged` require delivery arithmetic,
+`fork_github.status=converged`, release tick exit 0, a complete consumer anchor,
+zero stranded commits, and no source error. The former arithmetic remains
+available as `delivery_converged` and `delivery_round_converged` for historical dashboards.
+A valid measured `status=open` is retained with exact items and a
+`finished_with_open_fork_work` lesson; the checker exit 1 still gates the cron.
 
 The LL keeps the merge-boundary verdict separate from live drift. A round with
 `sync_lag_at_merge=0`, `release_lag=0`, and `ours_past_pin=0` converged on every

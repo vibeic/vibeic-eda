@@ -94,7 +94,7 @@ def test_an_unmeasured_gap_is_fatal_and_not_treated_as_zero():
     assert "unmeasured" in block, (
         "there is no unmeasured branch: a missing or unparseable fork_gap.json "
         "would fall through as if the lag were zero")
-    i = block.index("unmeasured")
+    i = block.index('if [ "${GAP}" -ge 2 ]')
     after = block[i:i + 600]
     assert "GAP_FATAL=1" in after, (
         "the unmeasured branch does not make the round fail; measuring nothing "
@@ -113,8 +113,18 @@ def test_release_lag_alone_does_not_fail_the_round():
         "right thing")
 
 
-@pytest.mark.parametrize("lag,want_fatal", [("0", 0), ("12", 1), ("unmeasured", 1)])
-def test_the_gate_behaves_on_each_state(tmp_path, lag, want_fatal):
+@pytest.mark.parametrize("lag,gap_rc,stranded,past_pin,want_fatal", [
+    ("0", 1, 0, 0, 0),
+    ("12", 1, 0, 0, 1),
+    ("0", 1, 1, 0, 1),
+    ("0", 1, 0, 1, 1),
+    ("unmeasured", 2, 0, 0, 1),
+    # A partial sweep can have a numeric sum of zero. rc=2 is the producer's
+    # typed statement that the sum is incomplete, and must override the number.
+    ("0", 2, 0, 0, 1),
+])
+def test_the_gate_behaves_on_each_state(
+        tmp_path, lag, gap_rc, stranded, past_pin, want_fatal):
     """Run the gate's own logic, rather than reading it.
 
     The shell is extracted and executed with a synthetic fork_gap.json, so this
@@ -123,14 +133,20 @@ def test_the_gate_behaves_on_each_state(tmp_path, lag, want_fatal):
     state = tmp_path / "state"
     state.mkdir()
     if lag != "unmeasured":
-        (state / "fork_gap.json").write_text(json.dumps({"q1_sync_lag": int(lag)}))
+        (state / "fork_gap.json").write_text(json.dumps({
+            "q1_sync_lag": int(lag),
+            "q2_our_commits_stranded": stranded,
+            "q2_ours_past_the_pin_substantive": past_pin,
+        }))
 
     block = _verdict_block()
     start = block.index("SYNC_LAG=$(")
     end = block.index("# 0 only when BOTH are clean")
     gate = block[start:end]
 
-    script = (f'STATE="{state}"\nLOG=/dev/null\nGAP=1\n' + gate
+    script = (f'STATE="{state}"\nGK_STATE_DIR="{state}"\n'
+              f'GAP_JSON="{state / "fork_gap.json"}"\n'
+              f'LOG=/dev/null\nGAP={gap_rc}\n' + gate
               + '\necho "GAP_FATAL=${GAP_FATAL}"\n')
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                        env={**os.environ, "HOME": str(tmp_path)})

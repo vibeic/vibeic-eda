@@ -139,8 +139,14 @@ def fleet(tmp_path):
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pin")
     _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 
+    forks_json = tmp_path / "FORKS.json"
+    forks_json.write_text(json.dumps({
+        "forks": [{"tool": "toolx"}],
+    }), encoding="utf-8")
+
     return {"up": up, "ours": ours, "fork": fork, "repo": repo,
             "forks_root": fork.parent, "ledger": tmp_path / "ledger",
+            "forks_json": forks_json,
             "base": base, "o1": o1, "o2": o2, "o3": o3}
 
 
@@ -224,6 +230,7 @@ def test_the_rejection_is_stated_and_holds_the_run(fleet, capsys):
     rc = m.main(["--repo", str(fleet["repo"]),
                  "--forks-root", str(fleet["forks_root"]),
                  "--ledger", str(_ledger(fleet, "vibeic/stale", pin=fleet["o1"])),
+                 "--forks-json", str(fleet["forks_json"]),
                  "--no-fetch"])
     out = capsys.readouterr().out
     assert "LEDGER BRANCH REJECTED" in out and "toolx" in out, out
@@ -321,6 +328,7 @@ def test_an_unresolvable_ledger_branch_is_named_not_silently_dropped(fleet, caps
     rc = m.main(["--repo", str(fleet["repo"]),
                  "--forks-root", str(fleet["forks_root"]),
                  "--ledger", str(_ledger(fleet, "vibeic/never-pushed")),
+                 "--forks-json", str(fleet["forks_json"]),
                  "--no-fetch"])
     out = capsys.readouterr().out
     assert "LEDGER BRANCH UNVERIFIED" in out, out
