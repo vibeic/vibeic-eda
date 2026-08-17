@@ -362,6 +362,7 @@ __NAV__
         <div class="fork-stale" id="forkStale" hidden></div>
         <div class="fork-release" id="forkRelease" hidden></div>
         <div class="fork-metrics" id="forkMetrics"></div>
+        <p class="fork-caption" data-en="The upstream-gap card is a live follow-up measurement. The 05:30 round is judged against the commits visible at its merge boundary; commits published upstream while the image is composing remain visible here for the next round." data-zh="上游落後數是即時追蹤值。05:30 本輪以 merge 邊界當時可見的 commit 判定；image compose 期間上游新出的 commit 會保留顯示在這裡，交給下一輪處理。">The upstream-gap card is a live follow-up measurement. The 05:30 round is judged against the commits visible at its merge boundary; commits published upstream while the image is composing remain visible here for the next round.</p>
 <div class="fork-gap" id="forkGap"></div>
 
         <p class="fork-caption" id="forkUpdated"></p>
@@ -869,8 +870,8 @@ function enhBlock(tool){
        // and our tip that is also in upstream is counted twice), so `28 (sync 14
        // · release 17)` was three apart and looked like a bug in the page.
        ,
-     {en:"Commits behind upstream" + notFreshTxt,
-      zh:"落後上游的 commit 數" + notFreshZh}],
+     {en:"Live commits behind upstream" + notFreshTxt,
+      zh:"目前落後上游的 commit 數" + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is

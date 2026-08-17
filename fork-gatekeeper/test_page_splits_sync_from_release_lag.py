@@ -255,7 +255,7 @@ def test_the_card_label_stays_short():
     src = (HERE / "build_page.py").read_text(encoding="utf-8")
     i = src.index("const kpis = [")
     block = src[i:src.index("\n  ];", i)]
-    for needle in ('zh:"落後上游的 commit 數"',
+    for needle in ('zh:"目前落後上游的 commit 數"',
                    'zh:"進到 image 的自有 commit"'):
         assert needle in block, (
             f"the KPI label {needle} has grown clauses again; the split and the "
