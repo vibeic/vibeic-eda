@@ -73,6 +73,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
                           if isinstance(a, dict) and a.get("exit_code"))
     status = release.get("status") or "unmeasured"
     failure = release.get("failure") if isinstance(release.get("failure"), dict) else {}
+    anchor_pr = (release.get("anchor_pr")
+                 if isinstance(release.get("anchor_pr"), dict) else None)
     sync_lag = gap.get("q1_sync_lag_at_merge")
     live_sync_lag = gap.get("q1_sync_lag")
     if sync_lag is None:
@@ -84,6 +86,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     round_measured = all(isinstance(v, int)
                          for v in (sync_lag, release_lag, past_pin))
     terminal_ok = status in {"published", "noop", "completed", "recorded"}
+    anchor_blocked = bool(terminal_ok and anchor_pr is not None
+                          and anchor_pr.get("ok") is False)
     converged = bool(measured and terminal_ok and sync_lag == 0
                      and image_lag == 0 and past_pin == 0)
     round_converged = bool(round_measured and terminal_ok and sync_lag == 0
@@ -91,6 +95,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
 
     if source_errors:
         outcome = "could_not_measure_inputs"
+    elif anchor_blocked:
+        # Publishing and advancing the consumer's immutable anchor are two
+        # delivery hops.  Keep the image convergence arithmetic intact, but do
+        # not let a successful registry push erase a failed second hop from LL.
+        outcome = "published_with_anchor_pr_blocked"
     elif terminal_ok and failed_attempts:
         outcome = "self_healed_after_retry"
     elif status == "failed" and failure.get("retryable"):
@@ -111,9 +120,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     else:
         outcome = "finished_with_gap"
 
-    category = failure.get("category")
+    category = failure.get("category") or ("anchor_pr" if anchor_blocked else None)
     control = None
-    if failed_attempts:
+    if anchor_blocked:
+        control = "retain the published image; refuse to bypass the anchor repository push gate"
+    elif failed_attempts:
         control = "classified bounded retry; reuse pushed artefacts and BuildKit cache"
     elif attempts:
         control = "single compose attempt; no retry needed"
@@ -122,7 +133,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
 
     return {
         "program": "release_ll",
-        "schema_version": 1,
+        "schema_version": 2,
         "round_at": round_at,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "release": {
@@ -133,6 +144,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "built_tools": list(release.get("built") or []),
             "compose_attempts": attempts,
             "failure": failure or None,
+            "anchor_pr": anchor_pr,
+            "delivery_complete": (None if anchor_pr is None
+                                  else bool(terminal_ok and anchor_pr.get("ok") is True)),
             "tick_exit": tick_exit,
         },
         "convergence": {
@@ -206,6 +220,8 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "trigger": record["lesson"]["trigger"],
         "outcome": record["lesson"]["outcome"],
         "compose_attempts": len(record["release"]["compose_attempts"]),
+        "anchor_pr_ok": (record["release"]["anchor_pr"] or {}).get("ok"),
+        "delivery_complete": record["release"]["delivery_complete"],
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
         "live_sync_lag": record["convergence"]["live_sync_lag"],
         "release_lag": record["convergence"]["release_lag"],
