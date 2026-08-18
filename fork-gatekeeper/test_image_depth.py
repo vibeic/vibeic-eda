@@ -173,9 +173,10 @@ def test_every_release_path_checks_depth_before_it_pushes():
     legacy = (ROOT / "fork-gatekeeper" / "build_and_regress.sh").read_text()
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
 
-    assert "tools/check_image_depth.py" in manual
-    assert 'check_image_depth.py" --compact' in manual
-    assert manual.index("tools/check_image_depth.py") < manual.index('docker push "${t}"')
+    # The manual and legacy publishers cannot satisfy the atomic
+    # immutable/latest/record/readback contract, so they are no longer release
+    # paths at all.  Their refusal is stronger than an image-depth guard.
+    assert "[REFUSED]" in manual and "docker push" not in manual
 
     compose_tail = daily[daily.index('result["registry_composed"] = True') :]
     assert "tools/check_image_depth.py" in compose_tail
@@ -187,11 +188,9 @@ def test_every_release_path_checks_depth_before_it_pushes():
     )
 
     promote = legacy[legacy.index("promote_all()") :]
-    assert "tools/check_image_depth.py" in promote
-    assert "--compact" in promote
-    assert promote.index("tools/check_image_depth.py") < promote.index(
-        '_progress_exec docker push "ghcr.io/vibeic/vibeic-eda:${NEWVER}"'
-    )
+    promote = promote[:promote.index("CANDS=")]
+    assert "legacy GK_MODE=promote is retired" in promote
+    assert "docker push" not in promote and "docker tag" not in promote
 
     assert "--load" in workflow
     assert "push: true" not in workflow[workflow.index("build-and-push:") :]

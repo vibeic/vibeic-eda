@@ -42,8 +42,10 @@ def test_a_red_suite_blocks_the_publish_and_fails_the_round():
     from code whose tests are red, and blocking it would trade a
     correctness-reporting problem for a synchronisation one."""
     src = ROUND.read_text(encoding="utf-8")
-    gate = re.search(r'if \[ "\$\{DISC\}" -eq 0 \][^\n]*\n', src)
-    assert gate and "${TESTS}" in gate.group(0), (
+    start = src.index("# PUBLISH LAST")
+    end = src.index("# 0 only when BOTH are clean")
+    gate = src[start:end]
+    assert '[ "${TESTS}" -eq 0 ]' in gate, (
         "the page publish does not consult the test result")
     verdict = src[src.index("# 0 only when BOTH are clean"):]
     assert '"${TESTS}" -ne 0' in verdict, (

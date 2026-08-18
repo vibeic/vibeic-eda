@@ -173,7 +173,10 @@ def test_main_republishes_the_digests_after_moving_pins():
     would have caught the original defect.
     """
     src = (Path(dr.__file__)).read_text()
-    body = src[src.index("def main("):]
+    # The public main owns the host-wide publication lock; the transaction
+    # body deliberately lives behind it so no supported call can bypass the
+    # lock. Assert ordering within that real transaction, not the wrapper.
+    body = src[src.index("def _main_under_release_lock("):]
 
     rewrite_at = body.index("rewrite_pin(root,")
     after = body[rewrite_at:]

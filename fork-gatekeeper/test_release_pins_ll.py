@@ -13,6 +13,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capture_release_ll as LL  # noqa: E402
 import check_release_pins_committed as CHECK  # noqa: E402
+from test_ai_handoff_progress_supervision import (  # noqa: E402
+    _published_release_record,
+)
 from test_fork_github_convergence_ll import (  # noqa: E402
     ROUND_AT,
     _ai_authorization_record,
@@ -49,7 +52,7 @@ def _pins(verdict: str = "PASS") -> dict:
         "program": LL.RELEASE_PINS_PROGRAM,
         "tool": LL.RELEASE_PINS_PROGRAM,
         "schema_version": LL.RELEASE_PINS_SCHEMA_VERSION,
-        "checked_at": "2026-08-17T06:03:00+08:00",
+        "checked_at": "2026-08-17T06:04:30+08:00",
         "round_at": ROUND_AT,
         "run_id": RUN_ID,
         "verdict": verdict,
@@ -75,14 +78,8 @@ def _capture(tmp_path: Path, pins: dict | None, *, raw: str | None = None,
              tick_state: str = "ran",
              release_value: dict | None = None) -> tuple[int, dict, dict]:
     release = tmp_path / "daily-release.json"
-    release.write_text(json.dumps(release_value or {
-        "program": "daily_release", "schema_version": 2,
-        "status": "published",
-        "started_at": "2026-08-17T05:40:00+08:00",
-        "finished_at": "2026-08-17T05:50:00+08:00",
-        "version": {"to": VERSION},
-        "compose_attempts": [{"exit_code": 0}],
-    }))
+    release.write_text(json.dumps(
+        release_value or _published_release_record(VERSION)))
     gap = tmp_path / "gap.json"
     gap.write_text(json.dumps(_gap_record()))
     github = tmp_path / "fork-github.json"

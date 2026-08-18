@@ -254,7 +254,8 @@ PY
     fi
 fi
 
-# Step 6 — refresh the fork ledger and REGENERATE the public page.
+# Step 6 — refresh the fork ledger.  Publication is deliberately later, after
+# every current-round delivery/convergence source has produced its verdict.
 #
 # This step did not exist. The cron merged, built, verified and published every
 # morning, and never touched https://vibeic.ai/eda-forks.html — so the page only
@@ -262,37 +263,12 @@ fi
 # older world in between. A daily pipeline whose public output is updated
 # manually is not a daily pipeline.
 #
-# It runs AFTER run_tick so the page reflects the release that just shipped.
-# Exit status captured directly, per the note at the top of this file.
+# Discovery runs AFTER run_tick so the ledger reflects the release that just
+# shipped. Exit status is captured directly, per the note at the top of this
+# file.
 python3 "${DIR}/discover_forks.py" >> "${LOG}" 2>&1
 DISC=$?
 echo "[$(date -Is)] discover_forks exit ${DISC}" >> "${LOG}"
-
-# Only CODE=0 proves the programs that compute this page are current. CODE=1
-# proves they are superseded; CODE=2 is NORECORD, not permission to publish.
-# Either condition keeps today's date off an unverified result.
-if [ "${DISC}" -eq 0 ] && [ "${CODE}" -eq 0 ] && [ "${TESTS}" -eq 0 ]; then
-    python3 "${DIR}/build_page.py" --out /home/reyerchu/vibeic.ai/eda-forks.html >> "${LOG}" 2>&1
-    PAGE=$?
-    echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
-else
-    # Publishing a page built from a ledger that failed to refresh would put stale
-    # numbers under today's date, which is worse than leaving yesterday's page up.
-    #
-    # PAGE stays 0 so the skip alone does not fail the round — DISC already does
-    # that below — but NO `build_page exit 0` line is written. That line would say
-    # the page build succeeded on a morning it never ran, and anything grepping
-    # `build_page exit` (rather than reading the log in order) would read it as a
-    # healthy publish. A step that did not run reports that it did not run.
-    PAGE=0
-    if [ "${TESTS}" -ne 0 ]; then
-        echo "[$(date -Is)] build_page SKIPPED — the round's own tests are red or produced NORECORD; publishing would date-stamp numbers from unverified logic. See semantic_pytest.json and the pytest output above." >> "${LOG}"
-    elif [ "${CODE}" -ne 0 ]; then
-        echo "[$(date -Is)] build_page SKIPPED — code currency is stale or NORECORD (rc=${CODE}); see check_round_code_is_current above" >> "${LOG}"
-    else
-        echo "[$(date -Is)] build_page SKIPPED — the ledger did not refresh" >> "${LOG}"
-    fi
-fi
 
 # THE ROUND MUST NOTICE ITS OWN SILENCE (vibeic-eda#58). Three consecutive days
 # published nothing and raised no alert: the round exited 1 into a log, and the
@@ -386,7 +362,8 @@ LL=$?
 echo "[$(date -Is)] capture_release_ll exit ${LL}" >> "${LOG}"
 
 python3 "${DIR}/check_ledger_is_fresh.py" \
-    --json "${STATE:-$HOME/.cache/eda-fork-gatekeeper}/ledger_freshness.json" >> "${LOG}" 2>&1
+    --ledger "${GK_STATE_DIR}/ledger" \
+    --json "${GK_STATE_DIR}/ledger_freshness.json" >> "${LOG}" 2>&1
 FRESH=$?
 echo "[$(date -Is)] check_ledger_is_fresh exit ${FRESH}" >> "${LOG}"
 
@@ -461,6 +438,68 @@ elif [ "${SYNC_LAG}" -ne 0 ] 2>/dev/null; then
 else
     echo "[$(date -Is)] CONVERGENCE: sync lag 0 — every fork took everything this round saw upstream" >> "${LOG}"
     GAP_FATAL=0
+fi
+
+# PUBLISH LAST, FROM THIS ROUND'S CERTIFICATE (BLOCKING).
+#
+# The old placement published immediately after discovery. Gap, GitHub, LL and
+# freshness all ran later, so each could report a failure after today's page had
+# already replaced yesterday's good one. Worse, build_page read the live
+# daily-release.json directly; when AI skipped the release tick that file was
+# necessarily yesterday's terminal record. The page therefore attributed an old
+# release to a new round.
+#
+# Every authority below is a required current-round zero. A measured open GitHub
+# inventory (rc=1), NORECORD (rc=2), a malformed/stale source rejected by LL, or
+# any release/tick refusal leaves the last good page byte-for-byte untouched.
+# build_page independently revalidates the strict gap/GitHub/LL JSON, run nonce,
+# timestamps and fleet denominator before its atomic rename.
+PAGE=0
+if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
+   && [ "${AI_AUTH}" -eq 0 ] && [ "${TICK}" -eq 0 ] \
+   && [ "${DISC}" -eq 0 ] && [ "${GAP}" -eq 0 ] \
+   && [ "${FORK_GH}" -eq 0 ] && [ "${LL}" -eq 0 ] \
+   && [ "${FRESH}" -eq 0 ] && [ "${INPUT_CLEAR}" -eq 0 ] \
+   && [ "${GAP_FATAL}" -eq 0 ]; then
+    python3 "${DIR}/build_page.py" \
+        --out /home/reyerchu/vibeic.ai/eda-forks.html \
+        --round-at "${ROUND_AT}" \
+        --run-id "${AI_RUN_ID}" \
+        --forks-json "${DIR}/FORKS.json" \
+        --gap-json "${GAP_JSON}" \
+        --fork-github-json "${FORK_GH_JSON}" \
+        --release-ll-json "${GK_STATE_DIR}/release-ll/latest.json" \
+        --expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}" \
+        >> "${LOG}" 2>&1
+    PAGE=$?
+    echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
+else
+    # PAGE remains zero because the source gate already owns the round failure.
+    # Do not write a fake `build_page exit 0`: a step that did not run says so.
+    if [ "${TESTS}" -ne 0 ]; then
+        PAGE_SKIP="semantic pytest is not a natural green record (rc=${TESTS})"
+    elif [ "${CODE}" -ne 0 ]; then
+        PAGE_SKIP="round code currency is stale or NORECORD (rc=${CODE})"
+    elif [ "${AI_AUTH}" -ne 0 ]; then
+        PAGE_SKIP="AI release authorization is blocked or NORECORD (rc=${AI_AUTH})"
+    elif [ "${TICK}" -ne 0 ]; then
+        PAGE_SKIP="release tick is not authorized/current (rc=${TICK})"
+    elif [ "${DISC}" -ne 0 ]; then
+        PAGE_SKIP="fork discovery/ledger refresh is nonzero (rc=${DISC})"
+    elif [ "${GAP}" -ne 0 ]; then
+        PAGE_SKIP="current-round fork gap is open or NORECORD (rc=${GAP})"
+    elif [ "${FORK_GH}" -ne 0 ]; then
+        PAGE_SKIP="current-round GitHub delivery is open or NORECORD (rc=${FORK_GH})"
+    elif [ "${LL}" -ne 0 ]; then
+        PAGE_SKIP="current-round release LL is invalid or nonzero (rc=${LL})"
+    elif [ "${FRESH}" -ne 0 ]; then
+        PAGE_SKIP="ledger freshness is stale or NORECORD (rc=${FRESH})"
+    elif [ "${INPUT_CLEAR}" -ne 0 ]; then
+        PAGE_SKIP="a stale round input could not be cleared"
+    else
+        PAGE_SKIP="whole-round fork convergence is not zero"
+    fi
+    echo "[$(date -Is)] build_page SKIPPED — ${PAGE_SKIP}; last good page preserved" >> "${LOG}"
 fi
 
 # 0 only when BOTH are clean: the delivery pipeline and every

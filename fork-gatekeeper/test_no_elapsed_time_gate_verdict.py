@@ -70,7 +70,7 @@ def test_legacy_and_release_paths_cannot_restore_the_old_runtime_budgets():
 
     promote = (HERE / "build_and_regress.sh").read_text(encoding="utf-8")
     assert not re.search(r"(^|[;&|]\s*)timeout\s+", promote, re.MULTILINE)
-    assert "progress_exec.py" in promote
+    assert "legacy GK_MODE=promote is retired" in promote
 
 
 def test_reachability_is_bounded_by_graph_shape_not_machine_speed():

@@ -47,16 +47,21 @@ Exit: 0 released or nothing to do, 1 something needed a human, 2 nothing checked
 from __future__ import annotations
 
 import argparse
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import difflib
 from enum import Enum
+import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -75,6 +80,43 @@ RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 SHORT = 7
 
 
+def _release_lock_path() -> Path:
+    """One host-wide lock for every checkout that can publish ``:latest``.
+
+    The lock cannot live in the checkout: two clones are precisely how an old
+    noop and a new release can otherwise run concurrently.  Resolve the account
+    home from the uid database rather than HOME/XDG environment overrides, so
+    every supported invocation by this release authority converges on the same
+    inode.
+    """
+    home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    return home / ".cache" / "eda-fork-gatekeeper" / "daily-release.lock"
+
+
+def _acquire_release_lock(path: Path):
+    """Acquire the release authority without waiting or following a symlink."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()):
+            raise OSError("release lock is not a private regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.ftruncate(fd, 0)
+        os.write(fd, (f"pid={os.getpid()} started={_utcnow()}\n").encode())
+        os.fsync(fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Presence(str, Enum):
     """A measured image/tag state; UNKNOWN is never treated as absence."""
 
@@ -89,6 +131,12 @@ class PresenceMeasurement:
     subject: str
     source: str
     detail: str = ""
+    # A PRESENT answer says only that a tag resolves.  Publication checks also
+    # have to prove that ``:latest`` resolves to the SAME manifest as the
+    # immutable version tag; an old-but-present latest is the exact state left
+    # by a failed latest push.  Registry probes fill this with a digest of the
+    # canonical manifest JSON.  Other presence callers do not need it.
+    identity: Optional[str] = None
 
 
 class ReleaseMeasurementUnknown(RuntimeError):
@@ -109,6 +157,23 @@ class ReleaseMeasurementUnknown(RuntimeError):
             "subject": self.subject,
             "detail": self.detail,
         }
+
+
+def _strict_json_loads(raw: str):
+    """Parse registry/git evidence without duplicate keys or non-finite values."""
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def constant(value):
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    return json.loads(raw, object_pairs_hook=object_pairs,
+                      parse_constant=constant)
 
 
 #: Environment every buildx invocation gets.
@@ -536,7 +601,7 @@ def _is_pure_mirror(repo: str) -> bool:
         return False
     def _g(*a):
         try:
-            r = subprocess.run(["git", "-C", str(clone), *a],
+            r = subprocess.run(_release_git_cmd(clone, *a),
                                capture_output=True, text=True, timeout=120)
             return r.stdout.strip() if r.returncode == 0 else None
         except Exception:                                            # noqa: BLE001
@@ -622,13 +687,49 @@ def released_record(eda_root: Path) -> dict:
     if not f.is_file():
         return {}
     try:
-        return json.loads(f.read_text())
-    except ValueError:
-        return {}
+        value = _strict_json_loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseMeasurementUnknown(
+            stage="release_record",
+            category="release_record_malformed",
+            subject=str(f),
+            detail=f"authoritative RELEASED.json is not strict JSON: {exc}",
+        ) from exc
+    if not isinstance(value, dict):
+        raise ReleaseMeasurementUnknown(
+            stage="release_record",
+            category="release_record_malformed",
+            subject=str(f),
+            detail="authoritative RELEASED.json must be a JSON object",
+        )
+    return value
+
+
+def release_record_value(eda_root: Path, version: str,
+                         targets: Dict[str, List[str]], *,
+                         manifest_identity: Optional[str] = None) -> dict:
+    """Construct the canonical record without changing the working tree."""
+    rec = {
+        "_comment": "What the last PUBLISHED image was built from. A pin set "
+                    "not matching this has never been released, however current "
+                    "the pins look. The fingerprint is measured AFTER every edit "
+                    "this run made, so a later run can reproduce it from the "
+                    "tree that shipped.",
+        "version": version,
+        "pins_fingerprint": pins_fingerprint({
+            **pinned_refs(eda_root),
+            **{f"recipe:{k}": recipe_hash(eda_root, k) for k in targets},
+            "recipe:__compose__": compose_recipe_hash(eda_root)}),
+        "pins": {k: v for k, v in sorted(pinned_refs(eda_root).items())},
+    }
+    if manifest_identity is not None:
+        rec["manifest_identity"] = manifest_identity
+    return rec
 
 
 def write_released_record(eda_root: Path, version: str,
-                          targets: Dict[str, List[str]]) -> dict:
+                          targets: Dict[str, List[str]], *,
+                          manifest_identity: Optional[str] = None) -> dict:
     """THE ONE writer of `RELEASED.json`. Returns the record it wrote.
 
     vibeic-eda#51. This used to be an inline block inside the publish path, so
@@ -650,33 +751,184 @@ def write_released_record(eda_root: Path, version: str,
     from the tree that shipped — `compose_recipe_hash` reads the root Dockerfile
     that `rewrite_pin` and `retag_images` have already edited.
     """
-    rec = {
-        "_comment": "What the last PUBLISHED image was built from. A pin set "
-                    "not matching this has never been released, however current "
-                    "the pins look. The fingerprint is measured AFTER every edit "
-                    "this run made, so a later run can reproduce it from the "
-                    "tree that shipped.",
-        "version": version,
-        "pins_fingerprint": pins_fingerprint({
-            **pinned_refs(eda_root),
-            **{f"recipe:{k}": recipe_hash(eda_root, k) for k in targets},
-            "recipe:__compose__": compose_recipe_hash(eda_root)}),
-        "pins": {k: v for k, v in sorted(pinned_refs(eda_root).items())},
-    }
-    (eda_root / "RELEASED.json").write_text(
-        json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    rec = release_record_value(
+        eda_root, version, targets, manifest_identity=manifest_identity)
+    _atomic_json(eda_root / "RELEASED.json", rec)
     return rec
 
 
 #: A changed line in a pin file that is a PIN and nothing else. Anything a
 #: release run writes into these files matches one of these; anything that does
 #: not is a human's edit and is refused rather than swept into a release commit.
-_PIN_LINE_RE = re.compile(
-    r"^\s*(?:"
-    r"ARG\s+[A-Z0-9_]+_REF=[0-9a-f]{40}"                      # tools/*/Dockerfile
-    r"|ARG\s+IMG_[A-Z0-9_]+=\S+"                              # root Dockerfile tag
-    r"|variable\s+\"[A-Z0-9_]+_(?:REF|RECIPE)\"\s*\{.*\}"     # docker-bake.hcl
-    r")")
+_PIN_LINE_RES = (
+    re.compile(
+        r"^(\s*ARG\s+[A-Z0-9_]+_REF=)[0-9a-f]{40}"
+        r"(\s*(?:#.*)?)$"),
+    re.compile(
+        r"^(\s*ARG\s+IMG_[A-Z0-9_]+=)\S+"
+        r"(\s*(?:#.*)?)$"),
+    re.compile(
+        r'^(\s*variable\s+\"[A-Z0-9_]+_(?:REF|RECIPE)\"\s*\{\s*'
+        r'default\s*=\s*\")[^\"]*(\"\s*\}\s*(?:#.*)?)$'),
+)
+
+
+def _pin_line_shape(line: str) -> Optional[str]:
+    """Canonical shape of one mechanically writable pin line."""
+    for pattern in _PIN_LINE_RES:
+        match = pattern.fullmatch(line)
+        if match:
+            return match.group(1) + "<RELEASE-PIN>" + match.group(2)
+    return None
+
+
+def _git_error(blob: bytes) -> str:
+    return blob.decode("utf-8", errors="replace").strip()
+
+
+def _release_git_bytes(eda_root: Path, *args: str,
+                       input_bytes: Optional[bytes] = None,
+                       timeout: int = 60) -> Tuple[int, bytes, bytes]:
+    """Run sanitised Git plumbing without decoding or content conversion."""
+    try:
+        result = subprocess.run(
+            _release_git_cmd(eda_root, *args), input=input_bytes,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+        )
+        return result.returncode, result.stdout, result.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 124, b"", str(exc).encode("utf-8", errors="replace")
+
+
+def _head_tree_entries(
+        eda_root: Path, revision: str = "HEAD",
+        ) -> Tuple[Optional[Dict[str, Tuple[str, str, str]]], str]:
+    """HEAD path -> (mode, object type, oid), without worktree filters."""
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "ls-tree", "-r", "-z", "--full-tree", revision),
+        timeout=60)
+    if rc != 0:
+        return None, f"could not enumerate HEAD: {(err or out).strip()[:200]}"
+    entries: Dict[str, Tuple[str, str, str]] = {}
+    try:
+        for record in (item for item in out.split("\0") if item):
+            metadata, rel = record.split("\t", 1)
+            mode, kind, oid = metadata.split(" ", 2)
+            entries[rel] = (mode, kind, oid.lower())
+    except ValueError as exc:
+        return None, f"could not parse HEAD tree inventory: {exc}"
+    return entries, ""
+
+
+def _index_entries(
+        eda_root: Path) -> Tuple[Optional[Dict[str, List[Tuple[str, str, int]]]], str]:
+    """Raw index entries, retaining conflict stages instead of flattening them."""
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "ls-files", "--stage", "-z"), timeout=60)
+    if rc != 0:
+        return None, f"could not enumerate the release index: {(err or out).strip()[:200]}"
+    entries: Dict[str, List[Tuple[str, str, int]]] = {}
+    try:
+        for record in (item for item in out.split("\0") if item):
+            metadata, rel = record.split("\t", 1)
+            mode, oid, stage = metadata.split(" ", 2)
+            entries.setdefault(rel, []).append(
+                (mode, oid.lower(), int(stage)))
+    except ValueError as exc:
+        return None, f"could not parse the release index: {exc}"
+    return entries, ""
+
+
+def _object_format(eda_root: Path) -> Tuple[Optional[str], str]:
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--show-object-format"), timeout=60)
+    algorithm = out.strip().lower()
+    if rc != 0 or algorithm not in {"sha1", "sha256"}:
+        return None, ("could not determine Git object format: "
+                      + (err or out).strip()[:160])
+    return algorithm, ""
+
+
+def _blob_oid(data: bytes, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    digest.update(f"blob {len(data)}\0".encode("ascii"))
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _raw_worktree_blob(
+        eda_root: Path, rel: str, algorithm: str,
+        ) -> Tuple[Optional[Tuple[str, str, bytes]], str]:
+    """Return (Git mode, raw oid, raw bytes); never run attributes/filters."""
+    path = eda_root / rel
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        return None, f"could not inspect working-tree {rel}: {exc}"
+    try:
+        if stat.S_ISREG(info.st_mode):
+            data = path.read_bytes()
+            mode = "100755" if info.st_mode & 0o111 else "100644"
+        elif stat.S_ISLNK(info.st_mode):
+            data = os.readlink(path).encode(sys.getfilesystemencoding(),
+                                            errors="surrogateescape")
+            mode = "120000"
+        else:
+            return None, f"working-tree {rel} is not a regular file or symlink"
+    except OSError as exc:
+        return None, f"could not read working-tree {rel}: {exc}"
+    return (mode, _blob_oid(data, algorithm), data), ""
+
+
+def _single_index_entry(
+        entries: Dict[str, List[Tuple[str, str, int]]], rel: str,
+        ) -> Optional[Tuple[str, str]]:
+    values = entries.get(rel, [])
+    if len(values) != 1 or values[0][2] != 0:
+        return None
+    return values[0][0], values[0][1]
+
+
+def _raw_head_blob(eda_root: Path, oid: str) -> Tuple[Optional[bytes], str]:
+    rc, out, err = _release_git_bytes(eda_root, "cat-file", "blob", oid)
+    if rc != 0:
+        return None, f"could not read HEAD blob {oid}: {_git_error(err or out)[:160]}"
+    return out, ""
+
+
+def _raw_pin_change_is_only_pins(
+        *, head_mode: str, head_oid: str, head_bytes: bytes,
+        index_entry: Optional[Tuple[str, str]],
+        working: Tuple[str, str, bytes],
+        ) -> Tuple[bool, str]:
+    """Admit one already-captured raw pin replacement."""
+    work_mode, work_oid, work_bytes = working
+    if work_mode != head_mode:
+        return False, "the release pin file mode or type changed"
+    if index_entry not in {(head_mode, head_oid), (work_mode, work_oid)}:
+        return False, "the release index carries a different staged pin edit"
+    try:
+        before = head_bytes.decode("utf-8").splitlines(keepends=True)
+        after = work_bytes.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return False, "the release pin file is not UTF-8 text"
+    removed: Counter[str] = Counter()
+    added: Counter[str] = Counter()
+    for delta in difflib.ndiff(before, after):
+        if delta[:2] not in {"- ", "+ "}:
+            continue
+        line = delta[2:].rstrip("\r\n")
+        shape = _pin_line_shape(line)
+        if shape is None:
+            return False, f"non-pin change: {line.strip()[:48]}"
+        (removed if delta.startswith("- ") else added)[shape] += 1
+    if not added and not removed:
+        return False, "the release pin change no longer exists"
+    if not added or not removed or added != removed:
+        return False, "the release pin is not a paired replacement"
+    return True, ""
 
 
 def _diff_is_only_pins(eda_root: Path, rel: str) -> Tuple[bool, str]:
@@ -687,16 +939,35 @@ def _diff_is_only_pins(eda_root: Path, rel: str) -> Tuple[bool, str]:
     against a snapshot, and the looser one is what the refusal is for: keeping a
     human's half-finished edit out of an automated release commit.
     """
-    rc, out, err = _sh(["git", "-C", str(eda_root), "diff", "-U0", "--", rel],
-                       timeout=60)
-    if rc != 0:
-        return False, f"git diff failed: {(err or out).strip()[:60]}"
-    for line in out.splitlines():
-        if line[:1] not in ("+", "-") or line[:3] in ("+++", "---"):
-            continue
-        if not _PIN_LINE_RE.match(line[1:]):
-            return False, f"non-pin change: {line[1:].strip()[:48]}"
-    return True, ""
+    # Git's diff machinery still applies clean filters even with --no-textconv
+    # and --no-ext-diff. Compare raw committed/worktree bytes ourselves, and
+    # separately prove that replacing the real index entry loses no staged data.
+    head, why = _head_tree_entries(eda_root)
+    if head is None:
+        return False, why
+    indexes, why = _index_entries(eda_root)
+    if indexes is None:
+        return False, why
+    algorithm, why = _object_format(eda_root)
+    if algorithm is None:
+        return False, why
+    head_entry = head.get(rel)
+    if head_entry is None or head_entry[1] != "blob":
+        return False, "the release pin has no regular HEAD blob"
+    working, why = _raw_worktree_blob(eda_root, rel, algorithm)
+    if working is None:
+        return False, why or "the release pin change no longer exists"
+    head_mode, _kind, head_oid = head_entry
+    index_entry = _single_index_entry(indexes, rel)
+    if index_entry is None:
+        return False, "the release index has a missing or conflicted pin entry"
+    head_bytes, why = _raw_head_blob(eda_root, head_oid)
+    if head_bytes is None:
+        return False, why
+    return _raw_pin_change_is_only_pins(
+        head_mode=head_mode, head_oid=head_oid, head_bytes=head_bytes,
+        index_entry=index_entry, working=working,
+    )
 
 
 def commit_release_record(eda_root: Path, version: str,
@@ -742,10 +1013,11 @@ def commit_release_record(eda_root: Path, version: str,
     recipe digest, an IMG tag) is REFUSED and named, because that is someone
     else's uncommitted work and a release commit is not where it belongs.
 
-    Does not push: whether the record reaches origin is the caller's call, and a
-    failed push must not look like a failed release. Returns (committed, note)
-    and never raises — a release that published successfully must not be
-    reported as failed because a commit could not be made.
+    Attempts the fail-safe push after committing, but its boolean describes the
+    commit only for compatibility; the caller independently reads origin back
+    before any green terminal. Returns (committed, note) and never raises — an
+    already-published immutable image must retain an explicit recovery record
+    even when the Git half cannot complete.
     """
     # README.md carries this repo's OWN install pointers, rewritten by
     # `sync_image_version --set` immediately before this call. It is listed here so
@@ -764,47 +1036,336 @@ def commit_release_record(eda_root: Path, version: str,
     admitted, refused = [], []
     for rel in sorted(set(pin_files or [])):
         if not (eda_root / rel).is_file():
+            refused.append(f"{rel} (missing after the release build)")
             continue
         ok, why = _diff_is_only_pins(eda_root, rel)
         (admitted if ok else refused).append(rel if ok else f"{rel} ({why})")
-    present += admitted
-    rc, out, err = _sh(["git", "-C", str(eda_root), "status", "--porcelain",
-                        "--"] + present, timeout=60)
-    if rc != 0:
-        return False, f"git status failed: {(err or out).strip()[:120]}"
-    if not out.strip():
-        return False, "record already matches HEAD — nothing to commit"
-    rc, out, err = _sh(["git", "-C", str(eda_root), "add", "--"] + present,
-                       timeout=60)
-    if rc != 0:
-        return False, f"git add failed: {(err or out).strip()[:120]}"
-    msg = (f"release: record {version} as published\n"
-           f"\n"
-           f"Written by daily_release after the image was pushed. The publish is "
-           f"durable (it is in a registry); this is the half that was not "
-           f"(vibeic-eda#71).\n")
-    if admitted:
-        msg += ("\nThe pins this run moved are committed here too, so a fresh "
-                "clone rebuilds what this record says shipped:\n"
-                + "".join(f"  {f}\n" for f in admitted))
     if refused:
-        msg += ("\nNOT committed — carries changes beyond the pin lines, which "
-                "are someone else's to review:\n"
-                + "".join(f"  {f}\n" for f in refused))
-    rc, out, err = _sh(["git", "-C", str(eda_root), "commit", "-m", msg,
-                        "--"] + present, timeout=120)
-    if rc != 0:
-        return False, f"git commit failed: {(err or out).strip()[:160]}"
-    note = f"recorded {version} in a commit"
-    if admitted:
-        note += f" with {len(admitted)} pin file(s)"
-    if refused:
-        note += (f"; {len(refused)} pin file(s) REFUSED, still uncommitted: "
-                 + ", ".join(refused))
+        # The record was computed from the working tree that built the image.
+        # Publishing it without every pin file named by this run would make
+        # origin claim the new pin while retaining the old one -- the exact
+        # stale-GitHub-pin defect this commit path exists to close.  Preserve
+        # the human edit and the locally written record, but publish neither as
+        # a falsely complete release.
+        return False, (
+            f"record NOT committed — {len(refused)} release pin file(s) "
+            "REFUSED, so the record would not reproduce on origin: "
+            + ", ".join(refused)
+        )
+    present = sorted(set(present + admitted))
 
+    committed, note = _commit_release_record_exact(
+        eda_root, version, present, admitted)
+    if not committed:
+        return False, note
     _pushed, _why = push_release_record(eda_root)
     note += f"; {_why}"
     return True, note
+
+
+def _commit_release_record_exact(
+        eda_root: Path, version: str, present: List[str], admitted: List[str],
+        ) -> Tuple[bool, str]:
+    """Create the exact release tree while holding the checkout's index lock."""
+    # Claim the standard lock before the final index measurement.  Otherwise a
+    # human `git add` between admission and index replacement can either ride
+    # the release tree or be destroyed by it.  Read-only Git plumbing continues
+    # to work while this inode exists; all cooperating index writers refuse.
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--path-format=absolute", "--git-path", "index"),
+        timeout=60)
+    index_text = out.strip()
+    if rc != 0 or not index_text or "\x00" in index_text:
+        return False, ("could not resolve the release index path: "
+                       f"{(err or out).strip()[:160]}")
+    index_path = Path(index_text)
+    if not index_path.is_absolute():
+        index_path = eda_root / index_path
+    lock_path = Path(str(index_path) + ".lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        return False, f"could not lock the release index {lock_path}: {exc}"
+
+    temporary_index: Optional[Path] = None
+    try:
+        # Freeze the parent, then inspect HEAD, the real index, and raw worktree
+        # bytes as three independent states. `git diff HEAD` collapses index and
+        # worktree changes: a staged human edit followed by a worktree restoration
+        # can look clean, and a later replacement destroys that staged-only edit.
+        rc, out, err = _sh(_release_git_cmd(
+            eda_root, "rev-parse", "--verify", "HEAD^{commit}"), timeout=60)
+        parent = out.strip().lower()
+        if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", parent):
+            return False, ("could not resolve release commit parent: "
+                           f"{(err or out).strip()[:160]}")
+        head, why = _head_tree_entries(eda_root, parent)
+        if head is None:
+            return False, why
+        indexes, why = _index_entries(eda_root)
+        if indexes is None:
+            return False, why
+        algorithm, why = _object_format(eda_root)
+        if algorithm is None:
+            return False, why
+
+        def head_signature(rel: str) -> Optional[Tuple[str, str]]:
+            item = head.get(rel)
+            return (item[0], item[2]) if item is not None else None
+
+        def index_state(rel: str) -> Tuple[bool, Optional[Tuple[str, str]]]:
+            values = indexes.get(rel, [])
+            if not values:
+                return True, None
+            if len(values) == 1 and values[0][2] == 0:
+                return True, (values[0][0], values[0][1])
+            return False, None
+
+        # A pathspec commit used to leave unrelated staged work alone. Plumbing
+        # the exact index is safe only if that property is preserved.
+        staged_paths = set()
+        for rel in set(head) | set(indexes):
+            valid, indexed = index_state(rel)
+            if not valid or indexed != head_signature(rel):
+                staged_paths.add(rel)
+        unrelated_staged = staged_paths - set(present)
+        if unrelated_staged:
+            return False, (
+                "record NOT committed — unrelated staged paths would be swept: "
+                + ", ".join(sorted(unrelated_staged))
+            )
+
+        planned: Dict[str, Tuple[str, str, bytes]] = {}
+        for rel in present:
+            working, why = _raw_worktree_blob(eda_root, rel, algorithm)
+            if working is None:
+                return False, why or f"working-tree {rel} disappeared"
+            mode, oid, raw = working
+            if mode not in {"100644", "100755"}:
+                return False, f"working-tree {rel} is not a regular release file"
+            item = head.get(rel)
+            if item is not None and item[1] != "blob":
+                return False, f"HEAD:{rel} is not a regular release blob"
+            valid, indexed = index_state(rel)
+            if not valid:
+                return False, (
+                    f"record NOT committed — {rel} has conflicted index stages")
+            before = head_signature(rel)
+            after = (mode, oid)
+            if indexed not in {before, after}:
+                return False, (
+                    f"record NOT committed — {rel} carries a different staged "
+                    "edit; the release will not overwrite it"
+                )
+            if rel in admitted:
+                if item is None:
+                    return False, (
+                        f"record NOT committed — HEAD:{rel} disappeared during "
+                        "pin admission"
+                    )
+                head_bytes, why = _raw_head_blob(eda_root, item[2])
+                if head_bytes is None:
+                    return False, why
+                pin_ok, pin_why = _raw_pin_change_is_only_pins(
+                    head_mode=item[0], head_oid=item[2],
+                    head_bytes=head_bytes, index_entry=indexed,
+                    working=working,
+                )
+                if not pin_ok:
+                    return False, (
+                        f"record NOT committed — {rel} changed during pin "
+                        f"admission ({pin_why})"
+                    )
+            planned[rel] = working
+
+        if all((mode, oid) == head_signature(rel)
+               for rel, (mode, oid, _raw) in planned.items()):
+            return False, "record already matches HEAD — nothing to commit"
+
+        # Populate a private index from the frozen parent. The real index stays
+        # locked and untouched until the HEAD compare-and-swap succeeds.  In
+        # particular, Git never refreshes a racy real-index entry through a
+        # repository clean filter while an unrelated release path is staged.
+        try:
+            with tempfile.NamedTemporaryFile(
+                    prefix=f".{index_path.name}.release-",
+                    dir=index_path.parent, delete=True) as scratch:
+                temporary_index = Path(scratch.name)
+        except OSError as exc:
+            return False, f"could not allocate the private release index: {exc}"
+        rc, out, err = _sh(_release_git_cmd(
+            eda_root, "read-tree", parent, index_file=temporary_index),
+            timeout=60)
+        if rc != 0:
+            return False, ("could not initialise the private release index: "
+                           f"{(err or out).strip()[:160]}")
+
+        # Write raw blobs and private index entries only. `--no-filters` plus
+        # `--cacheinfo` makes attributes incapable of executing a helper or of
+        # changing the bytes which the release image consumed.
+        for rel, (mode, expected_oid, raw) in planned.items():
+            rc, oid_out, oid_err = _release_git_bytes(
+                eda_root, "hash-object", "-w", "--no-filters", "--stdin",
+                input_bytes=raw,
+            )
+            written_oid = _git_error(oid_out).lower()
+            if rc != 0 or written_oid != expected_oid:
+                return False, (f"could not stage raw release bytes for {rel}: "
+                               f"{_git_error(oid_err or oid_out)[:160]}")
+            rc, out, err = _sh(_release_git_cmd(
+                eda_root, "update-index", "--add", "--cacheinfo",
+                mode, expected_oid, rel, index_file=temporary_index), timeout=60)
+            if rc != 0:
+                return False, (f"could not stage exact release blob {rel}: "
+                               f"{(err or out).strip()[:160]}")
+
+        rc, out, err = _sh(_release_git_cmd(
+            eda_root, "write-tree", index_file=temporary_index), timeout=60)
+        tree = out.strip().lower()
+        if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", tree):
+            return False, f"git write-tree failed: {(err or out).strip()[:160]}"
+        msg = (f"release: record {version} as published\n"
+               f"\n"
+               f"Written by daily_release after the image was pushed. The "
+               f"publish is durable (it is in a registry); this is the half "
+               f"that was not (vibeic-eda#71).\n")
+        if admitted:
+            msg += ("\nThe pins this run moved are committed here too, so a fresh "
+                    "clone rebuilds what this record says shipped:\n"
+                    + "".join(f"  {f}\n" for f in admitted))
+        rc, out, err = _sh(_release_git_cmd(
+            eda_root, "commit-tree", tree, "-p", parent, "-m", msg),
+            timeout=120)
+        commit = out.strip().lower()
+        if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+            return False, f"git commit-tree failed: {(err or out).strip()[:160]}"
+        rc, out, err = _sh(_release_git_cmd(
+            eda_root, "update-ref", "-m", f"release: record {version}",
+            "HEAD", commit, parent), timeout=60)
+        if rc != 0:
+            return False, ("release commit was constructed but HEAD CAS failed: "
+                           f"{(err or out).strip()[:160]}")
+
+        # The private index already names exactly the new commit tree. Install
+        # it atomically while the standard lock still excludes Git writers;
+        # never ask Git to re-read working bytes through attributes.
+        try:
+            os.replace(temporary_index, index_path)
+            temporary_index = None
+        except OSError as exc:
+            # HEAD is already durably advanced. Calling that commit a failure
+            # would invite a duplicate recovery; surface the local cleanup
+            # problem without lying about the recorded release.
+            note = (f"recorded {version} in a commit; WARNING: could not "
+                    f"refresh the checkout index: {exc}")
+            return True, note
+        note = f"recorded {version} in a commit"
+        if admitted:
+            note += f" with {len(admitted)} pin file(s)"
+        return True, note
+    finally:
+        if temporary_index is not None:
+            try:
+                temporary_index.unlink(missing_ok=True)
+            except OSError:
+                pass
+        os.close(lock_fd)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+_GIT_ENV_UNSET = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE", "GIT_ATTR_SOURCE", "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF", "GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE",
+    "GIT_DIFF_OPTS",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS",
+    "GIT_SSL_NO_VERIFY", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+    "GIT_OPTIONAL_LOCKS", "GIT_QUARANTINE_PATH",
+)
+
+
+def _release_git_cmd(
+        eda_root: Path, *args: str,
+        index_file: Optional[Path] = None,
+        ) -> List[str]:
+    """Git invocation whose object/ref meaning is not inherited from ambient env."""
+    command = ["/usr/bin/env"]
+    for name in _GIT_ENV_UNSET:
+        command.extend(["-u", name])
+    command.extend([
+        "GIT_NO_REPLACE_OBJECTS=1", "GIT_ATTR_NOSYSTEM=1",
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_EXEC_PATH=/usr/lib/git-core",
+        "GIT_SSH=/usr/bin/ssh", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C",
+    ])
+    if index_file is not None:
+        command.append(f"GIT_INDEX_FILE={index_file}")
+    command.extend([
+        "/usr/bin/git", "-c", "core.hooksPath=/dev/null",
+        "-c", "core.fsmonitor=false",
+        "-c", "credential.helper=",
+        "-c", "credential.https://github.com.helper=!/usr/bin/gh auth git-credential",
+        "-C", str(eda_root), *args,
+    ])
+    return command
+
+
+def _fetch_remote_branch_commit(eda_root: Path, branch: str) \
+        -> Tuple[Optional[str], str]:
+    """Fetch one remote branch into a private ref and return its exact commit.
+
+    ``git fetch origin main`` is not enough: with a missing/custom
+    ``remote.origin.fetch`` it updates only FETCH_HEAD and leaves origin/main
+    stale.  FETCH_HEAD itself is shared and can be overwritten concurrently.
+    A unique explicit destination avoids both false answers.  Replace refs are
+    disabled for every object read so the returned SHA means the same object on
+    GitHub and locally.
+    """
+    if (not branch or branch.startswith("-") or ".." in branch
+            or not re.fullmatch(r"[A-Za-z0-9._/-]+", branch)):
+        return None, f"unsafe remote branch name: {branch!r}"
+    fetch_ref = (f"refs/vibeic-release-probe/{os.getpid()}-"
+                 f"{threading.get_ident()}-{time.time_ns()}")
+    rc, _, err = _sh(_release_git_cmd(
+        eda_root, "show-ref", "--verify", "--quiet", fetch_ref))
+    if rc == 0:
+        return None, f"private fetch ref collision: {fetch_ref}"
+    if rc not in (1,):
+        return None, f"could not check private fetch ref: {err.strip()[:120]}"
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "fetch", "--progress",
+        "--no-write-fetch-head", "origin",
+        f"+refs/heads/{branch}:{fetch_ref}",
+    ), progress=True, stall_grace=PUSH_STALL_GRACE_S)
+    if rc != 0:
+        kind = "stalled" if rc == watchdog.RC_STALLED else "failed"
+        return None, f"fetch {kind}: {(err or out).strip()[:400]}"
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--verify",
+        f"{fetch_ref}^{{commit}}",
+    ))
+    commit = out.strip().lower()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        _sh(_release_git_cmd(eda_root, "update-ref", "-d", fetch_ref))
+        return None, (f"fetched ref is not a commit: "
+                      f"{(err or out).strip()[:160]}")
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "update-ref", "-d", fetch_ref, commit))
+    if rc != 0:
+        return None, (f"could not remove private fetch ref with CAS: "
+                      f"{(err or out).strip()[:160]}")
+    return commit, ""
 
 
 def push_release_record(eda_root: Path, branch: str = "main") -> Tuple[bool, str]:
@@ -847,26 +1408,39 @@ def push_release_record(eda_root: Path, branch: str = "main") -> Tuple[bool, str
     minutes. A refusal is reported, never silent: the caller prints it and the
     record stays committed for a human to land.
     """
-    rc, out, err = _sh(["git", "-C", str(eda_root), "fetch", "--progress",
-                        "origin", branch], progress=True,
-                       stall_grace=PUSH_STALL_GRACE_S)
-    if rc != 0:
-        kind = "stalled; state UNKNOWN" if rc == watchdog.RC_STALLED else "failed"
-        return False, f"NOT PUSHED (fetch {kind}: {(err or out).strip()[:100]})"
+    remote_commit, why = _fetch_remote_branch_commit(eda_root, branch)
+    if remote_commit is None:
+        return False, f"NOT PUSHED ({why})"
 
-    rc, _, _ = _sh(["git", "-C", str(eda_root), "merge-base", "--is-ancestor",
-                    f"origin/{branch}", "HEAD"])
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--verify", "HEAD^{commit}"))
+    local_commit = out.strip().lower()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", local_commit):
+        return False, ("NOT PUSHED — could not resolve the exact local HEAD: "
+                       f"{(err or out).strip()[:160]}")
+
+    rc, _, _ = _sh(_release_git_cmd(
+        eda_root, "merge-base", "--is-ancestor", remote_commit, local_commit))
     if rc != 0:
         return False, (f"NOT PUSHED — origin/{branch} is not an ancestor of HEAD; "
                        f"the remote moved while the image was building. The "
                        f"record is committed; land it by hand.")
 
-    rc, out, err = _sh(["git", "-C", str(eda_root), "push", "--progress",
-                        "origin", branch], progress=True,
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "push", "--progress",
+        f"--force-with-lease=refs/heads/{branch}:{remote_commit}",
+        "origin", f"{local_commit}:refs/heads/{branch}"), progress=True,
                        stall_grace=PUSH_STALL_GRACE_S)
     if rc != 0:
         kind = "stalled; state UNKNOWN" if rc == watchdog.RC_STALLED else "failed"
         return False, f"NOT PUSHED (push {kind}: {(err or out).strip()[:200]})"
+
+    published_commit, why = _fetch_remote_branch_commit(eda_root, branch)
+    if published_commit is None:
+        return False, f"NOT PUSHED (push returned zero but readback {why})"
+    if published_commit != local_commit:
+        return False, (f"NOT PUSHED (push returned zero but origin/{branch} "
+                       f"read back as {published_commit}, not {local_commit})")
     return True, "pushed"
 
 
@@ -898,12 +1472,822 @@ def _probe_remote_manifest(ref: str) -> PresenceMeasurement:
     rc, out, err = _sh(["docker", "manifest", "inspect", ref], timeout=180)
     detail = (err or out).strip()
     if rc == 0:
-        return PresenceMeasurement(Presence.PRESENT, ref, "registry", detail)
+        identity = None
+        try:
+            # The tag name is not part of a Docker manifest.  Canonicalising the
+            # returned object therefore gives the same identity for two tags
+            # pointing at the same image, without trusting a local tag/cache.
+            manifest = _strict_json_loads(out)
+            canonical = json.dumps(
+                manifest, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            identity = hashlib.sha256(canonical).hexdigest()
+        except (TypeError, ValueError):
+            # Presence is still known, but callers asking WHICH manifest must
+            # retain this as an unmeasured identity rather than guessing.
+            pass
+        return PresenceMeasurement(
+            Presence.PRESENT, ref, "registry", detail, identity,
+        )
     if _REMOTE_ABSENCE.search(detail):
         return PresenceMeasurement(Presence.ABSENT, ref, "registry", detail)
     return PresenceMeasurement(Presence.UNKNOWN, ref, "registry", detail or (
         f"docker manifest inspect exited {rc} without an explicit not-found answer"
     ))
+
+
+RELEASE_IMAGE = "ghcr.io/vibeic/vibeic-eda"
+
+
+def verify_remote_immutable_publication(
+        version: Optional[str], *, image: str = RELEASE_IMAGE,
+        probe: Optional[Callable[[str], PresenceMeasurement]] = None,
+        ) -> Tuple[bool, dict]:
+    """Read an immutable version tag back and freeze its manifest identity."""
+    if not version:
+        return False, {
+            "category": "version_missing",
+            "summary": "no immutable release version was supplied",
+            "retryable": False,
+        }
+
+    ref = f"{image}:{version}"
+    measured = (probe or _probe_remote_manifest)(ref)
+    evidence = {
+        "ref": measured.subject,
+        "state": measured.state.value,
+        "source": measured.source,
+        "identity": measured.identity,
+        "detail": measured.detail[-1200:],
+    }
+    if measured.state is Presence.UNKNOWN:
+        raise ReleaseMeasurementUnknown(
+            stage="immutable_publication",
+            category="immutable_manifest_unmeasurable",
+            subject=measured.subject,
+            detail=f"{measured.source} manifest unmeasured: {measured.detail}",
+        )
+    if measured.state is Presence.ABSENT:
+        evidence.update({
+            "verified": False,
+            "category": "immutable_manifest_missing",
+            "summary": f"{measured.subject} is absent after its push",
+            "retryable": True,
+        })
+        return False, evidence
+    if not measured.identity:
+        raise ReleaseMeasurementUnknown(
+            stage="immutable_publication",
+            category="immutable_manifest_identity_unmeasurable",
+            subject=measured.subject,
+            detail=("registry confirmed the immutable tag exists but returned "
+                    "no parseable manifest identity"),
+        )
+    evidence["verified"] = True
+    return True, evidence
+
+
+def verify_remote_release_publication(
+        version: Optional[str], *, image: str = RELEASE_IMAGE,
+        probe: Optional[Callable[[str], PresenceMeasurement]] = None,
+        ) -> Tuple[bool, dict]:
+    """Verify an immutable release tag and ``:latest`` from the registry.
+
+    This is deliberately injectable: the production default performs two
+    read-only registry probes, while tests supply exact measurements and never
+    contact Docker or a registry.  Merely finding both tags is insufficient --
+    a failed latest push leaves an old, perfectly PRESENT latest behind.
+    """
+    if not version:
+        return False, {
+            "category": "recorded_version_missing",
+            "summary": "RELEASED.json has no recorded version to verify",
+            "retryable": False,
+        }
+
+    ask = probe or _probe_remote_manifest
+    version_ref = f"{image}:{version}"
+    latest_ref = f"{image}:latest"
+    measured = {
+        "version": ask(version_ref),
+        "latest": ask(latest_ref),
+    }
+    evidence = {
+        key: {
+            "ref": item.subject,
+            "state": item.state.value,
+            "source": item.source,
+            "identity": item.identity,
+            "detail": item.detail[-1200:],
+        }
+        for key, item in measured.items()
+    }
+
+    for key, item in measured.items():
+        if item.state is Presence.UNKNOWN:
+            raise ReleaseMeasurementUnknown(
+                stage="noop_publication",
+                category=f"{key}_manifest_unmeasurable",
+                subject=item.subject,
+                detail=(f"{item.source} manifest unmeasured: {item.detail}"),
+            )
+        if item.state is Presence.ABSENT:
+            return False, {
+                "category": ("recorded_version_manifest_missing"
+                             if key == "version" else "latest_manifest_missing"),
+                "summary": f"{item.subject} is absent from the registry",
+                "retryable": True,
+                "manifests": evidence,
+            }
+
+    for key, item in measured.items():
+        if not item.identity:
+            raise ReleaseMeasurementUnknown(
+                stage="noop_publication",
+                category=f"{key}_manifest_identity_unmeasurable",
+                subject=item.subject,
+                detail=("registry confirmed the tag exists but returned no "
+                        "parseable manifest identity"),
+            )
+
+    if measured["version"].identity != measured["latest"].identity:
+        return False, {
+            "category": "latest_manifest_mismatch",
+            "summary": (f"{latest_ref} does not identify the recorded "
+                        f"{version_ref} manifest"),
+            "retryable": True,
+            "manifests": evidence,
+        }
+    return True, {"verified": True, "manifests": evidence}
+
+
+def repair_latest_publication(
+        version: Optional[str], *, image: str = RELEASE_IMAGE,
+        probe: Optional[Callable[[str], PresenceMeasurement]] = None,
+        publish: Optional[Callable[[str, str], Tuple[int, str, str]]] = None,
+        authorize: Optional[Callable[[str], Tuple[bool, dict]]] = None,
+        expected_identity: Optional[str] = None,
+        repair: bool = True,
+        ) -> Tuple[bool, dict]:
+    """Make ``:latest`` name an already-published immutable version.
+
+    The immutable version tag is the source of truth.  We mutate only after a
+    read-only probe proves that tag exists and proves latest is absent or names
+    a different manifest.  The registry-side copy avoids depending on a local
+    daemon cache surviving from the release that originally pushed the image.
+    A second independent probe is required before success is reported.
+    """
+    ok, initial = verify_remote_release_publication(
+        version, image=image, probe=probe)
+    evidence = dict(initial)
+    evidence["initial"] = initial
+    evidence["repair_attempted"] = False
+    frozen_identity = (initial.get("manifests", {})
+                       .get("version", {}).get("identity"))
+    evidence["frozen_identity"] = frozen_identity
+    if expected_identity is not None:
+        if (not isinstance(expected_identity, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_identity)):
+            evidence.update({
+                "verified": False,
+                "repairable": False,
+                "category": "expected_manifest_identity_invalid",
+                "summary": "latest repair has no valid recorded manifest identity",
+            })
+            return False, evidence
+        if frozen_identity != expected_identity:
+            evidence.update({
+                "verified": False,
+                "repairable": False,
+                "category": "immutable_manifest_changed",
+                "summary": (f"{image}:{version} no longer has the identity "
+                            "which authorised latest repair"),
+            })
+            return False, evidence
+    if ok:
+        evidence["verified"] = True
+        return True, evidence
+
+    category = initial.get("category")
+    if category not in {"latest_manifest_missing", "latest_manifest_mismatch"}:
+        evidence["verified"] = False
+        evidence["repairable"] = False
+        return False, evidence
+    if not repair:
+        evidence["repair_deferred"] = True
+        return False, evidence
+
+    version_ref = f"{image}:{version}"
+    latest_ref = f"{image}:latest"
+
+    # The first manifest probe is intentionally not mutation authority.  A
+    # newer release can publish between that read and the mutable-tag write.
+    # The host-wide lock closes that window for every supported invocation
+    # on the release host; this second, independent source-of-truth check also
+    # refuses a stale checkout if origin advanced before the lock was acquired.
+    if authorize is not None:
+        authorised, authority = authorize(str(version))
+        evidence["authority"] = authority
+        if not authorised:
+            evidence["verified"] = False
+            evidence["repairable"] = False
+            evidence["category"] = "release_authority_changed"
+            evidence["summary"] = (
+                authority.get("summary")
+                or "the authoritative release changed before latest repair"
+            )
+            return False, evidence
+
+    # Freeze is a value, not merely an ordering point.  Re-read the immutable
+    # name after Git authorization and require the same identity immediately
+    # before the mutable write.  A replaced version tag must not be copied just
+    # because both names can later be made to agree on the replacement.
+    immutable_ok, immutable = verify_remote_immutable_publication(
+        version, image=image, probe=probe)
+    evidence["pre_repair_immutable"] = immutable
+    required_identity = expected_identity or frozen_identity
+    if (not immutable_ok
+            or immutable.get("identity") != required_identity):
+        evidence.update({
+            "verified": False,
+            "repairable": False,
+            "category": "immutable_manifest_changed",
+            "summary": (f"{version_ref} changed after its authoritative "
+                        "readback; :latest was not moved"),
+        })
+        return False, evidence
+
+    def registry_copy(source: str, target: str) -> Tuple[int, str, str]:
+        return _sh([
+            "docker", "buildx", "imagetools", "create",
+            "--tag", target, source,
+        ], progress=True, stall_grace=PUSH_STALL_GRACE_S)
+
+    evidence["repair_attempted"] = True
+    rc, out, err = (publish or registry_copy)(version_ref, latest_ref)
+    evidence["repair"] = {
+        "source": version_ref,
+        "target": latest_ref,
+        "exit_code": rc,
+    }
+    if rc != 0:
+        evidence["repair"]["error"] = _one_line_error(err or out)
+        evidence["verified"] = False
+        return False, evidence
+
+    final_ok, final = verify_remote_release_publication(
+        version, image=image, probe=probe)
+    evidence["final"] = final
+    evidence.update(final)
+    final_identity = (final.get("manifests", {})
+                      .get("version", {}).get("identity"))
+    if final_ok and final_identity != required_identity:
+        final_ok = False
+        evidence.update({
+            "category": "immutable_manifest_changed",
+            "summary": (f"{version_ref} changed while :latest was being "
+                        "repaired; the repair is not authoritative"),
+        })
+    evidence["verified"] = final_ok
+    return final_ok, evidence
+
+
+def _probe_release_record_publication(
+        eda_root: Path, branch: str = "main") -> PresenceMeasurement:
+    """Is the commit carrying this checkout's RELEASED.json on origin?
+
+    The probe fetches and inspects git objects only; it never pushes.  Testing
+    ancestry of the commit that last changed RELEASED.json (rather than HEAD)
+    avoids publishing unrelated local commits merely because a later noop wants
+    to repair an earlier record-push failure.
+    """
+    subject = f"origin/{branch}:RELEASED.json"
+    remote_commit, why = _fetch_remote_branch_commit(eda_root, branch)
+    if remote_commit is None:
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            why,
+        )
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--verify", "HEAD^{commit}"))
+    local_commit = out.strip().lower()
+    if rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", local_commit):
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not resolve the local HEAD commit: "
+            f"{(err or out).strip()[:400]}",
+        )
+
+    # Compare bytes from the captured commit, not `git diff`: assume-unchanged,
+    # skip-worktree, or a foreign index can hide a modified working-tree record.
+    for rel in ("RELEASED.json", "VERSION"):
+        rc, committed, err = _sh(_release_git_cmd(
+            eda_root, "show", f"{local_commit}:{rel}"))
+        if rc != 0:
+            return PresenceMeasurement(
+                Presence.UNKNOWN, subject, "git",
+                f"could not read {rel} from local HEAD: "
+                f"{(err or committed).strip()[:400]}",
+            )
+        try:
+            working = (eda_root / rel).read_text(encoding="utf-8")
+        except OSError as exc:
+            return PresenceMeasurement(
+                Presence.UNKNOWN, subject, "git",
+                f"could not read working-tree {rel}: {exc}",
+            )
+        if committed != working:
+            return PresenceMeasurement(
+                Presence.ABSENT, subject, "git",
+                f"the working-tree {rel} differs from local HEAD",
+            )
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "log", "-1", "--format=%H", local_commit, "--",
+        "RELEASED.json"))
+    record_commit = out.strip()
+    if rc != 0:
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not resolve the local record commit: "
+            f"{(err or out).strip()[:400]}",
+        )
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", record_commit):
+        return PresenceMeasurement(
+            Presence.ABSENT, subject, "git",
+            "no commit in HEAD records RELEASED.json",
+        )
+
+    # An ancestor test alone proves only that this record existed on origin at
+    # some point.  A later remote commit can replace it, so compare the remote
+    # branch's CURRENT record and VERSION with this checkout too.
+    rc, remote_record, err = _sh(_release_git_cmd(
+        eda_root, "show", f"{remote_commit}:RELEASED.json"))
+    if rc != 0:
+        low = (err or remote_record).lower()
+        if "does not exist" in low or "exists on disk, but not in" in low:
+            return PresenceMeasurement(
+                Presence.ABSENT, subject, "git",
+                f"origin/{branch} has no RELEASED.json",
+            )
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not read origin/{branch}:RELEASED.json: "
+            f"{(err or remote_record).strip()[:400]}",
+        )
+    try:
+        local_record = _strict_json_loads(
+            (eda_root / "RELEASED.json").read_text())
+        remote_record_value = _strict_json_loads(remote_record)
+    except (OSError, ValueError) as exc:
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not compare local and remote release records: {exc}",
+        )
+    if remote_record_value != local_record:
+        return PresenceMeasurement(
+            Presence.ABSENT, subject, "git",
+            f"origin/{branch}'s current RELEASED.json differs from this checkout",
+            record_commit,
+        )
+
+    rc, remote_version, err = _sh(_release_git_cmd(
+        eda_root, "show", f"{remote_commit}:VERSION"))
+    if rc != 0:
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not read origin/{branch}:VERSION: "
+            f"{(err or remote_version).strip()[:400]}",
+        )
+    try:
+        local_version = (eda_root / "VERSION").read_text().strip()
+    except OSError as exc:
+        return PresenceMeasurement(
+            Presence.UNKNOWN, subject, "git",
+            f"could not read local VERSION: {exc}",
+        )
+    if remote_version.strip() != local_version:
+        return PresenceMeasurement(
+            Presence.ABSENT, subject, "git",
+            f"origin/{branch}'s VERSION differs from this checkout",
+            record_commit,
+        )
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "merge-base", "--is-ancestor",
+        record_commit, remote_commit))
+    if rc == 0:
+        return PresenceMeasurement(
+            Presence.PRESENT, subject, "git",
+            f"record commit {record_commit} is published", record_commit,
+        )
+    if rc == 1:
+        return PresenceMeasurement(
+            Presence.ABSENT, subject, "git",
+            f"record commit {record_commit} is not on origin/{branch}",
+            record_commit,
+        )
+    return PresenceMeasurement(
+        Presence.UNKNOWN, subject, "git",
+        f"could not compare record commit with origin/{branch}: "
+        f"{(err or out).strip()[:400]}",
+    )
+
+
+def ensure_release_record_published(
+        eda_root: Path, *, branch: str = "main",
+        probe: Optional[Callable[[Path, str], PresenceMeasurement]] = None,
+        push: Optional[Callable[[Path, str], Tuple[bool, str]]] = None,
+        repair: bool = True,
+        ) -> Tuple[bool, dict]:
+    """Verify, and when absent retry, release-record publication.
+
+    UNKNOWN never authorises a push.  An explicit ABSENT answer permits the
+    existing fail-safe push (which itself refuses a non-ancestor remote), then
+    a second read-only probe proves the repair actually reached origin.
+    """
+    ask = probe or _probe_release_record_publication
+    publish = push or push_release_record
+    first = ask(eda_root, branch)
+    evidence = {
+        "initial_state": first.state.value,
+        "subject": first.subject,
+        "detail": first.detail,
+        "identity": first.identity,
+        "repair_attempted": False,
+    }
+    if first.state is Presence.UNKNOWN:
+        raise ReleaseMeasurementUnknown(
+            stage="release_record_publication",
+            category="release_record_remote_unmeasurable",
+            subject=first.subject,
+            detail=first.detail,
+        )
+    if first.state is Presence.PRESENT:
+        evidence["verified"] = True
+        return True, evidence
+
+    if not repair:
+        evidence["repair_deferred"] = True
+        return False, evidence
+
+    evidence["repair_attempted"] = True
+    ok, note = publish(eda_root, branch)
+    evidence["repair"] = {"ok": bool(ok), "note": note}
+    if not ok:
+        return False, evidence
+
+    after = ask(eda_root, branch)
+    evidence["final_state"] = after.state.value
+    evidence["final_detail"] = after.detail
+    evidence["identity"] = after.identity
+    if after.state is Presence.UNKNOWN:
+        raise ReleaseMeasurementUnknown(
+            stage="release_record_publication",
+            category="release_record_repair_unmeasurable",
+            subject=after.subject,
+            detail=after.detail,
+        )
+    evidence["verified"] = after.state is Presence.PRESENT
+    return after.state is Presence.PRESENT, evidence
+
+
+def authorize_latest_repair(eda_root: Path, version: str,
+                            *, branch: str = "main") -> Tuple[bool, dict]:
+    """Re-read origin's release record immediately before mutating latest.
+
+    ``_probe_release_record_publication`` compares the fetched branch's current
+    RELEASED.json and VERSION bytes with this checkout and proves the record
+    commit is on that branch.  Thus a stale noop cannot use an old immutable
+    tag as authority after a newer recorded release has advanced origin.
+    UNKNOWN remains an exception so callers preserve the unmeasured category.
+    """
+    measured = _probe_release_record_publication(eda_root, branch)
+    evidence = {
+        "subject": measured.subject,
+        "state": measured.state.value,
+        "source": measured.source,
+        "detail": measured.detail,
+        "identity": measured.identity,
+        "expected_version": version,
+    }
+    if measured.state is Presence.UNKNOWN:
+        raise ReleaseMeasurementUnknown(
+            stage="noop_publication",
+            category="release_authority_unmeasurable",
+            subject=measured.subject,
+            detail=measured.detail,
+        )
+    if measured.state is not Presence.PRESENT:
+        evidence["summary"] = (
+            f"origin/{branch}'s current release record no longer authorises "
+            f"repairing :latest to {version}"
+        )
+        return False, evidence
+    try:
+        current = (eda_root / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ReleaseMeasurementUnknown(
+            stage="noop_publication",
+            category="release_authority_unmeasurable",
+            subject=str(eda_root / "VERSION"),
+            detail=str(exc),
+        ) from exc
+    if current != version:
+        evidence["summary"] = (
+            f"local authoritative VERSION is {current!r}, not {version!r}"
+        )
+        return False, evidence
+    evidence["verified"] = True
+    return True, evidence
+
+
+_LIVE_IMAGE_VERSION_RE = re.compile(
+    r"(vibeic-eda:)\d+\.\d+\.\d+"
+)
+_CURRENT_IMAGE_VERSION_RE = re.compile(
+    r"(Current:\s*\*\*)\d+\.\d+\.\d+(\*\*)"
+)
+
+
+def _release_changed_paths(eda_root: Path) -> Tuple[Optional[set[str]], str]:
+    """Raw index/worktree and non-ignored untracked paths versus ``HEAD``.
+
+    Do not use ``git diff HEAD`` here.  It collapses HEAD->index and
+    index->worktree, so equal-and-opposite staged/unstaged changes disappear.
+    It also applies clean filters even when external diff and textconv are
+    disabled.  The image build reads raw filesystem bytes; admission must judge
+    those same bytes, plus the independent index which a later commit replaces.
+    """
+    head, why = _head_tree_entries(eda_root)
+    if head is None:
+        return None, why
+    indexes, why = _index_entries(eda_root)
+    if indexes is None:
+        return None, why
+    algorithm, why = _object_format(eda_root)
+    if algorithm is None:
+        return None, why
+
+    changed: set[str] = set()
+    for rel in set(head) | set(indexes):
+        item = head.get(rel)
+        head_signature = ((item[0], item[2]) if item is not None else None)
+        indexed = _single_index_entry(indexes, rel)
+        values = indexes.get(rel, [])
+        if ((values and indexed is None) or indexed != head_signature):
+            changed.add(rel)
+
+    for rel, (head_mode, kind, head_oid) in head.items():
+        if kind != "blob":
+            return None, f"cannot raw-verify non-blob release input HEAD:{rel}"
+        working, why = _raw_worktree_blob(eda_root, rel, algorithm)
+        if working is None:
+            if why:
+                return None, why
+            changed.add(rel)
+            continue
+        work_mode, work_oid, _raw = working
+        if (work_mode, work_oid) != (head_mode, head_oid):
+            changed.add(rel)
+
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "ls-files", "--others", "--exclude-standard", "-z"),
+        timeout=60)
+    if rc != 0:
+        return None, f"could not enumerate untracked paths: {(err or out)[:200]}"
+    untracked = {item for item in out.split("\0") if item}
+    changed.update(untracked)
+    return changed, ""
+
+
+def _head_file(eda_root: Path, rel: str) -> Tuple[Optional[str], str]:
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "show", f"HEAD:{rel}"), timeout=60)
+    if rc != 0:
+        return None, f"could not read HEAD:{rel}: {(err or out).strip()[:200]}"
+    return out, ""
+
+
+def recover_uncommitted_release_record(
+        eda_root: Path, version: str, targets: Dict[str, List[str]],
+        *, fingerprint: str, immutable_identity: str,
+        ) -> Tuple[bool, dict]:
+    """Safely commit a proven release record left dirty by an earlier failure.
+
+    This is deliberately narrower than a generic dirty-tree commit.  Recovery
+    is authorised by the exact remote immutable identity, the deterministic
+    record for this working tree, and a closed set of mechanically-written
+    paths.  Any untracked, mixed, deleted, or non-pin edit is a refusal.
+    """
+    evidence = {
+        "attempted": False,
+        "version": version,
+        "pins_fingerprint": fingerprint,
+        "immutable_identity": immutable_identity,
+    }
+
+    if (not isinstance(version, str)
+            or not re.fullmatch(r"\d+\.\d+\.\d+", version)):
+        evidence.update({
+            "category": "recovery_version_invalid",
+            "summary": f"release recovery version is invalid: {version!r}",
+        })
+        return False, evidence
+    if not re.fullmatch(r"[0-9a-f]{64}", immutable_identity or ""):
+        evidence.update({
+            "category": "recovery_identity_invalid",
+            "summary": "release recovery has no exact immutable identity",
+        })
+        return False, evidence
+
+    remote_ok, remote = verify_remote_immutable_publication(version)
+    evidence["immutable_readback"] = remote
+    if not remote_ok or remote.get("identity") != immutable_identity:
+        evidence.update({
+            "category": "recovery_immutable_changed",
+            "summary": (f"{RELEASE_IMAGE}:{version} no longer has the "
+                        "identity which authorised recovery"),
+        })
+        return False, evidence
+
+    record_dirty = []
+    for rel in ("VERSION", "RELEASED.json"):
+        committed, why = _head_file(eda_root, rel)
+        if committed is None:
+            evidence.update({
+                "category": "recovery_head_unmeasurable", "summary": why,
+            })
+            return False, evidence
+        try:
+            working = (eda_root / rel).read_text(encoding="utf-8")
+        except OSError as exc:
+            evidence.update({
+                "category": "recovery_record_unreadable",
+                "summary": f"could not read working {rel}: {exc}",
+            })
+            return False, evidence
+        if committed != working:
+            record_dirty.append(rel)
+    evidence["dirty_record_files"] = record_dirty
+    if not record_dirty:
+        evidence["needed"] = False
+        return True, evidence
+
+    # Recovery may publish only the explicit files admitted below.  If local
+    # HEAD already contains an unpushed commit, committing the record on top and
+    # pushing HEAD would smuggle that commit to main even though it never passed
+    # this admission.  Freeze an exact clean base before examining paths.
+    remote_base, why = _fetch_remote_branch_commit(eda_root, "main")
+    if remote_base is None:
+        evidence.update({
+            "category": "recovery_base_unmeasurable", "summary": why,
+        })
+        return False, evidence
+    rc, out, err = _sh(_release_git_cmd(
+        eda_root, "rev-parse", "--verify", "HEAD^{commit}"), timeout=60)
+    local_base = out.strip().lower()
+    if (rc != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", local_base)):
+        evidence.update({
+            "category": "recovery_base_unmeasurable",
+            "summary": ("could not resolve local recovery base: "
+                        f"{(err or out).strip()[:200]}"),
+        })
+        return False, evidence
+    evidence["local_base"] = local_base
+    evidence["remote_base"] = remote_base
+    if local_base != remote_base:
+        evidence.update({
+            "category": "recovery_base_changed",
+            "summary": ("local HEAD is not exactly origin/main; refusing to "
+                        "publish unadmitted commits during record recovery"),
+        })
+        return False, evidence
+
+    changed, why = _release_changed_paths(eda_root)
+    if changed is None:
+        evidence.update({
+            "category": "recovery_changes_unmeasurable",
+            "summary": why,
+        })
+        return False, evidence
+    evidence["changed_paths"] = sorted(changed)
+    if not changed:
+        evidence.update({
+            "category": "recovery_changes_inconsistent",
+            "summary": "record bytes differ from HEAD but Git reports no change",
+        })
+        return False, evidence
+
+    try:
+        record = released_record(eda_root)
+    except ReleaseMeasurementUnknown:
+        raise
+    expected = release_record_value(
+        eda_root, version, targets, manifest_identity=immutable_identity)
+    if (record != expected
+            or record.get("pins_fingerprint") != fingerprint):
+        evidence.update({
+            "category": "recovery_record_mismatch",
+            "summary": ("working RELEASED.json is not the deterministic record "
+                        "for this version, identity, pins, and recipes"),
+        })
+        return False, evidence
+    try:
+        version_bytes = (eda_root / "VERSION").read_text(encoding="utf-8")
+    except OSError as exc:
+        evidence.update({
+            "category": "recovery_version_unreadable",
+            "summary": f"could not read VERSION for recovery: {exc}",
+        })
+        return False, evidence
+    if version_bytes != version + "\n":
+        evidence.update({
+            "category": "recovery_version_mismatch",
+            "summary": "working VERSION is not the exact recorded version",
+        })
+        return False, evidence
+    if not {"VERSION", "RELEASED.json"}.issubset(changed):
+        evidence.update({
+            "category": "recovery_record_not_whole",
+            "summary": ("recovery requires VERSION and RELEASED.json to be the "
+                        "same uncommitted publication"),
+        })
+        return False, evidence
+
+    allowed_pin_paths = {"Dockerfile", "docker-bake.hcl"}
+    allowed_pin_paths.update(
+        f"tools/{target}/Dockerfile" for target in targets)
+    fixed_paths = {"VERSION", "RELEASED.json", "README.md"}
+    unknown = changed - fixed_paths - allowed_pin_paths
+    if unknown:
+        evidence.update({
+            "category": "recovery_mixed_changes",
+            "mixed_paths": sorted(unknown),
+            "summary": ("release recovery refuses unrelated dirty paths: "
+                        + ", ".join(sorted(unknown))),
+        })
+        return False, evidence
+
+    if "README.md" in changed:
+        head_readme, why = _head_file(eda_root, "README.md")
+        if head_readme is None:
+            evidence.update({
+                "category": "recovery_readme_unmeasurable", "summary": why,
+            })
+            return False, evidence
+        expected_readme = _LIVE_IMAGE_VERSION_RE.sub(
+            rf"\g<1>{version}", head_readme)
+        expected_readme = _CURRENT_IMAGE_VERSION_RE.sub(
+            rf"\g<1>{version}\g<2>", expected_readme)
+        try:
+            working_readme = (eda_root / "README.md").read_text(
+                encoding="utf-8")
+        except OSError as exc:
+            working_readme = None
+            why = str(exc)
+        if working_readme != expected_readme:
+            evidence.update({
+                "category": "recovery_readme_mixed",
+                "summary": ("README.md contains changes beyond the mechanical "
+                            f"version sync{': ' + why if working_readme is None else ''}"),
+            })
+            return False, evidence
+
+    pin_files = sorted(changed & allowed_pin_paths)
+    refused = []
+    for rel in pin_files:
+        if not (eda_root / rel).is_file():
+            refused.append(f"{rel} (missing)")
+            continue
+        ok, detail = _diff_is_only_pins(eda_root, rel)
+        if not ok:
+            refused.append(f"{rel} ({detail})")
+    if refused:
+        evidence.update({
+            "category": "recovery_pin_changes_refused",
+            "refused_pin_files": refused,
+            "summary": ("release recovery found mixed or unmeasurable pin "
+                        "changes: " + ", ".join(refused)),
+        })
+        return False, evidence
+
+    evidence["attempted"] = True
+    evidence["admitted_pin_files"] = pin_files
+    committed, note = commit_release_record(
+        eda_root, version, pin_files)
+    evidence["committed"] = bool(committed)
+    evidence["commit_note"] = note
+    if not committed:
+        evidence.update({
+            "category": "recovery_commit_failed",
+            "summary": note,
+        })
+        return False, evidence
+    evidence["verified"] = True
+    return True, evidence
 
 
 def _require_measured(measurement: PresenceMeasurement, *, stage: str,
@@ -1189,7 +2573,7 @@ def select_publish_version(
     )
 
 
-def main(argv=None) -> int:
+def _main_under_release_lock(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--eda-root",
                     default=str(Path(__file__).resolve().parents[1]))
@@ -1219,6 +2603,13 @@ def main(argv=None) -> int:
         "built": [],
         "version": None,
         "compose_attempts": [],
+        "smoke": {
+            "executed": False,
+            "expected": len(SMOKE),
+            "passed": 0,
+            "outcome": "not_applicable",
+            "failures": [],
+        },
     }
     # Replace yesterday's terminal record before doing anything that can return
     # early.  A crash can now leave "running" (incomplete and visibly so), never
@@ -1243,6 +2634,14 @@ def main(argv=None) -> int:
                 "retryable": False,
                 "summary": f"VERSION says {cur!r}, not {a.record_release!r}",
             })
+        if a.dry_run:
+            # ``--dry-run`` is global, including the early maintenance modes.
+            # Previously this branch bypassed the release-path guard and wrote
+            # RELEASED.json while claiming to be a dry run.
+            print(f"[DRY RUN] would record {a.record_release} from this tree; "
+                  "RELEASED.json was not written")
+            result["version"] = {"to": a.record_release}
+            return _finish(result, a.json, RC_OK, "dry_run")
         rec = write_released_record(root, a.record_release, bake_targets(root))
         print(f"RELEASED.json <- {rec['version']} "
               f"fingerprint={rec['pins_fingerprint']} "
@@ -1263,6 +2662,13 @@ def main(argv=None) -> int:
         print(f"smoke: {len(SMOKE) - len(bad)}/{len(SMOKE)} tools run in "
               f"{a.smoke_only}")
         result["smoke_failures"] = bad
+        result["smoke"] = {
+            "executed": True,
+            "expected": len(SMOKE),
+            "passed": len(SMOKE) - len(bad),
+            "outcome": "natural_failure" if bad else "natural",
+            "failures": bad,
+        }
         if bad:
             return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
                 "stage": "smoke", "category": "tool_smoke",
@@ -1538,7 +2944,17 @@ def main(argv=None) -> int:
                            **{f"recipe:{k}": recipe_hash(root, k)
                               for k in targets},
                            "recipe:__compose__": compose_recipe_hash(root)})
-    rec = released_record(root)
+    try:
+        rec = released_record(root)
+    except ReleaseMeasurementUnknown as exc:
+        return _finish_unmeasured(result, a.json, exc)
+    version_file = root / "VERSION"
+    current_version = (version_file.read_text().strip()
+                       if version_file.is_file() else None)
+    result["version"] = {
+        "from": rec.get("version"),
+        "to": current_version,
+    }
     unreleased = rec.get("pins_fingerprint") != fp
     if unreleased:
         print(f"  pin set {fp} has not been released "
@@ -1576,12 +2992,63 @@ def main(argv=None) -> int:
         selected_version = (old_candidate, new_candidate)
         result["occupied_version_candidates"] = occupied
 
+    # A new immutable image must be reproducible from the exact Git tree which
+    # will carry its release record.  Recipe hashes deliberately read working
+    # files, so without this admission a human Dockerfile/README edit (or an
+    # untracked source input) could enter the image while the later explicit
+    # release commit omitted it.  Enumerate both index/worktree changes and all
+    # non-ignored untracked paths through the fixed, sanitised Git invocation.
+    #
+    # This belongs after the read-only release measurements above and before
+    # the first writer below.  The proven failed-publication recovery takes the
+    # noop path and performs its own narrower mixed-change admission instead.
+    if release_needed and not a.dry_run:
+        source_changes, source_why = _release_changed_paths(root)
+        if source_changes is None:
+            result["source_admission"] = {
+                "verified": False,
+                "changed_paths": None,
+                "detail": source_why,
+            }
+            print("[UNMEASURED] release source cleanliness could not be "
+                  "established; no recipe, pin, build, or image was changed",
+                  file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "unmeasured", {
+                "stage": "release_source_admission",
+                "category": "release_source_state_unmeasurable",
+                "retryable": True,
+                "summary": source_why,
+            })
+        result["source_admission"] = {
+            "verified": not source_changes,
+            "changed_paths": sorted(source_changes),
+        }
+        if source_changes:
+            detail = ", ".join(sorted(source_changes))
+            print("[REFUSED] release source contains tracked or untracked "
+                  f"changes ({detail}); no recipe, pin, build, or image was "
+                  "changed", file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "release_source_admission",
+                "category": "release_source_dirty",
+                "retryable": False,
+                "summary": ("new release requires a clean source tree; "
+                            f"dirty paths: {detail}"),
+            })
+
     # Publish the recipe digests only after every pre-mutation measurement has
     # formed a record.  `artefact_tag` hashes the source Dockerfile directly, so
     # the registry questions above do not depend on this write.
-    stale = write_recipe_vars(root, targets)
+    pin_files: List[str] = []
+    stale = [] if a.dry_run else write_recipe_vars(root, targets)
     for s in stale:
         print(f"  recipe changed: {s}")
+    if stale:
+        # This first call is the only write in a recipe-only release.  The
+        # second call below is intentionally idempotent, so discovering the
+        # path only there left docker-bake.hcl dirty and absent from the release
+        # commit while RELEASED.json fingerprinted its working-tree bytes.
+        pin_files.append("docker-bake.hcl")
 
     if (moved or absent or unreleased) and not a.dry_run:
         for m in moved:
@@ -1611,7 +3078,8 @@ def main(argv=None) -> int:
         # "which files hold a pin" — a second list that would drift from the
         # first. `rewrite_pin` already returns the paths it changed; the other
         # two writers report WHAT moved, not where, and each owns one file.
-        pin_files: List[str] = [f for m in moved for f in (m.get("files") or [])]
+        pin_files.extend(
+            f for m in moved for f in (m.get("files") or []))
 
         for s2 in write_recipe_vars(root, targets):
             print(f"  recipe changed (after pin move): {s2}")
@@ -1829,6 +3297,13 @@ def main(argv=None) -> int:
             # left carrying a version number.
             bad = smoke_image(tag)
             result["smoke_failures"] = bad
+            result["smoke"] = {
+                "executed": True,
+                "expected": len(SMOKE),
+                "passed": len(SMOKE) - len(bad),
+                "outcome": "natural_failure" if bad else "natural",
+                "failures": bad,
+            }
             if bad:
                 _sh(["docker", "rmi", tag])
                 unmeasured = [b for b in bad
@@ -1904,11 +3379,37 @@ def main(argv=None) -> int:
             result["version"] = {"from": old, "to": new}
 
             if pushed:
-                # `latest` moves only after a smoke pass AND a successful push,
-                # so it can never point at something nobody could pull.
-                _sh(["docker", "tag", tag, "ghcr.io/vibeic/vibeic-eda:latest"])
-                _sh(["docker", "push", "ghcr.io/vibeic/vibeic-eda:latest"],
-                    progress=True, stall_grace=PUSH_STALL_GRACE_S)
+                # A zero push rc is not publication authority.  Freeze the
+                # exact remote immutable-manifest identity before changing the
+                # Git record or the mutable latest tag.  If this readback is
+                # absent or unmeasurable, the sidecar records that the command
+                # returned zero but no later writer is allowed to run.
+                try:
+                    immutable_ok, immutable_evidence = \
+                        verify_remote_immutable_publication(new)
+                except ReleaseMeasurementUnknown as exc:
+                    result["immutable_publication"] = {
+                        "verified": False, "unmeasured": exc.as_dict(),
+                    }
+                    return _finish_unmeasured(result, a.json, exc)
+                result["immutable_publication"] = immutable_evidence
+                if not immutable_ok:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "immutable_publication",
+                            "category": immutable_evidence.get(
+                                "category", "immutable_readback_failed"),
+                            "retryable": immutable_evidence.get(
+                                "retryable", True),
+                            "summary": immutable_evidence.get(
+                                "summary", "immutable tag readback failed"),
+                        })
+                immutable_identity = immutable_evidence["identity"]
+
+                # The immutable version tag is now remotely proven.  Publish
+                # its Git authority before moving :latest, so a record push or
+                # readback failure leaves the old mutable tag untouched and a
+                # later noop has one unambiguous recovery order.
                 (root / "VERSION").write_text(new + "\n", encoding="utf-8")
                 # RECOMPUTE. `fp` above was measured before `rewrite_pin` and
                 # `retag_images` edited the root Dockerfile, and those edits feed
@@ -1925,28 +3426,155 @@ def main(argv=None) -> int:
                 # two writes. The decision fingerprint (early) and the RECORDED
                 # fingerprint (here) answer different questions and only the
                 # second has to match the tree that shipped.
-                write_released_record(root, new, targets)
-                # #71 — and COMMIT it. Only when the image was actually pushed:
-                # a LOCAL ONLY build has published nothing, so recording it as
-                # released would assert a release nobody can pull.
-                if pushed:
-                    # THIS REPO'S OWN DOCS, BEFORE THE RECORD COMMIT. VERSION is
-                    # written directly above, which is why README.md's five
-                    # `docker pull` / `docker run` commands sat at 0.2.56 while
-                    # VERSION said 0.2.63 — seven releases telling a reader to pull
-                    # an image the release had superseded.
-                    # `sync_image_version.py` is the tool that knows where those
-                    # pointers are, and writing VERSION without it is what let them
-                    # drift. It runs AFTER the push because it refuses to point at a
-                    # tag `docker pull` cannot resolve, and BEFORE the record commit
-                    # so README.md lands in the same commit as VERSION rather than
-                    # as a stray edit nobody stages.
-                    _rc, _dout, _derr = _sh(
-                        ["python3", str(root / "sync_image_version.py"),
-                         "--set", new], cwd=str(root))
-                    print(f"  docs: {'synced to ' + new if _rc == 0 else 'SYNC FAILED — ' + (_dout or '').strip()[-160:]}")
-                    _ok, _note = commit_release_record(root, new, pin_files)
-                    print(f"  record: {_note}")
+                write_released_record(
+                    root, new, targets,
+                    manifest_identity=immutable_identity,
+                )
+                # THIS REPO'S OWN DOCS, BEFORE THE RECORD COMMIT. VERSION is
+                # written directly above, which is why README.md's five
+                # `docker pull` / `docker run` commands sat at 0.2.56 while
+                # VERSION said 0.2.63 — seven releases telling a reader to pull
+                # an image the release had superseded.
+                _rc, _dout, _derr = _sh(
+                    ["python3", str(root / "sync_image_version.py"),
+                     "--set", new], cwd=str(root))
+                print(f"  docs: {'synced to ' + new if _rc == 0 else 'SYNC FAILED — ' + (_dout or '').strip()[-160:]}")
+                _ok, _note = commit_release_record(root, new, pin_files)
+                result["release_record_publication"] = {
+                    "committed": bool(_ok), "commit_note": _note,
+                }
+                print(f"  record: {_note}")
+                if not _ok:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "release_record_commit",
+                            "category": "release_record_commit_failed",
+                            "retryable": True,
+                            "summary": _note,
+                        })
+
+                # `commit_release_record` historically attempted this push but
+                # returned only whether the commit succeeded. Measure origin,
+                # retry an explicit absence, then measure it again.
+                try:
+                    record_ok, record_evidence = \
+                        ensure_release_record_published(root)
+                except ReleaseMeasurementUnknown as exc:
+                    return _finish_unmeasured(result, a.json, exc)
+                result["release_record_publication"].update(record_evidence)
+                if not record_ok:
+                    note = (record_evidence.get("repair", {}).get("note")
+                            or record_evidence.get("final_detail")
+                            or "release record did not reach origin")
+                    print(f"  RECORD PUSH FAILED — {note}", file=sys.stderr)
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "release_record_push",
+                            "category": "release_record_push_failed",
+                            "retryable": True,
+                            "summary": note,
+                        })
+
+                # Re-read both authorities immediately before the only mutable
+                # registry write.  The record must still be current and the
+                # immutable tag must still have the identity frozen above.
+                try:
+                    authority_ok, authority_evidence = \
+                        authorize_latest_repair(root, new)
+                except ReleaseMeasurementUnknown as exc:
+                    return _finish_unmeasured(result, a.json, exc)
+                result["latest_authority"] = authority_evidence
+                if not authority_ok:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "latest_authority",
+                            "category": "release_authority_changed",
+                            "retryable": True,
+                            "summary": authority_evidence.get(
+                                "summary", "release authority changed"),
+                        })
+                try:
+                    still_ok, still_evidence = \
+                        verify_remote_immutable_publication(new)
+                except ReleaseMeasurementUnknown as exc:
+                    return _finish_unmeasured(result, a.json, exc)
+                result["immutable_publication"]["pre_latest"] = still_evidence
+                if (not still_ok
+                        or still_evidence.get("identity") != immutable_identity):
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "latest_authority",
+                            "category": "immutable_manifest_changed",
+                            "retryable": True,
+                            "summary": (f"{tag} changed after its authoritative "
+                                        "readback; :latest was not moved"),
+                        })
+
+                # Only now may :latest move.  A failed latest publication leaves
+                # a complete immutable+record authority for the next noop to
+                # repair; it never leaves latest ahead of the Git record.
+                latest_ref = f"{RELEASE_IMAGE}:latest"
+                ltrc, ltout, lterr = _sh(["docker", "tag", tag, latest_ref])
+                latest_pushed = False
+                latest_error = ""
+                if ltrc != 0:
+                    latest_error = _one_line_error(lterr or ltout)
+                else:
+                    lprc, lpout, lperr = _sh(
+                        ["docker", "push", latest_ref], progress=True,
+                        stall_grace=PUSH_STALL_GRACE_S,
+                    )
+                    latest_pushed = lprc == 0
+                    if not latest_pushed:
+                        latest_error = _one_line_error(lperr or lpout)
+                result["latest_publication"] = {
+                    "ref": latest_ref,
+                    "tagged": ltrc == 0,
+                    "pushed": latest_pushed,
+                }
+                if latest_error:
+                    result["latest_publication"]["error"] = latest_error
+                    print(f"  LATEST PUSH FAILED — {latest_ref} was not moved "
+                          f"to {tag}: {latest_error}", file=sys.stderr)
+                if not latest_pushed:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "latest_push",
+                            "category": "latest_push_failed",
+                            "retryable": True,
+                            "ref": latest_ref,
+                            "summary": latest_error or (
+                                "latest tag was not published"),
+                        })
+
+                # Read both names back, then bind the result to the frozen
+                # immutable identity rather than merely comparing two names
+                # which might both have changed.
+                try:
+                    remote_ok, remote_evidence = \
+                        verify_remote_release_publication(new)
+                except ReleaseMeasurementUnknown as exc:
+                    return _finish_unmeasured(result, a.json, exc)
+                result["remote_publication"] = remote_evidence
+                final_identity = (remote_evidence.get("manifests", {})
+                                  .get("version", {}).get("identity"))
+                if remote_ok and final_identity != immutable_identity:
+                    remote_ok = False
+                    remote_evidence.update({
+                        "category": "immutable_manifest_changed",
+                        "summary": (f"{tag} no longer has the identity proven "
+                                    "immediately after its push"),
+                    })
+                if not remote_ok:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "publication_readback",
+                            "category": remote_evidence.get(
+                                "category", "publication_readback_failed"),
+                            "retryable": True,
+                            "summary": remote_evidence.get(
+                                "summary", "remote publication readback failed"),
+                        })
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
             # vibe-ic#754 — PUBLISHING AND ANCHORING ARE ONE ACTION.
@@ -1972,10 +3600,185 @@ def main(argv=None) -> int:
                 print(f"  anchor: {_anote}")
                 result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
                 result["anchor_pr"]["note"] = _anote
+                if not _aok:
+                    return _finish(
+                        result, a.json, RC_NEEDS_HUMAN, "failed", {
+                            "stage": "anchor_pr",
+                            "category": "anchor_pr_not_established",
+                            "retryable": True,
+                            "summary": _anote,
+                        })
 
     if not moved and not absent and not unreleased:
+        # A matching LOCAL fingerprint is necessary, not sufficient.  The old
+        # noop accepted it without asking whether the immutable version still
+        # had a registry manifest, whether latest still named that manifest, or
+        # whether the commit carrying RELEASED.json ever left this host.
+        # First establish that the immutable version exists.  Do not publish a
+        # git release record for a missing/unmeasurable image.  A stale/missing
+        # mutable latest is repairable, but its repair authority is the git
+        # record, so converge that record before performing the mutable write.
+        try:
+            remote_ok, remote_evidence = repair_latest_publication(
+                rec.get("version"), repair=False,
+            )
+        except ReleaseMeasurementUnknown as exc:
+            return _finish_unmeasured(result, a.json, exc)
+        result["remote_publication"] = remote_evidence
+        recorded_identity = rec.get("manifest_identity")
+        remote_version_identity = (remote_evidence.get("manifests", {})
+                                   .get("version", {}).get("identity"))
+        if recorded_identity is not None:
+            if not (isinstance(recorded_identity, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", recorded_identity)):
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "noop_publication",
+                    "category": "recorded_manifest_identity_invalid",
+                    "retryable": False,
+                    "summary": ("RELEASED.json manifest_identity is not an "
+                                "exact canonical manifest identity"),
+                })
+            if remote_version_identity != recorded_identity:
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "noop_publication",
+                    "category": "recorded_manifest_identity_mismatch",
+                    "retryable": False,
+                    "summary": (f"{RELEASE_IMAGE}:{rec.get('version')} no "
+                                "longer has the identity recorded when it was "
+                                "published"),
+                })
+        latest_expected_identity = recorded_identity or remote_version_identity
+        repairable_latest = remote_evidence.get("category") in {
+            "latest_manifest_missing", "latest_manifest_mismatch",
+        }
+        if not remote_ok and not repairable_latest:
+            summary = (remote_evidence.get("repair", {}).get("error")
+                       or remote_evidence.get("summary")
+                       or "remote version/latest publication is incomplete")
+            print(f"[FAIL] noop publication check: {summary}", file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "noop_publication",
+                "category": remote_evidence.get(
+                    "category", "latest_repair_failed"),
+                "retryable": remote_evidence.get("retryable", True),
+                "summary": summary,
+            })
+
+        # A previous round may have proved and pushed the immutable tag, then
+        # failed while committing its local VERSION/RELEASED update.  Merely
+        # calling the record *push* helper in that state pushes old HEAD forever.
+        # Recover the missing commit first, under the same immutable identity
+        # already measured above, and only through the closed pin-only admission.
+        if not a.dry_run:
+            immutable_identity = (remote_evidence.get("manifests", {})
+                                  .get("version", {}).get("identity"))
+            try:
+                recovery_ok, recovery_evidence = \
+                    recover_uncommitted_release_record(
+                        root, rec.get("version"), targets,
+                        fingerprint=fp,
+                        immutable_identity=immutable_identity,
+                    )
+            except ReleaseMeasurementUnknown as exc:
+                return _finish_unmeasured(result, a.json, exc)
+            result["release_record_recovery"] = recovery_evidence
+            if not recovery_ok:
+                summary = recovery_evidence.get(
+                    "summary", "uncommitted release record was not recoverable")
+                print(f"[FAIL] noop release-record recovery: {summary}",
+                      file=sys.stderr)
+                return _finish(
+                    result, a.json, RC_NEEDS_HUMAN, "failed", {
+                        "stage": "release_record_recovery",
+                        "category": recovery_evidence.get(
+                            "category", "release_record_recovery_failed"),
+                        "retryable": True,
+                        "summary": summary,
+                    })
+
+        try:
+            record_ok, record_evidence = ensure_release_record_published(
+                root, repair=not a.dry_run,
+            )
+        except ReleaseMeasurementUnknown as exc:
+            return _finish_unmeasured(result, a.json, exc)
+        result["release_record_publication"] = record_evidence
+        if not record_ok:
+            note = (record_evidence.get("repair", {}).get("note")
+                    or record_evidence.get("final_detail")
+                    or "release record did not reach origin")
+            print(f"[FAIL] noop could not repair release-record publication: "
+                  f"{note}", file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "release_record_push",
+                "category": "release_record_push_failed",
+                "retryable": True,
+                "summary": note,
+            })
+
+        if not remote_ok:
+            if a.dry_run:
+                summary = (remote_evidence.get("summary")
+                           or "latest publication requires repair")
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "noop_publication",
+                    "category": remote_evidence.get(
+                        "category", "latest_repair_deferred"),
+                    "retryable": True,
+                    "summary": summary,
+                })
+            try:
+                remote_ok, remote_evidence = repair_latest_publication(
+                    rec.get("version"), repair=True,
+                    expected_identity=latest_expected_identity,
+                    authorize=(
+                        lambda version: authorize_latest_repair(root, version)
+                    ),
+                )
+            except ReleaseMeasurementUnknown as exc:
+                return _finish_unmeasured(result, a.json, exc)
+            result["remote_publication"] = remote_evidence
+            if not remote_ok:
+                summary = (remote_evidence.get("repair", {}).get("error")
+                           or remote_evidence.get("summary")
+                           or "remote version/latest publication is incomplete")
+                print(f"[FAIL] noop publication check: {summary}",
+                      file=sys.stderr)
+                return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                    "stage": "noop_publication",
+                    "category": remote_evidence.get(
+                        "category", "latest_repair_failed"),
+                    "retryable": remote_evidence.get("retryable", True),
+                    "summary": summary,
+                })
+
+        # The release is not operationally converged until vibe-ic's image
+        # anchor is either already current or represented by a successfully
+        # opened review PR. Retry this on noops so a transient GitHub failure
+        # does not require a new image release to heal.
+        if not a.dry_run:
+            try:
+                import pr_notify as _prn
+                anchor_ok, anchor_note = _prn.open_anchor_pr(
+                    rec.get("version"))
+            except Exception as exc:      # noqa: BLE001
+                anchor_ok = False
+                anchor_note = f"{exc.__class__.__name__}: {exc}"
+            result["anchor_pr"] = {
+                "ok": bool(anchor_ok), "note": anchor_note,
+            }
+            if not anchor_ok:
+                return _finish(
+                    result, a.json, RC_NEEDS_HUMAN, "failed", {
+                        "stage": "anchor_pr",
+                        "category": "anchor_pr_not_established",
+                        "retryable": True,
+                        "summary": anchor_note,
+                    })
+
         print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
-              "and this pin set is already released — nothing to do")
+              "the recorded version and :latest resolve to the same remote "
+              "manifest, and the release record is published — nothing to do")
         return _finish(result, a.json, RC_OK, "noop")
     elif a.dry_run:
         # A release follows from ANY of the three, not from `unreleased` alone —
@@ -1992,6 +3795,83 @@ def main(argv=None) -> int:
         })
     status = "published" if result.get("pushed") else "completed"
     return _finish(result, a.json, RC_OK, status)
+
+
+def _option_value(argv: List[str], name: str) -> Optional[str]:
+    """Read one argparse-style string option for pre-parser failure evidence."""
+    for idx, item in enumerate(argv):
+        if item == name:
+            return argv[idx + 1] if idx + 1 < len(argv) else None
+        prefix = name + "="
+        if item.startswith(prefix):
+            return item[len(prefix):]
+    return None
+
+
+def main(argv=None) -> int:
+    """Serialize the complete measurement/mutation/publication transaction.
+
+    A lock around only ``imagetools create`` is too small: an older noop can
+    measure stale authority, pause while a new release publishes, then roll
+    ``:latest`` back and validate its own write.  Every supported entry point
+    therefore acquires the same host-wide lock before it measures anything and
+    holds it through final readback and sidecar publication.  Contention is a
+    named fail-closed result; it never waits and never runs the inner program.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    json_path = _option_value(args, "--json")
+    started = _utcnow()
+    lock_path = _release_lock_path()
+    try:
+        lock_fd = _acquire_release_lock(lock_path)
+    except BlockingIOError:
+        result = {
+            "program": "daily_release",
+            "schema_version": 2,
+            "status": "blocked",
+            "started_at": started,
+            "finished_at": _utcnow(),
+            "exit_code": RC_NEEDS_HUMAN,
+            "failure": {
+                "stage": "release_lock",
+                "category": "release_already_running",
+                "retryable": True,
+                "summary": f"another release owns {lock_path}",
+            },
+        }
+        if json_path:
+            _atomic_json(json_path, result)
+        print(f"[BLOCKED] another release owns {lock_path}; no measurement "
+              "or mutation was attempted", file=sys.stderr)
+        return RC_NEEDS_HUMAN
+    except OSError as exc:
+        result = {
+            "program": "daily_release",
+            "schema_version": 2,
+            "status": "unmeasured",
+            "started_at": started,
+            "finished_at": _utcnow(),
+            "exit_code": RC_NEEDS_HUMAN,
+            "failure": {
+                "stage": "release_lock",
+                "category": "release_lock_unmeasurable",
+                "retryable": False,
+                "summary": f"could not establish release lock {lock_path}: {exc}",
+            },
+        }
+        if json_path:
+            _atomic_json(json_path, result)
+        print(f"[UNMEASURED] could not establish release lock {lock_path}: "
+              f"{exc}", file=sys.stderr)
+        return RC_NEEDS_HUMAN
+
+    try:
+        return _main_under_release_lock(args)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 if __name__ == "__main__":

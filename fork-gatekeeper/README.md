@@ -223,8 +223,10 @@ defence-in-depth retry, keeping deterministic failures bounded.
 
 `daily-release.json` is schema-versioned and atomically replaced at the start
 and every known exit. A crash can leave `status: running`, never yesterday's
-`status: published`; the public forks page renders `failed`, `not_checked`, and
-interrupted `running` records as the release-lag blocker.
+`status: published`. The public page never reads that live path in a certified
+05:30 publish: it renders the release summary retained by the same current-round
+LL certificate, so an AI-skipped release cannot attribute yesterday's terminal
+record to today.
 
 After `fork_gap_report`, `run_0530.sh` runs `fork_github_convergence.py`, then
 invokes `capture_release_ll.py`. The GitHub check has three states: exit 0 is an
@@ -234,7 +236,8 @@ read can therefore never be rendered as zero. Every morning LL joins that
 answer and its exact item references to the terminal release evidence and the
 measured sync/image/pin lag, then retains:
 
-* `release-ll/latest.json` — latest full LL record;
+* `release-ll/latest.json` — latest full LL record (schema 3 binds the round
+  nonce and registered-fork denominator at the top level);
 * `release-ll/rounds/<stamp>.json` — full evidence, 400 days by default
   (`GK_RELEASE_LL_KEEP_DAYS`);
 * `release-ll/index.jsonl` — narrow append-only outcome history, never pruned.
@@ -258,7 +261,7 @@ The producer and LL independently require exact coverage of every tool in
 fleets are therefore incomplete, never an all-zero report. LL accepts only a
 fetching, complete gap record with every unmeasured list empty. The fork-GitHub
 record is accepted only when
-`program=fork_github_convergence`, `schema_version=1`, its authenticated actor
+`program=fork_github_convergence`, `schema_version=2`, its authenticated actor
 matches the configured expected actor, its round nonce/timestamps match this
 round, its status is `converged|open|norecord`, and its `started_at` is at or
 after the same round boundary.
@@ -275,6 +278,18 @@ zero stranded commits, and no source error. The former arithmetic remains
 available as `delivery_converged` and `delivery_round_converged` for historical dashboards.
 A valid measured `status=open` is retained with exact items and a
 `finished_with_open_fork_work` lesson; the checker exit 1 still gates the cron.
+
+Page publication is the final blocking consumer, after discovery, gap, GitHub,
+LL, ledger freshness, and the whole-round convergence verdict. It requires the
+natural green semantic-test record, current AI authorization, a successful
+release tick whose terminal state is either `published` or an explicit zero-work
+`noop`, exact zero gap/GitHub evidence, a source-clean LL, and fresh ledgers. The
+builder independently strict-parses gap/GitHub/LL JSON (duplicate keys and every
+form of non-finite number are refused), revalidates their timestamps, shared
+run nonce and registered denominator, and embeds both the GitHub open-delivery
+count/status and LL's whole-round convergence booleans in the page model. Only
+after the complete HTML has rendered and passed NDA redaction does it atomically
+replace `eda-forks.html`; any refusal leaves the last good page unchanged.
 
 The LL keeps the merge-boundary verdict separate from live drift. A round with
 `sync_lag_at_merge=0`, `release_lag=0`, and `ours_past_pin=0` converged on every

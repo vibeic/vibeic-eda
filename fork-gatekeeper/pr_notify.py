@@ -362,20 +362,21 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
     if rc != 0:
         return (False, f"git fetch origin failed: {out.strip()[:200]}")
     rc, out = _run(["git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch])
-    if rc == 0 and out.strip() and not dry:
-        return (False, f"branch {branch} already on origin — anchor PR already open")
+    branch_exists = rc == 0 and bool(out.strip())
+    if rc != 0:
+        return (False, f"could not inspect anchor branch: {out.strip()[:200]}")
 
     wt = Path(tempfile.gettempdir()) / f"gk-vibeic-anchor-{version}"
     _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
     shutil.rmtree(wt, ignore_errors=True)
-    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
+    # Inspect the authoritative main tree before treating a retained remote
+    # branch as pending. GitHub may keep a merged branch; in that state the
+    # anchor is fulfilled and a permanent false-red would be worse than the
+    # stale branch. Detached also avoids local branch-name residue entirely.
+    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "--detach",
                     str(wt), "origin/main"])
     if rc != 0:
-        _run(["git", "-C", str(REPO), "branch", "-D", branch])
-        rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
-                        str(wt), "origin/main"])
-        if rc != 0:
-            return (False, f"worktree add failed: {out.strip()[:200]}")
+        return (False, f"worktree add failed: {out.strip()[:200]}")
     try:
         context_ok, context_note = _prepare_anchor_gate_context(wt)
         if not context_ok:
@@ -388,7 +389,13 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
             return (False, f"anchor tool refused {version}: {out.strip()[-300:]}")
         rc, dirty = _run(["git", "-C", str(wt), "status", "--porcelain"])
         if not [l for l in dirty.splitlines() if l and not l.startswith("??")]:
-            return (False, f"anchor already at {version} — nothing to open")
+            # This is the fulfilled postcondition, not a failure to create work.
+            # Treating it as false made every repair/noop round permanently red
+            # after the anchor PR had already landed.
+            return (True, f"anchor already at {version} — nothing to open")
+
+        if branch_exists and not dry:
+            return (False, f"branch {branch} already on origin — anchor PR pending")
 
         _run(["git", "-C", str(wt), "add", "-u"])
         title = f"chore(image-anchor): adopt vibeic-eda {version}"
@@ -424,7 +431,6 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
     finally:
         _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
         shutil.rmtree(wt, ignore_errors=True)
-        _run(["git", "-C", str(REPO), "branch", "-D", branch])
 
 
 def tally_line(tool: str, a: dict) -> str | None:

@@ -640,7 +640,8 @@ def validate_round_evidence(record: object, *, round_at: str,
     finished = _parse_when(meta.get("finished_at"))
     observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     run_id = meta.get("run_id")
-    if meta.get("schema_version") != 1:
+    if (type(meta.get("schema_version")) is not int
+            or meta.get("schema_version") != 1):
         errors.append("watch-reset source _round schema is not 1")
     if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         errors.append("watch-reset source run_id is invalid")
@@ -653,7 +654,9 @@ def validate_round_evidence(record: object, *, round_at: str,
         errors.append("watch-reset source is stale, reversed, or future-dated")
     if meta.get("applied") is not True:
         errors.append("watch-reset source is not an applied round")
-    if evidence.get("program") != PROGRAM or evidence.get("schema_version") != 1:
+    if (evidence.get("program") != PROGRAM
+            or type(evidence.get("schema_version")) is not int
+            or evidence.get("schema_version") != 1):
         errors.append("watch-reset evidence program/schema is invalid")
     if evidence.get("round_at") != round_at:
         errors.append("watch-reset evidence round_at does not match this round")
@@ -689,6 +692,7 @@ def validate_round_evidence(record: object, *, round_at: str,
             continue
         policy = registry["policies"][tool]
         if (row.get("program") != "watch_only_reset"
+                or type(row.get("schema_version")) is not int
                 or row.get("schema_version") != 1
                 or row.get("round_at") != round_at
                 or row.get("run_id") != run_id
@@ -798,9 +802,11 @@ def validate_round_evidence(record: object, *, round_at: str,
     summary = {
         "program": PROGRAM, "schema_version": SCHEMA_VERSION,
         "round_at": round_at, "run_id": run_id,
+        "applied": evidence.get("applied"),
         "status": evidence.get("status"),
         "policy_digest": evidence.get("policy_digest"),
         "policy_tools": expected_tools,
+        "registry_errors": list(evidence.get("registry_errors") or []),
         "results": rows,
     }
     return summary, errors

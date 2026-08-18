@@ -282,6 +282,7 @@ def test_main_composes_the_measured_free_tag_not_remote_existing_candidate(
     monkeypatch.setattr(R, "retag_images", lambda *_a: [])
     monkeypatch.setattr(R, "preferred_builder", lambda: None)
     monkeypatch.setattr(R, "log_limit_effective", lambda *_a: True)
+    monkeypatch.setattr(R, "_release_changed_paths", lambda _root: (set(), ""))
 
     def registry(ref):
         state = (R.Presence.PRESENT if ref.endswith(":0.3.0")
