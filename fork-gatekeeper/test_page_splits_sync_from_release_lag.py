@@ -226,22 +226,46 @@ def test_page_states_sync_and_release_separately_on_the_real_ledger():
     """
     html = _render_rows(_enrich(_real_rows()))
     rows = _enrich(_real_rows())
-    gap = sum((d.get("sync_lag") or 0) + (d.get("release_lag") or 0)
-              for d in rows
-              if isinstance(d.get("sync_lag"), int)
-              and isinstance(d.get("release_lag"), int))
-    if not gap:
-        assert "sync " not in html.lower(), (
+
+    # MATCH THE LABEL, NOT THE WORD. This used to assert `"sync " not in html`
+    # over the WHOLE page, and the page legitimately contains that substring in
+    # unrelated prose -- "Carried patches · Releases · Daily sync log", the
+    # per-fork "Daily sync log" heading, even a commit subject with "in sync
+    # scope" in it. Measured on a level fleet: 152 occurrences of `sync `, of
+    # which exactly ONE was a real split label. So the assertion reported a
+    # zero-split render that was not happening, and it did so at precisely the
+    # moment the fleet reached zero -- a gate that can only be green while
+    # something is behind.
+    #
+    # The emitter (`lagWhich` in build_page.py) writes `sync <n>` / `release <n>`
+    # with a NUMBER, and writes nothing at all when both are zero, so the number
+    # is what separates the label from the prose.
+    sync_labels = re.findall(r"sync \d+", html)
+    release_labels = re.findall(r"release \d+", html)
+
+    expected_sync = [d for d in rows if isinstance(d.get("sync_lag"), int)
+                     and d["sync_lag"]]
+    expected_release = [d for d in rows if isinstance(d.get("release_lag"), int)
+                        and d["release_lag"]]
+
+    if not expected_sync and not expected_release:
+        assert not sync_labels and not release_labels, (
             "the fleet is level and the rows still print a zero split; the split "
             "exists to tell a reader WHICH fix to apply, and at zero there is no "
-            "fix to apply")
+            f"fix to apply. Found: {sync_labels + release_labels}")
         return
-    assert "sync" in html.lower(), (
-        "the fleet IS behind and no row mentions sync lag. One number for two "
-        "conditions with opposite fixes is the defect this test exists for.\n"
-        + html[:1200])
-    assert "release" in html.lower(), (
-        "the fleet IS behind and no row mentions release lag.\n" + html[:1200])
+
+    # A gap must say which fix it needs -- and must say it for EVERY fork that
+    # has one, not merely somewhere on the page.
+    for d in expected_sync:
+        assert f"sync {d['sync_lag']}" in html, (
+            f"{d['tool']} is {d['sync_lag']} behind upstream and its row does "
+            "not name sync lag. One number for two conditions with opposite "
+            "fixes is the defect this test exists for.")
+    for d in expected_release:
+        assert f"release {d['release_lag']}" in html, (
+            f"{d['tool']} has {d['release_lag']} commit(s) past its pin and its "
+            "row does not name release lag.")
 
 
 def test_the_card_label_stays_short():
