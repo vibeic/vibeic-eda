@@ -3592,6 +3592,7 @@ def _main_under_release_lock(argv=None) -> int:
             # is still authoritative; this just stops it being the FIRST time anyone
             # notices.
             if pushed:
+                _await_registry_tag(new)
                 try:
                     import pr_notify as _prn
                     _aok, _anote = _prn.open_anchor_pr(new)
@@ -3851,6 +3852,33 @@ def _option_value(argv: List[str], name: str) -> Optional[str]:
 # The published page path, resolved from gk_state without importing it at module
 # scope (this module deliberately has no gk_state dependency). Falls back to the
 # known production path so a release can still publish if the import moves.
+def _await_registry_tag(version: str, *, attempts: int = 12,
+                        pause: float = 10.0) -> bool:
+    """Block until GHCR can resolve the tag we just pushed, or give up.
+
+    vibe-ic's `sync_image_version.py` verifies the anchor's adoption target
+    against GHCR's tag-LIST endpoint, which is cached and lags a push by up to
+    a minute. The per-tag manifest resolves immediately. Measured on 0.3.12:
+    the anchor refused with "does not exist on the registry (newest published:
+    0.3.11)" at the same moment `docker manifest inspect ...:0.3.12` succeeded
+    -- so a correctly published release was recorded as anchor-blocked, and the
+    page told readers "no version was published, the lag below is real" about a
+    release that WAS published.
+
+    Bounded, and a timeout is not a block: the anchor gate still makes its own
+    decision. This only stops us asking it before the registry can answer.
+    """
+    for _ in range(attempts):
+        probe = subprocess.run(
+            ["docker", "manifest", "inspect",
+             f"ghcr.io/vibeic/vibeic-eda:{version}"],
+            capture_output=True, text=True)
+        if probe.returncode == 0:
+            return True
+        time.sleep(pause)
+    return False
+
+
 def _resolve_production_page() -> str:
     try:
         import gk_state as _gks  # noqa: PLC0415

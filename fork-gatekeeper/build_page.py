@@ -1397,8 +1397,19 @@ function enhBlock(tool){
     // fresh is this page"; the reader's actual question is "when did we last
     // stand level with upstream", and on a converged round those are the same
     // instant -- so it is stated rather than left to be inferred.
+    // SAME DAY, SO SAY THE DAY ONCE. The value is "<check date> · <converged
+    // at>", and convergence almost always happens on the day of the check --
+    // so it rendered "2026-08-19 · 2026-08-19 06:44", printing the date twice
+    // and reading like two unrelated dates. When the two days agree only the
+    // clock time is appended; when they differ (a page built the day after the
+    // round that converged) the full stamp is kept, because then the second
+    // date is the whole point.
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``)
-       + (convergedRound && convergedAtTxt ? ` · ${convergedAtTxt}` : ``),
+       + (convergedRound && convergedAtTxt
+            ? ` · ${convergedAtTxt.startsWith(lastCheck)
+                     ? convergedAtTxt.slice(lastCheck.length).trim()
+                     : convergedAtTxt}`
+            : ``),
      {en:convergedRound ? "Last daily check · converged to 0 at"
                         : "Last daily check",
       zh:convergedRound ? "最後每日檢查 · 收斂到 0 的時間"
