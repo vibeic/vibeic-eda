@@ -44,24 +44,24 @@ variable "TAG" { default = "dev" }
 # program because two places compose a tool tag — `tool_tags` and `eda-local`'s
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
-variable "SV2V_REF"    { default = "1a89e8b986135a5e4951d06a308c05d44e5a4146" }
-variable "SV2V_RECIPE" { default = "abacc3" }
+variable "SV2V_REF"    { default = "493a88f930802da68f592c192ec86991eaf95c49" }
+variable "SV2V_RECIPE" { default = "3a8690" }
 variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
-variable "OPENROAD_RECIPE" { default = "7ff74f" }
-variable "YOSYS_RECIPE" { default = "1f4b33" }
+variable "OPENROAD_RECIPE" { default = "0f98c4" }
+variable "YOSYS_RECIPE" { default = "608bcd" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "19b4e7" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
 variable "IVERILOG_RECIPE" { default = "7e8bf2" }
 variable "KLAYOUT_RECIPE" { default = "cbbc4b" }
-variable "VERILATOR_RECIPE" { default = "7a9b7a" }
+variable "VERILATOR_RECIPE" { default = "7b94bc" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
-variable "XSCHEM_RECIPE" { default = "e1316b" }
-variable "SLANG_RECIPE" { default = "d13e6c" }
+variable "XSCHEM_RECIPE" { default = "6fd328" }
+variable "SLANG_RECIPE" { default = "ef514c" }
 variable "XYCE_RECIPE" { default = "b2fce0" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
@@ -73,8 +73,8 @@ variable "SV_ELAB_RECIPE" { default = "06cea9" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "42cadea9dfcb91d8d8ef4aa37623d278ab1616f6" }
-variable "YOSYS_REF"       { default = "7a41b1522a988c98c73d7e8878de50d2ed9e1c25" }
+variable "OPENROAD_REF"    { default = "17d1b90b1dd66a5253b54e8f205e144bf426b475" }
+variable "YOSYS_REF"       { default = "0048145dd1ffca90ca6a01fce33f6d3ad12defdd" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
@@ -89,11 +89,11 @@ variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
 variable "IVERILOG_REF"    { default = "5d87083a0be13e09aefffaa3ab22f9be02181b74" }
 variable "KLAYOUT_REF"     { default = "08cf213ad18e737b4aa7995d2de580110524203f" }
-variable "VERILATOR_REF"   { default = "bd5b856c0c03894a92cd22c32b0fcece14e92e13" }
+variable "VERILATOR_REF"   { default = "82117b96dadc603708a6332cf6ffbfc941d4ddc8" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
-variable "XSCHEM_REF" { default = "5d5a4adbfd36a34e4c23396932d21692a38ca17c" }
+variable "XSCHEM_REF" { default = "cd839861c3ad9fba23a7ef373fb21f0665585c9f" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "e3291f8fe002c22d625732b928877b73688d8e07" }
+variable "SLANG_REF" { default = "7ce5f186b9eeadd0e9cede10e791533dc54724f0" }
 variable "XYCE_REF" { default = "24e13434180c40f32f16101f4e236819c9809f62" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
 variable "SV_ELAB_REF" { default = "ce38835520fbdf422304a6f6a2f1c437c3ba98c2" }

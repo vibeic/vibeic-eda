@@ -15,7 +15,7 @@
 # build. Every other tool image here is ubuntu:24.04 anyway.
 FROM ubuntu:24.04 AS build
 ARG SV2V_REPO=https://github.com/vibeic/sv2v.git
-ARG SV2V_REF=1a89e8b986135a5e4951d06a308c05d44e5a4146  # pinned; branch master — identical to zachjs/sv2v@master today (ahead=0, behind=0)
+ARG SV2V_REF=493a88f930802da68f592c192ec86991eaf95c49  # pinned; branch master — identical to zachjs/sv2v@master today (ahead=0, behind=0)
 # The distro's `haskell-stack`, not the get.haskellstack.org installer: that
 # script runs its own `apt-get install` and dies on a layer that has already
 # cleared /var/lib/apt/lists ("Package 'netbase' has no installation candidate"

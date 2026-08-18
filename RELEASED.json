@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.6",
-  "pins_fingerprint": "68751244e80e",
+  "version": "0.3.7",
+  "pins_fingerprint": "e7eb1b85b8ed",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,15 +11,15 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "42cadea9dfcb91d8d8ef4aa37623d278ab1616f6",
-    "OpenROAD-flow-scripts": "af76293c1b40b5ea0f0eb6cf81b9b0ee1488af27",
+    "OpenROAD": "17d1b90b1dd66a5253b54e8f205e144bf426b475",
+    "OpenROAD-flow-scripts": "6101364b2d7909dd797e1e3e7f80695401cfa4e4",
     "Trilinos": "45fca519fe45a7414b3b5ae8f3e4440da140a5fe",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "9f95dae104ee3fd4708339b1188ec9dec6b3867c",
     "cadical": "c60730422e758ef1cebe7aeddf2dda31c996bf04",
     "ciel": "714d1bbb626d41e3cecc0ea23e752775166fde6e",
-    "cocotb": "902db26335558cd7a0fac208d6db4551a349ccc6",
+    "cocotb": "13c55df3c69cf75a0b99bf16fce07b0b996b5668",
     "cocotb-coverage": "957b5b4a2ca932e30b05ceb852c1728501631e76",
     "gtkwave": "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b",
     "iverilog": "5d87083a0be13e09aefffaa3ab22f9be02181b74",
@@ -28,14 +28,15 @@
     "magic": "02e5d4ac00e9702cdc679b1cd76a4be96e2a9454",
     "netgen": "b7941fafb91317b6a5845d9e9765cea278aa31c3",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
-    "pyuvm": "8a8c8116e41978368c61b112ad45af2c33189e63",
+    "pyuvm": "75cd4d6523aeaee7a4c94788961690bc52e87d43",
     "sby": "2c2f04e96154995677fb604d697dc894ac680a69",
-    "slang": "e3291f8fe002c22d625732b928877b73688d8e07",
+    "slang": "7ce5f186b9eeadd0e9cede10e791533dc54724f0",
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
-    "sv2v": "1a89e8b986135a5e4951d06a308c05d44e5a4146",
-    "verilator": "bd5b856c0c03894a92cd22c32b0fcece14e92e13",
-    "xschem": "5d5a4adbfd36a34e4c23396932d21692a38ca17c",
+    "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
+    "verilator": "82117b96dadc603708a6332cf6ffbfc941d4ddc8",
+    "xschem": "cd839861c3ad9fba23a7ef373fb21f0665585c9f",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "7a41b1522a988c98c73d7e8878de50d2ed9e1c25"
-  }
+    "yosys": "0048145dd1ffca90ca6a01fce33f6d3ad12defdd"
+  },
+  "manifest_identity": "682f2ab0d2d777a1fbfc483d027bf6b9de03da5ee8dfa6370fa30ddd30318e46"
 }
