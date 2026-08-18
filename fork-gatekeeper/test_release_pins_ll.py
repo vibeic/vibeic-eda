@@ -18,6 +18,7 @@ from test_fork_github_convergence_ll import (  # noqa: E402
     _ai_authorization_record,
     _fork_record,
     _gap_record,
+    _watch_reset_record,
 )
 from test_release_pins_committed import _repo  # noqa: E402
 
@@ -88,6 +89,7 @@ def _capture(tmp_path: Path, pins: dict | None, *, raw: str | None = None,
     github.write_text(json.dumps(_fork_record()))
     ai = tmp_path / "ai.json"
     ai.write_text(json.dumps(_ai_authorization_record()))
+    watch = _watch_reset_record(tmp_path / "daily_0530.json")
     pin_path = tmp_path / "release-pins.json"
     if raw is not None:
         pin_path.write_text(raw)
@@ -102,6 +104,7 @@ def _capture(tmp_path: Path, pins: dict | None, *, raw: str | None = None,
         "--gap-json", str(gap),
         "--fork-github-json", str(github),
         "--ai-authorization-json", str(ai),
+        "--watch-reset-json", str(watch),
         "--expected-github-actor", "reyerchu",
         "--round-at", ROUND_AT,
         "--tick-exit", "0" if tick_state == "ran" else "2",

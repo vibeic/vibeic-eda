@@ -32,6 +32,30 @@ _EDA_HEAD = subprocess.run(
 ).stdout.strip()
 
 
+def _write_no_watch_policy_registry(tmp_path: Path) -> tuple[Path, str]:
+    """Pin LL-only fixtures to the contract they exercise.
+
+    These tests predate watch-only repair and intentionally exercise AI handoff
+    and release evidence in a fleet with no reset policy.  Do not let a policy
+    later added to the production registry silently add an unrelated required
+    sidecar to these fixtures.
+    """
+    registry = json.loads(
+        (_HERE / "FORKS.json").read_text(encoding="utf-8"))
+    for entry in registry["forks"]:
+        entry.pop("watch_only_reset", None)
+    path = tmp_path / "FORKS.no-watch-policy.json"
+    path.write_text(
+        json.dumps(registry, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _bind_ai_record_to_registry(record: dict, path: Path, digest: str) -> None:
+    record["registry"] = {"source": str(path), "sha256": digest}
+
+
 CASE = {
     "branch": "origin/vibeic/topic",
     "direction": "our branch -> our mainline",
@@ -458,6 +482,7 @@ def test_cron_does_not_invoke_release_without_all_green_controls():
 
 def test_stalled_norecord_is_retained_without_reusing_old_release(
         tmp_path, capsys):
+    forks_json, registry_digest = _write_no_watch_policy_registry(tmp_path)
     old_release = tmp_path / "daily-release.json"
     old_release.write_text(json.dumps({
         "program": "daily_release", "status": "published",
@@ -471,7 +496,9 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
-    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
+    ai_record = _ai_authorization_record()
+    _bind_ai_record_to_registry(ai_record, forks_json, registry_digest)
+    ai_authorization.write_text(json.dumps(ai_record))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
@@ -480,6 +507,7 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
+        "--forks-json", str(forks_json),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
@@ -501,6 +529,7 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
 
 def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
                      tick_state: str) -> tuple[int, dict, dict]:
+    forks_json, registry_digest = _write_no_watch_policy_registry(tmp_path)
     semantic = tmp_path / "semantic.json"
     semantic.write_text(json.dumps(_semantic_record(rc=0, outcome="natural")))
     gap = tmp_path / "gap.json"
@@ -509,6 +538,8 @@ def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai = tmp_path / "ai-authorization.json"
     if ai_value is not None:
+        _bind_ai_record_to_registry(
+            ai_value, forks_json, registry_digest)
         ai.write_text(json.dumps(ai_value))
     state = tmp_path / "state"
     rc = LL.main([
@@ -518,6 +549,7 @@ def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai),
+        "--forks-json", str(forks_json),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
@@ -592,6 +624,7 @@ def test_red_and_norecord_remain_different_ll_facts():
 
 
 def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
+    forks_json, registry_digest = _write_no_watch_policy_registry(tmp_path)
     release = tmp_path / "daily-release.json"
     release.write_text(json.dumps({
         "program": "daily_release", "status": "published",
@@ -605,7 +638,9 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
-    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
+    ai_record = _ai_authorization_record()
+    _bind_ai_record_to_registry(ai_record, forks_json, registry_digest)
+    ai_authorization.write_text(json.dumps(ai_record))
     release_pins = tmp_path / "release-pins.json"
     release_pins.write_text(json.dumps(_release_pins_record("0.3.0")))
 
@@ -616,6 +651,7 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
+        "--forks-json", str(forks_json),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic),
         "--round-at", "2026-08-17T05:30:00+08:00",
@@ -634,6 +670,7 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
 
 def _capture_ran_tick(tmp_path: Path, release: dict,
                       semantic: dict) -> tuple[int, dict]:
+    forks_json, registry_digest = _write_no_watch_policy_registry(tmp_path)
     release_path = tmp_path / "daily-release.json"
     release_path.write_text(json.dumps(release))
     semantic_path = tmp_path / "semantic.json"
@@ -643,7 +680,9 @@ def _capture_ran_tick(tmp_path: Path, release: dict,
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
-    ai_authorization.write_text(json.dumps(_ai_authorization_record()))
+    ai_record = _ai_authorization_record()
+    _bind_ai_record_to_registry(ai_record, forks_json, registry_digest)
+    ai_authorization.write_text(json.dumps(ai_record))
     target = LL._target(release) or "0.3.5"
     release_pins = tmp_path / "release-pins.json"
     release_pins.write_text(json.dumps(_release_pins_record(target)))
@@ -655,6 +694,7 @@ def _capture_ran_tick(tmp_path: Path, release: dict,
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
+        "--forks-json", str(forks_json),
         "--expected-github-actor", "reyerchu",
         "--semantic-pytest-json", str(semantic_path),
         "--round-at", "2026-08-17T05:30:00+08:00",

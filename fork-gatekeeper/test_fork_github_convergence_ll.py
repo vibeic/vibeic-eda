@@ -12,6 +12,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import capture_release_ll as LL  # noqa: E402
+import watch_only_reset as WATCH_RESET  # noqa: E402
 
 
 ROUND_AT = "2026-08-17T05:30:00+08:00"
@@ -31,6 +32,44 @@ SOURCE_KEYS = (
     "fork_delivery_pull_requests", "viewer_upstream_issues",
     "viewer_upstream_pull_requests", "round_upstream_pull_requests",
 )
+
+
+def _watch_reset_record(path: Path) -> Path:
+    """Current exact noop evidence required by the production LL registry."""
+    registry = WATCH_RESET.load_registry(HERE / "FORKS.json")
+    started = "2026-08-17T05:31:00+08:00"
+    finished = "2026-08-17T05:32:00+08:00"
+    results = []
+    for policy in registry["policies"].values():
+        tip = "d" * 40
+        results.append({
+            "program": "watch_only_reset", "schema_version": 1,
+            "tool": policy["tool"], "round_at": ROUND_AT,
+            "run_id": "a" * 64, "started_at": started,
+            "finished_at": finished, "applied": True,
+            "status": "pass", "outcome": "already_aligned", "reason": None,
+            "branch": policy["branch"],
+            "upstream_repository": policy["upstream"],
+            "policy": {"mode": WATCH_RESET.MODE,
+                       "preserve": WATCH_RESET.PRESERVE},
+            "old_tip": tip, "upstream_tip": tip, "local_old_tip": None,
+            "ahead": 0, "behind": 0, "recovery_ref": None,
+            "recovery_tip": None, "recovery_action": None,
+            "remote_tip_after": tip, "upstream_tip_after": tip,
+            "local_tip_after": tip, "branch_cas_guard": None,
+            "cas": {"applied": False, "expected_old": tip,
+                    "target": tip, "verified": True},
+        })
+    value = {
+        "_round": {"schema_version": 1, "run_id": "a" * 64,
+                   "started_at": started, "finished_at": finished,
+                   "applied": True},
+        "_watch_only_resets": WATCH_RESET.make_round_evidence(
+            round_at=ROUND_AT, run_id="a" * 64, applied=True,
+            registry=registry, results=results),
+    }
+    path.write_text(json.dumps(value))
+    return path
 
 
 def _inventory_row(repository: str) -> dict:
@@ -361,6 +400,7 @@ def _capture(tmp_path: Path, fork_path: Path, *, gap_record=None
     gap.write_text(json.dumps(_gap_record() if gap_record is None else gap_record))
     ai = tmp_path / "ai-authorization.json"
     ai.write_text(json.dumps(_ai_authorization_record()))
+    watch = _watch_reset_record(tmp_path / "daily_0530.json")
     state = tmp_path / "state"
     rc = LL.main([
         "--state-dir", str(state),
@@ -369,6 +409,7 @@ def _capture(tmp_path: Path, fork_path: Path, *, gap_record=None
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_path),
         "--ai-authorization-json", str(ai),
+        "--watch-reset-json", str(watch),
         "--expected-github-actor", "reyerchu",
         "--round-at", ROUND_AT,
         "--tick-exit", "2",

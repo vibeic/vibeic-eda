@@ -95,15 +95,15 @@ comes from `open_pdks`, and until it was tracked nothing watched it. `sv-elab` i
 the fourth: built and pinned, deliberately not installed (vibeic-eda#24). See
 `fork-gatekeeper/PDKS.json` for which PDK each one produces and who reads it.
 
-A fifth, `icsprout55-pdk`, is tracked for the same upstream-pull-review reason
-but is a different case from the other four: it is not pre-installed in the
-base image, not staged by any Dockerfile stage, and not in `PDKS.json` — there
-is no image claim to make about it yet. It is the PDK data behind the plugin's
-new `--pdk icsprout55` target (vibe-ic, not this repo); today the plugin stages
-its files into a running container at runtime rather than through an image
-build. Baking it into the published image (a `PDKS.json` entry + a Dockerfile
-stage, the same path `ihp-sg13g2` took) is a separate decision this mirror
-does not make on its own.
+A fifth, `icsprout55-pdk`, is tracked for upstream-change review only. It is not
+pre-installed, staged by a Dockerfile, listed in `PDKS.json`, or consumed by a
+current vibe-ic plugin target. It is therefore an explicit **watch-only mirror**,
+not a shipping input. The 05:30 policy keeps its published mainline exactly at
+the authoritative upstream tip; before dropping any accidental mirror-only
+commits it preserves their exact old tip under a deterministic remote recovery
+tag and updates the branch with an exact-SHA lease. Adding icsprout55 support is
+a separate end-to-end product change (consumer, PDK manifest, image stage and
+signoff assets), not something this mirror can imply by carrying patches.
 
 The mirrors are **not forks** — they are mirrors of upstream data, solver and PDK
 repos (`kissat`, `cadical`, ORFS, the three ASAP7 data repos, `open_pdks`,
