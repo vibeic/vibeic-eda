@@ -1080,7 +1080,27 @@ function enhBlock(tool){
                                         && (d.behind_commits||0) > 0);
   const behindKnown   = gapRows.filter(d=>typeof d.behind_commits === "number");
   const behindUnknown = gapRows.length - behindKnown.length;
-  const commitsBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
+  // THE CARD RECORDS THE MOMENT WE CONVERGED, NOT THE MOMENT YOU LOOKED.
+  // Owner directive 2026-08-19: "THE WEBPAGE RECORD SHOULD USE THE MOMENT THAT
+  // WE CONVERGE TO 0". Upstream keeps moving -- OpenROAD and Trilinos each
+  // gained commits within minutes of a release that had taken everything they
+  // had -- so a live pin->upstream sum can never read 0 for long, and the page
+  // showed 16 immediately after a round that genuinely closed the gap. That
+  // reports the fork-gatekeeper as permanently behind for doing its job.
+  //
+  // So the headline states the CONVERGED state whenever the round that
+  // produced this page reached it, and CONVERGENCE_AT records when. Drift that
+  // arrived afterwards is still measured, still split per row in the table
+  // below, and still the next round's work -- it just does not overwrite the
+  // record of a gap that was actually closed.
+  const liveBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
+  // `sync_lag_at_merge === 0` is the measured statement "this round took
+  // everything upstream had WHEN IT LOOKED" -- which is exactly the moment of
+  // convergence, and unlike the live sum it does not un-converge the instant
+  // upstream pushes again. CONVERGED_AT carries when that last happened, so a
+  // reader sees both the achievement and its age.
+  const convergedRound = !!(REPORT && REPORT.q1_sync_lag_at_merge === 0);
+  const commitsBehind = convergedRound ? 0 : liveBehind;
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
 
   // ONE NUMBER FOR TWO CONDITIONS WITH OPPOSITE FIXES was this card's remaining
