@@ -34,8 +34,16 @@ RELEASE_RECORD_COMMIT = subprocess.run(
      "--", "RELEASED.json"],
     check=True, capture_output=True, text=True,
 ).stdout.strip()
+# An ancestor that is NOT the release-record commit, BY CONSTRUCTION.
+# This used to be `HEAD^`, which collides with RELEASE_RECORD_COMMIT in a
+# completely ordinary state: exactly one commit sitting on top of a release.
+# That is what the tree looks like after any single post-release fix, so the
+# test's own precondition (`ANCESTOR_COMMIT != RELEASE_RECORD_COMMIT`) failed
+# and took the impersonation check with it -- the guard was not exercised at
+# all, which is worse than a visible red. Walking back from the release record
+# cannot collide with it.
 ANCESTOR_COMMIT = subprocess.run(
-    ["git", "-C", str(HERE.parent), "rev-parse", "HEAD^"],
+    ["git", "-C", str(HERE.parent), "rev-parse", RELEASE_RECORD_COMMIT + "^"],
     check=True, capture_output=True, text=True,
 ).stdout.strip()
 FIXTURE_NOW = datetime.fromisoformat("2026-08-17T06:10:00+08:00")

@@ -218,20 +218,64 @@ def test_the_live_watch_only_gap_never_passes_as_zero():
         baseline shrank    the register lists forks that are now pinned
 
     Ordinary lag is reported by the run and is not one of them.
+
+    NOW ASSERTS THE PROPERTY, NOT THE INCIDENT (2026-08-19). The paragraph above
+    hard-coded that icsprout55-pdk "carries three commits", and required
+    rc in (1, 2) unconditionally.  Those three commits have since been retired
+    by the mirror's own declared `watch_only_reset` policy -- the published
+    branch is now exactly upstream 68d89edb, with the displaced tip preserved at
+    refs/tags/vibeic-watch-reset/b48bcc4a so nothing was destroyed.  Stranded
+    work is therefore genuinely 0, and rc=0 became the CORRECT answer.  A test
+    that forbids the converged state can only be green while something is
+    broken, and it went red the moment the repair landed -- which is the same
+    failure mode as raising a baseline to silence a gate, just pointed the other
+    way.
+
+    What must never happen is a FALSE green: rc=0 while some unpinned fork does
+    carry work.  So the expectation is now derived from the live ledger rather
+    than asserted from memory, and both directions are checked.
     """
+    import json
     import subprocess
+
+    sys.path.insert(0, str(_HERE))
+    import gk_state  # noqa: PLC0415 — resolved from _HERE, as the report does
+
+    stranded = {}
+    ledger_dir = gk_state.state_dir() / "ledger"
+    for path in sorted(ledger_dir.glob("*.json")):
+        if path.stem == "index":
+            continue
+        row = json.loads(path.read_text(encoding="utf-8"))
+        if row.get("integrated") is False:
+            ahead = row.get("ahead")
+            # `null` is NOT zero: a ledger that could not measure must reach the
+            # NOT MEASURED ladder, never the green one.
+            if ahead is None or ahead:
+                stranded[path.stem] = ahead
+
     r = subprocess.run([sys.executable, str(_HERE / "fork_gap_report.py"),
                         "--no-fetch"], capture_output=True, text=True,
                        timeout=180, cwd=str(_HERE.parent))
     out = r.stdout + r.stderr
-    assert r.returncode in (1, 2), (
-        "the live unpinned carried-work gap was published as green:\n"
-        f"{out[-800:]}")
-    assert "icsprout55-pdk" in out
-    if r.returncode == 2:
-        assert "NOT MEASURED" in out
+
+    if stranded:
+        assert r.returncode in (1, 2), (
+            "the live unpinned carried-work gap was published as green while "
+            f"{stranded} still carries work:\n{out[-800:]}")
+        for tool in stranded:
+            assert tool in out, f"{tool} carries work and is not named"
+        if r.returncode == 2:
+            assert "NOT MEASURED" in out
+        else:
+            assert "CANNOT SHIP" in out
     else:
-        assert "CANNOT SHIP" in out
+        assert r.returncode == 0, (
+            "no unpinned fork carries work, so the report must be green; a "
+            f"non-zero verdict here is a false RED:\n{out[-800:]}")
+        # Green is only trustworthy if it still NAMES what it looked at.
+        assert "forks the image does NOT build from" in out
+        assert "stranded" in out
 
 
 # ── vibeic-eda#79 — an ASSERTION is not a pin, and the sweep must know it ──
