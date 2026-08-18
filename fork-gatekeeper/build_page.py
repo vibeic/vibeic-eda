@@ -1254,7 +1254,17 @@ function enhBlock(tool){
   // counting it would cry wolf on every sync.
   const unshipAll = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped==="number"?d.ours_unshipped:0),0);
   const unship    = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped_substantive==="number"?d.ours_unshipped_substantive:0),0);
-  const unknownShip = LEDGERS.filter(d=>d.integrated && d.ours_unshipped==null).length;
+  // A CONTENTS ASSERTION HAS NO SHIPPED/UNSHIPPED QUESTION TO BE UNSURE ABOUT.
+  // `open_pdks` is `ARG OPEN_PDKS_VOLUME_CONTENTS_SHA`, a claim about a
+  // PREBUILT volume, not a ref the image builds from (vibeic-eda#74/#78/#79).
+  // It therefore has no `ours_unshipped` by construction -- and counting that
+  // absence as "unmeasured" put a permanent `+1?` next to a fully converged
+  // 568/568, implying one fork's work might not have shipped when there was
+  // never a fork of ours there to ship. Same rule the gap report already
+  // applies: these rows are listed as assertions, never summed into a gap.
+  const unknownShip = LEDGERS.filter(
+      d=>d.integrated && d.ours_unshipped==null
+         && d.pin_kind !== "contents_assertion").length;
   const totalOurs = LEDGERS.reduce((a,d)=>a+(d.ahead||0),0);
   const shipPatches = totalOurs - unshipAll;
   const notBuilt    = LEDGERS.filter(d=>!d.integrated).length;
