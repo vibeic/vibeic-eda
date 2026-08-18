@@ -270,12 +270,25 @@ def test_the_live_watch_only_gap_never_passes_as_zero():
         else:
             assert "CANNOT SHIP" in out
     else:
-        assert r.returncode == 0, (
-            "no unpinned fork carries work, so the report must be green; a "
-            f"non-zero verdict here is a false RED:\n{out[-800:]}")
+        # THIS TEST OWNS ONE CONDITION, NOT THE WHOLE EXIT CODE. The report's rc
+        # also answers Q1 (image behind upstream), which is non-zero for an
+        # ordinary reason between a merge and the release that ships it -- and
+        # was, right here, at `[sync 0 · release 7]`. Asserting rc==0 whenever
+        # no fork carries stranded work made this test fail for a condition it
+        # does not measure and cannot fix, which is how the version it replaced
+        # got its reputation.
+        #
+        # So the claim is exactly the one in the name: stranded work must never
+        # be reported as zero when it is not zero, and the converged state must
+        # be RENDERED as converged.
+        assert "our commits stranded in them        : 0" in out, (
+            "no unpinned fork carries work, but the report does not say the "
+            f"stranded count is zero:\n{out[-800:]}")
+        assert "CANNOT SHIP" not in out, (
+            "no unpinned fork carries work, yet the report raised CANNOT SHIP "
+            f"-- a false RED on the condition this test owns:\n{out[-800:]}")
         # Green is only trustworthy if it still NAMES what it looked at.
         assert "forks the image does NOT build from" in out
-        assert "stranded" in out
 
 
 # ── vibeic-eda#79 — an ASSERTION is not a pin, and the sweep must know it ──
