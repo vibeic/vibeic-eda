@@ -53,6 +53,15 @@ PASSING = "#!/usr/bin/env python3\nprint('clean')\n"
 _RETAINED = {"stamp": "test", "rows": 0}
 
 
+@pytest.fixture(autouse=True)
+def _this_synthetic_fleet_has_no_watch_only_policy(monkeypatch):
+    """Keep these one-fork merger tests independent of the production fleet."""
+    monkeypatch.setattr(
+        D.watch_only_reset, "load_registry",
+        lambda _path: {"policies": {}, "invalid_tools": {}, "errors": [],
+                       "digest": "0" * 64})
+
+
 def _fleet(tmp_path: pathlib.Path, checker: str):
     """An upstream with a new commit, and our fork one behind it."""
     up = tmp_path / "up"

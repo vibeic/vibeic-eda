@@ -41,9 +41,12 @@ second merge is the one that conflicts.
 WHAT IT REFUSES
 ---------------
 * It never deletes a branch `git cherry` says still holds unique work.
-* It never force-pushes. A rejected push is reported, never overridden — on
-  2026-07-31 a `master` that looked stale locally was 7924 upstream commits
-  BEHIND its own origin, and forcing would have destroyed them.
+* The ordinary merge path never force-pushes. The sole exception is an explicit
+  machine-readable watch-only policy: it first preserves the exact displaced
+  tip under a deterministic remote tag, then resets with an exact-SHA lease.
+  A rejected lease is reported, never overridden — on 2026-07-31 a `master`
+  that looked stale locally was 7924 upstream commits BEHIND its own origin,
+  and an unguarded force would have destroyed them.
 * It never cuts an image version when no tool changed.
 * It never RESOLVES a conflict by itself. A merge conflict between our own work
   and upstream is a judgement call, and pretending otherwise is how a fix gets
@@ -83,6 +86,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gk_state
 import progress_watchdog as watchdog
 import round_record
+import watch_only_reset
 # ONE mechanism, both mergers (vibeic-eda#89). This module and `daily_merge.py`
 # are two automatic paths from upstream onto a published branch, and this is the
 # one the 05:30 wrapper runs FIRST. Wiring the post-merge checks into only the
@@ -1920,6 +1924,8 @@ def main_(argv=None) -> int:
                     help="seconds of zero forward progress before the "
                          "gatekeeper AI is stopped as stalled; this is not a "
                          "total-runtime limit (default 3600)")
+    ap.add_argument("--round-at", default=None,
+                    help="05:30 wrapper boundary carried into current-round evidence")
     args = ap.parse_args(argv)
 
     if not FORKS.is_dir():
@@ -1927,11 +1933,107 @@ def main_(argv=None) -> int:
         return 2
 
     started_at = datetime.now().astimezone()
+    round_at = (args.round_at or os.environ.get("GK_CURRENT_ROUND_AT")
+                or started_at.isoformat())
     run_id = secrets.token_hex(16)
     pins = image_pins()
     report, needs_human = {}, False
+    registry = watch_only_reset.load_registry(
+        Path(__file__).resolve().with_name("FORKS.json"))
+    reset_results = []
+    seen_reset_tools = set()
+    # A malformed opt-in registry must be found before any fork is changed.
+    # Continuing with an empty policy map would silently turn a protected
+    # watch-only mirror back into the ordinary merge/push path.
+    if registry.get("errors"):
+        report["_watch_only_resets"] = watch_only_reset.make_round_evidence(
+            round_at=round_at, run_id=run_id, applied=args.apply,
+            registry=registry, results=[])
+        report["_ai_decisions"] = {
+            "cases": 0, "invoked": False, "cleared": False,
+            "verified": False,
+            "error": "watch-only reset registry is invalid; no fork was changed",
+        }
+        report["_round"] = {
+            "schema_version": 1, "run_id": run_id,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now().astimezone().isoformat(),
+            "applied": bool(args.apply),
+        }
+        if args.json:
+            _atomic_json(Path(args.json), report)
+        round_record.write(report, gk_state.state_dir(), when=started_at)
+        for error in registry["errors"]:
+            print(f"daily_0530: watch-only policy NORECORD: {error}",
+                  file=sys.stderr)
+        return 2
     for d in sorted(FORKS.iterdir()):
         if not (d / ".git").is_dir():
+            continue
+        policy = registry["policies"].get(d.name)
+        if policy is not None:
+            seen_reset_tools.add(d.name)
+            g = ["git", "-C", str(d)]
+            upstream_prs = _upstream_pull_request_evidence(g)
+            try:
+                if upstream_prs.get("outcome") != "complete":
+                    reset = watch_only_reset.refusal_record(
+                        policy, apply=args.apply, round_at=round_at,
+                        run_id=run_id, status="norecord",
+                        reason="open-upstream-PR evidence could not be measured")
+                elif upstream_prs.get("open_count") != 0:
+                    reset = watch_only_reset.refusal_record(
+                        policy, apply=args.apply, round_at=round_at,
+                        run_id=run_id, status="blocked",
+                        reason=(f"{upstream_prs.get('open_count')} open upstream "
+                                "PR(s); published branch rewrite refused"))
+                else:
+                    def branch_cas_pr_guard():
+                        evidence = _upstream_pull_request_evidence(g)
+                        if evidence.get("outcome") != "complete":
+                            return (False, evidence,
+                                    "upstream PRs became unmeasurable at the "
+                                    "branch-CAS boundary")
+                        count = evidence.get("open_count")
+                        return (count == 0, evidence,
+                                ("" if count == 0 else
+                                 f"{count} upstream PR(s) are open at the "
+                                 "branch-CAS boundary"))
+
+                    reset = watch_only_reset.apply_policy(
+                        d, policy, apply=args.apply, round_at=round_at,
+                        run_id=run_id,
+                        destructive_guard=branch_cas_pr_guard)
+            except Exception as exc:  # retained NORECORD, never a silent skip
+                reset = watch_only_reset.refusal_record(
+                    policy, apply=args.apply, round_at=round_at,
+                    run_id=run_id, status="norecord",
+                    reason=f"unexpected reset failure: {type(exc).__name__}: {exc}")
+            reset_results.append(reset)
+            clean = reset.get("status") == "pass"
+            rep = {
+                "main": policy["branch"], "conflicted": [],
+                "needs_human": not clean,
+                "pin": pins.get(d.name.lower()),
+                "watch_only_reset": reset,
+                "upstream_pull_requests": upstream_prs,
+                "upstream": ("watch-only mirror exactly aligned"
+                             if clean else reset.get("reason")),
+                "upstream_merge_outcome": (
+                    "natural_success" if clean else "unmeasurable"),
+                "upstream_evidence": {
+                    "ref": f"upstream/{policy['branch']}",
+                    "tip_before_fetch": None,
+                    "tip_seen": reset.get("upstream_tip"),
+                    "fetch": "ok" if clean else "unmeasurable",
+                    "confirmed_by": "ls_remote" if clean else None,
+                    "remote_tip": reset.get("upstream_tip_after"),
+                    "behind": 0 if clean else None,
+                },
+                "push": "ok" if clean else f"WATCH RESET {reset.get('status')}",
+            }
+            needs_human |= not clean
+            report[d.name] = rep
             continue
         g = ["git", "-C", str(d)]
         upstream_prs = _upstream_pull_request_evidence(g)
@@ -2106,11 +2208,29 @@ def main_(argv=None) -> int:
         needs_human |= rep.get("needs_human", False)
         report[d.name] = rep
 
+    for tool in sorted(set(registry["policies"]) - seen_reset_tools):
+        policy = registry["policies"][tool]
+        reset = watch_only_reset.refusal_record(
+            policy, apply=args.apply, round_at=round_at, run_id=run_id,
+            status="norecord",
+            reason=f"configured watch-only checkout {FORKS / tool} is missing")
+        reset_results.append(reset)
+        report[tool] = {
+            "main": policy["branch"], "conflicted": [],
+            "upstream_merge_outcome": "unmeasurable",
+            "watch_only_reset": reset, "needs_human": True,
+            "error": reset["reason"], "pin": pins.get(tool.lower()),
+        }
+        needs_human = True
+
     # Step 2b — the AI half. A conflict is NOT a reason to stop the round; it
     # is the one decision this script is not allowed to make alone.
     ai = step2b_ai_decisions(report, gk_state.state_dir(), args.apply and not args.no_ai,
                              stall_grace_s=args.ai_stall_grace)
     report["_ai_decisions"] = ai
+    report["_watch_only_resets"] = watch_only_reset.make_round_evidence(
+        round_at=round_at, run_id=run_id, applied=args.apply,
+        registry=registry, results=reset_results)
     # Process rc is transport evidence, not delivery evidence.  Only a natural
     # turn whose every source tip is verified on the remote mainline clears the
     # case.  A stalled, failed, or rc=0-but-unverified turn stays actionable.

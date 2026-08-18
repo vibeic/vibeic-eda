@@ -30,6 +30,7 @@ import subprocess
 from typing import Optional
 
 import gk_state
+import watch_only_reset
 
 KEEP_DAYS = int(os.environ.get("GK_RELEASE_LL_KEEP_DAYS", "400"))
 GITHUB_ORG = "vibeic"
@@ -1907,7 +1908,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
                 tick_state: str = "ran",
                 fork_github: Optional[dict] = None,
                 ai_authorization: Optional[dict] = None,
-                release_pins: Optional[dict] = None) -> dict:
+                release_pins: Optional[dict] = None,
+                watch_reset: Optional[dict] = None) -> dict:
     release = release or {}
     gap = gap or {}
     attempts = release.get("compose_attempts") or []
@@ -1957,18 +1959,25 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     # NOT_CHECKED evidence when the release-capable tick did not run.
     release_pins_clear = (release_pins is None
                           or release_pins_verdict == "PASS")
+    watch_reset_status = (watch_reset.get("status")
+                          if isinstance(watch_reset, dict) else None)
+    # None preserves helper compatibility. Production supplies independently
+    # validated current-round reset/noop/refusal evidence.
+    watch_reset_clear = watch_reset is None or watch_reset_status == "pass"
     inputs_authoritative = not source_errors
     tick_authorized = tick_state == "ran" and tick_exit == 0
     whole_round_clear = bool(
         tick_authorized and not anchor_blocked
-        and ai_authorized and release_pins_clear
+        and ai_authorized and release_pins_clear and watch_reset_clear
         and isinstance(stranded, int) and stranded == 0)
     converged = bool(delivery_converged and github_converged
                      and inputs_authoritative and whole_round_clear)
     round_converged = bool(delivery_round_converged and github_converged
                            and inputs_authoritative and whole_round_clear)
 
-    if source_errors:
+    if watch_reset_status in {"blocked", "norecord"}:
+        outcome = f"watch_only_reset_{watch_reset_status}"
+    elif source_errors:
         outcome = "could_not_measure_inputs"
     elif ai_status == "blocked" and status == "not_checked":
         outcome = "release_blocked_by_unverified_ai_decision"
@@ -2010,7 +2019,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     selftest = _selftest_summary(semantic_pytest)
     category = (failure.get("category")
                 or ("anchor_pr" if anchor_blocked else None))
-    if ai_status == "blocked" and category is None:
+    if watch_reset_status in {"blocked", "norecord"}:
+        category = f"watch_only_reset_{watch_reset_status}"
+    elif ai_status == "blocked" and category is None:
         category = "ai_postcondition_unverified"
     elif ai_status == "norecord" and category is None:
         category = "ai_authorization_norecord"
@@ -2019,7 +2030,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     elif (terminal_ok and release_pins_verdict == "OUTSTANDING"
           and category is None):
         category = "release_pins_uncommitted"
-    if tick_state != "ran":
+    if (tick_state != "ran"
+            and watch_reset_status not in {"blocked", "norecord"}):
         if tick_state == "not_checked_stale_round_code":
             category = "stale_round_code"
         elif tick_state == "not_checked_round_code_norecord":
@@ -2082,6 +2094,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         },
         "selftest": selftest,
         "ai_authorization": ai_authorization,
+        "watch_only_reset": watch_reset,
         "release_pins": release_pins,
         "fork_github": _fork_github_summary(fork_github),
         "convergence": {
@@ -2102,6 +2115,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "release_pins_committed": (
                 True if release_pins_verdict == "PASS" else
                 False if release_pins_verdict == "OUTSTANDING" else None),
+            "watch_only_reset_clear": watch_reset_clear,
             "anchor_complete": not anchor_blocked,
             "converged": converged,
             "round_converged": round_converged,
@@ -2173,6 +2187,9 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         # Retain the exact normalized postconditions, not only a boolean. A
         # later clean round must not erase which source tip was still pending.
         "ai_authorization": record.get("ai_authorization"),
+        # Keep exact old/target/recovery refs and the CAS result in the
+        # append-only index; a later noop must not erase what this round reset.
+        "watch_only_reset": record.get("watch_only_reset"),
         # Same retention rule for the post-release source declaration: keep
         # every named tool and both abbreviated SHAs, not merely a boolean a
         # later PASS could erase.
@@ -2191,6 +2208,8 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         "ai_authorized": record["convergence"]["ai_authorized"],
         "release_pins_committed": record["convergence"][
             "release_pins_committed"],
+        "watch_only_reset_clear": record["convergence"][
+            "watch_only_reset_clear"],
         "anchor_complete": record["convergence"]["anchor_complete"],
         "converged": record["convergence"]["converged"],
         "round_converged": record["convergence"]["round_converged"],
@@ -2235,6 +2254,8 @@ def main(argv=None) -> int:
     ap.add_argument("--gap-json", type=Path, required=True)
     ap.add_argument("--fork-github-json", type=Path, required=True)
     ap.add_argument("--ai-authorization-json", type=Path, required=True)
+    ap.add_argument("--watch-reset-json", type=Path,
+                    help="daily_0530.json carrying current-round reset evidence")
     ap.add_argument(
         "--expected-github-actor", required=True,
         help="independently configured GitHub login that both actor fields "
@@ -2253,6 +2274,30 @@ def main(argv=None) -> int:
     ))
     a = ap.parse_args(argv)
     observed_now = datetime.now(timezone.utc)
+
+    reset_registry = watch_only_reset.load_registry(a.forks_json)
+    if reset_registry.get("errors"):
+        watch_reset, watch_reset_errors = None, [
+            "watch-reset registry is invalid: "
+            + "; ".join(reset_registry["errors"])]
+    elif a.watch_reset_json is None and reset_registry.get("policies"):
+        watch_reset, watch_reset_errors = None, [
+            "--watch-reset-json is required because FORKS.json declares "
+            "watch-only reset policy"]
+    elif a.watch_reset_json is None:
+        watch_reset, watch_reset_errors = None, []
+    else:
+        try:
+            watch_raw = watch_only_reset.read_json(a.watch_reset_json)
+        except (OSError, ValueError) as exc:
+            watch_reset, watch_reset_errors = None, [
+                f"strict watch-reset source read failed: "
+                f"{type(exc).__name__}: {exc}"]
+        else:
+            watch_reset, watch_reset_errors = (
+                watch_only_reset.validate_round_evidence(
+                    watch_raw, round_at=a.round_at,
+                    forks_json=a.forks_json, now=observed_now))
 
     semantic, semantic_err = ((None, None) if a.semantic_pytest_json is None
                               else _read(a.semantic_pytest_json))
@@ -2343,6 +2388,17 @@ def main(argv=None) -> int:
                 "fork-github-convergence.json and "
                 "ai-release-authorization.json name different daily_0530 "
                 "run_id values")
+    if watch_reset is not None:
+        watch_run_id = watch_reset.get("run_id")
+        if gap is not None and watch_run_id != gap["source"]["_round"]["run_id"]:
+            provenance_errors.append(
+                "watch-reset evidence and fork_gap.json name different "
+                "daily_0530 run_id values")
+        if (isinstance(ai_authorization.get("round"), dict)
+                and watch_run_id != ai_authorization["round"].get("run_id")):
+            provenance_errors.append(
+                "watch-reset evidence and ai-release-authorization.json name "
+                "different daily_0530 run_id values")
     if release_err is None and (release.get("program") != "daily_release"
                                 or not release.get("status")):
         release_err = ("daily-release.json has no current-run status; it is "
@@ -2448,12 +2504,14 @@ def main(argv=None) -> int:
     errors.extend(gap_errors)
     errors.extend(fork_github_errors)
     errors.extend(ai_errors)
+    errors.extend(watch_reset_errors)
     errors.extend(provenance_errors)
     record = make_record(
         release, gap, a.round_at, a.tick_exit, errors,
         semantic_pytest=semantic, tick_state=a.tick_state,
         fork_github=fork_github, ai_authorization=ai_authorization,
         release_pins=release_pins,
+        watch_reset=watch_reset,
     )
     written = retain(record, a.state_dir)
     print("release LL: "

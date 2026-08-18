@@ -28,6 +28,7 @@ if ! flock -n 9; then
 fi
 
 ROUND_AT="$(date -Is)"
+export GK_CURRENT_ROUND_AT="${ROUND_AT}"
 {
   echo "════════ ${ROUND_AT} 05:30 round ════════"
 } >> "${LOG}"
@@ -133,6 +134,8 @@ echo "[$(date -Is)] check_round_code_is_current exit ${CODE}" >> "${LOG}"
 PYTEST_STAMP="$(date +%Y-%m-%dT%H%M%S%z)"
 PYTEST_RETAINED="${GK_STATE_DIR}/rounds/${PYTEST_STAMP}/semantic_pytest.json"
 mkdir -p "$(dirname "${PYTEST_RETAINED}")"
+GK_CURRENT_WATCH_RESET_JSON="${GK_STATE_DIR}/daily_0530.json" \
+GK_CURRENT_WATCH_RESET_ROUND_AT="${ROUND_AT}" \
 python3 "${DIR}/semantic_pytest_gate.py" \
     --junit "${GK_STATE_DIR}/fork-gatekeeper.junit.xml" \
     --json "${GK_STATE_DIR}/semantic_pytest.json" \
@@ -375,6 +378,7 @@ python3 "${DIR}/capture_release_ll.py" \
     --forks-json "${DIR}/FORKS.json" \
     --expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}" \
     --ai-authorization-json "${AI_AUTH_JSON}" \
+    --watch-reset-json "${GK_STATE_DIR}/daily_0530.json" \
     --semantic-pytest-json "${PYTEST_RETAINED}" \
     --round-at "${ROUND_AT}" --tick-exit "${TICK}" \
     --tick-state "${TICK_STATE}" >> "${LOG}" 2>&1

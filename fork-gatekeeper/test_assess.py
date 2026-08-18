@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import assess_release as A
 import gk_state as GK
+import watch_only_reset as WATCH_RESET
 
 
 # A judgement the confirmation round agreed on. Every auto-adopt assertion below has to
@@ -3712,6 +3713,7 @@ def test_the_cron_reaches_the_same_state_dir_it_did_before_and_declares_itself()
             }
             for entry in registry["forks"]
         }
+        finished = datetime.now(timezone.utc)
         round_record.update({
             "_ai_decisions": {
                 "cases": 0, "invoked": False, "cleared": True,
@@ -3720,10 +3722,36 @@ def test_the_cron_reaches_the_same_state_dir_it_did_before_and_declares_itself()
             "_round": {
                 "schema_version": 1, "run_id": run_id,
                 "started_at": started.isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "applied": True,
-            },
-        })
+                    "finished_at": finished.isoformat(),
+                    "applied": True,
+                },
+            })
+        reset_registry = WATCH_RESET.load_registry(registry_path)
+        reset_results = []
+        for policy in reset_registry["policies"].values():
+            tip = "b" * 40
+            reset_results.append({
+                "program": "watch_only_reset", "schema_version": 1,
+                "tool": policy["tool"], "round_at": boundary.isoformat(),
+                "run_id": run_id, "started_at": started.isoformat(),
+                "finished_at": finished.isoformat(), "applied": True,
+                "status": "pass", "outcome": "already_aligned",
+                "reason": None, "branch": policy["branch"],
+                "upstream_repository": policy["upstream"],
+                "policy": {"mode": WATCH_RESET.MODE,
+                           "preserve": WATCH_RESET.PRESERVE},
+                "old_tip": tip, "upstream_tip": tip,
+                "local_old_tip": None, "ahead": 0, "behind": 0,
+                "recovery_ref": None, "recovery_tip": None,
+                "recovery_action": None, "remote_tip_after": tip,
+                "upstream_tip_after": tip, "local_tip_after": tip,
+                "branch_cas_guard": None,
+                "cas": {"applied": False, "expected_old": tip,
+                        "target": tip, "verified": True},
+            })
+        round_record["_watch_only_resets"] = WATCH_RESET.make_round_evidence(
+            round_at=boundary.isoformat(), run_id=run_id, applied=True,
+            registry=reset_registry, results=reset_results)
         round_json.write_text(json.dumps(round_record))
         capability = "e" * 64
         (state_dir / f"ai-release-handoff.{capability}.json").write_text(

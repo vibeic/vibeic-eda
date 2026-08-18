@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gk_state                                            # noqa: E402
+import watch_only_reset                                    # noqa: E402
 
 #: IMPORTED, not re-derived. The first version of this file spelled the state
 #: path itself and got it wrong (`~/.gatekeeper` against the real
@@ -97,7 +99,17 @@ def unmeasured(ledgers: List[Dict[str, Any]]) -> List[str]:
                   and not d.get("integrated"))
 
 
-def report(ledger_dir: Path) -> Tuple[int, str]:
+def report(ledger_dir: Path, *, watch_reset_json: Path | None = None,
+           round_at: str | None = None,
+           forks_json: Path | None = None) -> Tuple[int, str]:
+    # pytest exercises report() directly; the 05:30 wrapper supplies the same
+    # current-round capability through environment variables to the whole
+    # semantic process, not only to this module's CLI entry point.
+    if watch_reset_json is None and round_at is None:
+        env_path = os.environ.get("GK_CURRENT_WATCH_RESET_JSON")
+        env_round = os.environ.get("GK_CURRENT_WATCH_RESET_ROUND_AT")
+        watch_reset_json = Path(env_path) if env_path else None
+        round_at = env_round
     if not ledger_dir.is_dir():
         return 2, (f"check_unshippable_patches: no ledger at {ledger_dir} — the "
                    f"question could not be put. Run discover_forks first.")
@@ -106,12 +118,45 @@ def report(ledger_dir: Path) -> Tuple[int, str]:
         return 2, (f"check_unshippable_patches: {ledger_dir} holds no readable "
                    f"ledger — the question could not be put.")
     bad = violations(ledgers)
+    reconciled: list[str] = []
+    reset_errors: list[str] = []
+    if watch_reset_json is not None or round_at is not None:
+        if watch_reset_json is None or not round_at:
+            reset_errors.append("current-round watch-reset path/boundary is incomplete")
+        else:
+            try:
+                current = watch_only_reset.read_json(watch_reset_json)
+            except (OSError, ValueError) as exc:
+                reset_errors.append(
+                    f"current-round watch-reset evidence unreadable: "
+                    f"{type(exc).__name__}: {exc}")
+            else:
+                summary, reset_errors = watch_only_reset.validate_round_evidence(
+                    current, round_at=round_at,
+                    forks_json=(forks_json or
+                                Path(__file__).resolve().with_name("FORKS.json")))
+                if not reset_errors and summary and summary.get("status") == "pass":
+                    proven = {
+                        row["tool"] for row in summary["results"]
+                        if row.get("status") == "pass"
+                        and row.get("remote_tip_after") == row.get("upstream_tip")
+                    }
+                    reconciled = sorted(
+                        row["tool"] for row in bad if row["tool"] in proven)
+                    bad = [row for row in bad if row["tool"] not in proven]
     unk = unmeasured(ledgers)
     tail = (f"\n  ({len(unk)} unpinned fork(s) have no measured `ahead`, so the "
             f"invariant could not be put to them: {', '.join(unk)})" if unk else "")
+    reconciliation = (
+        f"; current-round exact reset/noop supersedes stale ledger for "
+        f"{', '.join(reconciled)}" if reconciled else "")
+    rejected = (
+        "\n  (current-round watch-reset evidence rejected: "
+        + "; ".join(reset_errors[:5]) + ")" if reset_errors else "")
     if not bad:
         return 0, (f"check_unshippable_patches: PASS — {len(ledgers)} fork(s), "
-                   f"none carries commits it cannot ship{tail}")
+                   f"none carries commits it cannot ship{reconciliation}{tail}"
+                   f"{rejected}")
     lines = [f"check_unshippable_patches: {len(bad)} fork(s) carry patches that "
              f"CANNOT REACH THE IMAGE"]
     for b in bad:
@@ -124,14 +169,23 @@ def report(ledger_dir: Path) -> Tuple[int, str]:
                  "it) or stop carrying the patch. A fork that is tracked, "
                  "reported, and unreachable is the third state vibeic-eda#60 "
                  "refuses.")
-    return 1, "\n".join(lines) + tail
+    return 1, "\n".join(lines) + reconciliation + tail + rejected
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    ap.add_argument("--watch-reset-json",
+                    default=os.environ.get("GK_CURRENT_WATCH_RESET_JSON"))
+    ap.add_argument("--round-at",
+                    default=os.environ.get("GK_CURRENT_WATCH_RESET_ROUND_AT"))
+    ap.add_argument("--forks-json", default=str(
+        Path(__file__).resolve().with_name("FORKS.json")))
     a = ap.parse_args(argv)
-    rc, msg = report(Path(a.ledger))
+    rc, msg = report(
+        Path(a.ledger),
+        watch_reset_json=Path(a.watch_reset_json) if a.watch_reset_json else None,
+        round_at=a.round_at, forks_json=Path(a.forks_json))
     print(msg, file=sys.stderr if rc else sys.stdout)
     return rc
 

@@ -135,9 +135,10 @@ def _conflicted_cases(round_record: dict, registered_forks: list[str]
     keys: list[tuple[str, str]] = []
     errors: list[str] = []
     expected_top = set(registered_forks) | {"_ai_decisions", "_round"}
+    allowed_top = expected_top | {"_watch_only_resets"}
     observed_top = set(round_record)
     missing = sorted(expected_top - observed_top)
-    extra = sorted(observed_top - expected_top)
+    extra = sorted(observed_top - allowed_top)
     if missing:
         errors.append("daily_0530 evidence is missing top-level row(s): "
                       + ", ".join(missing))
@@ -195,11 +196,14 @@ def _conflicted_cases(round_record: dict, registered_forks: list[str]
 
 def assess(round_record: dict, round_at: str, *, registered_forks: list[str],
            source: str = "", registry_source: str = "",
-           registry_sha256: Optional[str] = None) -> tuple[int, dict]:
+           registry_sha256: Optional[str] = None,
+           watch_reset: Optional[dict] = None,
+           watch_reset_errors: Optional[list[str]] = None) -> tuple[int, dict]:
     """Validate and normalize one release-authorization record."""
     registered_forks = sorted(registered_forks)
     checked_at = datetime.now(timezone.utc)
     errors: list[str] = []
+    errors.extend(watch_reset_errors or [])
     boundary = _strict_when(round_at)
     if boundary is None:
         errors.append("--round-at is missing a timezone-aware ISO-8601 timestamp")
@@ -346,9 +350,16 @@ def assess(round_record: dict, round_at: str, *, registered_forks: list[str],
                             and ai.get("outcome") == "natural"
                             and transport_rc_ok))
     )
+    watch_status = (watch_reset.get("status")
+                    if isinstance(watch_reset, dict) else None)
+    if watch_status == "norecord" and not errors:
+        errors.append("current-round watch-only reset produced NORECORD")
     if errors:
         status, rc = "norecord", RC_NORECORD
         reasons = list(errors)
+    elif watch_status == "blocked":
+        status, rc = "blocked", RC_BLOCKED
+        reasons = ["current-round watch-only reset is blocked"]
     elif all_delivered:
         status, rc = "authorized", RC_AUTHORIZED
         reasons = []
@@ -401,6 +412,7 @@ def assess(round_record: dict, round_at: str, *, registered_forks: list[str],
             "rc": ai.get("rc"),
         },
         "case_results": normalized,
+        "watch_only_reset": watch_reset,
         "reasons": reasons,
         "source_errors": list(errors),
     }
@@ -439,11 +451,35 @@ def main(argv=None) -> int:
         rc = RC_NORECORD
     else:
         assert value is not None
+        registry_value, registry_read_error = _read(args.forks_json)
+        has_reset_policy = bool(
+            registry_read_error is None and registry_value
+            and any(isinstance(row, dict) and "watch_only_reset" in row
+                    for row in registry_value.get("forks", [])))
+        if has_reset_policy:
+            # Lazy on purpose: isolated consumers with no reset policy do not
+            # need to vendor the reset implementation merely to validate AI.
+            import watch_only_reset  # noqa: PLC0415
+            try:
+                strict_watch_source = watch_only_reset.read_json(args.round_json)
+            except (OSError, ValueError) as exc:
+                watch_summary, watch_errors = None, [
+                    "strict watch-reset source read failed: "
+                    f"{type(exc).__name__}: {exc}"]
+            else:
+                watch_summary, watch_errors = (
+                    watch_only_reset.validate_round_evidence(
+                        strict_watch_source, round_at=args.round_at,
+                        forks_json=args.forks_json))
+        else:
+            watch_summary, watch_errors = None, []
         rc, record = assess(
             value, args.round_at, registered_forks=registered_forks,
             source=str(args.round_json),
             registry_source=str(args.forks_json),
-            registry_sha256=registry_sha256)
+            registry_sha256=registry_sha256,
+            watch_reset=watch_summary,
+            watch_reset_errors=watch_errors)
     try:
         _atomic_json(args.json, record)
     except OSError as exc:
