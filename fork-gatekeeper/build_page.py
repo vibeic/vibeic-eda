@@ -1322,9 +1322,6 @@ function enhBlock(tool){
   const githubDeliveryOpen = Number.isInteger(githubRound.open_delivery_count)
       ? githubRound.open_delivery_count : null;
   const githubStatus = githubRound.status || "unmeasured";
-  const wholeRoundConverged = !!(CURRENT_ROUND && CURRENT_ROUND.convergence
-      && CURRENT_ROUND.convergence.converged === true
-      && CURRENT_ROUND.convergence.round_converged === true);
   const kpis = [
     // CARD ORDER, owner instruction 2026-08-05: when it was measured, what
     // shipped, what we carry, then the two gap numbers. A reader wants the
@@ -1332,11 +1329,20 @@ function enhBlock(tool){
 
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
      {en:"Last daily check", zh:"最後每日檢查"}],
-    [githubDeliveryOpen === null ? "?" : `${githubDeliveryOpen}`,
+    // Shown only when the GitHub inventory was actually taken. Rendering "?"
+    // for it -- which is what happens on any page published outside a full
+    // 05:30 tick, now the normal case -- spends a KPI slot on a non-answer and
+    // pushes the real figures down a row. Same rule as the round-converged
+    // card removed just below: absent evidence means the question was not
+    // asked, which is not a number worth a card.
+    ...(githubDeliveryOpen === null ? [] : [[`${githubDeliveryOpen}`,
      {en:`Open delivery PRs · GitHub ${githubStatus}`,
-      zh:`未完成交付 PR · GitHub ${githubStatus}`}],
-    [wholeRoundConverged ? "✓" : "?",
-     {en:"Whole 05:30 round converged", zh:"05:30 整輪已收斂"}],
+      zh:`未完成交付 PR · GitHub ${githubStatus}`}]]),
+    // REMOVED, owner instruction 2026-08-19: the "Whole 05:30 round converged"
+    // card. It rendered "?" whenever the page was published outside a full
+    // tick -- which is now the normal case, since a release publishes the page
+    // immediately -- so it occupied a KPI slot to say nothing, and displaced
+    // the fork/tool count out of the reader's first row.
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     // The label states the SCOPE of the number, because the number's scope is what
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
