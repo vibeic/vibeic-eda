@@ -127,3 +127,40 @@ def test_the_anchor_branch_is_pushed_by_full_refname():
         "anchor worktree git refuses a short destination")
     assert 'f"HEAD:{branch}"' not in body, (
         "a short-name push destination survives in open_anchor_pr")
+
+
+def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
+    """We verified the push; the anchor must not re-derive it from a cache.
+
+    `daily_release` reaches the anchor step only after
+    `verify_remote_immutable_publication` has read the tag back with
+    `docker manifest inspect` -- authoritative, immediate, and the same thing
+    `docker pull` consults. Absent an override, vibe-ic's anchor tool re-asks
+    the question through GHCR's `/tags/list`, which is CACHED.
+
+    Measured 2026-08-19, unchanged tool, one hour after 0.3.12 was pushed and
+    while its manifest resolved fine:
+
+        no override  -> UNRESOLVABLE ADOPTION TARGET: 0.3.12 does not exist
+                        on the registry (newest published: 0.3.11)
+        override set -> adoption-target-resolves : OK (source=override)
+
+    Without the override the release recorded itself anchor-blocked and the
+    public page told readers no version had shipped and the lag below was real
+    -- three false statements about an image that was in the registry the whole
+    time. Whether OUR image reached the registry is this repo's question,
+    already answered by this repo's readback.
+    """
+    src = Path(P.__file__).read_text()
+    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
+    call = [l for l in body.splitlines() if "ANCHOR_TOOL" in l or '"--set"' in l]
+    assert call, "open_anchor_pr no longer invokes the anchor tool"
+    # CODE ONLY. The rationale above the call names the variable too, so a
+    # substring check over the whole body passes on the comment alone -- it
+    # stayed green with the override deleted.
+    code = "\n".join(l for l in body.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert 'env={"VIBEIC_EDA_PUBLISHED_TAG": version}' in code, (
+        "the anchor tool is invoked without VIBEIC_EDA_PUBLISHED_TAG, so it "
+        "re-discovers the published tag from GHCR's cached /tags/list and can "
+        "refuse a release we have already verified")

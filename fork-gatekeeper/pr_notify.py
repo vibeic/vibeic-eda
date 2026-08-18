@@ -100,10 +100,12 @@ def _nda_block_push(wt, rev_range: str = "origin/main..HEAD") -> str:
                 f"repository. Literals are not printed by design (vibe-ic#395).")
     return ""
 
-def _run(args, cwd=None):
+def _run(args, cwd=None, env=None):
     """Run a command; return (rc, combined_output). Never raises."""
     try:
-        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=120)
+        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                           timeout=120,
+                           env=({**os.environ, **env} if env else None))
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except Exception as e:  # noqa: BLE001
         return 1, f"{e.__class__.__name__}: {e}"
@@ -397,7 +399,25 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
         tool = wt / ANCHOR_TOOL
         if not tool.is_file():
             return (False, f"{ANCHOR_TOOL} not present in vibe-ic — cannot anchor")
-        rc, out = _run(["python3", str(tool), "--set", version], cwd=str(wt))
+        # WE ALREADY PROVED THIS TAG IS PUBLISHED -- DON'T MAKE IT GUESS AGAIN.
+        # `daily_release` only reaches the anchor step after
+        # `verify_remote_immutable_publication`, which reads the tag back from
+        # the registry with `docker manifest inspect`: authoritative, immediate,
+        # and the same thing `docker pull` consults. The anchor tool, absent an
+        # override, re-asks the question via GHCR's `/tags/list`, which is
+        # CACHED -- measured 2026-08-19, it still named 0.3.11 as newest a full
+        # HOUR after 0.3.12 was pushed and readable. So a release we had already
+        # verified was refused as "does not exist on the registry", recorded
+        # itself anchor-blocked, and the public page told readers no version had
+        # shipped and the lag below was real. Three false statements, none of
+        # them ours to make: whether OUR image reached the registry is this
+        # repo's question, answered by this repo's readback.
+        #
+        # `VIBEIC_EDA_PUBLISHED_TAG` is the tool's own documented way to be told
+        # rather than to query. Passing it hands over the verified fact instead
+        # of asking a stale cache to rediscover it.
+        rc, out = _run(["python3", str(tool), "--set", version], cwd=str(wt),
+                       env={"VIBEIC_EDA_PUBLISHED_TAG": version})
         if rc != 0:
             return (False, f"anchor tool refused {version}: {out.strip()[-300:]}")
         rc, dirty = _run(["git", "-C", str(wt), "status", "--porcelain"])
