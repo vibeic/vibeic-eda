@@ -635,10 +635,16 @@ fi
 # Loud in the log and the JSON either way, so the outstanding review cannot go
 # unseen the way the #71 gap did.
 RELPIN_OUT="${LOG_DIR}/release-pins-committed.txt"
+RELPIN_JSON="${LOG_DIR}/release-pins-committed.json"
 relpin_rc=0
-if [ -f "${DIR}/check_release_pins_committed.py" ]; then
+if ! rm -f -- "${RELPIN_JSON}"; then
+    echo "COULD-NOT-TELL: stale ${RELPIN_JSON} could not be cleared" > "${RELPIN_OUT}"
+    log "[release-pins] stale sidecar could not be cleared, which is not a clean result"
+    relpin_rc=2
+elif [ -f "${DIR}/check_release_pins_committed.py" ]; then
     python3 "${DIR}/check_release_pins_committed.py" \
-        --json "${LOG_DIR}/release-pins-committed.json" > "${RELPIN_OUT}" 2>&1
+        --round-at "${AI_ROUND_AT}" --run-id "${AI_RUN_ID}" \
+        --json "${RELPIN_JSON}" > "${RELPIN_OUT}" 2>&1
     relpin_rc=$?
     grep -E "^\[(PASS|FAIL)\]|^  FAIL " "${RELPIN_OUT}" | sed 's/^/[release-pins]   /' | tee -a "${LOG}" || true
     [ "${relpin_rc}" = "1" ] && log "[release-pins] a released pin is uncommitted at HEAD — the gatekeeper's review is outstanding (vibeic-eda#99)"
