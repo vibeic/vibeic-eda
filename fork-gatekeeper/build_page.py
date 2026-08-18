@@ -1100,6 +1100,14 @@ function enhBlock(tool){
   // upstream pushes again. CONVERGED_AT carries when that last happened, so a
   // reader sees both the achievement and its age.
   const convergedRound = !!(REPORT && REPORT.q1_sync_lag_at_merge === 0);
+  // The instant the round finished measuring a zero gap. `completed_at` is
+  // when the gap report finished; that is the moment the claim was true.
+  const convergedAtRaw = convergedRound
+      ? (REPORT.completed_at || REPORT.round_at || REPORT.started_at || "") : "";
+  const convergedAtTxt = convergedAtRaw
+      ? new Date(convergedAtRaw).toLocaleString("sv-SE",
+          {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
+      : "";
   const commitsBehind = convergedRound ? 0 : liveBehind;
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
 
@@ -1357,8 +1365,17 @@ function enhBlock(tool){
     // shipped, what we carry, then the two gap numbers. A reader wants the
     // freshness of the whole page before any figure on it.
 
-    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
-     {en:"Last daily check", zh:"最後每日檢查"}],
+    // The card names WHEN THE GAP WAS CLOSED, not only when the page was
+    // generated (owner instruction 2026-08-19). A date alone answers "how
+    // fresh is this page"; the reader's actual question is "when did we last
+    // stand level with upstream", and on a converged round those are the same
+    // instant -- so it is stated rather than left to be inferred.
+    [lastCheck + (stale ? ` (${ageTxt} old)` : ``)
+       + (convergedRound && convergedAtTxt ? ` · ${convergedAtTxt}` : ``),
+     {en:convergedRound ? "Last daily check · converged to 0 at"
+                        : "Last daily check",
+      zh:convergedRound ? "最後每日檢查 · 收斂到 0 的時間"
+                        : "最後每日檢查"}],
     // Shown only when the GitHub inventory was actually taken. Rendering "?"
     // for it -- which is what happens on any page published outside a full
     // 05:30 tick, now the normal case -- spends a KPI slot on a non-answer and
