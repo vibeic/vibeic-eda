@@ -1156,10 +1156,24 @@ function enhBlock(tool){
   // everything upstream had WHEN IT LOOKED" -- exactly the moment of
   // convergence, and unlike the live sum it does not un-converge the instant
   // upstream pushes again.
-  const convergedRound = !!(typeof REPORT !== "undefined" && REPORT
-      && REPORT.q1_sync_lag_at_merge === 0);
+  // TWO REPORT SHAPES REACH THIS PAGE and only one carries `q1_*`. A page
+  // published straight after a release gets the gap report itself; a certified
+  // page from a full 05:30 tick gets a small round view with none of those
+  // keys. Reading only `q1_sync_lag_at_merge` therefore left a converged
+  // CERTIFIED page looking unconverged. The ledger rows carry
+  // `sync_lag_at_merge` per fork in BOTH shapes, so the fleet sum is derived
+  // from them and the report field is used only when present.
+  const atMergeRows = LEDGERS.filter(
+      d=>typeof d.sync_lag_at_merge === "number");
+  const atMergeSum = atMergeRows.reduce((a,d)=>a+d.sync_lag_at_merge, 0);
+  const convergedRound = (typeof REPORT !== "undefined" && REPORT
+      && typeof REPORT.q1_sync_lag_at_merge === "number")
+        ? REPORT.q1_sync_lag_at_merge === 0
+        : (atMergeRows.length > 0 && atMergeSum === 0);
   const convergedAtRaw = convergedRound
-      ? (REPORT.completed_at || REPORT.round_at || REPORT.started_at || "") : "";
+      ? ((typeof REPORT !== "undefined" && REPORT
+          && (REPORT.completed_at || REPORT.round_at || REPORT.generated_at
+              || REPORT.started_at)) || "") : "";
   const convergedAtTxt = convergedAtRaw
       ? new Date(convergedAtRaw).toLocaleString("sv-SE",
           {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
