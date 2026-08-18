@@ -3600,6 +3600,46 @@ def _main_under_release_lock(argv=None) -> int:
                 print(f"  anchor: {_anote}")
                 result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
                 result["anchor_pr"]["note"] = _anote
+
+            # OWNER DIRECTIVE 2026-08-19, stated three times in one session:
+            # "EVERYTIME YOU CONVERGE TO 0, YOU SHOULD MODIFY THE WEBSITE AS
+            # WELL -- DON'T WAIT ANYTHING. THE WEBPAGE RECORD SHOULD USE THE
+            # MOMENT THAT WE CONVERGE TO 0."
+            #
+            # The page used to be published only by run_0530.sh, at the END of
+            # an hour-long tick and only when eleven separate gates were all
+            # zero. So a release that closed the gap at 05:00 left the public
+            # page advertising the OLD version and the OLD gap until the next
+            # tick happened to finish -- and if any unrelated gate was red, it
+            # never updated at all. Measured this session: the registry was at
+            # 0.3.11 and every commit of ours shipped, while the page still
+            # said 0.3.6 with 10 commits stranded past the pin.
+            #
+            # Publishing is cheap (~2s) and reads its own state, so it happens
+            # HERE, the moment the version is published, timestamped by this
+            # release rather than by a later tick. run_0530.sh still publishes
+            # with the full certified evidence bundle; this is the floor, not a
+            # replacement. Advisory by construction: a page failure must never
+            # fail a release that already succeeded and is already in the
+            # registry.
+            if pushed:
+                try:
+                    import subprocess as _sp
+                    _pg = _sp.run(
+                        [sys.executable,
+                         str(Path(__file__).resolve().with_name(
+                             "build_page.py")),
+                         "--out", gk_state.PRODUCTION_PAGE],
+                        env={**os.environ, "GK_PRODUCTION_WRITER": "1"},
+                        capture_output=True, text=True, timeout=600)
+                    _pok = _pg.returncode == 0
+                    _pnote = ((_pg.stdout or _pg.stderr or "").strip()
+                              .splitlines() or ["(no output)"])[-1]
+                except Exception as _e:      # noqa: BLE001
+                    _pok, _pnote = False, f"{_e.__class__.__name__}: {_e}"
+                print(f"  page: {'published' if _pok else 'FAILED'} — {_pnote}")
+                result.setdefault("page_publish", {})["ok"] = bool(_pok)
+                result["page_publish"]["note"] = _pnote
                 if not _aok:
                     return _finish(
                         result, a.json, RC_NEEDS_HUMAN, "failed", {

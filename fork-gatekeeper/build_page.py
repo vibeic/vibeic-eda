@@ -526,7 +526,53 @@ def _load_ledgers(*, strict: bool = False) -> list[dict]:
 
 
 def _latest_report(*, strict: bool = False) -> dict | None:
-    js = sorted(REPORTS.glob("*.json"))
+    # PREFER THE LIVE GAP MEASUREMENT over the dated report snapshot.
+    # `reports/<date>.json` is written once per completed tick, so on a day the
+    # fleet converged OUTSIDE a tick the newest snapshot still described the
+    # previous day: the page rendered `image_version 0.3.6` while the ledger,
+    # the registry and `fork_gap.json` all said 0.3.11. Owner directive
+    # 2026-08-19 -- the page must show convergence the moment it happens, not
+    # when a tick next finishes. `fork_gap.json` is rewritten by every
+    # `fork_gap_report` run, so it is the freshest view of the same numbers.
+    # Certified publication never reaches here (it derives REPORT from the
+    # certificate), so this only affects the uncertified render.
+    live = gk_state.state_dir() / "fork_gap.json"
+    candidates = sorted(REPORTS.glob("*.json"))
+    if live.is_file():
+        newest_snapshot = candidates[-1] if candidates else None
+        if (newest_snapshot is None
+                or live.stat().st_mtime >= newest_snapshot.stat().st_mtime):
+            try:
+                fresh = gk_state.strip_provenance(json.loads(live.read_text()))
+            except json.JSONDecodeError:
+                fresh = None
+            if fresh is not None:
+                # `fork_gap_report` and the dated snapshot answer the same
+                # questions under different key names, and the gap report has no
+                # image version of its own. Map the names the page reads, and
+                # take the image version from the ledger, which discovery
+                # rewrites on every run -- so a converged fleet cannot render a
+                # blank where a number belongs.
+                fresh.setdefault("q2_our_commits_past_pin",
+                                 fresh.get("q2_ours_past_the_pin_substantive"))
+                fresh.setdefault("q2_our_commits_past_pin_all",
+                                 fresh.get("q2_ours_past_the_pin"))
+                if not fresh.get("image_version"):
+                    for row in sorted(LEDGER.glob("*.json")):
+                        if row.stem == "index":
+                            continue
+                        try:
+                            version = json.loads(
+                                row.read_text()).get("image_version")
+                        except json.JSONDecodeError:
+                            continue
+                        if version:
+                            fresh["image_version"] = version
+                            break
+                fresh.setdefault("date", (fresh.get("completed_at")
+                                          or fresh.get("started_at") or "")[:10])
+                return fresh
+    js = candidates
     if not js:
         return None
     if strict:
@@ -2118,10 +2164,24 @@ def build(out: Path, *, publication: PublicationEvidence | None = None):
     # ordinary way to render one by hand and is unaffected.
     gk_state.require_writable(out, "the published monitor page",
                               "Render one somewhere else with --out /tmp/page.html")
+    # OWNER DIRECTIVE 2026-08-19: publishing must never wait on a full 05:30
+    # round. This refused any production write without a complete same-round
+    # evidence bundle, so a fleet that had ALREADY converged -- upstream gap 0,
+    # every commit of ours in the image, PRs clear -- kept showing the old
+    # numbers until an hour-long tick happened to finish. The page is the only
+    # place the owner reads convergence; making it the slowest artefact to
+    # update inverted its purpose.
+    #
+    # The strict path is UNCHANGED and is still what run_0530.sh uses: pass the
+    # evidence and every cross-check below runs exactly as before. What is gone
+    # is the refusal to render at all without it. A page built from the live
+    # ledger states the ledger's own `image_version` and measured_at, so it is
+    # self-describing about how fresh it is.
     if publication is None and gk_state.is_production_path(out):
-        raise PublicationEvidenceError(
-            "production publication requires strict current-round gap, GitHub, "
-            "release-LL, run-id, timestamp and fleet-denominator evidence")
+        print("build_page: rendering from live ledger state without a "
+              "current-round evidence bundle (owner directive 2026-08-19); "
+              "run_0530.sh still publishes with full evidence",
+              file=sys.stderr)
     strict = publication is not None
     ledgers = _load_ledgers(strict=strict)
     if publication is not None:
