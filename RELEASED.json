@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.10",
-  "pins_fingerprint": "292b04320792",
+  "version": "0.3.11",
+  "pins_fingerprint": "b2187c1008d2",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "8ecc254e34ff7f892bf694d9c820ec8b83945fca",
+    "OpenROAD": "b6294021b183b50c8c5e9ba778f55977fe4cb5b1",
     "OpenROAD-flow-scripts": "6101364b2d7909dd797e1e3e7f80695401cfa4e4",
     "Trilinos": "45fca519fe45a7414b3b5ae8f3e4440da140a5fe",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
@@ -38,5 +38,5 @@
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
     "yosys": "0048145dd1ffca90ca6a01fce33f6d3ad12defdd"
   },
-  "manifest_identity": "86c68e7826d479429ee57ae405b79749829885b475571b6d355ae6a7be8ec119"
+  "manifest_identity": "4a79c8c3f79e3657ae9bd65f12a75c5ee065039124ac21be93b7cf5f24974e63"
 }
