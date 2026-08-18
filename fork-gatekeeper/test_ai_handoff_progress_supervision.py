@@ -211,17 +211,35 @@ def test_cron_wires_a_stall_grace_not_a_total_timeout():
 
 
 def _semantic_record(*, rc: int, outcome: str) -> dict:
+    process_rc = 0 if rc == 0 else (1 if rc == 1 else 0)
+    cases = 1 if rc in {0, 1} else 0
     return {
         "schema": 1,
         "mechanism": "validated_semantic_progress_lease",
-        "started_at": "2026-08-17T05:31:00+08:00",
+        "started_at": "2026-08-17T06:02:10+08:00",
         "total_runtime_ceiling_seconds": None,
         "stall_grace_seconds": 300,
         "outcome": outcome,
+        "process_rc": process_rc,
         "exit_code": rc,
         "elapsed_seconds": 42.0,
+        "junit": "/state/fork-gatekeeper.junit.xml",
+        "junit_cases": cases,
+        "junit_red": 1 if rc == 1 else 0,
         "reason": "fixture",
-        "progress": {"stage": "running" if rc == 2 else "finished"},
+        "progress": {
+            "events": 3 if cases else 0,
+            "last_event": "session_finish" if cases else None,
+            "stage": "running" if rc == 2 else "finished",
+            "selected": cases, "finished": cases,
+            "exitstatus": process_rc if cases else None,
+            "protocol_error": None,
+        },
+        "process_tree": {
+            "subreaper": True, "census_complete": True,
+            "live_descendants_observed": [], "cleanup_observed": [],
+            "cleanup_survivors": [], "final_empty": True,
+        },
     }
 
 
@@ -250,8 +268,8 @@ def _gap_record() -> dict:
     return {
         "program": "fork_gap_report",
         "schema_version": 1,
-        "started_at": "2026-08-17T06:00:00+08:00",
-        "completed_at": "2026-08-17T06:01:00+08:00",
+        "started_at": "2026-08-17T06:06:00+08:00",
+        "completed_at": "2026-08-17T06:07:00+08:00",
         "status": "complete",
         "source": {
             "kind": "daily_0530_merge_round",
@@ -307,8 +325,8 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
     return {
         "program": "fork_github_convergence",
         "schema_version": 2,
-        "started_at": started_at or "2026-08-17T05:32:00+08:00",
-        "completed_at": "2026-08-17T05:33:00+08:00",
+        "started_at": started_at or "2026-08-17T06:08:00+08:00",
+        "completed_at": "2026-08-17T06:09:00+08:00",
         "actor": "reyerchu",
         "expected_actor": "reyerchu",
         "round": {
@@ -316,7 +334,7 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
             "schema_version": 1,
             "run_id": "a" * 64,
             "started_at": "2026-08-17T05:30:01+08:00",
-            "finished_at": "2026-08-17T05:31:00+08:00",
+            "finished_at": "2026-08-17T05:59:00+08:00",
         },
         "inventory": {
             "status": "complete",
@@ -448,7 +466,7 @@ def _release_pins_record(version="0.3.5") -> dict:
         "program": "check_release_pins_committed",
         "tool": "check_release_pins_committed",
         "schema_version": 1,
-        "checked_at": "2026-08-17T06:03:00+08:00",
+        "checked_at": "2026-08-17T06:04:30+08:00",
         "round_at": "2026-08-17T05:30:00+08:00",
         "run_id": "a" * 64,
         "verdict": "PASS",
@@ -462,6 +480,70 @@ def _release_pins_record(version="0.3.5") -> dict:
     }
 
 
+def _published_release_record(version="0.3.5") -> dict:
+    manifest = "e" * 64
+    return {
+        "program": "daily_release", "schema_version": 2,
+        "status": "published", "exit_code": 0,
+        "started_at": "2026-08-17T06:03:30+08:00",
+        "finished_at": "2026-08-17T06:04:00+08:00",
+        "version": {"from": "0.3.4", "to": version},
+        "version_candidate": {"from": "0.3.4", "to": version},
+        "moved": [], "built": [],
+        "compose_attempts": [{"attempt": 1, "exit_code": 0}],
+        "registry_composed": True, "pushed": True,
+        "smoke": {"executed": True, "expected": 16, "passed": 16,
+                  "outcome": "natural", "failures": []},
+        "remote_publication": {
+            "verified": True,
+            "manifests": {
+                "version": {
+                    "ref": f"ghcr.io/vibeic/vibeic-eda:{version}",
+                    "state": "present", "source": "registry",
+                    "identity": manifest, "detail": "fixture",
+                },
+                "latest": {
+                    "ref": "ghcr.io/vibeic/vibeic-eda:latest",
+                    "state": "present", "source": "registry",
+                    "identity": manifest, "detail": "fixture",
+                },
+            },
+        },
+        "latest_publication": {
+            "ref": "ghcr.io/vibeic/vibeic-eda:latest",
+            "tagged": True, "pushed": True,
+        },
+        "release_record_publication": {
+            "committed": True, "verified": True,
+            "subject": "origin/main:RELEASED.json", "identity": _EDA_HEAD,
+            "initial_state": "present", "repair_attempted": False,
+        },
+        "anchor_pr": {"ok": True, "note": f"anchor {version} verified"},
+    }
+
+
+def _noop_release_record(version="0.3.5") -> dict:
+    release = _published_release_record(version)
+    release.update({
+        "status": "noop",
+        "version": {"from": version, "to": version},
+        "version_candidate": None,
+        "compose_attempts": [],
+        "registry_composed": None,
+        "pushed": None,
+        "smoke": {"executed": False, "expected": 16, "passed": 0,
+                  "outcome": "not_applicable", "failures": []},
+        "latest_publication": None,
+        "release_record_publication": {
+            "verified": True, "subject": "origin/main:RELEASED.json",
+            "identity": _EDA_HEAD, "initial_state": "present",
+            "repair_attempted": False,
+        },
+        "anchor_pr": {"ok": True, "note": f"anchor {version} verified"},
+    })
+    return release
+
+
 def test_cron_does_not_invoke_release_without_all_green_controls():
     source = (Path(__file__).resolve().parent / "run_0530.sh").read_text()
     gate = source[source.index('TICK_STATE="ran"'):
@@ -472,9 +554,13 @@ def test_cron_does_not_invoke_release_without_all_green_controls():
     assert gate.count('"${DIR}/run_tick.sh"') == 1
     assert 'TICK=2' in gate and "NOT CHECKED" in gate
 
-    page_gate = source[source.index("if [ \"${DISC}\""):
-                       source.index("# THE ROUND MUST NOTICE")]
-    assert '[ "${CODE}" -eq 0 ]' in page_gate
+    page_gate = source[source.index("# PUBLISH LAST"):
+                       source.index("# 0 only when BOTH are clean")]
+    for authority in (
+        "TESTS", "CODE", "AI_AUTH", "TICK", "DISC", "GAP", "FORK_GH",
+        "LL", "FRESH", "INPUT_CLEAR", "GAP_FATAL",
+    ):
+        assert f'[ "${{{authority}}}" -eq 0 ]' in page_gate
     assert '--semantic-pytest-json "${PYTEST_RETAINED}"' in source
     assert '--ai-authorization-json "${AI_AUTH_JSON}"' in source
     assert '--tick-state "${TICK_STATE}"' in source
@@ -722,6 +808,114 @@ def test_future_release_evidence_cannot_make_the_ll_green(tmp_path, capsys):
     assert record["convergence"]["converged"] is False
     assert any("daily-release.json is dated in the future" in error
                for error in record["source_errors"])
+
+
+@pytest.mark.parametrize("release_factory", [
+    pytest.param(_published_release_record, id="published"),
+    pytest.param(_noop_release_record, id="noop"),
+])
+def test_complete_release_terminal_proof_can_form_a_clean_ll(
+        tmp_path, capsys, release_factory):
+    rc, record = _capture_ran_tick(
+        tmp_path, release_factory(),
+        _semantic_record(rc=0, outcome="natural"))
+    capsys.readouterr()
+
+    assert rc == 0
+    assert record["source_errors"] == []
+    assert record["release"]["status"] in {"published", "noop"}
+
+
+@pytest.mark.parametrize("mutate,needle", [
+    pytest.param(
+        lambda release, semantic: semantic.update(
+            started_at="2026-08-17T06:01:30+08:00"),
+        "semantic pytest started before AI authorization finished",
+        id="selftest-before-ai"),
+    pytest.param(
+        lambda release, _semantic: release.update(
+            started_at="2026-08-17T06:02:30+08:00"),
+        "daily release started before semantic pytest finished",
+        id="release-before-selftest-finish"),
+    pytest.param(
+        lambda release, _semantic: release.update(
+            finished_at="2026-08-17T06:05:00+08:00"),
+        "release pins were checked before the release finished",
+        id="pins-before-release-finish"),
+])
+def test_individually_current_but_out_of_order_sources_cannot_form_clean_ll(
+        tmp_path, capsys, mutate, needle):
+    release = _published_release_record()
+    semantic = _semantic_record(rc=0, outcome="natural")
+    mutate(release, semantic)
+
+    rc, record = _capture_ran_tick(tmp_path, release, semantic)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert any(needle in error for error in record["source_errors"])
+    assert record["convergence"]["round_converged"] is False
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda r: r.pop("smoke"), id="missing-smoke"),
+    pytest.param(lambda r: r.update(schema_version=2.0),
+                 id="float-schema"),
+    pytest.param(lambda r: r["remote_publication"].update(verified=False),
+                 id="unverified-manifests"),
+    pytest.param(lambda r: r["release_record_publication"].pop("identity"),
+                 id="record-without-identity"),
+    pytest.param(lambda r: r.update(compose_attempts=[]),
+                 id="no-compose"),
+    pytest.param(lambda r: r.update(failure={"category": "push_failed"}),
+                 id="success-with-failure"),
+    pytest.param(lambda r: r.update(exit_code=1), id="nonzero-exit"),
+    pytest.param(lambda r: r.update(exit_code=False), id="boolean-exit"),
+    pytest.param(lambda r: r["compose_attempts"][0].update(attempt=True),
+                 id="boolean-compose-attempt"),
+    pytest.param(lambda r: r["anchor_pr"].update(ok=False),
+                 id="anchor-failed"),
+    pytest.param(lambda r: r["latest_publication"].update(pushed=False),
+                 id="latest-not-pushed"),
+])
+def test_published_status_without_exact_terminal_proof_is_a_source_error(
+        tmp_path, capsys, mutate):
+    release = _published_release_record()
+    mutate(release)
+
+    rc, record = _capture_ran_tick(
+        tmp_path, release, _semantic_record(rc=0, outcome="natural"))
+    capsys.readouterr()
+
+    assert rc == 1
+    assert record["release"]["status"] == "unmeasured"
+    assert any("terminal proof is invalid" in error
+               for error in record["source_errors"])
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda s: s.update(schema=1.0), id="float-schema"),
+    pytest.param(lambda s: s.update(exit_code=False), id="boolean-exit"),
+    pytest.param(lambda s: s["progress"].update(stage="running"),
+                 id="unfinished-progress"),
+    pytest.param(lambda s: s["process_tree"].update(
+        cleanup_survivors=[123], final_empty=False),
+                 id="live-descendant"),
+    pytest.param(lambda s: s.update(elapsed_seconds=float("inf")),
+                 id="nonfinite-elapsed"),
+])
+def test_green_selftest_label_without_exact_terminal_proof_is_rejected(
+        tmp_path, capsys, mutate):
+    semantic = _semantic_record(rc=0, outcome="natural")
+    mutate(semantic)
+
+    rc, record = _capture_ran_tick(
+        tmp_path, _published_release_record(), semantic)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert record["selftest"] is None
+    assert any("semantic" in error for error in record["source_errors"])
 
 
 def test_future_semantic_evidence_cannot_make_the_ll_green(tmp_path, capsys):

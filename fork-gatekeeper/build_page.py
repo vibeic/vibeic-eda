@@ -8,7 +8,13 @@ version, the patches we carry, the upstream commits still pending, and the daily
 Gatekeeper sync log. Data is embedded at build time (the site is a static server),
 so the daily tick just regenerates this file.
 
-    python3 build_page.py [--out /home/reyerchu/vibeic.ai/eda-forks.html]
+    python3 build_page.py --out /tmp/eda-forks.html
+
+Production output additionally requires ``--round-at``, ``--run-id``,
+``--forks-json``, ``--gap-json``, ``--fork-github-json``,
+``--release-ll-json`` and ``--expected-github-actor``. Scratch rendering stays
+available without a publication certificate, but represents missing round
+evidence explicitly as unmeasured.
 """
 from __future__ import annotations
 
@@ -17,21 +23,455 @@ import json
 import os
 import subprocess
 import base64
+import math
 import re
 import sys
-from datetime import datetime, timezone
+import tempfile
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).parent          # version-controlled source
 sys.path.insert(0, str(HERE))
 import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
 import inventory  # noqa: E402 — the tool inventory, measured at build time
+import capture_release_ll as release_ll  # noqa: E402 — canonical evidence validators
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
 REPORTS = STATE / "reports"
 RELEASE_STATE = STATE / "daily-release.json"
 DEFAULT_OUT = Path(os.environ.get("GK_PAGE_OUT") or gk_state.PRODUCTION_PAGE)
+RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{32,256}")
+PUBLICATION_MAX_AGE = timedelta(hours=30)
+
+
+class PublicationEvidenceError(RuntimeError):
+    """A required current-round source cannot authorize page replacement."""
+
+
+def _json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number {text!r}")
+    return value
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-finite JSON number {value!r}")
+
+
+def _strict_json(path: Path, *, object_required: bool = True) -> Any:
+    """Read RFC-shaped JSON without duplicate keys or non-finite numbers.
+
+    ``json.loads`` otherwise accepts NaN/Infinity and silently keeps the last of
+    duplicate keys. It also turns an overflowing exponent such as ``1e999`` into
+    infinity. Any of those can make a zero/status field mean two different things
+    to the producer and this publication boundary.
+    """
+    try:
+        value = json.loads(
+            Path(path).read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object,
+            parse_float=_finite_float,
+            parse_constant=_reject_json_constant,
+        )
+    except FileNotFoundError as exc:
+        raise PublicationEvidenceError(f"missing {Path(path).name}") from exc
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PublicationEvidenceError(
+            f"unreadable {Path(path).name}: {type(exc).__name__}: {exc}") from exc
+    if object_required and not isinstance(value, dict):
+        raise PublicationEvidenceError(f"{Path(path).name} is not a JSON object")
+    return value
+
+
+def _when(value: object, name: str) -> datetime:
+    parsed = release_ll._strict_when(value)
+    if parsed is None:
+        raise PublicationEvidenceError(f"{name} is missing or malformed")
+    return parsed
+
+
+@dataclass(frozen=True)
+class PublicationEvidence:
+    round_at: str
+    run_id: str
+    registered_forks: tuple[str, ...]
+    gap: dict
+    github: dict
+    ll: dict
+    page_model: dict
+
+
+def _exact_tools(value: object, expected: list[str], name: str) -> None:
+    if not isinstance(value, list) or any(
+            not isinstance(tool, str) or not tool or tool.strip() != tool
+            for tool in value):
+        raise PublicationEvidenceError(f"{name} is not a list of tool identities")
+    lowered = [tool.casefold() for tool in value]
+    if len(lowered) != len(set(lowered)):
+        raise PublicationEvidenceError(f"{name} contains duplicate tool identities")
+    if lowered != [tool.casefold() for tool in expected]:
+        raise PublicationEvidenceError(
+            f"{name} does not match the registered fleet denominator")
+
+
+def load_publication_evidence(*, round_at: str, run_id: str,
+                              forks_json: Path, gap_json: Path,
+                              fork_github_json: Path, release_ll_json: Path,
+                              expected_github_actor: str,
+                              now: datetime | None = None
+                              ) -> PublicationEvidence:
+    """Build a BLOCKING current-round publication certificate.
+
+    The three inputs are independently parsed and validated here even though LL
+    already validated them while capturing. That is intentional: a page is the
+    public consumer, and a stale/replaced LL or sidecar must fail at this final
+    boundary without touching the last good HTML.
+    """
+    boundary = _when(round_at, "round_at")
+    if now is None:
+        observed_now = datetime.now(timezone.utc)
+    elif (not isinstance(now, datetime) or now.tzinfo is None
+          or now.utcoffset() is None):
+        raise PublicationEvidenceError("injected now is not timezone-aware")
+    else:
+        observed_now = now.astimezone(timezone.utc)
+    if boundary > observed_now:
+        raise PublicationEvidenceError("round_at is in the future")
+    if observed_now - boundary > PUBLICATION_MAX_AGE:
+        raise PublicationEvidenceError(
+            "whole publication certificate is older than 30 hours")
+    if not isinstance(run_id, str) or RUN_ID_RE.fullmatch(run_id) is None:
+        raise PublicationEvidenceError("run_id is missing or malformed")
+
+    gap_raw = _strict_json(gap_json)
+    github_raw = _strict_json(fork_github_json)
+    ll = _strict_json(release_ll_json)
+
+    gap, gap_errors = release_ll._validate_gap(
+        gap_raw, Path(gap_json), round_at, Path(forks_json))
+    github, github_errors = release_ll._validate_fork_github(
+        github_raw, Path(fork_github_json), round_at, Path(forks_json),
+        expected_github_actor)
+    if gap_errors or gap is None:
+        raise PublicationEvidenceError("; ".join(gap_errors or [
+            "fork gap did not form a current-round record"]))
+    if github_errors or github is None:
+        raise PublicationEvidenceError("; ".join(github_errors or [
+            "GitHub convergence did not form a current-round record"]))
+
+    errors: list[str] = []
+    if ll.get("program") != "release_ll":
+        errors.append("release LL program is not release_ll")
+    if type(ll.get("schema_version")) is not int or ll["schema_version"] != 3:
+        errors.append("release LL schema_version is not 3")
+    if ll.get("round_at") != round_at:
+        errors.append("release LL round_at does not match this round")
+    if ll.get("run_id") != run_id:
+        errors.append("release LL run_id does not match this round")
+    captured = release_ll._strict_when(ll.get("captured_at"))
+    if captured is None:
+        errors.append("release LL captured_at is missing or malformed")
+    else:
+        if captured < _when(gap["completed_at"], "gap.completed_at"):
+            errors.append("release LL predates completion of the fork gap")
+        if captured < _when(github["completed_at"], "github.completed_at"):
+            errors.append("release LL predates completion of GitHub convergence")
+        if captured > observed_now:
+            errors.append("release LL captured_at is in the future")
+    if ll.get("source_errors") != []:
+        errors.append("release LL contains source errors")
+
+    expected = list(gap["registered_forks"])
+    try:
+        _exact_tools(ll.get("registered_forks"), expected,
+                     "release LL registered_forks")
+    except PublicationEvidenceError as exc:
+        errors.append(str(exc))
+    if ll.get("registered_count") != len(expected):
+        errors.append("release LL registered_count does not match the fleet")
+
+    gap_round = gap["source"]["_round"]
+    github_round = github["round"]
+    gap_run_id = gap_round["run_id"]
+    github_run_id = github_round["run_id"]
+    if gap_run_id != run_id or github_run_id != run_id:
+        errors.append("gap/GitHub evidence names a different daily_0530 run_id")
+    errors.extend(release_ll._round_provenance_errors(
+        gap_round, github_round,
+        left_name="fork gap", right_name="GitHub convergence"))
+    if ll.get("fork_github") != github:
+        errors.append("release LL GitHub evidence differs from the strict sidecar")
+
+    accepted_ai = None
+    ai = ll.get("ai_authorization")
+    if not isinstance(ai, dict):
+        errors.append("release LL has no AI authorization record")
+    else:
+        accepted_ai, ai_errors = release_ll._validate_ai_authorization(
+            ai, Path(release_ll_json), round_at, Path(forks_json))
+        if ai_errors or accepted_ai is None:
+            errors.extend(ai_errors or ["AI authorization is invalid"])
+        elif (accepted_ai.get("status") != "authorized"
+              or accepted_ai.get("round", {}).get("run_id") != run_id):
+            errors.append("AI authorization is not current and authorized")
+        else:
+            errors.extend(release_ll._round_provenance_errors(
+                gap_round, accepted_ai["round"],
+                left_name="fork gap", right_name="AI authorization"))
+            errors.extend(release_ll._round_provenance_errors(
+                github_round, accepted_ai["round"],
+                left_name="GitHub convergence",
+                right_name="AI authorization"))
+
+    selftest = ll.get("selftest")
+    if not isinstance(selftest, dict):
+        errors.append("release LL has no semantic pytest evidence")
+    else:
+        errors.extend(release_ll._validate_selftest(
+            selftest, round_at=round_at,
+            observed_until=captured or observed_now, summary=True))
+        if selftest.get("status") != "passed":
+            errors.append("semantic pytest is not a natural green record")
+
+    release = ll.get("release")
+    if not isinstance(release, dict):
+        errors.append("release LL has no release authorization")
+    else:
+        errors.extend(release_ll._validate_release_terminal(
+            release, round_at=round_at,
+            observed_until=captured or observed_now, summary=True))
+        if release.get("status") not in {"published", "noop"}:
+            errors.append("release is neither published nor an explicit current noop")
+        if isinstance(selftest, dict):
+            selftest_started = release_ll._strict_when(selftest.get("started_at"))
+            elapsed = selftest.get("elapsed_seconds")
+            release_started = release_ll._strict_when(release.get("started_at"))
+            if (selftest_started is not None
+                    and isinstance(elapsed, (int, float))
+                    and not isinstance(elapsed, bool)
+                    and math.isfinite(float(elapsed))
+                    and release_started is not None
+                    and selftest_started
+                    + timedelta(seconds=float(elapsed))
+                    > release_started):
+                errors.append("release started before semantic pytest finished")
+
+    pins = ll.get("release_pins")
+    current_head, current_head_error = release_ll._current_head(HERE.parent)
+    if current_head_error is not None:
+        errors.append(current_head_error)
+    if not isinstance(pins, dict):
+        errors.append("release-pin authorization is not a current-round PASS")
+    else:
+        pins_checked = release_ll._strict_when(pins.get("checked_at"))
+        expected_target = (release.get("target")
+                           if isinstance(release, dict) else None)
+        requested = pins.get("requested_revision", pins.get("rev"))
+        if (pins.get("program") != release_ll.RELEASE_PINS_PROGRAM
+                or pins.get("tool") != release_ll.RELEASE_PINS_PROGRAM
+                or type(pins.get("schema_version")) is not int
+                or pins.get("schema_version")
+                != release_ll.RELEASE_PINS_SCHEMA_VERSION
+                or pins.get("verdict") != "PASS"
+                or pins.get("committed") is not True
+                or pins.get("run_id") != run_id
+                or pins.get("round_at") != round_at
+                or pins.get("version") != expected_target
+                or requested != "HEAD"
+                or pins.get("revision") != current_head
+                or pins.get("findings") != []
+                or pins.get("outstanding") != []
+                or type(pins.get("recorded_count")) is not int
+                or pins.get("recorded_count") < 0
+                or pins.get("committed_count") != pins.get("recorded_count")
+                or pins_checked is None or pins_checked < boundary
+                or pins_checked > (captured or observed_now)):
+            errors.append("release-pin authorization is not an exact current-HEAD PASS")
+
+    # Prove the actual pipeline order, not merely that every retained timestamp
+    # falls somewhere after 05:30.  Without these edges, yesterday's shape can
+    # be recreated with individually current records whose producers ran in the
+    # wrong order (for example a ledger measured before the release it claims).
+    ai_checked = (release_ll._strict_when(accepted_ai.get("checked_at"))
+                  if isinstance(accepted_ai, dict) else None)
+    selftest_started = (release_ll._strict_when(selftest.get("started_at"))
+                        if isinstance(selftest, dict) else None)
+    release_finished = (release_ll._strict_when(release.get("finished_at"))
+                        if isinstance(release, dict) else None)
+    pins_checked = (release_ll._strict_when(pins.get("checked_at"))
+                    if isinstance(pins, dict) else None)
+    if (ai_checked is not None and selftest_started is not None
+            and ai_checked > selftest_started):
+        errors.append("semantic pytest started before AI authorization finished")
+    if (release_finished is not None and pins_checked is not None
+            and release_finished > pins_checked):
+        errors.append("release pins were checked before the release finished")
+    if (_when(gap["completed_at"], "gap.completed_at")
+            > _when(github["started_at"], "github.started_at")):
+        errors.append("GitHub convergence started before fork-gap collection finished")
+
+    watch = ll.get("watch_only_reset")
+    if not isinstance(watch, dict) or not isinstance(accepted_ai, dict):
+        errors.append("watch-only reset evidence is missing its current round")
+    else:
+        watch_source = {
+            "_round": dict(accepted_ai["round"]),
+            "_watch_only_resets": dict(watch),
+        }
+        accepted_watch, watch_errors = \
+            release_ll.watch_only_reset.validate_round_evidence(
+                watch_source, round_at=round_at, forks_json=Path(forks_json),
+                now=captured or observed_now)
+        if watch_errors or accepted_watch is None \
+                or accepted_watch.get("status") != "pass" \
+                or accepted_watch.get("run_id") != run_id:
+            errors.extend(watch_errors or [
+                "watch-only reset is not an exact current-round PASS"])
+
+    if isinstance(release, dict):
+        record_publication = release.get("release_record_publication")
+        record_identity = (record_publication.get("identity")
+                           if isinstance(record_publication, dict) else None)
+        if isinstance(record_identity, str) and current_head is not None:
+            ancestry = release_ll._git_run(
+                ["-C", str(HERE.parent), "merge-base",
+                 "--is-ancestor", record_identity, current_head],
+                capture_output=True, text=True,
+            )
+            if ancestry.returncode != 0:
+                errors.append(
+                    "published release-record commit is not an ancestor of current HEAD")
+            last_record = release_ll._git_run(
+                ["-C", str(HERE.parent), "log", "-1", "--format=%H",
+                 current_head, "--", "RELEASED.json"],
+                capture_output=True, text=True,
+            )
+            if (last_record.returncode != 0
+                    or last_record.stdout.strip().lower()
+                    != record_identity.lower()):
+                errors.append(
+                    "release-record publication identity is not the current "
+                    "RELEASED.json commit")
+
+            expected_version = release.get("target")
+            version_file = release_ll._git_run(
+                ["-C", str(HERE.parent), "show",
+                 f"{current_head}:VERSION"],
+                capture_output=True, text=True,
+            )
+            released_file = release_ll._git_run(
+                ["-C", str(HERE.parent), "show",
+                 f"{current_head}:RELEASED.json"],
+                capture_output=True, text=True,
+            )
+            try:
+                released_value = json.loads(
+                    released_file.stdout,
+                    object_pairs_hook=_json_object,
+                    parse_float=_finite_float,
+                    parse_constant=_reject_json_constant,
+                )
+            except (TypeError, ValueError):
+                released_value = None
+            if (version_file.returncode != 0
+                    or version_file.stdout.strip() != expected_version
+                    or released_file.returncode != 0
+                    or not isinstance(released_value, dict)
+                    or released_value.get("version") != expected_version):
+                errors.append(
+                    "release target differs from VERSION/RELEASED.json at current HEAD")
+
+    zero_fields = (
+        "q1_image_behind_upstream", "q1_forks_behind", "q1_sync_lag",
+        "q1_sync_lag_at_merge", "q1_release_lag",
+        "q2_our_commits_stranded", "q2_ours_past_the_pin",
+        "q2_ours_past_the_pin_substantive",
+    )
+    nonzero = [name for name in zero_fields if gap.get(name) != 0]
+    if nonzero:
+        errors.append("fork gap is nonzero: " + ", ".join(nonzero))
+    if github.get("status") != "converged":
+        errors.append(f"GitHub convergence status is {github.get('status')!r}")
+    counts = github.get("counts") if isinstance(github.get("counts"), dict) else {}
+    if counts.get("items") != 0 or counts.get("fork_delivery_items") != 0:
+        errors.append("GitHub open work/delivery count is nonzero")
+
+    convergence = ll.get("convergence")
+    expected_convergence = {
+        "sync_lag_at_merge": gap["q1_sync_lag_at_merge"],
+        "live_sync_lag": gap["q1_sync_lag"],
+        "release_lag": gap["q1_release_lag"],
+        "image_behind_upstream": gap["q1_image_behind_upstream"],
+        "ours_past_pin": gap["q2_ours_past_the_pin"],
+        "ours_past_pin_substantive": gap[
+            "q2_ours_past_the_pin_substantive"],
+        "our_commits_stranded": gap["q2_our_commits_stranded"],
+    }
+    if not isinstance(convergence, dict):
+        errors.append("release LL convergence is missing")
+    else:
+        for name, expected_value in expected_convergence.items():
+            if (type(convergence.get(name)) is not type(expected_value)
+                    or convergence.get(name) != expected_value):
+                errors.append(f"release LL convergence.{name} differs from gap")
+        required_true = (
+            "measured", "round_measured", "delivery_converged",
+            "delivery_round_converged", "tick_authorized", "ai_authorized",
+            "release_pins_committed", "watch_only_reset_clear",
+            "anchor_complete", "converged", "round_converged",
+        )
+        false_fields = [name for name in required_true
+                        if convergence.get(name) is not True]
+        if false_fields:
+            errors.append("whole-round convergence is not true: "
+                          + ", ".join(false_fields))
+
+    if errors:
+        raise PublicationEvidenceError("; ".join(errors))
+
+    page_model = {
+        "program": "eda_forks_page_publication",
+        "schema_version": 1,
+        "round_at": round_at,
+        "run_id": run_id,
+        "captured_at": ll["captured_at"],
+        "registered_forks": expected,
+        "registered_count": len(expected),
+        "github": {
+            "status": github["status"],
+            "open_items": counts["items"],
+            "open_delivery_count": counts["fork_delivery_items"],
+            "inventory_status": github["inventory"]["status"],
+            "required_repository_count": github["inventory"][
+                "required_repository_count"],
+            "completed_repository_count": github["inventory"][
+                "completed_repository_count"],
+        },
+        "release": {
+            "status": release["status"],
+            "noop": release["noop"],
+            "tick_authorized": True,
+        },
+        "convergence": dict(convergence),
+    }
+    return PublicationEvidence(
+        round_at=round_at, run_id=run_id,
+        registered_forks=tuple(expected), gap=gap, github=github, ll=ll,
+        page_model=page_model,
+    )
 
 # --- NDA redaction at the publish boundary (BINDING) ---------------------------
 # The ledgers are seeded from the forks' own commit messages, some of which name a
@@ -62,29 +502,35 @@ def _redact_nda(s: str) -> str:
     return _redact_nda_impl(s)
 
 
-def _load_ledgers() -> list[dict]:
+def _load_ledgers(*, strict: bool = False) -> list[dict]:
     out = []
     for p in sorted(LEDGER.glob("*.json")):
         if p.name == "index.json":
             continue
-        try:
-            # The whole ledger dict is embedded into the published page, so the #12
-            # provenance block — which names a local checkout path and a hostname —
-            # comes off at the load boundary. What an internal state file records and
-            # what a public page carries are two questions, exactly as for the NDA
-            # redaction below.
-            out.append(gk_state.strip_provenance(json.loads(p.read_text())))
-        except json.JSONDecodeError:
-            pass
+        if strict:
+            value = _strict_json(p)
+        else:
+            try:
+                value = json.loads(p.read_text())
+            except json.JSONDecodeError:
+                continue
+        # The whole ledger dict is embedded into the published page, so the #12
+        # provenance block — which names a local checkout path and a hostname —
+        # comes off at the load boundary. What an internal state file records and
+        # what a public page carries are two questions, exactly as for the NDA
+        # redaction below.
+        out.append(gk_state.strip_provenance(value))
     # OpenROAD/yosys first (most active), then by pending desc
     out.sort(key=lambda d: (-(d.get("pending_upstream_count") or d.get("behind") or 0), d.get("tool", "")))
     return out
 
 
-def _latest_report() -> dict | None:
+def _latest_report(*, strict: bool = False) -> dict | None:
     js = sorted(REPORTS.glob("*.json"))
     if not js:
         return None
+    if strict:
+        return gk_state.strip_provenance(_strict_json(js[-1]))
     try:
         return gk_state.strip_provenance(json.loads(js[-1].read_text()))
     except json.JSONDecodeError:
@@ -92,11 +538,13 @@ def _latest_report() -> dict | None:
 
 
 def _release_state() -> dict | None:
-    """This morning's release terminal state, never inferred from yesterday.
+    """Best-effort live release state for an uncertified scratch render only.
 
     `daily_release` schema v2 replaces this file at start and at every known
-    exit.  Older records have no status and are ignored: absence of a terminal
-    verdict is not licence to manufacture a blocker or a pass.
+    exit. Older records have no status and are ignored. Certified production
+    publication never calls this helper; it consumes LL's timestamp- and
+    run-id-bound release summary instead, because an AI skip leaves this live
+    path holding the preceding round.
     """
     try:
         value = json.loads(RELEASE_STATE.read_text())
@@ -116,7 +564,9 @@ def _release_state() -> dict | None:
 ENH_FILE = HERE / "ENHANCEMENTS.json"
 
 
-def _load_enh() -> dict:
+def _load_enh(*, strict: bool = False) -> dict:
+    if strict:
+        return _strict_json(ENH_FILE)
     try:
         return json.loads(ENH_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
@@ -391,6 +841,11 @@ __FOOTER__
 const LEDGERS = __DATA__;
 const REPORT = __REPORT__;
 const RELEASE = __RELEASE__;
+// The exact current-round certificate that authorized this page replacement.
+// A scratch render has an explicit unmeasured model; production refuses to
+// render without a strict certificate, so a displayed GitHub zero can never sit
+// beside an open/unmeasured inventory or a false whole-round verdict.
+const CURRENT_ROUND = __ROUND__;
 const ENH = __ENH__;
 // How many tools the IMAGE ships, measured by listing /foss/tools inside it.
 // `null` when the image could not be inspected -- never 0, because "we could
@@ -817,6 +1272,13 @@ function enhBlock(tool){
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
   const enhOpen = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.todo)||0)+((e.counts&&e.counts.deferred)||0)),0);
+  const githubRound = (CURRENT_ROUND && CURRENT_ROUND.github) || {};
+  const githubDeliveryOpen = Number.isInteger(githubRound.open_delivery_count)
+      ? githubRound.open_delivery_count : null;
+  const githubStatus = githubRound.status || "unmeasured";
+  const wholeRoundConverged = !!(CURRENT_ROUND && CURRENT_ROUND.convergence
+      && CURRENT_ROUND.convergence.converged === true
+      && CURRENT_ROUND.convergence.round_converged === true);
   const kpis = [
     // CARD ORDER, owner instruction 2026-08-05: when it was measured, what
     // shipped, what we carry, then the two gap numbers. A reader wants the
@@ -824,6 +1286,11 @@ function enhBlock(tool){
 
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
      {en:"Last daily check", zh:"最後每日檢查"}],
+    [githubDeliveryOpen === null ? "?" : `${githubDeliveryOpen}`,
+     {en:`Open delivery PRs · GitHub ${githubStatus}`,
+      zh:`未完成交付 PR · GitHub ${githubStatus}`}],
+    [wholeRoundConverged ? "✓" : "?",
+     {en:"Whole 05:30 round converged", zh:"05:30 整輪已收斂"}],
     ["v"+imageVer, {en:"vibeic-eda version",zh:"vibeic-eda 版本"}],
     // The label states the SCOPE of the number, because the number's scope is what
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
@@ -845,8 +1312,11 @@ function enhBlock(tool){
     // data-zh, so an English word inside the value is shown to a Chinese reader.
     // `36 forks · 59 tools` did exactly that. The value is now digits only and
     // the words live in the label, where the page can translate them.
-    [NTOOLS === null ? `${LEDGERS.length}` : `${LEDGERS.length} · ${NTOOLS}`,
-     {en:"Forks · tools in the image", zh:"fork 數 · image 工具數"}],
+    [NTOOLS === null ? `${LEDGERS.length} · ?` : `${LEDGERS.length} · ${NTOOLS}`,
+     {en:NTOOLS === null ? "Forks · image tool count unmeasured"
+                         : "Forks · tools in the image",
+      zh:NTOOLS === null ? "fork 數 · image 工具數未量測"
+                         : "fork 數 · image 工具數"}],
     [commitsBehind + behindMark + (behindUnknown?` +${behindUnknown}?`:``)
        // The split shows ONLY when one of the two halves is non-zero -- gated on
        // the SPLIT, not on `commitsBehind`. `sync + release == behind` is NOT an
@@ -1036,7 +1506,7 @@ function enhBlock(tool){
       ? esc(d.pinned_via)
       : (d.dockerfile_arg ? `Dockerfile ${esc(d.dockerfile_arg)}` : '');
     const pin = d.integrated
-      ? `<span class="fork-mono">${esc(d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}${pinHow?`<br><span style="color:var(--text-muted,#6b7684);font-size:.68rem">${pinHow}</span>`:''}`
+      ? `<span class="fork-mono">${esc(d.pinned_ref_full||d.pinned_ref||'—')}</span>${d.vibeic_branch?`<br><span style="color:var(--text-muted,#6b7684);font-size:.72rem" class="fork-mono">${esc(d.vibeic_branch)}</span>`:''}${pinHow?`<br><span style="color:var(--text-muted,#6b7684);font-size:.68rem">${pinHow}</span>`:''}`
       : `<span style="color:var(--text-muted,#6b7684)" data-en="not layered" data-zh="未納入">not layered</span>`;
     // DOES OUR WORK IN THIS FORK ACTUALLY SHIP? A fork can carry N of our commits
     // and deliver none of them, because the image consumes the BASE image's copy
@@ -1076,7 +1546,7 @@ function enhBlock(tool){
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
       <td class="fork-hide-sm">${pin}</td>
       <td>${pill(ahead,'ahead')}${lagWhich}</td>
-      <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref||'—')}</td>
+      <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref_full||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
       <td>${inImagePill(d)}</td>
       <td>${verd}</td>
@@ -1474,7 +1944,173 @@ def _image_ref() -> str:
     return f"vibeic/vibeic-eda:{v}"          # let collect() report it as unmeasured
 
 
-def build(out: Path):
+def _validate_ledger_round(ledgers: list[dict], evidence: PublicationEvidence
+                           ) -> None:
+    expected = sorted(evidence.registered_forks, key=str.casefold)
+    actual = sorted(
+        [row.get("tool") if isinstance(row, dict) else None for row in ledgers],
+        key=lambda value: str(value).casefold(),
+    )
+    _exact_tools(actual, expected, "page ledger tools")
+    boundary = _when(evidence.round_at, "round_at")
+    gap_started = _when(evidence.gap["started_at"], "gap.started_at")
+    release_finished = _when(
+        evidence.ll["release"]["finished_at"], "release.finished_at")
+    pins_checked = _when(
+        evidence.ll["release_pins"]["checked_at"], "release_pins.checked_at")
+    ledger_not_before = max(release_finished, pins_checked)
+    release_target = evidence.ll["release"]["target"]
+    gap_rows = evidence.gap.get("rows")
+    if not isinstance(gap_rows, list):
+        # ``_validate_gap`` already rejects this shape.  Keep the publication
+        # boundary total if its contract changes rather than deriving an empty
+        # map and accidentally treating every rendered row as unrelated data.
+        raise PublicationEvidenceError("fork gap has no per-tool row evidence")
+    gap_by_tool = {
+        row.get("tool"): row for row in gap_rows if isinstance(row, dict)
+    }
+    for row in ledgers:
+        tool = row.get("tool")
+        generated = release_ll._strict_when(row.get("generated_at"))
+        if generated is None:
+            raise PublicationEvidenceError(
+                f"ledger {tool!r} has no parseable generated_at")
+        if generated < boundary:
+            raise PublicationEvidenceError(
+                f"ledger {tool!r} predates this 05:30 round")
+        if generated < ledger_not_before:
+            raise PublicationEvidenceError(
+                f"ledger {tool!r} predates release/pin completion")
+        if generated > gap_started:
+            raise PublicationEvidenceError(
+                f"ledger {tool!r} is newer than fork-gap collection")
+        if row.get("image_version") != release_target:
+            raise PublicationEvidenceError(
+                f"ledger {tool!r}.image_version differs from release target")
+
+        # The page renders the ledgers, while the all-zero certificate is
+        # derived from gap.rows.  A shared timestamp and denominator do not make
+        # those the same measurement: a row can be replaced after gap capture
+        # and otherwise put ``sync_lag=99`` beside ``round_converged=true``.
+        # Bind every health field the page acts on to the exact validated gap
+        # row, with explicit null schemas for row kinds that have no image pin.
+        gap_row = gap_by_tool.get(tool)
+        if not isinstance(gap_row, dict):
+            raise PublicationEvidenceError(
+                f"ledger {tool!r} has no matching fork-gap row")
+        comparisons = (
+            ("integrated", "integrated"),
+            ("ahead", "ahead"),
+        )
+        if gap_row.get("kind") == "contents_assertion":
+            if gap_row.get("integrated") is not True:
+                raise PublicationEvidenceError(
+                    f"ledger {tool!r} contents assertion is not integrated")
+            comparisons += (("pin_kind", "kind"),)
+            if row.get("pinned_ref_full") != gap_row.get("asserted_contents"):
+                raise PublicationEvidenceError(
+                    f"ledger {tool!r}.pinned_ref_full differs from "
+                    "fork-gap asserted_contents")
+        elif gap_row.get("integrated") is True:
+            comparisons += (("pin_kind", "kind"),)
+            gap_pin = gap_row.get("pin")
+            # The certified page renders ``pinned_ref_full``.  Validate that
+            # exact field, not an ANY-alias set: accepting a matching full SHA
+            # beside an unrelated short ``pinned_ref`` previously certified the
+            # gap while displaying the unrelated value.
+            if (not isinstance(gap_pin, str) or not gap_pin
+                    or row.get("pinned_ref_full") != gap_pin):
+                raise PublicationEvidenceError(
+                    f"ledger {tool!r}.pinned_ref_full differs from "
+                    "fork-gap rows.pin")
+        else:
+            # A watch-only/non-layered row has no image pin.  Its upstream
+            # mirror may have its own useful diagnostics elsewhere, but values
+            # in the page's pin/release/shipping fields would be read as image
+            # health even though that question has no subject.
+            if (gap_row.get("kind") != "pin"
+                    or row.get("pin_kind") is not None
+                    or row.get("pinned_ref") is not None
+                    or row.get("pinned_ref_full") is not None):
+                raise PublicationEvidenceError(
+                    f"ledger {tool!r} watch-only row carries a pin identity")
+
+        # These are every ledger number the page renders or aggregates as fork,
+        # pin, release, or shipping health.  Bind them on every row kind.  For a
+        # contents assertion the validated gap row carries nulls, and for a
+        # watch-only row the page schema below requires nulls explicitly; neither
+        # may smuggle 77/99 beside a certified all-zero aggregate.
+        health_comparisons = (
+            ("behind_commits", "image_behind"),
+            ("sync_lag", "sync_lag"),
+            ("release_lag", "release_lag"),
+            ("ours_unshipped", "ours_unshipped"),
+            ("ours_unshipped_substantive",
+             "ours_unshipped_substantive"),
+        )
+        if gap_row.get("kind") == "contents_assertion" \
+                or gap_row.get("integrated") is False:
+            for ledger_name, _gap_name in health_comparisons:
+                if row.get(ledger_name) is not None:
+                    raise PublicationEvidenceError(
+                        f"ledger {tool!r}.{ledger_name} must be null for its "
+                        "non-pin row kind")
+        else:
+            comparisons += health_comparisons
+
+        for ledger_name, gap_name in comparisons:
+            ledger_value = row.get(ledger_name)
+            gap_value = gap_row.get(gap_name)
+            if (type(ledger_value) is not type(gap_value)
+                    or ledger_value != gap_value):
+                raise PublicationEvidenceError(
+                    f"ledger {tool!r}.{ledger_name} differs from "
+                    f"fork-gap rows.{gap_name}")
+
+
+def _page_json(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise PublicationEvidenceError(
+            f"page data is not strict finite JSON: {exc}") from exc
+    # JSON is embedded directly in a classic <script>.  JSON escaping alone
+    # does not protect the HTML parser: a string containing ``</script>`` ends
+    # the element before JavaScript gets to parse it.  Escape the HTML-significant
+    # scalars plus the two JavaScript line separators without changing the
+    # decoded data value.
+    return (encoded.replace("&", r"\u0026")
+            .replace("<", r"\u003c")
+            .replace(">", r"\u003e")
+            .replace("\u2028", r"\u2028")
+            .replace("\u2029", r"\u2029"))
+
+
+def _atomic_page(out: Path, html: str) -> None:
+    """Replace the page as one filesystem event, preserving its mode."""
+    mode = 0o644
+    try:
+        mode = out.stat().st_mode & 0o777
+    except FileNotFoundError:
+        pass
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", dir=str(out.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            # Transfer ownership of the descriptor before any operation that
+            # can raise so an fchmod failure cannot leak it.
+            os.fchmod(stream.fileno(), mode)
+            stream.write(html)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, out)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def build(out: Path, *, publication: PublicationEvidence | None = None):
     # vibeic/vibeic-eda#12. The published page is the third shared production artefact
     # with the same exposure as the cache and the ledgers: it is derived from whatever
     # state THIS process happened to read, so a run against an empty or scratch state
@@ -1482,10 +2118,30 @@ def build(out: Path):
     # ordinary way to render one by hand and is unaffected.
     gk_state.require_writable(out, "the published monitor page",
                               "Render one somewhere else with --out /tmp/page.html")
-    ledgers = _load_ledgers()
-    report = _latest_report()
-    release = _release_state()
-    enh = _load_enh()
+    if publication is None and gk_state.is_production_path(out):
+        raise PublicationEvidenceError(
+            "production publication requires strict current-round gap, GitHub, "
+            "release-LL, run-id, timestamp and fleet-denominator evidence")
+    strict = publication is not None
+    ledgers = _load_ledgers(strict=strict)
+    if publication is not None:
+        _validate_ledger_round(ledgers, publication)
+    # A report file is a separately-written best-effort artefact with no run
+    # nonce.  It may still describe yesterday even when every certified source
+    # below is current.  Certified output therefore derives the tiny REPORT
+    # view from the certificate itself; scratch output retains the legacy latest
+    # report behaviour.
+    report = ({
+        "date": publication.ll["captured_at"],
+        "round_at": publication.round_at,
+        "run_id": publication.run_id,
+    } if publication is not None else _latest_report(strict=False))
+    # A certified page gets release state only from the LL record that proved it
+    # current. Reading the live daily-release.json here would let yesterday's
+    # published result impersonate today whenever AI skipped the release tick.
+    release = (publication.ll["release"] if publication is not None
+               else _release_state())
+    enh = _load_enh(strict=strict)
     # Measured now, not pasted. If it cannot be measured the section says so
     # rather than vanishing: a section that disappears on failure looks exactly
     # like one that was never meant to be there.
@@ -1502,37 +2158,124 @@ def build(out: Path):
     # `null` when it cannot be measured, NEVER 0 and never omitted: an image we
     # could not inspect must not render as an image with no tools.
     inv_html = ""
-    try:
-        _inv = inventory.collect(_image_ref())
-        _ntools = len(_inv.get("a") or _inv.get("tools") or [])
-        ntools = str(_ntools) if _ntools else "null"
-    except Exception as exc:                                       # noqa: BLE001
-        print(f"  inventory: could not measure the image tool count ({exc})")
+    if publication is not None:
+        # LL proves that the registry's immutable version and latest returned
+        # one canonical manifest identity during this round.  That identity is
+        # a hash of normalized manifest JSON, not an OCI digest that can safely
+        # qualify a Docker reference.  A local version/latest tag therefore
+        # cannot be proved to be that manifest here.  Publish an explicit
+        # unmeasured tool count instead of inspecting an ambient ``:latest`` and
+        # attaching its number to the certified release.
         ntools = "null"
-    data = json.dumps(ledgers, ensure_ascii=False)
+    else:
+        try:
+            _inv = inventory.collect(_image_ref())
+            _ntools = len(_inv.get("a") or _inv.get("tools") or [])
+            ntools = str(_ntools) if _ntools else "null"
+        except Exception as exc:                                   # noqa: BLE001
+            print(f"  inventory: could not measure the image tool count ({exc})")
+            ntools = "null"
+    data = _page_json(ledgers)
+    current_round = (publication.page_model if publication is not None else {
+        "program": "eda_forks_page_publication",
+        "schema_version": 1,
+        "round_at": None,
+        "run_id": None,
+        "captured_at": None,
+        "registered_forks": [],
+        "registered_count": None,
+        "github": {
+            "status": "unmeasured", "open_items": None,
+            "open_delivery_count": None, "inventory_status": "unmeasured",
+            "required_repository_count": None,
+            "completed_repository_count": None,
+        },
+        "release": {"status": None, "noop": None, "tick_authorized": False},
+        "convergence": {"converged": False, "round_converged": False},
+    })
     nav = NAV.replace("__NAVLINKS__", build_navlinks(out))
     footer = FOOTER.replace("__FOOTER_SITE__", build_footer_site(out))
-    html = (PAGE.replace("__STYLE__", STYLE).replace("__NAV__", nav).replace("__FOOTER__", footer)
-            .replace("__GAP__", GAP
-                     .replace("__NFORKS__", str(len(enh)))
-                     .replace("__NTOTAL__", str(len(ledgers)))
-                     .replace("__NUNSURVEYED__", str(max(0, len(ledgers) - len(enh))))
-                     .replace("__NOPEN__", str(sum(
-                         1 for v in enh.values() for r in v.get("rows", [])
-                         if r.get("status") in ("todo", "deferred")))))
-            .replace("__NTOOLS__", ntools)
-            .replace("__DATA__", data)
-            .replace("__ENH__", json.dumps(enh, ensure_ascii=False))
-            .replace("__PINNOTES__", json.dumps(PIN_NOTES, ensure_ascii=False))
-            .replace("__REPORT__", json.dumps(report, ensure_ascii=False))
-            .replace("__RELEASE__", json.dumps(release, ensure_ascii=False)))
+    gap_html = (GAP
+                .replace("__NFORKS__", str(len(enh)))
+                .replace("__NTOTAL__", str(len(ledgers)))
+                .replace("__NUNSURVEYED__",
+                         str(max(0, len(ledgers) - len(enh))))
+                .replace("__NOPEN__", str(sum(
+                    1 for v in enh.values() for r in v.get("rows", [])
+                    if r.get("status") in ("todo", "deferred")))))
+    substitutions = {
+        "__STYLE__": STYLE,
+        "__NAV__": nav,
+        "__FOOTER__": footer,
+        "__GAP__": gap_html,
+        "__NTOOLS__": ntools,
+        "__DATA__": data,
+        "__ENH__": _page_json(enh),
+        "__PINNOTES__": _page_json(PIN_NOTES),
+        "__REPORT__": _page_json(report),
+        "__RELEASE__": _page_json(release),
+        "__ROUND__": _page_json(current_round),
+    }
+    # Substitute against the template in one pass.  A source string containing
+    # another placeholder literal must remain data, not become a second template
+    # expansion after it has crossed the serialization boundary.  This replaces
+    # the former chained `.replace("__RELEASE__", ...)` operation while retaining
+    # the release program's own terminal record as that placeholder's source.
+    html = re.sub(
+        "|".join(map(re.escape, substitutions)),
+        lambda match: substitutions[match.group(0)], PAGE)
     html = _redact_nda(html)   # NDA redaction at the publish boundary — MUST be last
-    out.write_text(html)
+    if publication is not None:
+        clean, clean_error = release_ll._repository_clean(HERE.parent)
+        if not clean:
+            raise PublicationEvidenceError(clean_error or (
+                "repository cleanliness is unproved"))
+        final_head, final_head_error = release_ll._current_head(HERE.parent)
+        expected_head = publication.ll["release_pins"]["revision"]
+        if final_head_error is not None or final_head != expected_head:
+            raise PublicationEvidenceError(
+                final_head_error or (
+                    "repository HEAD changed after publication certification"))
+    _atomic_page(out, html)
     enh_rows = sum(len(v.get("rows", [])) for v in enh.values())
     print(f"wrote {out}  ({len(html)//1024} KB, {len(ledgers)} tools, {enh_rows} enhancement rows)")
 
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    build(ap.parse_args().out)
+    ap.add_argument("--round-at")
+    ap.add_argument("--run-id")
+    ap.add_argument("--forks-json", type=Path)
+    ap.add_argument("--gap-json", type=Path)
+    ap.add_argument("--fork-github-json", type=Path)
+    ap.add_argument("--release-ll-json", type=Path)
+    ap.add_argument("--expected-github-actor")
+    args = ap.parse_args(argv)
+    values = (
+        args.round_at, args.run_id, args.forks_json, args.gap_json,
+        args.fork_github_json, args.release_ll_json,
+        args.expected_github_actor,
+    )
+    if any(value is not None for value in values):
+        if any(value is None for value in values):
+            ap.error("current-round publication requires all evidence options")
+        publication = load_publication_evidence(
+            round_at=args.round_at, run_id=args.run_id,
+            forks_json=args.forks_json, gap_json=args.gap_json,
+            fork_github_json=args.fork_github_json,
+            release_ll_json=args.release_ll_json,
+            expected_github_actor=args.expected_github_actor,
+        )
+    else:
+        publication = None
+    build(args.out, publication=publication)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except PublicationEvidenceError as exc:
+        print(f"build_page: REFUSED — {exc}", file=sys.stderr)
+        raise SystemExit(2)

@@ -12,11 +12,10 @@
 #      and run a smoke regression against it.
 #      - build/regress green -> status "built_green"
 #      - red                 -> status "built_red"   (defer)
-#   3. PROMOTE only when GK_MODE=promote AND green: fast-forward the real vibeic branch,
-#      push it, commit the Dockerfile+VERSION bump, and push the new image (release.sh).
-#      Default GK_MODE=verify → build is proven but NOTHING in production is changed
-#      (temp refs + scratch tree cleaned; no branch move, no image push). This is the
-#      owner's staged rollout ("verify the build passes first, then enable auto-push").
+#   3. The legacy GK_MODE=promote arm is retired. It could publish version/latest
+#      but could not atomically publish RELEASED.json and read all three names
+#      back. Candidate verification remains; daily_release.py is the sole final
+#      image publication authority.
 #
 # Input : env VIBEIC_CANDIDATES = JSON [{tool,arg,branch,release}]  (set by gatekeeper.py)
 # Output: writes per-candidate results JSON to $GK_RESULT (default result.json), which
@@ -97,11 +96,6 @@ SCRATCH="/tmp/gk-build-${STAMP}"
 IMG="vibeic/vibeic-eda:gkcandidate-${STAMP}"
 RESULTS="[]"
 
-_progress_exec() {
-    python3 "${GATEKEEPER_DIR}/progress_exec.py" \
-        --stall-grace "${GK_PUSH_STALL_GRACE:-1800}" -- "$@"
-}
-
 emit() { python3 - "$RESULTS" "$1" "$2" "$3" "$4" <<'PY'
 import json,sys
 arr=json.loads(sys.argv[1]); arr.append({"tool":sys.argv[2],"status":sys.argv[3],"detail":sys.argv[4][:300],"sha":sys.argv[5] if len(sys.argv)>5 else ""})
@@ -149,131 +143,15 @@ _pf_mark() {
     done
     echo "[promote] ABORT — $1 (tools stay DEFERRED)"
 }
-# post-mutation abort: undo OUR OWN edits (reset to the already-reconciled origin/main),
-# then mark. Only safe AFTER step 0 verified the tree is clean + not ahead of origin, so
-# the reset discards nothing but this run's sed/version-bump. NEVER call from a step-0
-# guard — that would wipe the human WIP the guard exists to protect.
-_pf_abort() {
-    git -C "${EDA_CLONE}" rebase --abort 2>/dev/null
-    git -C "${EDA_CLONE}" reset --hard origin/main -q 2>/dev/null
-    _pf_mark "$1"
-}
-
-# GK_MODE=promote: ship the verified-green image + integrate the fork branches for real.
-# CORRECT-BY-ORDER + fail-loud (rewritten after an adversarial review found 8 HIGH bugs
-# in a swallow-and-continue version):
-#   0. reconcile the vibeic-eda clone to origin/main — so NEWVER is computed from ORIGIN
-#      (a stuck later step re-ships the SAME version, never inflates) and the commit
-#      fast-forwards. Refuse on a dirty tree or unpushed local commits (human WIP).
-#   1. GATE fork branches FIRST: land each rebased sha on its durable vibeic branch before
-#      anything pins it; any push failure → abort, ship NOTHING.
-#   2. bump Dockerfile pins + VERSION (tolerate sync's repo-wide drift audit — verify the
-#      write took, don't gate on unrelated stale pointers).
-#   3. GATE the image ship: :NEWVER then :latest, both checked by a renewable
-#      progress lease with no total-runtime ceiling. Shipped
-#      BEFORE the origin commit so a failed origin push re-ships the same version (converges).
-#   4. GATE the origin commit+push (retry once on non-ff via rebase); on failure roll the
-#      LOCAL commit back → next tick retries.
-#   5. only NOW emit "promoted" (→ MERGED). Every failure path emits "promote_failed"
-#      (→ DEFERRED) and leaves a CLEAN tree, so nothing is falsely MERGED and the dirty-tree
-#      guard can never wedge future runs. Docker Hub stays best-effort (GHCR is canonical).
-# Mutates global RESULTS (call NOT in a subshell). Returns 0 only on a fully-landed promote.
+# GK_MODE=promote remains accepted only so old schedulers get an explicit,
+# per-candidate DEFERRED reason instead of falling through to a second publisher.
 promote_all() {
-    local plog="/tmp/gk-push-${STAMP}.log" tool arg sha br fr CURVER NEWVER tools_csv DH="dockerhub:skipped"
-    # 0. reconcile — preservation guards use _pf_mark (NO reset): they exist to protect
-    #    human WIP, so they must not touch the tree. The reconcile reset runs only AFTER
-    #    they pass (tree clean + not ahead), so it discards nothing human.
-    if [ -n "$(git -C "${EDA_CLONE}" status --porcelain 2>/dev/null)" ]; then
-        _pf_mark "vibeic-eda tree is dirty — refusing to auto-commit (human attention)"; return 1
-    fi
-    if ! git -C "${EDA_CLONE}" fetch origin main -q 2>>"${plog}"; then
-        _pf_mark "vibeic-eda: git fetch origin failed"; return 1
-    fi
-    if [ "$(git -C "${EDA_CLONE}" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)" != "0" ]; then
-        _pf_mark "vibeic-eda main is ahead of origin (unpushed local commits) — refusing to reset"; return 1
-    fi
-    git -C "${EDA_CLONE}" reset --hard origin/main -q
-    # 1. GATE fork branches ---------------------------------------------------
-    for tool in "${!CLEAN_SHA[@]}"; do
-        br="${CLEAN_BRANCH[$tool]}"; sha="${CLEAN_SHA[$tool]}"; fr="${CLEAN_FORKREMOTE[$tool]}"
-        if [ -z "$br" ]; then _pf_abort "${tool}: no vibeic branch resolved — cannot integrate"; return 1; fi
-        if ! git -C "${FORKS_DIR}/${tool}" push -f "${fr}" "${sha}:refs/heads/${br}" -q 2>>"${plog}"; then
-            _pf_abort "${tool}: fork branch push (${br}) failed — nothing shipped"; return 1
-        fi
-        echo "[promote] ${tool}: fork ${br} -> ${sha:0:12}"
-    done
-    # 2. bump pins + VERSION (compute NEWVER from origin; tolerate unrelated drift) -------
-    for tool in "${!CLEAN_SHA[@]}"; do
-        arg="${CLEAN_ARG[$tool]}"; sha="${CLEAN_SHA[$tool]}"
-        # Same refusal as the build path, and it matters more here: this bump is
-        # COMMITTED and the image is pushed under a new version. A silent no-op
-        # would publish a release whose Dockerfile shows no pin change while its
-        # notes claim the commit — the version bump would be the only evidence,
-        # and it would be wrong.
-        if [ -z "$arg" ] || ! _bump_pin "${EDA_CLONE}" "$arg" "$sha"; then
-            _pf_abort "${tool}: could not move ARG ${arg} in the vibeic-eda clone — nothing shipped"
-            return 1
-        fi
-    done
-    if [ -f "${EDA_CLONE}/tools/check_pins_agree.py" ] \
-       && ! ( cd "${EDA_CLONE}" && python3 tools/check_pins_agree.py ) >>"${plog}" 2>&1; then
-        _pf_abort "pins disagree after bump — nothing shipped (see ${plog})"; return 1
-    fi
-    CURVER="$(cd "${EDA_CLONE}" && ./sync_image_version.py --print 2>/dev/null)"
-    # match sync_image_version.next_version()'s canonical scheme (patch 0..99, rollover to minor)
-    NEWVER="$(python3 -c "x,y,z='${CURVER}'.split('.'); z=int(z); print(f'{x}.{int(y)+1}.0' if z>=99 else f'{x}.{y}.{z+1}')" 2>/dev/null)"
-    if [ -z "${NEWVER}" ]; then _pf_abort "could not compute next version from '${CURVER}'"; return 1; fi
-    ( cd "${EDA_CLONE}" && ./sync_image_version.py --set "${NEWVER}" ) >>"${plog}" 2>&1 \
-        || echo "[promote] note: sync_image_version --set exit!=0 (likely unrelated repo drift); verifying the write"
-    if [ "$(cd "${EDA_CLONE}" && ./sync_image_version.py --print 2>/dev/null)" != "${NEWVER}" ]; then
-        _pf_abort "VERSION write to ${NEWVER} did not take"; return 1
-    fi
-    # The locally runnable candidate can still be impossible to pull.  This is
-    # the legacy promote path, so it needs the same measured/automatic
-    # compaction gate as daily_release and release.sh before either registry tag
-    # becomes durable. The checker leases on transferred bytes; total runtime is
-    # not a verdict.
-    if ! python3 "${EDA_CLONE}/tools/check_image_depth.py" --compact "${IMG}" \
-            >>"${plog}" 2>&1; then
-        _pf_abort "candidate image is over-depth or compaction was unmeasurable — nothing shipped (see ${plog})"
-        return 1
-    fi
-    # 3. GATE the image ship (both tags, progress-supervised) ----------------
-    docker tag "${IMG}" "ghcr.io/vibeic/vibeic-eda:${NEWVER}"
-    docker tag "${IMG}" "ghcr.io/vibeic/vibeic-eda:latest"
-    if ! _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:${NEWVER}" >>"${plog}" 2>&1; then
-        _pf_abort "GHCR push ${NEWVER} failed or stalled (see ${plog})"; return 1
-    fi
-    if ! _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1; then
-        _progress_exec docker push "ghcr.io/vibeic/vibeic-eda:latest" >>"${plog}" 2>&1 \
-            || { _pf_abort "GHCR :latest push failed (:${NEWVER} shipped, :latest stale) — retry next tick"; return 1; }
-    fi
-    if docker tag "${IMG}" "vibeic/vibeic-eda:${NEWVER}" \
-       && _progress_exec docker push "vibeic/vibeic-eda:${NEWVER}" >>"${plog}" 2>&1; then
-        docker tag "${IMG}" "vibeic/vibeic-eda:latest"
-        _progress_exec docker push "vibeic/vibeic-eda:latest" >>"${plog}" 2>&1 || true
-        DH="dockerhub:${NEWVER}"
-    else
-        DH="dockerhub:skipped(login?)"
-    fi
-    # 4. GATE origin commit + push (retry once on non-ff) ---------------------
-    tools_csv="$(IFS=,; echo "${!CLEAN_SHA[*]}")"
-    ( cd "${EDA_CLONE}" && git add -A \
-      && git commit -q -m "${NEWVER} — auto: rebased ${tools_csv} onto upstream release(s) [fork-gatekeeper]" ) \
-      || { _pf_abort "vibeic-eda commit failed (image ${NEWVER} shipped; retry next tick)"; return 1; }
-    if ! git -C "${EDA_CLONE}" push -q origin HEAD:main 2>>"${plog}"; then
-        git -C "${EDA_CLONE}" fetch origin main -q 2>>"${plog}"
-        if ! { git -C "${EDA_CLONE}" rebase origin/main -q >>"${plog}" 2>&1 \
-               && git -C "${EDA_CLONE}" push -q origin HEAD:main 2>>"${plog}"; }; then
-            _pf_abort "vibeic-eda origin push failed (image ${NEWVER} shipped; re-ships same ver next tick)"; return 1
-        fi
-    fi
-    # 5. SUCCESS — everything landed -----------------------------------------
-    for tool in "${!CLEAN_SHA[@]}"; do
-        RESULTS="$(emit "$tool" "promoted" "shipped ghcr.io/vibeic/vibeic-eda:${NEWVER} (${DH}); ${CLEAN_BRANCH[$tool]} rebased" "${CLEAN_SHA[$tool]}")"
-    done
-    echo "[promote] DONE -> vibeic-eda:${NEWVER}"
-    return 0
+    # Candidate verification remains useful, but final publication belongs
+    # exclusively to daily_release.py's immutable/latest/record/readback
+    # transaction.  A second writer cannot manufacture equivalent evidence
+    # merely by sharing its host lock.
+    _pf_mark "legacy GK_MODE=promote is retired — use daily_release.py for canonical publication"
+    return 1
 }
 
 CANDS="$(python3 -c 'import json,os;print("\n".join("%s\t%s\t%s\t%s\t%s"%(c["tool"],c.get("arg") or "",c.get("branch") or "",c.get("release") or "",c.get("upstream") or "") for c in json.loads(os.environ.get("VIBEIC_CANDIDATES","[]"))))')"

@@ -39,6 +39,9 @@ WHAT IT ASKS
    reads "never released" anyway. That is the 0.2.45 failure (the shipped tree
    hashed to e4e0a5f6 while the file recorded 94d85fda) and it is free to check
    here.
+3. The immutable VERSION tag and `:latest` must resolve to the same REMOTE
+   manifest. Presence alone cannot catch a failed latest push because the old
+   latest remains present.
 
 NOT A FINDING: VERSION bumped and nothing published yet. That is the normal
 mid-release state and the ledger is CORRECT to still name the previous release.
@@ -50,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -89,10 +93,31 @@ def published(tag: str, image: str = IMAGE, timeout: int = 180):
     return None
 
 
+def remote_publication(tag: str, image: str = IMAGE):
+    """Complete remote publication, not just version-tag presence.
+
+    Keep the implementation in daily_release: its noop and this independent
+    checker must not disagree about whether an old-but-present ``:latest`` is a
+    complete release.  None is COULD NOT ASK, preserving this checker's
+    three-state contract.
+    """
+    try:
+        ok, evidence = DR.verify_remote_release_publication(tag, image=image)
+    except DR.ReleaseMeasurementUnknown as exc:
+        return None, exc.as_dict()
+    return ok, evidence
+
+
 def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
     version = (eda_root / "VERSION").read_text().strip() if (
         eda_root / "VERSION").is_file() else None
-    rec = DR.released_record(eda_root)
+    try:
+        rec = DR.released_record(eda_root)
+    except DR.ReleaseMeasurementUnknown as exc:
+        return "CANNOT_ASK", [
+            f"could not read authoritative RELEASED.json strictly: "
+            f"{exc.detail}"
+        ], {"version": version, "record_error": exc.as_dict()}
     recorded = rec.get("version")
     stats = {"version": version, "recorded": recorded,
              "recorded_fingerprint": rec.get("pins_fingerprint")}
@@ -115,6 +140,49 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
             f"has never shipped, so the next release run will cut a version "
             f"byte-identical to one already published. Record it with: "
             f"python3 fork-gatekeeper/daily_release.py --record-release {version}")
+
+    # The old checker stopped after proving VERSION's tag existed. A failed
+    # latest push leaves that answer true forever while :latest remains stale.
+    # Ask the same paired-manifest question daily_release's noop asks.
+    if is_pub:
+        remote_ok, remote_evidence = remote_publication(version, image)
+        stats["remote_publication"] = remote_evidence
+        if remote_ok is None:
+            detail = (remote_evidence.get("detail")
+                      if isinstance(remote_evidence, dict) else None)
+            return "CANNOT_ASK", [
+                f"could not establish complete remote publication for "
+                f"{image}:{version}; version/latest identity is UNCHECKED, not "
+                f"confirmed{': ' + detail if detail else ''}"], stats
+        if not remote_ok:
+            summary = (remote_evidence.get("summary")
+                       if isinstance(remote_evidence, dict) else None)
+            findings.append(
+                f"{image}:{version} exists but publication is INCOMPLETE: "
+                f"{summary or 'the version and :latest manifests do not agree'}")
+        else:
+            recorded_identity = rec.get("manifest_identity")
+            if recorded_identity is not None:
+                remote_identity = (remote_evidence.get("manifests", {})
+                                   .get("version", {}).get("identity"))
+                stats["recorded_manifest_identity"] = recorded_identity
+                stats["remote_manifest_identity"] = remote_identity
+                if (not isinstance(recorded_identity, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}",
+                                           recorded_identity)):
+                    findings.append(
+                        "RELEASED.json carries a malformed manifest_identity")
+                elif remote_identity != recorded_identity:
+                    findings.append(
+                        f"{image}:{version} no longer has the exact manifest "
+                        "identity recorded when it was published")
+    elif recorded == version:
+        # RELEASED.json's contract says this version was PUBLISHED. An explicit
+        # registry absence contradicts that claim; it is not the normal
+        # mid-release state (where recorded names the previous version).
+        findings.append(
+            f"RELEASED.json records {version} as published, but "
+            f"{image}:{version} is absent from the registry")
 
     if recorded == version:
         targets = DR.bake_targets(eda_root)

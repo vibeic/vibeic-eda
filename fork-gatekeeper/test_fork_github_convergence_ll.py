@@ -154,8 +154,8 @@ def _fork_record(*, status="converged", started_at=None,
     record = {
         "program": "fork_github_convergence",
         "schema_version": 2,
-        "started_at": started_at or "2026-08-17T05:34:00+08:00",
-        "completed_at": "2026-08-17T05:35:00+08:00",
+        "started_at": started_at or "2026-08-17T06:02:30+08:00",
+        "completed_at": "2026-08-17T06:03:00+08:00",
         "actor": "reyerchu",
         "expected_actor": "reyerchu",
         "round": {
@@ -163,7 +163,7 @@ def _fork_record(*, status="converged", started_at=None,
             "schema_version": 1,
             "run_id": "a" * 64,
             "started_at": "2026-08-17T05:30:01+08:00",
-            "finished_at": "2026-08-17T05:33:00+08:00",
+            "finished_at": "2026-08-17T05:59:00+08:00",
         },
         "inventory": {
             "status": "complete",
@@ -502,12 +502,14 @@ def test_current_open_work_is_retained_with_exact_items(tmp_path, capsys):
 
 
 def test_open_github_cannot_contradict_a_generic_converged_lesson():
+    from test_ai_handoff_progress_supervision import _published_release_record
+
     item = _item(7)
     github = _fork_record(
         status="open", items=[item],
     )
     record = LL.make_record(
-        {"status": "published", "compose_attempts": [{"exit_code": 0}]},
+        _published_release_record("0.3.5"),
         _gap_record(), ROUND_AT, 0, fork_github=github,
     )
     convergence = record["convergence"]
@@ -722,6 +724,21 @@ def test_gap_and_github_must_name_the_same_daily_round_nonce(tmp_path, capsys):
     assert rc == 1
     assert full["fork_github"]["round"]["run_id"] == "b" * 64
     assert any("different daily_0530 run_id" in error
+               for error in full["source_errors"])
+    assert full["convergence"]["converged"] is False
+
+
+def test_same_nonce_cannot_splice_a_different_daily_round(tmp_path, capsys):
+    fork = tmp_path / "fork.json"
+    record = _fork_record()
+    record["round"]["finished_at"] = "2026-08-17T05:58:00+08:00"
+    fork.write_text(json.dumps(record))
+
+    rc, full, _narrow = _capture(tmp_path, fork)
+    capsys.readouterr()
+
+    assert rc == 1
+    assert any("different daily_0530 round finished_at" in error
                for error in full["source_errors"])
     assert full["convergence"]["converged"] is False
 
@@ -955,7 +972,7 @@ def test_stale_record_is_source_error_and_never_zero(tmp_path, capsys):
     lambda record: record["round"].update(
         started_at="2026-08-16T05:30:01+08:00"),
     lambda record: record["round"].update(
-        finished_at="2026-08-17T05:40:00+08:00"),
+        finished_at="2026-08-17T06:04:00+08:00"),
     lambda record: record.update(
         started_at="2099-08-17T05:34:00+08:00",
         completed_at="2099-08-17T05:35:00+08:00"),

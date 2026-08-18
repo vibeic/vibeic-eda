@@ -133,6 +133,7 @@ def _render_metrics(rows, element: str = "forkMetrics") -> str:
     # arithmetic and left alone, so this cannot accidentally supply a rendered value.
     body = (body.replace("__DATA__", json.dumps(rows))
                 .replace("__REPORT__", "{}").replace("__RELEASE__", "null")
+                .replace("__ROUND__", "{}")
                 .replace("__ENH__", "{}")
                 # An unsubstituted placeholder is a ReferenceError that kills the
                 # WHOLE page script, so this fixture must fill every one. That is

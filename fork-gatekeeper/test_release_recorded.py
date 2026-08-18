@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import pytest
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,15 @@ sys.path.insert(0, str(_HERE))
 
 import check_release_recorded as C  # noqa: E402
 import daily_release as R  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _complete_remote_publication(monkeypatch):
+    """Existing cases isolate ledger semantics from the new paired-tag probe."""
+    monkeypatch.setattr(
+        C, "remote_publication",
+        lambda *_a, **_k: (True, {"verified": True}),
+    )
 
 
 def _tree(tmp_path: Path, version="0.2.53") -> Path:
@@ -97,8 +107,10 @@ def test_the_publish_path_uses_the_one_writer():
     src = (_HERE / "daily_release.py").read_text(encoding="utf-8")
     code = "\n".join(l for l in src.splitlines()
                      if not l.lstrip().startswith("#"))
-    assert code.count('"RELEASED.json").write_text') == 1, (
-        "RELEASED.json is written in more than one place again")
+    assert code.count('_atomic_json(eda_root / "RELEASED.json", rec)') == 1, (
+        "RELEASED.json does not have exactly one atomic writer")
+    assert '"RELEASED.json").write_text' not in code, (
+        "a non-atomic RELEASED.json writer bypasses the canonical writer")
     assert code.count("write_released_record(") >= 3, (
         "the definition, the publish path, and --record-release")
 
@@ -143,6 +155,27 @@ def test_a_published_but_unrecorded_version_is_a_finding(tmp_path, monkeypatch):
         "a finding that does not say how to fix it makes the reader guess")
 
 
+@pytest.mark.parametrize("wire", [
+    '{"version":"0.2.52","version":"0.2.53"}',
+    '{"version":"0.2.53","pins_fingerprint":NaN}',
+])
+def test_malformed_release_record_is_cannot_ask_not_unreleased(
+        tmp_path, monkeypatch, wire):
+    root = _tree(tmp_path)
+    (root / "RELEASED.json").write_text(wire, encoding="utf-8")
+    monkeypatch.setattr(
+        C, "published",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("malformed authority must stop before registry I/O")),
+    )
+
+    verdict, findings, stats = C.audit(root)
+
+    assert verdict == "CANNOT_ASK"
+    assert "strict" in findings[0]
+    assert stats["record_error"]["category"] == "release_record_malformed"
+
+
 def test_recording_it_clears_the_finding(tmp_path, monkeypatch):
     """THE ACCEPT CASE, and it goes through the real writer rather than a
     hand-built record — a fingerprint the gate would reject is exactly what a
@@ -162,6 +195,67 @@ def test_an_unpublished_version_is_not_a_finding(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "published", lambda *a, **k: False)
     verdict, findings, _s = C.audit(root)
     assert verdict == "OK", findings
+
+
+def test_a_recorded_version_missing_from_registry_is_a_finding(
+        tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    R.write_released_record(root, "0.2.53", R.bake_targets(root))
+    monkeypatch.setattr(C, "published", lambda *a, **k: False)
+
+    verdict, findings, _stats = C.audit(root)
+
+    assert verdict == "FINDINGS"
+    assert any("records 0.2.53 as published" in f and "absent" in f
+               for f in findings), findings
+
+
+def test_a_stale_latest_is_a_finding_even_when_version_tag_exists(
+        tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    R.write_released_record(root, "0.2.53", R.bake_targets(root))
+    monkeypatch.setattr(C, "published", lambda *a, **k: True)
+    monkeypatch.setattr(
+        C, "remote_publication",
+        lambda *_a, **_k: (False, {
+            "category": "latest_manifest_mismatch",
+            "summary": ":latest identifies the previous release",
+        }),
+    )
+
+    verdict, findings, stats = C.audit(root)
+
+    assert verdict == "FINDINGS"
+    assert stats["remote_publication"]["category"] == \
+        "latest_manifest_mismatch"
+    assert any("publication is INCOMPLETE" in f for f in findings), findings
+
+
+def test_a_changed_immutable_identity_is_a_finding_even_if_latest_matches(
+        tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    R.write_released_record(
+        root, "0.2.53", R.bake_targets(root),
+        manifest_identity="d" * 64,
+    )
+    monkeypatch.setattr(C, "published", lambda *a, **k: True)
+    monkeypatch.setattr(
+        C, "remote_publication",
+        lambda *_a, **_k: (True, {
+            "verified": True,
+            "manifests": {
+                "version": {"identity": "e" * 64},
+                "latest": {"identity": "e" * 64},
+            },
+        }),
+    )
+
+    verdict, findings, stats = C.audit(root)
+
+    assert verdict == "FINDINGS"
+    assert stats["recorded_manifest_identity"] == "d" * 64
+    assert stats["remote_manifest_identity"] == "e" * 64
+    assert any("exact manifest identity" in f for f in findings), findings
 
 
 def test_an_unreproducible_fingerprint_is_a_finding(tmp_path, monkeypatch):

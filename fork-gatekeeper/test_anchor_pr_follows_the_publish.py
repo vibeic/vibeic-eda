@@ -75,11 +75,22 @@ def test_the_release_opens_the_anchor_pr_only_on_a_real_publish():
         "the anchor call is not guarded by `pushed`")
 
 
-def test_a_failed_anchor_never_fails_the_release():
-    """The image is already published by this point. An advisory step that can
-    turn a successful release into a failed one would be traded away the first
-    time it misfired."""
+def test_an_anchor_exception_is_captured_as_a_terminal_round_result():
+    """The image is irrevocably public, but the round is not converged.
+
+    The exception must be retained as evidence rather than escaping before the
+    current-round sidecar is written. A later noop retries the anchor.
+    """
     src = Path(DR.__file__).read_text()
     seg = src.split("open_anchor_pr", 1)[1][:400]
     assert "except Exception" in src.split("open_anchor_pr", 1)[0][-600:] or \
            "except Exception" in seg, "the call is not wrapped"
+    assert '"stage": "anchor_pr"' in Path(DR.__file__).read_text()
+
+
+def test_noop_retries_anchor_and_main_already_current_is_success():
+    release = Path(DR.__file__).read_text()
+    anchor = Path(P.__file__).read_text()
+    assert release.count("open_anchor_pr") >= 2
+    assert "anchor already at {version} — nothing to open" in anchor
+    assert "branch_exists" in anchor and "anchor PR pending" in anchor

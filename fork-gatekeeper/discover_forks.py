@@ -2964,6 +2964,22 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                                   "base_withheld": cl.get("base_withheld")}
     led["base_release"] = cl["base"]
 
+    # A contents assertion is a claim ABOUT an already-built artefact, not a
+    # source ref the image fetches.  A watch-only fork is not layered into the
+    # image at all.  Neither row kind has a meaningful image-pin, release-lag,
+    # or unshipped-at-that-pin measurement.  Leaving the ordinary fork compare
+    # values on these rows let the public page aggregate/display them beside an
+    # all-zero gap certificate even though fork_gap_report correctly excluded
+    # them.  Normalize the page-facing health schema at the producer boundary.
+    if led.get("pin_kind") == pin_kinds.KIND_CONTENTS_ASSERTION \
+            or led.get("integrated") is False:
+        record_behind(led, None)
+        for field in (
+                "sync_lag", "release_lag", "lag_split_exact",
+                "ours_unshipped", "ours_unshipped_substantive",
+                "ours_unshipped_measured_against"):
+            led[field] = None
+
     led.setdefault("last_sync", None)
     return led
 

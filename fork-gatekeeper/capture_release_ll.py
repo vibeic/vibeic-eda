@@ -20,9 +20,10 @@ class of failure without scraping human-oriented logs or inheriting a story.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -51,7 +52,74 @@ AI_AUTHORIZATION_SCHEMA_VERSION = 1
 RELEASE_PINS_PROGRAM = "check_release_pins_committed"
 RELEASE_PINS_SCHEMA_VERSION = 1
 FULL_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+MANIFEST_ID = re.compile(r"[0-9a-f]{64}")
+RELEASE_IMAGE = "ghcr.io/vibeic/vibeic-eda"
 EDA_ROOT = Path(__file__).resolve().parent.parent
+
+# Every Git read used by the retained certificate goes through one fixed,
+# hermetic entry point.  In particular, do not inherit a caller's GIT_DIR,
+# worktree/index, object alternates, replace-ref namespace, or config injection:
+# any of those can make a read-only-looking ``rev-parse``/``show`` answer a
+# different repository question.  Global/system config is disabled and hooks
+# are pinned off as defense in depth for future commands added to this helper.
+_GIT = "/usr/bin/git"
+_GIT_PREFIX = (
+    _GIT,
+    "--no-replace-objects",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false",
+)
+
+
+def _git_environment() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("GIT_")}
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+    })
+    return env
+
+
+def _git_run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run fixed Git with no ambient repository/config authority."""
+    if "env" in kwargs:
+        raise TypeError("_git_run owns its sanitized environment")
+    return subprocess.run(
+        [*_GIT_PREFIX, *args], env=_git_environment(), **kwargs)
+
+
+def _repository_clean(root: Path) -> tuple[bool, str | None]:
+    """Prove that a checkout has no staged, unstaged, or untracked state.
+
+    A commit identity is not the identity of the Python and JSON bytes this
+    process executed/read when its worktree is dirty.  Porcelain v1 with ``-z``
+    is a stable, filename-safe census; fixed Git and the sanitized environment
+    keep ambient repository/config authority out of the question.
+    """
+    try:
+        process = _git_run(
+            ["-C", str(root), "status", "--porcelain=v1", "-z",
+             "--untracked-files=all", "--ignore-submodules=none"],
+            capture_output=True, text=True,
+        )
+    except OSError as exc:
+        return False, f"could not prove repository cleanliness: {exc}"
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout).strip()[:160]
+        return False, ("could not prove repository cleanliness"
+                       + (f": {detail}" if detail else ""))
+    if process.stdout:
+        entries = len([row for row in process.stdout.split("\0") if row])
+        return False, (
+            "repository is dirty at the page publication boundary "
+            f"({entries} staged, unstaged, or untracked path(s))")
+    return True, None
 
 
 def _json_object(pairs):
@@ -67,11 +135,19 @@ def _reject_json_constant(value: str):
     raise ValueError(f"non-finite JSON number {value!r}")
 
 
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number {value!r}")
+    return parsed
+
+
 def _read(path: Path) -> tuple[Optional[dict], Optional[str]]:
     try:
         value = json.loads(
             path.read_text(encoding="utf-8"),
             object_pairs_hook=_json_object,
+            parse_float=_finite_float,
             parse_constant=_reject_json_constant,
         )
     except FileNotFoundError:
@@ -107,6 +183,38 @@ def _strict_when(value: object) -> Optional[datetime]:
     return parsed
 
 
+def _round_provenance_errors(left: object, right: object, *,
+                             left_name: str, right_name: str) -> list[str]:
+    """Require two consumers to name the same immutable daily round.
+
+    A nonce is necessary but not sufficient provenance.  A copied nonce beside
+    different source timestamps can otherwise splice two executions into one
+    apparently current certificate.  Compare the fields all daily-round
+    consumers retain; ``applied`` is deliberately excluded because the GitHub
+    collector's normalized envelope does not carry it (its source validators
+    independently require it on the gap/AI records that do).
+    """
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return [f"{left_name} and {right_name} do not both name a round object"]
+    errors: list[str] = []
+    for field in ("schema_version", "run_id"):
+        if left.get(field) != right.get(field):
+            label = ("run_id" if field == "run_id"
+                     else f"round {field}")
+            errors.append(
+                f"{left_name} and {right_name} name different daily_0530 "
+                f"{label} values")
+    for field in ("started_at", "finished_at"):
+        left_when = _strict_when(left.get(field))
+        right_when = _strict_when(right.get(field))
+        if (left_when is None or right_when is None
+                or left_when != right_when):
+            errors.append(
+                f"{left_name} and {right_name} name different daily_0530 "
+                f"round {field} values")
+    return errors
+
+
 def _target(release: dict) -> Optional[str]:
     for key in ("version_candidate", "version"):
         value = release.get(key)
@@ -134,9 +242,13 @@ def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
     else:
         status = "cannot_ask"
     progress = record.get("progress")
+    process_tree = record.get("process_tree")
     return {
+        "schema": record.get("schema"),
         "status": status,
+        "started_at": record.get("started_at"),
         "exit_code": rc,
+        "process_rc": record.get("process_rc"),
         "outcome": record.get("outcome"),
         "reason": record.get("reason"),
         "mechanism": record.get("mechanism"),
@@ -144,8 +256,303 @@ def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
         "stall_grace_seconds": record.get("stall_grace_seconds"),
         "total_runtime_ceiling_seconds": record.get(
             "total_runtime_ceiling_seconds"),
+        "junit": record.get("junit"),
+        "junit_cases": record.get("junit_cases"),
+        "junit_red": record.get("junit_red"),
         "progress": progress if isinstance(progress, dict) else None,
+        "process_tree": (process_tree
+                         if isinstance(process_tree, dict) else None),
     }
+
+
+def _validate_selftest(record: object, *, round_at: str,
+                       observed_until: datetime, summary: bool = False
+                       ) -> list[str]:
+    """Re-derive a semantic pytest verdict from its retained finite evidence."""
+    errors: list[str] = []
+    if not isinstance(record, dict):
+        return ["semantic pytest evidence is not an object"]
+    if type(record.get("schema")) is not int or record.get("schema") != 1:
+        errors.append("semantic pytest schema is not 1")
+    if record.get("mechanism") != "validated_semantic_progress_lease":
+        errors.append("semantic pytest mechanism is invalid")
+    started = _strict_when(record.get("started_at"))
+    boundary = _strict_when(round_at)
+    if (started is None or boundary is None or started < boundary
+            or started > observed_until):
+        errors.append("semantic pytest started_at is stale, malformed, or future")
+    elapsed = record.get("elapsed_seconds")
+    if (not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed)) or elapsed < 0):
+        errors.append("semantic pytest elapsed_seconds is not finite/non-negative")
+    elif started is not None \
+            and started + timedelta(seconds=float(elapsed)) > observed_until:
+        errors.append("semantic pytest elapsed interval ends after its observer")
+    grace = record.get("stall_grace_seconds")
+    if (not isinstance(grace, (int, float)) or isinstance(grace, bool)
+            or not math.isfinite(float(grace)) or grace <= 0):
+        errors.append("semantic pytest stall_grace_seconds is not finite/positive")
+    if record.get("total_runtime_ceiling_seconds") is not None:
+        errors.append("semantic pytest carries a forbidden total runtime ceiling")
+
+    rc = record.get("exit_code")
+    process_rc = record.get("process_rc")
+    red = record.get("junit_red")
+    cases = record.get("junit_cases")
+    progress = record.get("progress")
+    tree = record.get("process_tree")
+    if type(rc) is not int or rc not in {0, 1, 2}:
+        errors.append("semantic pytest exit_code is not an exact supported integer")
+    green = type(rc) is int and rc == 0
+    if summary:
+        expected_status = ("passed" if rc == 0 else
+                           "red" if rc == 1 else
+                           "norecord" if rc == 2 else "cannot_ask")
+        if record.get("status") != expected_status:
+            errors.append("semantic pytest status contradicts exit_code")
+    if green:
+        if (record.get("outcome") != "natural"
+                or type(process_rc) is not int or process_rc != 0):
+            errors.append("semantic pytest did not end naturally with process rc 0")
+        if (type(cases) is not int or cases <= 0
+                or type(red) is not int or red != 0):
+            errors.append("semantic pytest has no complete all-green JUnit census")
+        if not isinstance(record.get("junit"), str) or not record["junit"]:
+            errors.append("semantic pytest does not name its JUnit evidence")
+        if (not isinstance(progress, dict)
+                or progress.get("stage") != "finished"
+                or progress.get("last_event") != "session_finish"
+                or type(progress.get("selected")) is not int
+                or progress["selected"] <= 0
+                or type(progress.get("finished")) is not int
+                or progress.get("finished") != progress["selected"]
+                or progress["selected"] != cases
+                or type(progress.get("exitstatus")) is not int
+                or progress.get("exitstatus") != 0
+                or progress.get("protocol_error") is not None
+                or type(progress.get("events")) is not int
+                or progress["events"] <= 0):
+            errors.append("semantic pytest progress protocol is not a complete green run")
+        if (not isinstance(tree, dict)
+                or tree.get("subreaper") is not True
+                or tree.get("census_complete") is not True
+                or tree.get("live_descendants_observed") != []
+                or tree.get("cleanup_survivors") != []
+                or tree.get("final_empty") is not True):
+            errors.append("semantic pytest process-tree terminal census is not empty")
+    return errors
+
+
+def _string_identities(value: object, name: str, errors: list[str]) -> list[str]:
+    if (not isinstance(value, list)
+            or any(not isinstance(item, str) or not item
+                   or item.strip() != item for item in value)):
+        errors.append(f"{name} is not a list of non-empty identities")
+        return []
+    if len({item.casefold() for item in value}) != len(value):
+        errors.append(f"{name} contains duplicate identities")
+    return list(value)
+
+
+def _validate_remote_publication(value: object, target: str,
+                                 errors: list[str]) -> None:
+    if not isinstance(value, dict) or value.get("verified") is not True:
+        errors.append("remote release publication is not verified")
+        return
+    manifests = value.get("manifests")
+    if not isinstance(manifests, dict) or set(manifests) != {"version", "latest"}:
+        errors.append("remote publication has no exact version/latest manifests")
+        return
+    identities = []
+    expected_refs = {
+        "version": f"{RELEASE_IMAGE}:{target}",
+        "latest": f"{RELEASE_IMAGE}:latest",
+    }
+    for name in ("version", "latest"):
+        row = manifests.get(name)
+        if (not isinstance(row, dict)
+                or row.get("ref") != expected_refs[name]
+                or row.get("state") != "present"
+                or row.get("source") != "registry"
+                or not isinstance(row.get("detail"), str)
+                or not isinstance(row.get("identity"), str)
+                or MANIFEST_ID.fullmatch(row["identity"]) is None):
+            errors.append(f"remote publication {name} manifest is invalid")
+            continue
+        identities.append(row["identity"])
+    if len(identities) == 2 and identities[0] != identities[1]:
+        errors.append("immutable version and latest name different manifests")
+
+
+def _validate_record_publication(value: object, errors: list[str],
+                                 *, published: bool) -> None:
+    if not isinstance(value, dict) or value.get("verified") is not True:
+        errors.append("release-record publication is not verified")
+        return
+    if value.get("subject") != "origin/main:RELEASED.json":
+        errors.append("release-record publication names the wrong remote subject")
+    identity = value.get("identity")
+    if (not isinstance(identity, str)
+            or FULL_OBJECT_ID.fullmatch(identity.lower()) is None):
+        errors.append("release-record publication has no exact commit identity")
+    initial = value.get("initial_state")
+    attempted = value.get("repair_attempted")
+    if initial not in {"present", "absent"} or type(attempted) is not bool:
+        errors.append("release-record initial/repair evidence is malformed")
+    elif initial == "present" and attempted:
+        errors.append("present release record claims an unnecessary repair")
+    elif initial == "absent" and not (
+            attempted and value.get("final_state") == "present"
+            and isinstance(value.get("repair"), dict)
+            and value["repair"].get("ok") is True):
+        errors.append("absent release record has no verified successful repair")
+    if published and value.get("committed") is not True:
+        errors.append("published release record was not committed")
+
+
+def _validate_release_terminal(record: object, *, round_at: str,
+                               observed_until: datetime,
+                               summary: bool = False) -> list[str]:
+    """Validate the complete successful release, not its status label."""
+    errors: list[str] = []
+    if not isinstance(record, dict):
+        return ["release terminal evidence is not an object"]
+    if record.get("program") != "daily_release":
+        errors.append("release program is not daily_release")
+    if (type(record.get("schema_version")) is not int
+            or record.get("schema_version") != 2):
+        errors.append("release schema_version is not 2")
+    status = record.get("status")
+    if status not in {
+            "published", "noop", "failed", "running", "dry_run",
+            "recorded", "smoke_passed"}:
+        errors.append("release status is unsupported")
+    started = _strict_when(record.get("started_at"))
+    finished = _strict_when(record.get("finished_at"))
+    boundary = _strict_when(round_at)
+    if (started is None or boundary is None or started < boundary
+            or started > observed_until):
+        errors.append("release started_at is stale, malformed, or future")
+    if (finished is None or started is None or finished < started
+            or finished > observed_until):
+        errors.append("release finished_at is malformed, reversed, or future")
+
+    # Failed/unmeasured terminals remain useful LL evidence.  Only a source that
+    # claims success must prove the full publication chain below.
+    if status not in {"published", "noop"}:
+        return errors
+    if type(record.get("exit_code")) is not int \
+            or record.get("exit_code") != 0:
+        errors.append("successful release does not carry exit_code 0")
+    if record.get("failure") is not None:
+        errors.append("successful release carries a failure")
+    if summary:
+        if (type(record.get("tick_exit")) is not int
+                or record.get("tick_exit") != 0
+                or record.get("tick_state") != "ran"):
+            errors.append("release LL does not prove a successful current tick")
+        if record.get("noop") is not (status == "noop"):
+            errors.append("release noop flag contradicts its terminal status")
+
+    version = record.get("version")
+    if (not isinstance(version, dict)
+            or set(version) != {"from", "to"}
+            or any(not isinstance(version.get(name), str)
+                   or SEMVER.fullmatch(version[name]) is None
+                   for name in ("from", "to"))):
+        errors.append("release version is not an exact from/to semver pair")
+        target = None
+    else:
+        target = version["to"]
+        if status == "noop" and version["from"] != target:
+            errors.append("release noop changes the version")
+        if status == "published" and version["from"] == target:
+            errors.append("published release does not advance the version")
+    if summary and target is not None and record.get("target") != target:
+        errors.append("release LL target differs from release version.to")
+
+    moved_name = "moved_tools" if summary else "moved"
+    built_name = "built_tools" if summary else "built"
+    moved_raw = record.get(moved_name)
+    if not summary and isinstance(moved_raw, list):
+        moved_raw = [item.get("repo") if isinstance(item, dict) else None
+                     for item in moved_raw]
+    moved = _string_identities(moved_raw, moved_name, errors)
+    built = _string_identities(record.get(built_name), built_name, errors)
+    attempts = record.get("compose_attempts")
+    if not isinstance(attempts, list):
+        errors.append("release compose_attempts is not a list")
+        attempts = []
+
+    smoke = record.get("smoke")
+    if not isinstance(smoke, dict) or smoke.get("failures") != []:
+        errors.append("release smoke evidence is missing or carries failures")
+    elif status == "published":
+        expected = smoke.get("expected")
+        if (smoke.get("executed") is not True
+                or type(expected) is not int or expected <= 0
+                or type(smoke.get("passed")) is not int
+                or smoke.get("passed") != expected
+                or smoke.get("outcome") != "natural"):
+            errors.append("published image has no complete natural smoke census")
+    elif (smoke.get("executed") is not False
+          or smoke.get("outcome") != "not_applicable"
+          or type(smoke.get("expected")) is not int
+          or smoke["expected"] <= 0
+          or type(smoke.get("passed")) is not int
+          or smoke.get("passed") != 0):
+        errors.append("release noop has contradictory smoke evidence")
+
+    if target is not None:
+        _validate_remote_publication(record.get("remote_publication"),
+                                     target, errors)
+    _validate_record_publication(
+        record.get("release_record_publication"), errors,
+        published=status == "published")
+
+    anchor = record.get("anchor_pr")
+    if status == "noop":
+        if moved or built or attempts:
+            errors.append("release noop carries moved/built/compose work")
+        if (not isinstance(anchor, dict) or anchor.get("ok") is not True
+                or not isinstance(anchor.get("note"), str)
+                or not anchor["note"]):
+            errors.append("release noop has no successful anchor verification")
+    else:
+        candidate = record.get("version_candidate")
+        if (not isinstance(candidate, dict) or not isinstance(version, dict)
+                or candidate.get("from") != version.get("from")
+                or candidate.get("to") != version.get("to")):
+            errors.append("published version candidate differs from terminal version")
+        if not attempts:
+            errors.append("published release has no compose attempt")
+        else:
+            for pos, attempt in enumerate(attempts, 1):
+                if (not isinstance(attempt, dict)
+                        or type(attempt.get("attempt")) is not int
+                        or attempt.get("attempt") != pos
+                        or type(attempt.get("exit_code")) is not int):
+                    errors.append("published compose attempt evidence is malformed")
+                    break
+            if isinstance(attempts[-1], dict) \
+                    and attempts[-1].get("exit_code") != 0:
+                errors.append("published compose did not finish successfully")
+        if record.get("registry_composed") is not True:
+            errors.append("published release did not prove registry composition")
+        if record.get("pushed") is not True:
+            errors.append("published immutable version was not pushed")
+        latest = record.get("latest_publication")
+        expected_latest = f"{RELEASE_IMAGE}:latest"
+        if (not isinstance(latest, dict)
+                or latest.get("ref") != expected_latest
+                or latest.get("tagged") is not True
+                or latest.get("pushed") is not True):
+            errors.append("published latest tag was not pushed")
+        if (not isinstance(anchor, dict) or anchor.get("ok") is not True
+                or not isinstance(anchor.get("note"), str)
+                or not anchor["note"]):
+            errors.append("published release has no successful anchor action")
+    return errors
 
 
 def _current_head(root: Path) -> tuple[Optional[str], Optional[str]]:
@@ -157,8 +564,8 @@ def _current_head(root: Path) -> tuple[Optional[str], Optional[str]]:
     measured.
     """
     try:
-        process = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--verify",
+        process = _git_run(
+            ["-C", str(root), "rev-parse", "--verify",
              "HEAD^{commit}"],
             capture_output=True, text=True,
         )
@@ -284,6 +691,7 @@ def _validate_release_pins(record: dict, path: Path, round_at: str,
 
     normalized = {
         "program": RELEASE_PINS_PROGRAM,
+        "tool": RELEASE_PINS_PROGRAM,
         "schema_version": RELEASE_PINS_SCHEMA_VERSION,
         "checked_at": record["checked_at"],
         "round_at": record["round_at"],
@@ -293,6 +701,8 @@ def _validate_release_pins(record: dict, path: Path, round_at: str,
                       False if verdict == "OUTSTANDING" else None),
         "version": (version if verdict != "COULD_NOT_TELL"
                     and isinstance(version, str) else None),
+        "rev": (rev if verdict != "COULD_NOT_TELL"
+                and isinstance(rev, str) else None),
         "requested_revision": (rev if verdict != "COULD_NOT_TELL"
                                and isinstance(rev, str) else None),
         "revision": (revision.lower()
@@ -1913,8 +2323,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     release = release or {}
     gap = gap or {}
     attempts = release.get("compose_attempts") or []
-    failed_attempts = sum(1 for a in attempts
-                          if isinstance(a, dict) and a.get("exit_code"))
+    failed_attempts = sum(
+        1 for attempt in attempts
+        if (isinstance(attempt, dict)
+            and type(attempt.get("exit_code")) is int
+            and attempt["exit_code"] != 0))
     status = release.get("status") or "unmeasured"
     failure = (release.get("failure")
                if isinstance(release.get("failure"), dict) else {})
@@ -1928,20 +2341,42 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     release_lag = gap.get("q1_release_lag")
     past_pin = gap.get("q2_ours_past_the_pin")
     stranded = gap.get("q2_our_commits_stranded")
-    measured = all(isinstance(v, int) for v in (sync_lag, image_lag, past_pin))
-    round_measured = all(isinstance(v, int)
+    # JSON booleans are Python integers.  A forged ``false`` zero must not turn
+    # an unmeasured gap or tick into an exact numeric success.
+    measured = all(type(v) is int for v in (sync_lag, image_lag, past_pin))
+    round_measured = all(type(v) is int
                          for v in (sync_lag, release_lag, past_pin))
-    terminal_ok = status in {"published", "noop", "completed", "recorded"}
-    anchor_blocked = bool(terminal_ok and anchor_pr is not None
+    convergence_metrics_exact = all(type(v) is int for v in (
+        sync_lag, live_sync_lag, image_lag, release_lag, past_pin,
+        gap.get("q2_ours_past_the_pin_substantive"), stranded,
+    ))
+    # A release mode that merely wrote RELEASED.json (``recorded``), completed
+    # local work without a push (``completed``), or carries only a successful
+    # status label is not delivery.  Re-derive the complete terminal proof here
+    # even though the production CLI validates the source before calling this
+    # pure formatter: direct callers must not be able to manufacture convergence
+    # from ``status=published`` or ``exit_code=0`` alone.
+    release_terminal_errors = _validate_release_terminal(
+        release, round_at=round_at,
+        observed_until=datetime.now(timezone.utc),
+    )
+    terminal_ok = bool(
+        status in {"published", "noop"} and not release_terminal_errors)
+    # Keep the terminal cause visible even though a failed anchor necessarily
+    # prevents the complete-terminal predicate above from authorizing delivery.
+    anchor_blocked = bool(status in {"published", "noop"}
+                          and anchor_pr is not None
                           and anchor_pr.get("ok") is False)
     # Preserve the original image-delivery arithmetic under explicit names.
     # The generic verdict now means the whole fork programme, including its
     # GitHub issue/PR closure boundary; an absent/open GitHub answer can never
     # inherit a clean-looking delivery zero.
-    delivery_converged = bool(measured and terminal_ok and sync_lag == 0
-                              and image_lag == 0 and past_pin == 0)
+    delivery_converged = bool(
+        measured and convergence_metrics_exact and terminal_ok
+        and sync_lag == 0 and image_lag == 0 and past_pin == 0)
     delivery_round_converged = bool(
-        round_measured and terminal_ok and sync_lag == 0
+        round_measured and convergence_metrics_exact and terminal_ok
+        and sync_lag == 0
         and release_lag == 0 and past_pin == 0)
     fork_github_status = (fork_github.get("status")
                           if isinstance(fork_github, dict) else None)
@@ -1965,11 +2400,13 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     # validated current-round reset/noop/refusal evidence.
     watch_reset_clear = watch_reset is None or watch_reset_status == "pass"
     inputs_authoritative = not source_errors
-    tick_authorized = tick_state == "ran" and tick_exit == 0
+    tick_authorized = (tick_state == "ran" and type(tick_exit) is int
+                       and tick_exit == 0)
+    tick_ran_unsuccessfully = tick_state == "ran" and not tick_authorized
     whole_round_clear = bool(
         tick_authorized and not anchor_blocked
         and ai_authorized and release_pins_clear and watch_reset_clear
-        and isinstance(stranded, int) and stranded == 0)
+        and type(stranded) is int and stranded == 0)
     converged = bool(delivery_converged and github_converged
                      and inputs_authoritative and whole_round_clear)
     round_converged = bool(delivery_round_converged and github_converged
@@ -1988,7 +2425,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         # delivery hops.  Keep the image convergence arithmetic intact, but do
         # not let a successful registry push erase a failed second hop from LL.
         outcome = "published_with_anchor_pr_blocked"
-    elif terminal_ok and tick_state == "ran" and tick_exit != 0:
+    elif terminal_ok and tick_ran_unsuccessfully:
         outcome = "finished_with_nonzero_release_tick"
     elif terminal_ok and release_pins_verdict == "OUTSTANDING":
         outcome = "published_with_uncommitted_release_pins"
@@ -1996,6 +2433,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         outcome = "finished_with_open_fork_work"
     elif terminal_ok and failed_attempts:
         outcome = "self_healed_after_retry"
+    elif status == "recorded":
+        outcome = "release_record_only"
     elif status == "failed" and failure.get("retryable"):
         outcome = "blocked_after_bounded_retries"
     elif status == "failed":
@@ -2004,11 +2443,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         outcome = "interrupted_without_terminal_verdict"
     elif status == "not_checked":
         outcome = "release_not_checked"
-    elif tick_state == "ran" and tick_exit != 0:
+    elif tick_ran_unsuccessfully:
         outcome = "finished_with_nonzero_release_tick"
     elif converged:
         outcome = "converged"
-    elif (round_converged and isinstance(live_sync_lag, int)
+    elif (round_converged and type(live_sync_lag) is int
           and live_sync_lag > 0):
         outcome = "converged_at_boundary_with_late_upstream_drift"
     elif not measured:
@@ -2025,7 +2464,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         category = "ai_postcondition_unverified"
     elif ai_status == "norecord" and category is None:
         category = "ai_authorization_norecord"
-    if tick_state == "ran" and tick_exit != 0 and category is None:
+    elif status == "recorded" and category is None:
+        category = "release_record_only"
+    if tick_ran_unsuccessfully and category is None:
         category = "release_tick_nonzero"
     elif (terminal_ok and release_pins_verdict == "OUTSTANDING"
           and category is None):
@@ -2057,6 +2498,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             control = (
                 "do not invoke the release tick without current code and a "
                 "complete green semantic pytest record")
+    elif status == "recorded":
+        control = (
+            "retain the release record as bookkeeping only; require a canonical "
+            "published or noop terminal with complete remote, smoke, record and "
+            "anchor proof before declaring delivery")
     elif anchor_blocked:
         control = (
             "retain the published image; refuse to bypass the anchor "
@@ -2075,18 +2521,67 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     elif failure:
         control = "fail closed; publish no version and retain the terminal cause"
 
+    # Bind the retained certificate to one immutable daily_0530 nonce and one
+    # fleet denominator.  Prior LL records carried the nonce only inside several
+    # nested sources; a consumer could therefore read a forged top-level green
+    # while never proving that gap, GitHub, AI and release pins named one round.
+    run_ids = []
+    for value in (
+        ((gap.get("source") or {}).get("_round") or {}).get("run_id"),
+        ((fork_github or {}).get("round") or {}).get("run_id"),
+        ((ai_authorization or {}).get("round") or {}).get("run_id"),
+        (release_pins or {}).get("run_id"),
+        (watch_reset or {}).get("run_id"),
+    ):
+        if isinstance(value, str) and value:
+            run_ids.append(value)
+    run_id = run_ids[0] if run_ids and len(set(run_ids)) == 1 else None
+    registered_forks = gap.get("registered_forks")
+    if not isinstance(registered_forks, list):
+        registered_forks = []
+
     return {
         "program": "release_ll",
-        "schema_version": 2,
+        "schema_version": 3,
         "round_at": round_at,
+        "run_id": run_id,
+        "registered_forks": list(registered_forks),
+        "registered_count": len(registered_forks),
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "release": {
+            "program": release.get("program"),
+            "schema_version": release.get("schema_version"),
+            "started_at": release.get("started_at"),
+            "finished_at": release.get("finished_at"),
             "status": status,
+            "noop": status == "noop",
             "target": _target(release),
+            "exit_code": release.get("exit_code"),
+            "version": (dict(release["version"])
+                        if isinstance(release.get("version"), dict) else None),
+            "version_candidate": (
+                dict(release["version_candidate"])
+                if isinstance(release.get("version_candidate"), dict) else None),
             "moved_tools": [r.get("repo") for r in release.get("moved", [])
                             if isinstance(r, dict) and r.get("repo")],
             "built_tools": list(release.get("built") or []),
             "compose_attempts": attempts,
+            "registry_composed": release.get("registry_composed"),
+            "pushed": release.get("pushed"),
+            "smoke": (dict(release["smoke"])
+                      if isinstance(release.get("smoke"), dict) else None),
+            "remote_publication": (
+                dict(release["remote_publication"])
+                if isinstance(release.get("remote_publication"), dict)
+                else None),
+            "latest_publication": (
+                dict(release["latest_publication"])
+                if isinstance(release.get("latest_publication"), dict)
+                else None),
+            "release_record_publication": (
+                dict(release["release_record_publication"])
+                if isinstance(release.get("release_record_publication"), dict)
+                else None),
             "failure": failure or None,
             "anchor_pr": anchor_pr,
             "tick_exit": tick_exit,
@@ -2174,6 +2669,8 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
     fork_github = record.get("fork_github")
     narrow = {
         "round": stamp,
+        "run_id": record.get("run_id"),
+        "registered_count": record.get("registered_count"),
         "status": record["release"]["status"],
         "target": record["release"]["target"],
         "trigger": record["lesson"]["trigger"],
@@ -2366,28 +2863,21 @@ def main(argv=None) -> int:
             }
     provenance_errors: list[str] = []
     if gap is not None and fork_github is not None:
-        gap_run_id = gap["source"]["_round"]["run_id"]
-        github_run_id = fork_github["round"]["run_id"]
-        if gap_run_id != github_run_id:
-            provenance_errors.append(
-                "fork_gap.json and fork-github-convergence.json name different "
-                "daily_0530 run_id values")
+        provenance_errors.extend(_round_provenance_errors(
+            gap["source"]["_round"], fork_github["round"],
+            left_name="fork_gap.json",
+            right_name="fork-github-convergence.json"))
     if (gap is not None and isinstance(ai_authorization.get("round"), dict)):
-        gap_run_id = gap["source"]["_round"]["run_id"]
-        ai_run_id = ai_authorization["round"].get("run_id")
-        if gap_run_id != ai_run_id:
-            provenance_errors.append(
-                "fork_gap.json and ai-release-authorization.json name "
-                "different daily_0530 run_id values")
+        provenance_errors.extend(_round_provenance_errors(
+            gap["source"]["_round"], ai_authorization["round"],
+            left_name="fork_gap.json",
+            right_name="ai-release-authorization.json"))
     if (fork_github is not None
             and isinstance(ai_authorization.get("round"), dict)):
-        github_run_id = fork_github["round"]["run_id"]
-        ai_run_id = ai_authorization["round"].get("run_id")
-        if github_run_id != ai_run_id:
-            provenance_errors.append(
-                "fork-github-convergence.json and "
-                "ai-release-authorization.json name different daily_0530 "
-                "run_id values")
+        provenance_errors.extend(_round_provenance_errors(
+            fork_github["round"], ai_authorization["round"],
+            left_name="fork-github-convergence.json",
+            right_name="ai-release-authorization.json"))
     if watch_reset is not None:
         watch_run_id = watch_reset.get("run_id")
         if gap is not None and watch_run_id != gap["source"]["_round"]["run_id"]:
@@ -2435,6 +2925,14 @@ def main(argv=None) -> int:
                 "daily-release.json finished_at is in the future; no "
                 "current-run release verdict was recorded")
             release = None
+        if release_err is None and release is not None:
+            terminal_errors = _validate_release_terminal(
+                release, round_at=a.round_at, observed_until=observed_now)
+            if terminal_errors:
+                release_err = (
+                    "daily-release.json terminal proof is invalid: "
+                    + "; ".join(terminal_errors))
+                release = None
     if semantic_err is None and semantic is not None:
         semantic_started = _strict_when(semantic.get("started_at"))
         boundary = _strict_when(a.round_at)
@@ -2449,6 +2947,14 @@ def main(argv=None) -> int:
                 f"{a.semantic_pytest_json.name} is dated in the future; "
                 "no current self-test verdict was recorded")
             semantic = None
+        if semantic_err is None and semantic is not None:
+            semantic_errors = _validate_selftest(
+                semantic, round_at=a.round_at, observed_until=observed_now)
+            if semantic_errors:
+                semantic_err = (
+                    f"{a.semantic_pytest_json.name} terminal proof is invalid: "
+                    + "; ".join(semantic_errors))
+                semantic = None
     if (semantic_err is None and semantic is not None
             and a.tick_state == "ran" and semantic.get("exit_code") != 0):
         semantic_err = (
@@ -2499,6 +3005,43 @@ def main(argv=None) -> int:
             "reason": a.tick_state,
         }
         release_pins_errors = []
+    ordering_errors: list[str] = []
+    ai_checked = (_strict_when(ai_authorization.get("checked_at"))
+                  if isinstance(ai_authorization, dict) else None)
+    semantic_started = (_strict_when(semantic.get("started_at"))
+                        if isinstance(semantic, dict) else None)
+    semantic_elapsed = (semantic.get("elapsed_seconds")
+                        if isinstance(semantic, dict) else None)
+    release_started = (_strict_when(release.get("started_at"))
+                       if isinstance(release, dict) else None)
+    release_finished = (_strict_when(release.get("finished_at"))
+                        if isinstance(release, dict) else None)
+    pins_checked = (_strict_when(release_pins.get("checked_at"))
+                    if isinstance(release_pins, dict) else None)
+    if (ai_checked is not None and semantic_started is not None
+            and ai_checked > semantic_started):
+        ordering_errors.append(
+            "semantic pytest started before AI authorization finished")
+    if (semantic_started is not None
+            and isinstance(semantic_elapsed, (int, float))
+            and not isinstance(semantic_elapsed, bool)
+            and math.isfinite(float(semantic_elapsed))
+            and release_started is not None
+            and semantic_started + timedelta(
+                seconds=float(semantic_elapsed)) > release_started):
+        ordering_errors.append(
+            "daily release started before semantic pytest finished")
+    if (release_finished is not None and pins_checked is not None
+            and release_finished > pins_checked):
+        ordering_errors.append(
+            "release pins were checked before the release finished")
+    if gap is not None and fork_github is not None:
+        gap_completed = _strict_when(gap.get("completed_at"))
+        github_started = _strict_when(fork_github.get("started_at"))
+        if (gap_completed is not None and github_started is not None
+                and gap_completed > github_started):
+            ordering_errors.append(
+                "GitHub convergence started before fork-gap collection finished")
     errors = [e for e in (release_err, semantic_err) if e]
     errors.extend(release_pins_errors)
     errors.extend(gap_errors)
@@ -2506,6 +3049,7 @@ def main(argv=None) -> int:
     errors.extend(ai_errors)
     errors.extend(watch_reset_errors)
     errors.extend(provenance_errors)
+    errors.extend(ordering_errors)
     record = make_record(
         release, gap, a.round_at, a.tick_exit, errors,
         semantic_pytest=semantic, tick_state=a.tick_state,

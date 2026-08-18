@@ -98,6 +98,29 @@ def test_a_committed_record_reaches_the_remote(tmp_path):
     assert _git("rev-parse", "HEAD", cwd=work).stdout.strip() == after
 
 
+def test_release_head_is_pushed_even_when_checkout_branch_is_not_main(
+        tmp_path):
+    """Validate and publish the same ref, not HEAD versus local ``main``.
+
+    The old implementation proved origin/main was an ancestor of HEAD, then
+    ran ``git push origin main``.  On a release work branch Git reported
+    success while pushing the unchanged local main and leaving the record on
+    one disk.
+    """
+    origin, work = _repo_pair(tmp_path)
+    _git("switch", "-qc", "release-work", cwd=work)
+    (work / "RELEASED.json").write_text('{"version":"0.0.2"}\n')
+    (work / "VERSION").write_text("0.0.2\n")
+    _git("add", "RELEASED.json", "VERSION", cwd=work)
+    _git("commit", "-qm", "release: record 0.0.2", cwd=work)
+    head = _git("rev-parse", "HEAD", cwd=work).stdout.strip()
+
+    ok, why = D.push_release_record(work)
+
+    assert ok, why
+    assert _git("rev-parse", "refs/heads/main", cwd=origin).stdout.strip() == head
+
+
 def test_it_refuses_rather_than_discard_work_that_arrived_meanwhile(tmp_path):
     """The build takes tens of minutes; the remote can move inside that window."""
     origin, work = _repo_pair(tmp_path)

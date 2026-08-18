@@ -412,17 +412,42 @@ def test_a_pin_file_with_a_human_edit_is_refused_and_named(tmp_path):
     into an automated release commit. It is REFUSED and reported, never
     silently included and never silently dropped."""
     repo = _release_repo(tmp_path)
+    before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+        capture_output=True, text=True).stdout.strip()
     p = repo / "tools" / "openroad" / "Dockerfile"
     p.write_text(p.read_text() + "RUN echo a-human-was-editing-this\n")
+    subprocess.run(
+        ["git", "add", "--", "tools/openroad/Dockerfile"], cwd=str(repo),
+        check=True, capture_output=True)
 
     ok, note = D.commit_release_record(
         repo, "0.0.2", ["tools/openroad/Dockerfile"])
-    assert ok, note                       # the RECORD still lands
+    assert ok is False
     dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
                            capture_output=True, text=True).stdout
     assert "tools/openroad/Dockerfile" in dirty, \
         "a pin file with a non-pin change was swept into the release commit"
     assert "REFUSED" in note and "openroad" in note, note
+    after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+        capture_output=True, text=True).stdout.strip()
+    assert after == before, (
+        "the record was committed without the pin it claims; origin would "
+        "reproduce the stale pin and the public page would retain a fake gap")
+
+
+def test_a_moved_pin_reverted_before_record_commit_is_refused(tmp_path):
+    """A vacuously clean diff cannot stand for the pin the image used."""
+    repo = _release_repo(tmp_path)
+    p = repo / "tools" / "openroad" / "Dockerfile"
+    p.write_text(f"ARG OPENROAD_REF={'a'*40}\n")
+
+    ok, note = D.commit_release_record(
+        repo, "0.0.2", ["tools/openroad/Dockerfile"])
+
+    assert ok is False
+    assert "no longer exists" in note
 
 
 def test_it_still_never_uses_add_dash_A():

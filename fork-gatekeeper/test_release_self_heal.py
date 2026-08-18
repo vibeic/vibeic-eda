@@ -13,11 +13,16 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import build_page as B                                          # noqa: E402
 import capture_release_ll as LL                                 # noqa: E402
 import daily_release as R                                       # noqa: E402
+from test_ai_handoff_progress_supervision import (              # noqa: E402
+    _published_release_record,
+)
 from test_fork_github_convergence_ll import (                   # noqa: E402
     _fork_record as _valid_fork_github_record,
 )
@@ -153,6 +158,62 @@ def _fork_github_zero():
     return _valid_fork_github_record()
 
 
+def test_record_only_or_status_only_success_cannot_authorize_delivery():
+    round_at = "2026-08-17T05:30:00+08:00"
+    common = {
+        "program": "daily_release", "schema_version": 2,
+        "started_at": "2026-08-17T06:00:00+08:00",
+        "finished_at": "2026-08-17T06:00:01+08:00",
+        "exit_code": 0, "version": {"to": "0.3.4"},
+        "moved": [], "built": [], "compose_attempts": [],
+    }
+
+    for status in ("recorded", "published"):
+        record = LL.make_record(
+            dict(common, status=status), _gap(0, 0), round_at, 0,
+            fork_github=_fork_github_zero())
+        convergence = record["convergence"]
+        assert convergence["delivery_converged"] is False
+        assert convergence["delivery_round_converged"] is False
+        assert convergence["converged"] is False
+        assert convergence["round_converged"] is False
+
+    recorded = LL.make_record(
+        dict(common, status="recorded"), _gap(0, 0), round_at, 0,
+        fork_github=_fork_github_zero())
+    assert recorded["lesson"]["trigger"] == "release_record_only"
+    assert recorded["lesson"]["outcome"] == "release_record_only"
+
+
+@pytest.mark.parametrize("invalid_zero", [False, 0.0])
+def test_boolean_or_float_zeros_cannot_authorize_gap_or_tick_convergence(
+        invalid_zero):
+    round_at = "2026-08-17T05:30:00+08:00"
+    release = _published_release_record("0.3.5")
+    boolean_gap = {
+        name: invalid_zero for name in (
+            "q1_sync_lag_at_merge", "q1_sync_lag", "q1_release_lag",
+            "q1_image_behind_upstream", "q2_our_commits_stranded",
+            "q2_ours_past_the_pin", "q2_ours_past_the_pin_substantive",
+        )
+    }
+
+    gap_record = LL.make_record(
+        release, boolean_gap, round_at, 0,
+        fork_github=_fork_github_zero())
+    assert gap_record["convergence"]["measured"] is False
+    assert gap_record["convergence"]["round_measured"] is False
+    assert gap_record["convergence"]["converged"] is False
+    assert gap_record["convergence"]["round_converged"] is False
+
+    tick_record = LL.make_record(
+        release, _gap(0, 0), round_at, invalid_zero,
+        fork_github=_fork_github_zero())
+    assert tick_record["convergence"]["tick_authorized"] is False
+    assert tick_record["convergence"]["converged"] is False
+    assert tick_record["convergence"]["round_converged"] is False
+
+
 def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
     failed = {
         "status": "failed", "version_candidate": {"to": "0.3.3"},
@@ -169,9 +230,15 @@ def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
     assert first["lesson"]["outcome"] == "blocked_after_bounded_retries"
     assert first["convergence"]["image_behind_upstream"] == 31
 
-    healed = dict(failed, status="published", failure=None,
-                  compose_attempts=[{"exit_code": 1, "category": "dns"},
-                                    {"exit_code": 0, "category": None}])
+    healed = _published_release_record("0.3.5")
+    healed.update(
+        started_at="2026-08-18T06:03:30+08:00",
+        finished_at="2026-08-18T06:04:00+08:00",
+        compose_attempts=[
+            {"attempt": 1, "exit_code": 1, "category": "dns"},
+            {"attempt": 2, "exit_code": 0, "category": None},
+        ],
+    )
     second = LL.make_record(healed, _gap(0, 0),
                             "2026-08-18T05:30:00+08:00", 0,
                             fork_github=_fork_github_zero())
@@ -188,10 +255,7 @@ def test_ll_retains_failure_and_later_self_healed_outcome(tmp_path):
 
 
 def test_ll_separates_late_upstream_drift_from_a_failed_round():
-    release = {
-        "status": "published", "version": {"to": "0.3.4"},
-        "compose_attempts": [{"exit_code": 0}],
-    }
+    release = _published_release_record("0.3.5")
     gap = {
         "q1_sync_lag_at_merge": 0,
         "q1_sync_lag": 4,
@@ -202,7 +266,7 @@ def test_ll_separates_late_upstream_drift_from_a_failed_round():
         "q2_ours_past_the_pin_substantive": 0,
     }
     record = LL.make_record(
-        release, gap, "2026-08-17T09:12:00+08:00", 0,
+        release, gap, "2026-08-17T05:30:00+08:00", 0,
         fork_github=_fork_github_zero())
     assert record["lesson"]["outcome"] == \
         "converged_at_boundary_with_late_upstream_drift"
@@ -217,19 +281,16 @@ def test_ll_separates_late_upstream_drift_from_a_failed_round():
 def test_ll_keeps_a_failed_consumer_anchor_as_a_delivery_outcome(tmp_path):
     """A registry publish is real, but it is not the whole delivery when the
     consumer repo still points at the preceding immutable tag."""
-    release = {
-        "status": "published", "version": {"to": "0.3.4"},
-        "compose_attempts": [{"exit_code": 0}],
-        "anchor_pr": {
-            "ok": False,
-            "note": "branch push failed: benchmark gate could not run",
-        },
+    release = _published_release_record("0.3.5")
+    release["anchor_pr"] = {
+        "ok": False,
+        "note": "branch push failed: benchmark gate could not run",
     }
     record = LL.make_record(
-        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 0,
+        release, _gap(0, 0), "2026-08-17T05:30:00+08:00", 0,
         fork_github=_fork_github_zero())
-    assert record["schema_version"] == 2
-    assert record["convergence"]["delivery_round_converged"] is True
+    assert record["schema_version"] == 3
+    assert record["convergence"]["delivery_round_converged"] is False
     assert record["convergence"]["round_converged"] is False
     assert record["release"]["anchor_pr"] == release["anchor_pr"]
     assert record["lesson"]["trigger"] == "anchor_pr"
@@ -244,9 +305,9 @@ def test_ll_keeps_a_failed_consumer_anchor_as_a_delivery_outcome(tmp_path):
 
 
 def test_ll_never_calls_a_nonzero_tick_or_stranded_work_converged():
-    release = {"status": "published", "compose_attempts": [{"exit_code": 0}]}
+    release = _published_release_record("0.3.5")
     nonzero = LL.make_record(
-        release, _gap(0, 0), "2026-08-17T09:12:00+08:00", 7,
+        release, _gap(0, 0), "2026-08-17T05:30:00+08:00", 7,
         fork_github=_fork_github_zero())
     assert nonzero["convergence"]["delivery_converged"] is True
     assert nonzero["convergence"]["converged"] is False
@@ -257,7 +318,7 @@ def test_ll_never_calls_a_nonzero_tick_or_stranded_work_converged():
     gap = _gap(0, 0)
     gap["q2_our_commits_stranded"] = 1
     stranded = LL.make_record(
-        release, gap, "2026-08-17T09:12:00+08:00", 0,
+        release, gap, "2026-08-17T05:30:00+08:00", 0,
         fork_github=_fork_github_zero())
     assert stranded["convergence"]["delivery_converged"] is True
     assert stranded["convergence"]["our_commits_stranded"] == 1

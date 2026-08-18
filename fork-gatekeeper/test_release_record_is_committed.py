@@ -163,9 +163,20 @@ def test_the_publish_path_calls_it_only_when_something_was_pushed():
     assert guarded, (
         "commit_release_record is not inside an `if pushed:` block — a LOCAL "
         "ONLY build would be recorded as a release nobody can pull")
-    # ...and nowhere else: one guarded call site, not a guarded one plus a loose one.
+    # The only second call is the narrowly admitted next-round recovery of an
+    # immutable image already proved remote.  It reuses the same writer rather
+    # than growing a second commit implementation.
     total = sum(1 for n in ast.walk(tree)
                 if isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Name)
                 and n.func.id == "commit_release_record")
-    assert total == 1, f"expected exactly one call site, found {total}"
+    recovery = next(
+        n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name == "recover_uncommitted_release_record")
+    assert _calls(recovery, "commit_release_record")
+    recovery_src = ast.get_source_segment(src, recovery) or ""
+    assert "verify_remote_immutable_publication" in recovery_src
+    assert "_diff_is_only_pins" in recovery_src
+    assert "recovery_mixed_changes" in recovery_src
+    assert total == 2, f"expected publish + safe-recovery call sites, found {total}"

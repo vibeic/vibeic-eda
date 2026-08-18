@@ -54,8 +54,7 @@ ROUND = HERE / "run_0530.sh"
 def _verdict_block() -> str:
     """The final `if ...; then exit 1; fi` and the lines that feed it."""
     s = ROUND.read_text(encoding="utf-8")
-    i = s.rindex('if [ "${SIX}"')
-    return s[max(0, i - 3000):]
+    return s[s.index("# DID THE ROUND ACTUALLY CONVERGE?"):]
 
 
 def test_the_verdict_consults_the_convergence_measurement():
@@ -141,7 +140,7 @@ def test_the_gate_behaves_on_each_state(
 
     block = _verdict_block()
     start = block.index("SYNC_LAG=$(")
-    end = block.index("# 0 only when BOTH are clean")
+    end = block.index("# PUBLISH LAST")
     gate = block[start:end]
 
     script = (f'STATE="{state}"\nGK_STATE_DIR="{state}"\n'
