@@ -310,7 +310,20 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _nda_stop = _nda_block_push(wt)
         if _nda_stop:
             return (False, _nda_stop)
-        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
+        # `--detach` (so no local branch-name residue is left behind), and
+        # from a detached HEAD git cannot infer whether a SHORT destination
+        # names a branch or a tag -- it refuses rather than guessing:
+        #     error: The destination you provided is not a full refname
+        #     (i.e., starting with "refs/").
+        # Measured on the 0.3.7 release: the image built, smoked, recorded
+        # and published, and ONLY this push failed, leaving `:latest` moved
+        # off the version vibe-ic anchors -- the exact split vibe-ic#754
+        # closed. The other two callers create a NAMED branch and were not
+        # affected; spelling the ref in full is correct for them too and
+        # removes the dependency on how the worktree happened to be made.
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
+                        f"HEAD:refs/heads/{branch}"])
         if rc != 0:
             return (False, f"branch push failed: {out.strip()[:200]}")
         bf = Path(tempfile.gettempdir()) / f"gk-pr-body-{date}.md"
@@ -418,7 +431,20 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
         stop = _nda_block_push(wt)
         if stop:
             return (False, stop)
-        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
+        # `--detach` (so no local branch-name residue is left behind), and
+        # from a detached HEAD git cannot infer whether a SHORT destination
+        # names a branch or a tag -- it refuses rather than guessing:
+        #     error: The destination you provided is not a full refname
+        #     (i.e., starting with "refs/").
+        # Measured on the 0.3.7 release: the image built, smoked, recorded
+        # and published, and ONLY this push failed, leaving `:latest` moved
+        # off the version vibe-ic anchors -- the exact split vibe-ic#754
+        # closed. The other two callers create a NAMED branch and were not
+        # affected; spelling the ref in full is correct for them too and
+        # removes the dependency on how the worktree happened to be made.
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
+                        f"HEAD:refs/heads/{branch}"])
         if rc != 0:
             return (False, f"branch push failed: {out.strip()[:200]}")
         bf = Path(tempfile.gettempdir()) / f"gk-anchor-body-{version}.md"
@@ -572,7 +598,20 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
         _nda_stop = _nda_block_push(wt)
         if _nda_stop:
             return (False, _nda_stop)
-        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin", f"HEAD:{branch}"])
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
+        # `--detach` (so no local branch-name residue is left behind), and
+        # from a detached HEAD git cannot infer whether a SHORT destination
+        # names a branch or a tag -- it refuses rather than guessing:
+        #     error: The destination you provided is not a full refname
+        #     (i.e., starting with "refs/").
+        # Measured on the 0.3.7 release: the image built, smoked, recorded
+        # and published, and ONLY this push failed, leaving `:latest` moved
+        # off the version vibe-ic anchors -- the exact split vibe-ic#754
+        # closed. The other two callers create a NAMED branch and were not
+        # affected; spelling the ref in full is correct for them too and
+        # removes the dependency on how the worktree happened to be made.
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
+                        f"HEAD:refs/heads/{branch}"])
         if rc != 0:
             return (False, f"branch push failed: {out.strip()[:200]}")
         bf = Path(tempfile.gettempdir()) / f"gk-assess-body-{date}.md"

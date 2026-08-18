@@ -94,3 +94,36 @@ def test_noop_retries_anchor_and_main_already_current_is_success():
     assert release.count("open_anchor_pr") >= 2
     assert "anchor already at {version} — nothing to open" in anchor
     assert "branch_exists" in anchor and "anchor PR pending" in anchor
+
+
+def test_the_anchor_branch_is_pushed_by_full_refname():
+    """A detached HEAD cannot push to a SHORT destination name.
+
+    The anchor worktree is created with `--detach` (so no local branch-name
+    residue is left behind).  From a detached HEAD git cannot infer whether
+    `HEAD:eda-anchor-0.3.7` means a branch or a tag, so it refuses:
+
+        error: The destination you provided is not a full refname (i.e.,
+        starting with "refs/"). We tried to guess what you meant by:
+        - Looking for a ref that matches 'eda-anchor-0.3.7' on the remote side.
+
+    Reproduced standalone on git 2.x: from a detached HEAD,
+    `push origin HEAD:eda-anchor-0.3.7` errors and
+    `push origin HEAD:refs/heads/eda-anchor-0.3.7` returns 0.
+
+    Measured live on the 0.3.7 release: the image built, smoked, recorded and
+    published, and only the anchor PR failed -- so `:latest` moved off the
+    version vibe-ic pins, which is precisely the split vibe-ic#754 closed and
+    this file exists to keep closed.
+    """
+    src = Path(P.__file__).read_text()
+    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
+    assert '"push"' in body, "open_anchor_pr no longer pushes the anchor branch"
+    # Match the refspec itself rather than a source LINE: the call is wrapped,
+    # so a line-wise check passes or fails on formatting instead of on the
+    # thing under test.
+    assert 'f"HEAD:refs/heads/{branch}"' in body, (
+        "the anchor branch is not pushed by full refname; from the detached "
+        "anchor worktree git refuses a short destination")
+    assert 'f"HEAD:{branch}"' not in body, (
+        "a short-name push destination survives in open_anchor_pr")
