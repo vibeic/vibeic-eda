@@ -329,7 +329,11 @@ def test_the_call_site_captures_the_status_on_the_same_line():
     site's own line."""
     src = TICK.read_text()
     i = src.index('RELPIN_OUT="')
-    block = src[i:i + 400]
+    # Bound this semantic block by the next named section, not an arbitrary
+    # character window.  Current-round sidecar clearing deliberately lives
+    # before the checker and must not make this test lose sight of the call.
+    end = src.index("# Derived ONCE", i)
+    block = src[i:end]
     assert "relpin_rc=$?" in block
     lines = block.splitlines()
     call_i = next(n for n, ln in enumerate(lines)

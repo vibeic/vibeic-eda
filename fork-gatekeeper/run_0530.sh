@@ -150,6 +150,11 @@ echo "[$(date -Is)] fork-gatekeeper tests exit ${TESTS}" >> "${LOG}"
 # not ship. Keep the merge half above useful; fail closed only at this release
 # boundary. TICK=2 means NOT CHECKED — it is never forged into a successful
 # run_tick result.
+RELPIN_JSON="${GK_STATE_DIR}/release-pins-committed.json"
+if ! rm -f -- "${RELPIN_JSON}"; then
+    INPUT_CLEAR=1
+    echo "[$(date -Is)] could not clear ${RELPIN_JSON} — stale release-pin evidence must not describe this round" >> "${LOG}"
+fi
 TICK_STATE="ran"
 if [ "${TESTS}" -ne 0 ]; then
     TICK=2
@@ -362,7 +367,9 @@ fi
 # one retained row under release-ll/ for later policy and dashboard audits.
 python3 "${DIR}/capture_release_ll.py" \
     --state-dir "${GK_STATE_DIR}" \
+    --eda-root "${DIR}/.." \
     --release-json "${GK_STATE_DIR}/daily-release.json" \
+    --release-pins-json "${RELPIN_JSON}" \
     --gap-json "${GAP_JSON}" \
     --fork-github-json "${FORK_GH_JSON}" \
     --forks-json "${DIR}/FORKS.json" \

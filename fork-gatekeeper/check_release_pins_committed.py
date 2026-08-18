@@ -65,7 +65,9 @@ Exit: 0 committed / 1 outstanding review (named) / 2 could not tell.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
+import os
 import re
 import subprocess
 import sys
@@ -76,7 +78,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 TOOL = "check_release_pins_committed"
+SCHEMA_VERSION = 1
 RC_OK, RC_OUTSTANDING, RC_COULD_NOT_TELL = 0, 1, 2
+FULL_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
 #: Mirrors `check_pins_current.pinned_refs`'s name-pairing exactly — matched by
 #: the `github.com/vibeic/<repo>` URL in the same file, not by position, so a
@@ -191,6 +195,17 @@ def pins_at_rev(root: Path, rev: str) -> Dict[str, str]:
     return pins
 
 
+def resolve_revision(root: Path, rev: str) -> str:
+    """The immutable commit the human-facing revision named at check time."""
+    rc, out, err = _git(root, "rev-parse", "--verify", f"{rev}^{{commit}}")
+    value = out.strip().lower()
+    if rc != 0 or FULL_OBJECT_ID_RE.fullmatch(value) is None:
+        raise CouldNotTell(
+            f"cannot resolve {rev} to one full commit: "
+            f"{(err or out).strip()[:160]}")
+    return value
+
+
 def audit(root: Path, rev: str = "HEAD") -> Tuple[str, List[str], dict]:
     """(verdict, findings, stats). verdict in {"PASS", "OUTSTANDING"}.
 
@@ -199,7 +214,8 @@ def audit(root: Path, rev: str = "HEAD") -> Tuple[str, List[str], dict]:
     """
     rec = load_released(root)
     recorded: Dict[str, str] = rec["pins"]
-    committed = pins_at_rev(root, rev)
+    revision = resolve_revision(root, rev)
+    committed = pins_at_rev(root, revision)
 
     names = sorted(set(recorded) | set(committed))
     findings: List[str] = []
@@ -213,11 +229,21 @@ def audit(root: Path, rev: str = "HEAD") -> Tuple[str, List[str], dict]:
     stats = {
         "version": rec.get("version"),
         "rev": rev,
+        "revision": revision,
         "recorded_count": len(recorded),
         "committed_count": len(committed),
         "outstanding": [f.split(":", 1)[0] for f in findings],
     }
     return ("OUTSTANDING" if findings else "PASS"), findings, stats
+
+
+def _write_json(path: str, value: dict) -> None:
+    """Replace the sidecar atomically; a reader never sees half a verdict."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -228,25 +254,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "(default: HEAD — what a fresh clone of the current "
                          "branch would see)")
     ap.add_argument("--json", dest="json_out")
+    ap.add_argument("--round-at", default=None,
+                    help="05:30 boundary this production check belongs to")
+    ap.add_argument("--run-id", default=None,
+                    help="daily_0530 run nonce this production check belongs to")
     a = ap.parse_args(argv)
     root = Path(a.eda_root)
+    checked_at = datetime.now(timezone.utc).isoformat()
+    envelope = {
+        "program": TOOL,
+        "tool": TOOL,
+        "schema_version": SCHEMA_VERSION,
+        "checked_at": checked_at,
+        "round_at": a.round_at,
+        "run_id": a.run_id,
+    }
 
     try:
         verdict, findings, stats = audit(root, a.rev)
     except CouldNotTell as exc:
         if a.json_out:
-            Path(a.json_out).write_text(json.dumps(
-                {"tool": TOOL, "verdict": "COULD_NOT_TELL",
-                 "findings": [str(exc)]}, indent=2) + "\n", encoding="utf-8")
+            _write_json(a.json_out, {
+                **envelope, "verdict": "COULD_NOT_TELL",
+                "findings": [str(exc)],
+            })
         print(f"{TOOL}: could not tell whether the last released pins are "
               f"committed", file=sys.stderr)
         print(f"[COULD-NOT-TELL] {exc}", file=sys.stderr)
         return RC_COULD_NOT_TELL
 
     if a.json_out:
-        Path(a.json_out).write_text(json.dumps(
-            {"tool": TOOL, "verdict": verdict, "findings": findings,
-             **stats}, indent=2) + "\n", encoding="utf-8")
+        _write_json(a.json_out, {
+            **envelope, "verdict": verdict, "findings": findings, **stats,
+        })
 
     if verdict == "OUTSTANDING":
         print(f"{TOOL}: {len(findings)} pin(s) recorded in RELEASED.json as "

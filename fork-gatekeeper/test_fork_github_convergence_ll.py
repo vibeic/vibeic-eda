@@ -365,6 +365,7 @@ def _capture(tmp_path: Path, fork_path: Path, *, gap_record=None
     rc = LL.main([
         "--state-dir", str(state),
         "--release-json", str(tmp_path / "release-not-read.json"),
+        "--release-pins-json", str(tmp_path / "release-pins-not-read.json"),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_path),
         "--ai-authorization-json", str(ai),
@@ -398,6 +399,7 @@ def test_cron_runs_checker_between_gap_and_ll_and_gates_on_its_rc():
 
     ll_arm = source[ll:source.index("LL=$?")]
     assert '--fork-github-json "${FORK_GH_JSON}"' in ll_arm
+    assert '--release-pins-json "${RELPIN_JSON}"' in ll_arm
     assert '--ai-authorization-json "${AI_AUTH_JSON}"' in ll_arm
     assert '--forks-json "${DIR}/FORKS.json"' in ll_arm
     assert ('--expected-github-actor "${GK_GITHUB_ACTOR:-reyerchu}"'

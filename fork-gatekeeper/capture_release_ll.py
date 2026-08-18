@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Optional
 
 import gk_state
@@ -46,6 +47,10 @@ DELIVERY_HEAD_PATTERN_TEXT = {
 }
 AI_AUTHORIZATION_PROGRAM = "check_ai_release_authorization"
 AI_AUTHORIZATION_SCHEMA_VERSION = 1
+RELEASE_PINS_PROGRAM = "check_release_pins_committed"
+RELEASE_PINS_SCHEMA_VERSION = 1
+FULL_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+EDA_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _json_object(pairs):
@@ -140,6 +145,174 @@ def _selftest_summary(record: Optional[dict]) -> Optional[dict]:
             "total_runtime_ceiling_seconds"),
         "progress": progress if isinstance(progress, dict) else None,
     }
+
+
+def _current_head(root: Path) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the checkout independently of the release-pin producer.
+
+    This reads only the HEAD ref/object identity.  It deliberately does not
+    inspect mutable Dockerfiles or recompute pins: the checker owns that
+    measurement, while LL independently proves which immutable commit it
+    measured.
+    """
+    try:
+        process = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify",
+             "HEAD^{commit}"],
+            capture_output=True, text=True,
+        )
+    except OSError as exc:
+        return None, f"could not independently resolve release-pin HEAD: {exc}"
+    revision = process.stdout.strip().lower()
+    if (process.returncode != 0
+            or FULL_OBJECT_ID.fullmatch(revision) is None):
+        detail = (process.stderr or process.stdout).strip()[:160]
+        return None, (
+            "could not independently resolve release-pin HEAD"
+            + (f": {detail}" if detail else ""))
+    return revision, None
+
+
+def _validate_release_pins(record: dict, path: Path, round_at: str,
+                           expected_run_id: Optional[str],
+                           release_target: Optional[str],
+                           expected_revision: str,
+                           ) -> tuple[Optional[dict], list[str]]:
+    """Validate and normalize the current round's committed-pin verdict.
+
+    ``OUTSTANDING`` is valid negative evidence, just as an open PR is: it is
+    retained and blocks generic convergence, but is not mislabeled a source
+    error.  ``COULD_NOT_TELL`` and malformed/stale input are source failures;
+    neither may inherit a prior round's PASS or disappear from LL.
+    """
+    errors: list[str] = []
+    now = datetime.now(timezone.utc)
+    if record.get("program") != RELEASE_PINS_PROGRAM:
+        errors.append(f"program is not {RELEASE_PINS_PROGRAM}")
+    if record.get("tool") != RELEASE_PINS_PROGRAM:
+        errors.append(f"tool is not {RELEASE_PINS_PROGRAM}")
+    if (type(record.get("schema_version")) is not int
+            or record.get("schema_version") != RELEASE_PINS_SCHEMA_VERSION):
+        errors.append(
+            f"schema_version is not {RELEASE_PINS_SCHEMA_VERSION}")
+
+    checked = _strict_when(record.get("checked_at"))
+    boundary = _strict_when(round_at)
+    if checked is None:
+        errors.append("checked_at is missing or malformed")
+    elif boundary is None or checked < boundary:
+        errors.append("checked_at predates this 05:30 round")
+    elif checked > now:
+        errors.append("checked_at is in the future")
+    if record.get("round_at") != round_at:
+        errors.append("round_at does not match this 05:30 round")
+    run_id = record.get("run_id")
+    if (not isinstance(expected_run_id, str) or not expected_run_id
+            or run_id != expected_run_id):
+        errors.append("run_id does not match current daily_0530 evidence")
+
+    verdict = record.get("verdict")
+    if verdict not in {"PASS", "OUTSTANDING", "COULD_NOT_TELL"}:
+        errors.append("verdict is not PASS, OUTSTANDING, or COULD_NOT_TELL")
+    findings = record.get("findings")
+    findings_valid = (isinstance(findings, list)
+                      and all(isinstance(item, str) and item
+                              for item in findings)
+                      and len(findings) == len(set(findings)))
+    if not findings_valid:
+        errors.append("findings is not a duplicate-free list of strings")
+        findings = []
+
+    version = record.get("version")
+    rev = record.get("rev")
+    revision = record.get("revision")
+    recorded_count = record.get("recorded_count")
+    committed_count = record.get("committed_count")
+    outstanding = record.get("outstanding")
+    if verdict in {"PASS", "OUTSTANDING"}:
+        if not isinstance(version, str) or not version:
+            errors.append("version is missing")
+        elif release_target is not None and version != release_target:
+            errors.append(
+                f"version {version!r} does not match release target "
+                f"{release_target!r}")
+        if rev != "HEAD":
+            errors.append("rev is not HEAD")
+        if (not isinstance(revision, str)
+                or FULL_OBJECT_ID.fullmatch(revision.lower()) is None):
+            errors.append("revision is not one full commit id")
+        elif revision.lower() != expected_revision:
+            errors.append(
+                "revision does not match independently resolved current HEAD")
+        for name, value in (("recorded_count", recorded_count),
+                            ("committed_count", committed_count)):
+            if type(value) is not int or value < 0:
+                errors.append(f"{name} is not a non-negative integer")
+        if (not isinstance(outstanding, list)
+                or any(not isinstance(item, str) or not item
+                       for item in outstanding)
+                or len(outstanding) != len(set(outstanding))):
+            errors.append(
+                "outstanding is not a duplicate-free list of tool names")
+            outstanding = []
+        elif outstanding != sorted(outstanding):
+            errors.append("outstanding tools are not in canonical sorted order")
+        finding_tools = []
+        for finding in findings:
+            tool, separator, _detail = finding.partition(":")
+            if not separator or not tool:
+                errors.append("a finding does not name its tool before ':'")
+                break
+            finding_tools.append(tool)
+        if finding_tools != outstanding:
+            errors.append("findings and outstanding name different tools")
+        if verdict == "PASS":
+            if findings or outstanding:
+                errors.append("PASS carries findings/outstanding tools")
+            if (type(recorded_count) is int
+                    and type(committed_count) is int
+                    and recorded_count != committed_count):
+                errors.append("PASS carries unequal pin counts")
+        elif not findings or not outstanding:
+            errors.append("OUTSTANDING names no outstanding pin review")
+    elif verdict == "COULD_NOT_TELL" and not findings:
+        errors.append("COULD_NOT_TELL carries no cause")
+
+    if errors:
+        return None, [f"{path.name} is invalid: " + "; ".join(errors)]
+
+    normalized = {
+        "program": RELEASE_PINS_PROGRAM,
+        "schema_version": RELEASE_PINS_SCHEMA_VERSION,
+        "checked_at": record["checked_at"],
+        "round_at": record["round_at"],
+        "run_id": run_id,
+        "verdict": verdict,
+        "committed": (True if verdict == "PASS" else
+                      False if verdict == "OUTSTANDING" else None),
+        "version": (version if verdict != "COULD_NOT_TELL"
+                    and isinstance(version, str) else None),
+        "requested_revision": (rev if verdict != "COULD_NOT_TELL"
+                               and isinstance(rev, str) else None),
+        "revision": (revision.lower()
+                     if verdict != "COULD_NOT_TELL"
+                     and isinstance(revision, str) else None),
+        "recorded_count": (recorded_count
+                           if verdict != "COULD_NOT_TELL"
+                           and type(recorded_count) is int else None),
+        "committed_count": (committed_count
+                            if verdict != "COULD_NOT_TELL"
+                            and type(committed_count) is int else None),
+        "outstanding": (list(outstanding or [])
+                        if verdict != "COULD_NOT_TELL" else []),
+        "findings": list(findings),
+    }
+    if verdict == "COULD_NOT_TELL":
+        return normalized, [
+            f"{path.name} could not tell whether release pins are committed: "
+            + "; ".join(findings)
+        ]
+    return normalized, []
 
 
 def _validate_ai_authorization(record: dict, path: Path, round_at: str,
@@ -1733,7 +1906,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
                 semantic_pytest: Optional[dict] = None,
                 tick_state: str = "ran",
                 fork_github: Optional[dict] = None,
-                ai_authorization: Optional[dict] = None) -> dict:
+                ai_authorization: Optional[dict] = None,
+                release_pins: Optional[dict] = None) -> dict:
     release = release or {}
     gap = gap or {}
     attempts = release.get("compose_attempts") or []
@@ -1776,11 +1950,18 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
     ai_status = (ai_authorization.get("status")
                  if isinstance(ai_authorization, dict) else None)
     ai_authorized = ai_authorization is None or ai_status == "authorized"
+    release_pins_verdict = (release_pins.get("verdict")
+                            if isinstance(release_pins, dict) else None)
+    # ``None`` preserves the pure helper's historical semantics. Production
+    # always supplies either this round's validated verdict or explicit
+    # NOT_CHECKED evidence when the release-capable tick did not run.
+    release_pins_clear = (release_pins is None
+                          or release_pins_verdict == "PASS")
     inputs_authoritative = not source_errors
     tick_authorized = tick_state == "ran" and tick_exit == 0
     whole_round_clear = bool(
         tick_authorized and not anchor_blocked
-        and ai_authorized
+        and ai_authorized and release_pins_clear
         and isinstance(stranded, int) and stranded == 0)
     converged = bool(delivery_converged and github_converged
                      and inputs_authoritative and whole_round_clear)
@@ -1800,6 +1981,8 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         outcome = "published_with_anchor_pr_blocked"
     elif terminal_ok and tick_state == "ran" and tick_exit != 0:
         outcome = "finished_with_nonzero_release_tick"
+    elif terminal_ok and release_pins_verdict == "OUTSTANDING":
+        outcome = "published_with_uncommitted_release_pins"
     elif terminal_ok and fork_github_status == "open":
         outcome = "finished_with_open_fork_work"
     elif terminal_ok and failed_attempts:
@@ -1833,6 +2016,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         category = "ai_authorization_norecord"
     if tick_state == "ran" and tick_exit != 0 and category is None:
         category = "release_tick_nonzero"
+    elif (terminal_ok and release_pins_verdict == "OUTSTANDING"
+          and category is None):
+        category = "release_pins_uncommitted"
     if tick_state != "ran":
         if tick_state == "not_checked_stale_round_code":
             category = "stale_round_code"
@@ -1863,6 +2049,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         control = (
             "retain the published image; refuse to bypass the anchor "
             "repository push gate")
+    elif terminal_ok and release_pins_verdict == "OUTSTANDING":
+        control = (
+            "review and commit only the named pin files by explicit path; "
+            "do not let a fresh clone describe different sources from the "
+            "published release")
     elif failed_attempts:
         control = (
             "classified bounded retry; reuse pushed artefacts and BuildKit "
@@ -1891,6 +2082,7 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
         },
         "selftest": selftest,
         "ai_authorization": ai_authorization,
+        "release_pins": release_pins,
         "fork_github": _fork_github_summary(fork_github),
         "convergence": {
             "measured": measured,
@@ -1907,6 +2099,9 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             "delivery_round_converged": delivery_round_converged,
             "tick_authorized": tick_authorized,
             "ai_authorized": ai_authorized,
+            "release_pins_committed": (
+                True if release_pins_verdict == "PASS" else
+                False if release_pins_verdict == "OUTSTANDING" else None),
             "anchor_complete": not anchor_blocked,
             "converged": converged,
             "round_converged": round_converged,
@@ -1978,6 +2173,10 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
         # Retain the exact normalized postconditions, not only a boolean. A
         # later clean round must not erase which source tip was still pending.
         "ai_authorization": record.get("ai_authorization"),
+        # Same retention rule for the post-release source declaration: keep
+        # every named tool and both abbreviated SHAs, not merely a boolean a
+        # later PASS could erase.
+        "release_pins": record.get("release_pins"),
         "sync_lag_at_merge": record["convergence"]["sync_lag_at_merge"],
         "live_sync_lag": record["convergence"]["live_sync_lag"],
         "release_lag": record["convergence"]["release_lag"],
@@ -1990,6 +2189,8 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
             "delivery_round_converged"],
         "tick_authorized": record["convergence"]["tick_authorized"],
         "ai_authorized": record["convergence"]["ai_authorized"],
+        "release_pins_committed": record["convergence"][
+            "release_pins_committed"],
         "anchor_complete": record["convergence"]["anchor_complete"],
         "converged": record["convergence"]["converged"],
         "round_converged": record["convergence"]["round_converged"],
@@ -2026,7 +2227,11 @@ def retain(record: dict, state: Path, keep_days: int = KEEP_DAYS) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--state-dir", type=Path, default=gk_state.state_dir())
+    ap.add_argument("--eda-root", type=Path, default=EDA_ROOT,
+                    help="checkout whose immutable HEAD the pin checker must "
+                         "have measured")
     ap.add_argument("--release-json", type=Path, required=True)
+    ap.add_argument("--release-pins-json", type=Path, required=True)
     ap.add_argument("--gap-json", type=Path, required=True)
     ap.add_argument("--fork-github-json", type=Path, required=True)
     ap.add_argument("--ai-authorization-json", type=Path, required=True)
@@ -2065,10 +2270,14 @@ def main(argv=None) -> int:
     # LL capture itself.
     if a.tick_state == "ran":
         release, release_err = _read(a.release_json)
+        release_pins_raw, release_pins_read_err = _read(
+            a.release_pins_json)
     else:
         release = {"program": "daily_release", "status": "not_checked",
                    "not_checked_reason": a.tick_state}
         release_err = None
+        release_pins_raw = None
+        release_pins_read_err = None
     gap_raw, gap_read_err = _read(a.gap_json)
     if gap_read_err is not None:
         gap, gap_errors = None, [gap_read_err]
@@ -2189,7 +2398,53 @@ def main(argv=None) -> int:
         semantic_err = (
             "release tick ran without a complete green semantic pytest "
             "record; cron gate wiring is inconsistent")
+
+    if a.tick_state == "ran":
+        expected_revision, revision_err = _current_head(a.eda_root)
+        if release_pins_read_err is not None or revision_err is not None:
+            release_pins = None
+            release_pins_errors = [
+                error for error in (release_pins_read_err, revision_err)
+                if error is not None
+            ]
+        else:
+            assert release_pins_raw is not None
+            assert expected_revision is not None
+            expected_run_id = None
+            if gap is not None:
+                expected_run_id = gap["source"]["_round"]["run_id"]
+            release_status = ((release or {}).get("status")
+                              if isinstance(release, dict) else None)
+            release_target = (_target(release or {})
+                              if release_status in {"published", "recorded"}
+                              else None)
+            release_pins, release_pins_errors = _validate_release_pins(
+                release_pins_raw, a.release_pins_json, a.round_at,
+                expected_run_id, release_target, expected_revision)
+    else:
+        expected_run_id = None
+        if gap is not None:
+            expected_run_id = gap["source"]["_round"]["run_id"]
+        release_pins = {
+            "program": RELEASE_PINS_PROGRAM,
+            "schema_version": RELEASE_PINS_SCHEMA_VERSION,
+            "checked_at": None,
+            "round_at": a.round_at,
+            "run_id": expected_run_id,
+            "verdict": "NOT_CHECKED",
+            "committed": None,
+            "version": None,
+            "requested_revision": None,
+            "revision": None,
+            "recorded_count": None,
+            "committed_count": None,
+            "outstanding": [],
+            "findings": [],
+            "reason": a.tick_state,
+        }
+        release_pins_errors = []
     errors = [e for e in (release_err, semantic_err) if e]
+    errors.extend(release_pins_errors)
     errors.extend(gap_errors)
     errors.extend(fork_github_errors)
     errors.extend(ai_errors)
@@ -2198,6 +2453,7 @@ def main(argv=None) -> int:
         release, gap, a.round_at, a.tick_exit, errors,
         semantic_pytest=semantic, tick_state=a.tick_state,
         fork_github=fork_github, ai_authorization=ai_authorization,
+        release_pins=release_pins,
     )
     written = retain(record, a.state_dir)
     print("release LL: "

@@ -26,6 +26,10 @@ _REGISTERED_REPOSITORIES = sorted(
     f"vibeic/{entry['tool']}" for entry in _FORK_ENTRIES)
 _REQUIRED_REPOSITORIES = sorted(
     _REGISTERED_REPOSITORIES + ["vibeic/vibeic-eda"])
+_EDA_HEAD = subprocess.run(
+    ["git", "-C", str(_HERE.parent), "rev-parse", "HEAD^{commit}"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
 
 
 CASE = {
@@ -415,6 +419,25 @@ def _ai_authorization_record(*, status="authorized", run_id=None) -> dict:
     }
 
 
+def _release_pins_record(version="0.3.5") -> dict:
+    return {
+        "program": "check_release_pins_committed",
+        "tool": "check_release_pins_committed",
+        "schema_version": 1,
+        "checked_at": "2026-08-17T06:03:00+08:00",
+        "round_at": "2026-08-17T05:30:00+08:00",
+        "run_id": "a" * 64,
+        "verdict": "PASS",
+        "findings": [],
+        "version": version,
+        "rev": "HEAD",
+        "revision": _EDA_HEAD,
+        "recorded_count": 34,
+        "committed_count": 34,
+        "outstanding": [],
+    }
+
+
 def test_cron_does_not_invoke_release_without_all_green_controls():
     source = (Path(__file__).resolve().parent / "run_0530.sh").read_text()
     gate = source[source.index('TICK_STATE="ran"'):
@@ -453,6 +476,7 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(old_release),
+        "--release-pins-json", str(tmp_path / "release-pins-not-read.json"),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
@@ -490,6 +514,7 @@ def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
     rc = LL.main([
         "--state-dir", str(state),
         "--release-json", str(tmp_path / "release-must-not-be-read.json"),
+        "--release-pins-json", str(tmp_path / "release-pins-not-read.json"),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai),
@@ -581,10 +606,13 @@ def test_a_ran_tick_cannot_reuse_a_prior_round_release(tmp_path, capsys):
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
     ai_authorization.write_text(json.dumps(_ai_authorization_record()))
+    release_pins = tmp_path / "release-pins.json"
+    release_pins.write_text(json.dumps(_release_pins_record("0.3.0")))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(release),
+        "--release-pins-json", str(release_pins),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
@@ -616,10 +644,14 @@ def _capture_ran_tick(tmp_path: Path, release: dict,
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
     ai_authorization.write_text(json.dumps(_ai_authorization_record()))
+    target = LL._target(release) or "0.3.5"
+    release_pins = tmp_path / "release-pins.json"
+    release_pins.write_text(json.dumps(_release_pins_record(target)))
 
     rc = LL.main([
         "--state-dir", str(tmp_path / "state"),
         "--release-json", str(release_path),
+        "--release-pins-json", str(release_pins),
         "--gap-json", str(gap),
         "--fork-github-json", str(fork_github),
         "--ai-authorization-json", str(ai_authorization),
