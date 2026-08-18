@@ -3629,7 +3629,7 @@ def _main_under_release_lock(argv=None) -> int:
                         [sys.executable,
                          str(Path(__file__).resolve().with_name(
                              "build_page.py")),
-                         "--out", gk_state.PRODUCTION_PAGE],
+                         "--out", _PRODUCTION_PAGE],
                         env={**os.environ, "GK_PRODUCTION_WRITER": "1"},
                         capture_output=True, text=True, timeout=600)
                     _pok = _pg.returncode == 0
@@ -3846,6 +3846,20 @@ def _option_value(argv: List[str], name: str) -> Optional[str]:
         if item.startswith(prefix):
             return item[len(prefix):]
     return None
+
+
+# The published page path, resolved from gk_state without importing it at module
+# scope (this module deliberately has no gk_state dependency). Falls back to the
+# known production path so a release can still publish if the import moves.
+def _resolve_production_page() -> str:
+    try:
+        import gk_state as _gks  # noqa: PLC0415
+        return _gks.PRODUCTION_PAGE
+    except Exception:            # noqa: BLE001
+        return "/home/reyerchu/vibeic.ai/eda-forks.html"
+
+
+_PRODUCTION_PAGE = _resolve_production_page()
 
 
 def main(argv=None) -> int:

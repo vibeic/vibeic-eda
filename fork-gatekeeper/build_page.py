@@ -1094,21 +1094,11 @@ function enhBlock(tool){
   // below, and still the next round's work -- it just does not overwrite the
   // record of a gap that was actually closed.
   const liveBehind = behindKnown.reduce((a,d)=>a+(d.behind_commits||0),0);
-  // `sync_lag_at_merge === 0` is the measured statement "this round took
-  // everything upstream had WHEN IT LOOKED" -- which is exactly the moment of
-  // convergence, and unlike the live sum it does not un-converge the instant
-  // upstream pushes again. CONVERGED_AT carries when that last happened, so a
-  // reader sees both the achievement and its age.
-  const convergedRound = !!(REPORT && REPORT.q1_sync_lag_at_merge === 0);
-  // The instant the round finished measuring a zero gap. `completed_at` is
-  // when the gap report finished; that is the moment the claim was true.
-  const convergedAtRaw = convergedRound
-      ? (REPORT.completed_at || REPORT.round_at || REPORT.started_at || "") : "";
-  const convergedAtTxt = convergedAtRaw
-      ? new Date(convergedAtRaw).toLocaleString("sv-SE",
-          {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
-      : "";
-  const commitsBehind = convergedRound ? 0 : liveBehind;
+  // Declared here because `jstests/gap_kind.mjs` slices this block out and
+  // evaluates it on ledger rows ALONE -- nothing in here may reference
+  // page-level data. The converged-moment override is applied just below the
+  // slice boundary, where REPORT exists.
+  let commitsBehind = liveBehind;
   const forksBehind   = behindKnown.filter(d=>(d.behind_commits||0)>0).length;
 
   // ONE NUMBER FOR TWO CONDITIONS WITH OPPOSITE FIXES was this card's remaining
@@ -1155,6 +1145,29 @@ function enhBlock(tool){
   // the whole reason its ARG exists.
   const assertRows    = LEDGERS.filter(d=>isAssertion(d));
   const patchForks    = LEDGERS.filter(d=>(d.ahead||0)>0).length;
+
+  // MOVED OUT OF THE GAP-RULE BLOCK ABOVE. `jstests/gap_kind.mjs` slices that
+  // block out and evaluates it standalone to test the shipped rule; anything
+  // in there referencing page-level data (REPORT) throws ReferenceError in the
+  // slice even though it is perfectly ordered in the real page. The rule block
+  // must stay evaluable on ledger rows alone.
+  //
+  // `sync_lag_at_merge === 0` is the measured statement "this round took
+  // everything upstream had WHEN IT LOOKED" -- exactly the moment of
+  // convergence, and unlike the live sum it does not un-converge the instant
+  // upstream pushes again.
+  const convergedRound = !!(typeof REPORT !== "undefined" && REPORT
+      && REPORT.q1_sync_lag_at_merge === 0);
+  const convergedAtRaw = convergedRound
+      ? (REPORT.completed_at || REPORT.round_at || REPORT.started_at || "") : "";
+  const convergedAtTxt = convergedAtRaw
+      ? new Date(convergedAtRaw).toLocaleString("sv-SE",
+          {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
+      : "";
+  // THE MOMENT WE CONVERGED, NOT THE MOMENT YOU LOOKED. Upstream keeps
+  // moving, so the live sum can essentially never read 0; this preserves the
+  // record of a gap that was actually closed.
+  commitsBehind = convergedRound ? 0 : liveBehind;
 
   // ============ HOW OLD IS EACH COUNT? (vibeic-eda#91) ==========================
   //
