@@ -1163,13 +1163,21 @@ function enhBlock(tool){
   // CERTIFIED page looking unconverged. The ledger rows carry
   // `sync_lag_at_merge` per fork in BOTH shapes, so the fleet sum is derived
   // from them and the report field is used only when present.
-  const atMergeRows = LEDGERS.filter(
-      d=>typeof d.sync_lag_at_merge === "number");
-  const atMergeSum = atMergeRows.reduce((a,d)=>a+d.sync_lag_at_merge, 0);
+  // `sync_lag_at_merge` lives in the GAP REPORT, not in the ledger rows -- a
+  // certified page carries neither, so the earlier ledger-sum fallback found
+  // zero rows and could never conclude anything. The ledger does carry
+  // `sync_lag` per fork, which is the same question asked of the same round
+  // ("does our fork still trail upstream"), so that is the fallback.
+  //
+  // A contents assertion has no sync question (vibeic-eda#79) and is excluded,
+  // exactly as the gap rule above excludes it.
+  const syncRows = LEDGERS.filter(
+      d=>typeof d.sync_lag === "number" && d.pin_kind !== "contents_assertion");
+  const syncSum = syncRows.reduce((a,d)=>a+d.sync_lag, 0);
   const convergedRound = (typeof REPORT !== "undefined" && REPORT
       && typeof REPORT.q1_sync_lag_at_merge === "number")
         ? REPORT.q1_sync_lag_at_merge === 0
-        : (atMergeRows.length > 0 && atMergeSum === 0);
+        : (syncRows.length > 0 && syncSum === 0);
   const convergedAtRaw = convergedRound
       ? ((typeof REPORT !== "undefined" && REPORT
           && (REPORT.completed_at || REPORT.round_at || REPORT.generated_at
@@ -1345,7 +1353,16 @@ function enhBlock(tool){
   // beside freshly-gathered numbers, and looked like the whole page was stale. The
   // ledger's own generated_at cannot drift from the ledger it stamps.
   const generatedAt = (LEDGERS[0]||{}).generated_at || (REPORT&&REPORT.date) || "";
-  const lastCheck = generatedAt.slice(0,10) || "—";
+  // DATE **AND** TIME. This sliced the stamp to 10 chars, so a page rebuilt
+  // three times in an hour showed the same "2026-08-19" every time and a
+  // reader could not tell a fresh page from one eight hours old (owner,
+  // 2026-08-19: "why no time?"). The day is still first, so the stale-page
+  // banner and the converged-at comparison below keep working on the prefix.
+  const lastCheckDay = generatedAt.slice(0,10) || "—";
+  const lastCheck = generatedAt
+      ? new Date(generatedAt).toLocaleString("sv-SE",
+          {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
+      : "—";
   // STALENESS IS COMPUTED IN THE VIEWER'S BROWSER, not at build time, and that is
   // the whole point (vibeic-eda#58).
   //
@@ -1406,8 +1423,8 @@ function enhBlock(tool){
     // date is the whole point.
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``)
        + (convergedRound && convergedAtTxt
-            ? ` · ${convergedAtTxt.startsWith(lastCheck)
-                     ? convergedAtTxt.slice(lastCheck.length).trim()
+            ? ` · ${convergedAtTxt.startsWith(lastCheckDay)
+                     ? convergedAtTxt.slice(lastCheckDay.length).trim()
                      : convergedAtTxt}`
             : ``),
      {en:convergedRound ? "Last daily check · converged to 0 at"
