@@ -77,7 +77,7 @@ echo "   image id     : ${TARGET_ID}"
 
 # --- capture existing container config (or fall back to canonical defaults) --
 declare -a BINDS=() CMD=()
-USER_SPEC="" WORKDIR=""
+USER_SPEC="" WORKDIR="" OLD_MEMORY=0
 
 if docker container inspect "$NAME" >/dev/null 2>&1; then
   OLD_IMG="$(docker inspect "$NAME" --format '{{.Config.Image}}')"
@@ -96,6 +96,7 @@ if docker container inspect "$NAME" >/dev/null 2>&1; then
   while IFS= read -r b; do [[ -n "$b" ]] && BINDS+=( -v "$b" ); done \
     < <(docker inspect "$NAME" --format '{{range .HostConfig.Binds}}{{println .}}{{end}}')
   USER_SPEC="$(docker inspect "$NAME" --format '{{.Config.User}}')"
+  OLD_MEMORY="$(docker inspect "$NAME" --format '{{.HostConfig.Memory}}' 2>/dev/null || echo 0)"
   WORKDIR="$(docker inspect "$NAME"  --format '{{.Config.WorkingDir}}')"
   while IFS= read -r c; do [[ -n "$c" ]] && CMD+=( "$c" ); done \
     < <(docker inspect "$NAME" --format '{{range .Config.Cmd}}{{println .}}{{end}}')
@@ -122,10 +123,72 @@ echo "   binds        : ${BINDS[*]:-<none>}"
 echo "   user/workdir : ${USER_SPEC:-<image default>} / ${WORKDIR:-<image default>}"
 echo "   cmd          : ${CMD[*]:-<image default>}   (entrypoint stays image-baked)"
 
-# --- recreate --------------------------------------------------------------
-echo "== removing old container (if any)"
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+# --- memory ceiling --------------------------------------------------------
+# MEASURED 2026-08-19: a yosys inside this container grew to 113 GB on a 125 GB
+# host that carries 2 GB of swap, and the machine went down — GNOME was OOM-
+# killed and the session restarted, which from the seat is indistinguishable
+# from a reboot. Nothing in the stack could have stopped it:
+#
+#   * the container was created with HostConfig.Memory == 0, i.e. NO cgroup
+#     limit, so "the container" and "the host" are the same 125 GB pool;
+#   * `ulimit -v` inside the container is unlimited, so yosys never gets an
+#     allocation failure to report — it just keeps growing;
+#   * the MCP server drives every tool through `docker exec` with a wall-clock
+#     timeout, and that timeout kills the exec CLIENT, not the process in the
+#     container. Measured here: kill the client, and the in-container process
+#     is still running. So past the timeout the tool keeps allocating with
+#     nothing left watching it.
+#
+# The host OOM killer then picks its victim by score, which is why a synthesis
+# run took down the desktop session rather than only itself. A cgroup limit
+# makes that failure local: the kernel kills the runaway INSIDE the container,
+# the tool's own log ends in "Killed", and the host keeps its cushion.
+# --memory-swap pinned to the same value denies the container the host's swap
+# too — the minutes of "frozen" that preceded the crash were swap thrash on a
+# 2 GB swapfile, not the kill itself.
+#
+#   EDA_MEMORY=64g          explicit ceiling (any docker size string)
+#   EDA_MEMORY=0            opt out entirely (restores the pre-fix behaviour)
+#   EDA_MEMORY_FRACTION=70  percent of host RAM used when EDA_MEMORY is unset
+#
+# An existing container's own NON-ZERO ceiling is preserved across a recreate,
+# like the binds and the cmd are. A zero one is deliberately NOT preserved:
+# "unlimited" is the bug this section exists to remove, so cloning it forward
+# would make the fix un-adoptable by exactly the containers that need it.
+MEM_FRACTION="${EDA_MEMORY_FRACTION:-70}"
+[[ "$MEM_FRACTION" =~ ^[0-9]+$ ]] || die \
+  "EDA_MEMORY_FRACTION must be an integer percent (got '${MEM_FRACTION}')"
+(( MEM_FRACTION >= 1 && MEM_FRACTION <= 100 )) || die \
+  "EDA_MEMORY_FRACTION must be between 1 and 100 (got '${MEM_FRACTION}')"
+MEM_FLOOR=$(( 2 * 1024 * 1024 * 1024 ))   # under 2 GiB a ceiling only breaks tools
 
+if [[ -n "${EDA_MEMORY:-}" ]]; then
+  case "${EDA_MEMORY}" in
+    0|unlimited|none) MEMORY="" ;;
+    *)                MEMORY="${EDA_MEMORY}" ;;
+  esac
+elif [[ "${OLD_MEMORY:-0}" =~ ^[0-9]+$ ]] && (( OLD_MEMORY > 0 )); then
+  MEMORY="${OLD_MEMORY}"
+else
+  HOST_MEM="$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo 2>/dev/null || true)"
+  if [[ "${HOST_MEM:-0}" =~ ^[0-9]+$ ]] && (( HOST_MEM > 0 )); then
+    MEMORY=$(( HOST_MEM * MEM_FRACTION / 100 ))
+    (( MEMORY >= MEM_FLOOR )) || MEMORY="$MEM_FLOOR"
+    (( MEMORY <= HOST_MEM  )) || MEMORY="$HOST_MEM"
+  else
+    MEMORY=""
+    echo "-- WARNING: /proc/meminfo is unreadable, so no memory ceiling was" >&2
+    echo "   computed. The container will run UNBOUNDED; pass EDA_MEMORY=<size>" >&2
+    echo "   to set one explicitly." >&2
+  fi
+fi
+if [[ -n "$MEMORY" ]]; then
+  echo "   memory       : ${MEMORY} (--memory / --memory-swap; swap denied)"
+else
+  echo "   memory       : <unlimited — opted out>"
+fi
+
+# --- recreate --------------------------------------------------------------
 # `--init` because the container's command is `sleep infinity`, and PID 1 owns
 # reaping. `sleep` never calls wait(), so every process reparented to it after
 # its own parent exits stays a zombie for the life of the container. Measured on
@@ -137,8 +200,21 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 declare -a RUN=( docker run -d --init --name "$NAME" )
 [[ -n "$USER_SPEC" ]] && RUN+=( -u "$USER_SPEC" )
 [[ -n "$WORKDIR"  ]] && RUN+=( -w "$WORKDIR" )
+[[ -n "$MEMORY"   ]] && RUN+=( --memory "$MEMORY" --memory-swap "$MEMORY" )
 RUN+=( "${BINDS[@]}" "$IMAGE" )
 [[ ${#CMD[@]} -gt 0 ]] && RUN+=( "${CMD[@]}" )
+
+# Resolution-only mode: print the argv we WOULD run and stop, before anything
+# destructive. The old container is still there afterwards. This is what the
+# regression test reads, so the ceiling is asserted on the command that is
+# actually issued rather than on a re-derivation of it.
+if [[ "${RESTART_EDA_PRINT_RUN:-0}" == "1" ]]; then
+  printf '%s\n' "${RUN[@]}"
+  exit 0
+fi
+
+echo "== removing old container (if any)"
+docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "== ${RUN[*]}"
 "${RUN[@]}" >/dev/null
