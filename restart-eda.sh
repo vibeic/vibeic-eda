@@ -170,16 +170,33 @@ if [[ -n "${EDA_MEMORY:-}" ]]; then
 elif [[ "${OLD_MEMORY:-0}" =~ ^[0-9]+$ ]] && (( OLD_MEMORY > 0 )); then
   MEMORY="${OLD_MEMORY}"
 else
-  HOST_MEM="$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo 2>/dev/null || true)"
-  if [[ "${HOST_MEM:-0}" =~ ^[0-9]+$ ]] && (( HOST_MEM > 0 )); then
+  # Read MemTotal in the kB awk was handed, and do the arithmetic in bash.
+  #
+  # MEASURED 2026-08-19, and it is why this comment exists: the first version
+  # of this asked awk for the byte count directly, `print $2 * 1024`. On one
+  # host that prints 134973464576; on five others the same expression printed
+  # `1.34974e+11`, because awk falls back to OFMT once the value outgrows the
+  # precision it will print as an integer, and the two boxes disagree about
+  # where that is. The scientific-notation string then failed the ^[0-9]+$
+  # check and every one of those five hosts silently created the unbounded
+  # container this whole section exists to prevent. `$2` on its own is the
+  # integer awk was given, so nothing is left for it to reformat.
+  HOST_MEM_KB="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  if [[ "${HOST_MEM_KB:-}" =~ ^[0-9]+$ ]] && (( HOST_MEM_KB > 0 )); then
+    HOST_MEM=$(( HOST_MEM_KB * 1024 ))
     MEMORY=$(( HOST_MEM * MEM_FRACTION / 100 ))
     (( MEMORY >= MEM_FLOOR )) || MEMORY="$MEM_FLOOR"
     (( MEMORY <= HOST_MEM  )) || MEMORY="$HOST_MEM"
   else
-    MEMORY=""
-    echo "-- WARNING: /proc/meminfo is unreadable, so no memory ceiling was" >&2
-    echo "   computed. The container will run UNBOUNDED; pass EDA_MEMORY=<size>" >&2
-    echo "   to set one explicitly." >&2
+    # REFUSE rather than fall back to unbounded. A safety ceiling whose failure
+    # mode is "no ceiling" is worse than none at all: it reports success while
+    # leaving the exact configuration that took a host down, which is precisely
+    # what the awk bug above did on five machines at once. Opting out stays
+    # available, but it has to be asked for.
+    die "could not read MemTotal from /proc/meminfo (got '${HOST_MEM_KB:-<nothing>}'),
+   so no memory ceiling could be computed. Refusing to create '${NAME}' unbounded
+   — a single runaway tool would then be able to exhaust the host. Pass
+   EDA_MEMORY=<size> to set one explicitly, or EDA_MEMORY=0 to opt out on purpose."
   fi
 fi
 if [[ -n "$MEMORY" ]]; then

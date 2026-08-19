@@ -104,7 +104,11 @@ def run_script(tmp_path):
     stub.chmod(0o755)
     log = tmp_path / "docker.log"
 
-    def _run(env_extra=None, args=(), expect_rc=0):
+    def _run(env_extra=None, args=(), expect_rc=0, stubs=None):
+        for name, body in (stubs or {}).items():
+            extra = bindir / name
+            extra.write_text(body, encoding="utf-8")
+            extra.chmod(0o755)
         env = dict(os.environ)
         env["PATH"] = f"{bindir}:{env['PATH']}"
         env["DOCKER_STUB_LOG"] = str(log)
@@ -189,6 +193,57 @@ def test_an_existing_deliberate_ceiling_is_preserved(run_script):
                              "STUB_CONTAINER_MEMORY": chosen})
     assert _flag(argv, "--memory") == chosen
     assert _flag(argv, "--memory-swap") == chosen
+
+
+def test_the_ceiling_is_a_plain_integer_docker_can_parse(run_script):
+    """`docker run --memory 1.34974e+11` is a hard error, not a big number."""
+    argv, _, _ = run_script()
+    assert re.fullmatch(r"[0-9]+", _flag(argv, "--memory")), (
+        f"--memory {_flag(argv, '--memory')!r} is not a plain byte count")
+
+
+def test_an_awk_that_reformats_the_number_is_refused_not_silently_ignored(run_script):
+    """The five-host regression, reproduced by its actual cause.
+
+    MEASURED 2026-08-19: `awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo`
+    printed 134973464576 on one host and `1.34974e+11` on five others -- awk
+    switches to OFMT once the value outgrows the precision it prints as an
+    integer, and the boxes disagree about where that is. The first version of
+    this script rejected the scientific-notation string and fell back to "no
+    ceiling", so the rollout reported success on all five while leaving every
+    one of them in the configuration that had taken a host down.
+
+    Two things had to change and both are asserted here: the arithmetic no
+    longer goes through awk's formatter, and a ceiling that CANNOT be computed
+    is now a refusal rather than a silent unbounded container.
+    """
+    sci = "#!/bin/sh\necho 1.34974e+11\n"
+    _, proc, log = run_script(stubs={"awk": sci}, expect_rc=1)
+    assert "EDA_MEMORY" in proc.stderr, (
+        f"refused without telling the operator how to proceed: {proc.stderr!r}")
+    argv = [ln for ln in proc.stdout.splitlines() if ln]
+    assert "--memory" not in argv
+    assert "docker" not in argv, (
+        "a container was still going to be created without a ceiling; the "
+        "refusal must come BEFORE the run argv is emitted")
+    calls = [ln.split("\t") for ln in
+             (log.read_text(encoding="utf-8").splitlines() if log.is_file() else [])]
+    assert not [c for c in calls if c[:1] == ["run"]]
+
+
+def test_the_byte_count_is_not_left_to_awk_to_format():
+    """Pin the cause, not only the symptom.
+
+    The stubbed-awk test above proves the script REFUSES a reformatted number;
+    this one proves the script no longer asks awk to produce one. Bare `print`
+    of a product is the unsafe form, because awk switches to OFMT above an
+    implementation-dependent magnitude. `printf "%d"` would be fine, and so is
+    doing the multiply in the shell, which is what this script does.
+    """
+    body = _SCRIPT.read_text(encoding="utf-8")
+    assert not re.search(r"MemTotal[^\n]*?\bprint\s+\$2\s*\*", body), (
+        "MemTotal is multiplied inside a bare awk `print`; on a large-memory "
+        "host awk emits 1.34974e+11 and the ceiling is lost")
 
 
 def test_a_nonsense_fraction_is_refused_rather_than_silently_defaulted(run_script):
