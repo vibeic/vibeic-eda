@@ -1178,14 +1178,6 @@ function enhBlock(tool){
       && typeof REPORT.q1_sync_lag_at_merge === "number")
         ? REPORT.q1_sync_lag_at_merge === 0
         : (syncRows.length > 0 && syncSum === 0);
-  const convergedAtRaw = convergedRound
-      ? ((typeof REPORT !== "undefined" && REPORT
-          && (REPORT.completed_at || REPORT.round_at || REPORT.generated_at
-              || REPORT.started_at)) || "") : "";
-  const convergedAtTxt = convergedAtRaw
-      ? new Date(convergedAtRaw).toLocaleString("sv-SE",
-          {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
-      : "";
   // THE MOMENT WE CONVERGED, NOT THE MOMENT YOU LOOKED. Upstream keeps
   // moving, so the live sum can essentially never read 0; this preserves the
   // record of a gap that was actually closed.
@@ -1359,8 +1351,15 @@ function enhBlock(tool){
   // 2026-08-19: "why no time?"). The day is still first, so the stale-page
   // banner and the converged-at comparison below keep working on the prefix.
   const lastCheckDay = generatedAt.slice(0,10) || "—";
-  const lastCheck = generatedAt
-      ? new Date(generatedAt).toLocaleString("sv-SE",
+  // WHEN THE ROUND FINISHED CHECKING -- that is what "last daily check" means.
+  // `generated_at` is when the ledger file was written while assembling the
+  // page, an implementation detail that ran minutes before the gap was
+  // actually measured. The gap report's `completed_at` is the instant the
+  // check completed, so it is preferred and the ledger stamp is the fallback.
+  const checkStamp = (typeof REPORT !== "undefined" && REPORT
+      && (REPORT.completed_at || REPORT.round_at)) || generatedAt;
+  const lastCheck = checkStamp
+      ? new Date(checkStamp).toLocaleString("sv-SE",
           {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
       : "—";
   // STALENESS IS COMPUTED IN THE VIEWER'S BROWSER, not at build time, and that is
@@ -1409,28 +1408,14 @@ function enhBlock(tool){
     // shipped, what we carry, then the two gap numbers. A reader wants the
     // freshness of the whole page before any figure on it.
 
-    // The card names WHEN THE GAP WAS CLOSED, not only when the page was
-    // generated (owner instruction 2026-08-19). A date alone answers "how
-    // fresh is this page"; the reader's actual question is "when did we last
-    // stand level with upstream", and on a converged round those are the same
-    // instant -- so it is stated rather than left to be inferred.
-    // SAME DAY, SO SAY THE DAY ONCE. The value is "<check date> · <converged
-    // at>", and convergence almost always happens on the day of the check --
-    // so it rendered "2026-08-19 · 2026-08-19 06:44", printing the date twice
-    // and reading like two unrelated dates. When the two days agree only the
-    // clock time is appended; when they differ (a page built the day after the
-    // round that converged) the full stamp is kept, because then the second
-    // date is the whole point.
-    [lastCheck + (stale ? ` (${ageTxt} old)` : ``)
-       + (convergedRound && convergedAtTxt
-            ? ` · ${convergedAtTxt.startsWith(lastCheckDay)
-                     ? convergedAtTxt.slice(lastCheckDay.length).trim()
-                     : convergedAtTxt}`
-            : ``),
-     {en:convergedRound ? "Last daily check · converged to 0 at"
-                        : "Last daily check",
-      zh:convergedRound ? "最後每日檢查 · 收斂到 0 的時間"
-                        : "最後每日檢查"}],
+    // ONE TIME ONLY. This briefly showed the ledger stamp AND the convergence
+    // stamp -- "2026-08-19 08:04 · 08:09" -- two clocks minutes apart for one
+    // round, which reads as two separate events. The one that matters is when
+    // the round finished CHECKING, i.e. when the gap was measured and closed,
+    // so that is the single value shown. The ledger's own write time is an
+    // implementation detail of how the page was assembled.
+    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
+     {en:"Last check time", zh:"最後檢查時間"}],
     // Shown only when the GitHub inventory was actually taken. Rendering "?"
     // for it -- which is what happens on any page published outside a full
     // 05:30 tick, now the normal case -- spends a KPI slot on a non-answer and
