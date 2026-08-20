@@ -139,6 +139,10 @@ def _recount(record: dict) -> None:
         "fork_delivery_items": sum(
             "fork_delivery" in item["scopes"] for item in items),
         "by_source": by_source,
+        # Alarms are split out of `items` by the producer (a notice is not a
+        # debt) and the LL validates the EXACT key set, so a stub without this
+        # key models a shape the producer cannot emit.
+        "alarm_items_excluded": 0,
     }
 
 

@@ -408,6 +408,8 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
             "items": 0, "issues": 0, "pull_requests": 0,
             "registered_fork_items": 0, "upstream_items": 0,
             "vibeic_eda_items": 0, "fork_delivery_items": 0,
+            # See the producer: alarms leave `items` and are counted here.
+            "alarm_items_excluded": 0,
             "by_source": {
                 "exact_repository_issues": 0,
                 "exact_repository_pull_requests": 0,

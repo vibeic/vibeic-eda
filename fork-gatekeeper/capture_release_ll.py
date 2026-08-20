@@ -548,10 +548,23 @@ def _validate_release_terminal(record: object, *, round_at: str,
                 or latest.get("tagged") is not True
                 or latest.get("pushed") is not True):
             errors.append("published latest tag was not pushed")
-        if (not isinstance(anchor, dict) or anchor.get("ok") is not True
-                or not isinstance(anchor.get("note"), str)
-                or not anchor["note"]):
-            errors.append("published release has no successful anchor action")
+        # NO ANCHOR TO PROVE. A release used to move vibe-ic's pinned image
+        # version and this demanded evidence that it had. It no longer does:
+        # the pin claimed to be "what the plugin was verified against" and
+        # nothing ever ran that verification, so the anchor was removed
+        # (vibeic-eda 8ed5f33) and vibe-ic resolves the current image instead.
+        #
+        # A RELEASE THAT CARRIES ONE IS STILL CHECKED. Absence is now the
+        # expected shape; a present-but-failed anchor would mean something
+        # re-wired that path without updating this file, and saying nothing
+        # about it is how a stale consumer becomes a silent one.
+        if anchor is not None:
+            if (not isinstance(anchor, dict) or anchor.get("ok") is not True
+                    or not isinstance(anchor.get("note"), str)
+                    or not anchor["note"]):
+                errors.append("release carries an anchor action that did not "
+                              "succeed — the release path no longer anchors, so "
+                              "something re-wired it")
     return errors
 
 
@@ -1276,10 +1289,25 @@ def _validate_github_v2_sources(record: dict, items: list[dict],
                         errors.append(
                             f"inventory row {repo} issue count={issue_count!r}, "
                             f"retained items={actual_issues}")
-                    if pr_count != actual_prs:
+                    # ALARMS ARE SPLIT OUT OF `items`, SO ADD THEM BACK HERE.
+                    # This check exists to catch an item vanishing between the
+                    # catalog and the retained list, and it did its job: the
+                    # publish-silence exclusion showed up as "PR count=1,
+                    # retained items=0". The exclusion is legitimate — a notice
+                    # is not a debt — but it must be ACCOUNTED FOR, not waived.
+                    # `alarm_items` carries the excluded rows, so the catalog
+                    # still has to equal retained + excluded, and anything that
+                    # disappears for any OTHER reason still fails here.
+                    alarms_here = sum(
+                        item.get("repository") == repo
+                        and item.get("type") == "pull_request"
+                        for item in (record.get("alarm_items") or []))
+                    if pr_count != actual_prs + alarms_here:
                         errors.append(
                             f"inventory row {repo} PR count={pr_count!r}, "
-                            f"retained items={actual_prs}")
+                            f"retained items={actual_prs}"
+                            + (f" + {alarms_here} excluded alarm(s)"
+                               if alarms_here else ""))
                     inventory_issue_total += issue_count or 0
                     inventory_pr_total += pr_count or 0
                 else:
@@ -1743,7 +1771,12 @@ def _validate_fork_github(record: dict, path: Path, round_at: str,
     elif set(counts) != {
             "items", "issues", "pull_requests", "registered_fork_items",
             "upstream_items", "vibeic_eda_items", "fork_delivery_items",
-            "by_source"}:
+            "by_source",
+            # Publish-silence alarms, split out of `items` because a notice is
+            # not a debt (see fork_github_convergence). The EXACT set is the
+            # point of this check — a producer that grows a key must say so
+            # here, which is what caught this one.
+            "alarm_items_excluded"}:
         counts_valid = False
         errors.append("counts does not have the exact schema-v2 key set")
     items = record.get("items")
