@@ -54,7 +54,7 @@ LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-o
 #: vibe-ic's OWN anchor tool. It owns the pointer list (15 ghcr pointers across 9
 #: files, plus 24 install-doc refs); `DOC_FILES` above is a second, shorter list
 #: that covers 2 of them. Anything bumping the anchor must call this rather than
-#: re-derive where the version is written — see `push_anchor`.
+#: re-derive where the version is written — see `open_anchor_pr`.
 ANCHOR_TOOL = "tools/vibeic-eda/sync_image_version.py"
 BENCHMARK_TREE = "benchmark-data"
 ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
@@ -117,7 +117,7 @@ def _prepare_push_gate_context(wt: Path) -> tuple[bool, str]:
 
     EVERY worktree this module pushes from needs this, which is why the name no
     longer says "anchor". It did, and that is exactly how the gap survived: the
-    fix was written for the anchor path and the two other functions that create
+    fix was written for `open_anchor_pr` and the two other functions that create
     a throwaway worktree — `open_pr` and `open_assessment_pr` — never called it.
     Measured 2026-08-20: `[notify:assess]` and `[notify:sync]` both failed with
     "UNDETERMINED: --tree benchmark-data is not a directory", the tick exited 4,
@@ -325,7 +325,7 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _nda_stop = _nda_block_push(wt)
         if _nda_stop:
             return (False, _nda_stop)
-        # FULL REFNAME. `push_anchor`'s worktree is created with
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
         # `--detach` (so no local branch-name residue is left behind), and
         # from a detached HEAD git cannot infer whether a SHORT destination
         # names a branch or a tag -- it refuses rather than guessing:
@@ -353,6 +353,143 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
         _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
         shutil.rmtree(wt, ignore_errors=True)
         _run(["git", "-C", str(REPO), "branch", "-D", branch])   # local branch not needed (origin has it)
+
+
+def open_anchor_pr(version: str) -> tuple[bool, str]:
+    """Open a vibe-ic PR advancing the eda image anchor to `version`.
+
+    WHY THIS EXISTS (vibe-ic#754). Publishing an image and advancing vibe-ic's
+    anchor were two manual actions with nothing linking them, so every release
+    moved `:latest` off the pinned version BY CONSTRUCTION and the two were
+    reunited only because a landing gate happened to look. That repair was
+    applied by hand four times — 0.2.62 ("the gate caught it for the third
+    time") and 0.2.63 among them. A repair that keeps being applied by hand is a
+    missing step, not a recurring accident.
+
+    Between the publish and the next landing, anyone pulling the tag that means
+    "newest" gets a different toolchain from the one vibe-ic pins, and their
+    results are not comparable (vibe-ic#423).
+
+    IT DELEGATES TO VIBE-IC'S OWN TOOL. `open_pr` bumps `DOC_FILES` with a
+    regex — 2 files of the 9 that carry a pointer — which is why a tick that DID
+    fire still left the anchor failing its own gate. Re-deriving "where the
+    version is written" in this repo is how the second list drifts from the
+    first; `sync_image_version.py --set` is the one place that knows, and it
+    verifies itself afterwards.
+    """
+    version = (version or "").strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        return (False, f"refusing to anchor a malformed version: {version!r}")
+    if not REPO.is_dir():
+        return (False, f"vibe-ic clone not found at {REPO}")
+
+    branch = f"eda-anchor-{version}"
+    dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
+
+    rc, out = _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
+    if rc != 0:
+        return (False, f"git fetch origin failed: {out.strip()[:200]}")
+    rc, out = _run(["git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch])
+    branch_exists = rc == 0 and bool(out.strip())
+    if rc != 0:
+        return (False, f"could not inspect anchor branch: {out.strip()[:200]}")
+
+    wt = Path(tempfile.gettempdir()) / f"gk-vibeic-anchor-{version}"
+    _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+    shutil.rmtree(wt, ignore_errors=True)
+    # Inspect the authoritative main tree before treating a retained remote
+    # branch as pending. GitHub may keep a merged branch; in that state the
+    # anchor is fulfilled and a permanent false-red would be worse than the
+    # stale branch. Detached also avoids local branch-name residue entirely.
+    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "--detach",
+                    str(wt), "origin/main"])
+    if rc != 0:
+        return (False, f"worktree add failed: {out.strip()[:200]}")
+    try:
+        context_ok, context_note = _prepare_push_gate_context(wt)
+        if not context_ok:
+            return (False, context_note)
+        tool = wt / ANCHOR_TOOL
+        if not tool.is_file():
+            return (False, f"{ANCHOR_TOOL} not present in vibe-ic — cannot anchor")
+        # WE ALREADY PROVED THIS TAG IS PUBLISHED -- DON'T MAKE IT GUESS AGAIN.
+        # `daily_release` only reaches the anchor step after
+        # `verify_remote_immutable_publication`, which reads the tag back from
+        # the registry with `docker manifest inspect`: authoritative, immediate,
+        # and the same thing `docker pull` consults. The anchor tool, absent an
+        # override, re-asks the question via GHCR's `/tags/list`, which is
+        # CACHED -- measured 2026-08-19, it still named 0.3.11 as newest a full
+        # HOUR after 0.3.12 was pushed and readable. So a release we had already
+        # verified was refused as "does not exist on the registry", recorded
+        # itself anchor-blocked, and the public page told readers no version had
+        # shipped and the lag below was real. Three false statements, none of
+        # them ours to make: whether OUR image reached the registry is this
+        # repo's question, answered by this repo's readback.
+        #
+        # `VIBEIC_EDA_PUBLISHED_TAG` is the tool's own documented way to be told
+        # rather than to query. Passing it hands over the verified fact instead
+        # of asking a stale cache to rediscover it.
+        rc, out = _run(["python3", str(tool), "--set", version], cwd=str(wt),
+                       env={"VIBEIC_EDA_PUBLISHED_TAG": version})
+        if rc != 0:
+            return (False, f"anchor tool refused {version}: {out.strip()[-300:]}")
+        rc, dirty = _run(["git", "-C", str(wt), "status", "--porcelain"])
+        if not [l for l in dirty.splitlines() if l and not l.startswith("??")]:
+            # This is the fulfilled postcondition, not a failure to create work.
+            # Treating it as false made every repair/noop round permanently red
+            # after the anchor PR had already landed.
+            return (True, f"anchor already at {version} — nothing to open")
+
+        if branch_exists and not dry:
+            return (False, f"branch {branch} already on origin — anchor PR pending")
+
+        _run(["git", "-C", str(wt), "add", "-u"])
+        title = f"chore(image-anchor): adopt vibeic-eda {version}"
+        rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])
+        if rc != 0:
+            return (False, f"commit failed: {out.strip()[:200]}")
+
+        body = (
+            f"`vibeic-eda:{version}` is published, so `:latest` no longer resolves to "
+            f"the version this repo anchors. Opened by the release itself rather than "
+            f"waiting for a landing gate to notice.\n\n"
+            f"Produced by running vibe-ic's own `{ANCHOR_TOOL} --set {version}` — the "
+            f"tool that owns the pointer list — not by re-deriving where the version is "
+            f"written.\n\n"
+            f"Closes the hand step described in vibe-ic#754.\n")
+        if dry:
+            rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
+            return (True, f"DRY-RUN — would open '{title}'\n{diff.strip()[:800]}")
+
+        stop = _nda_block_push(wt)
+        if stop:
+            return (False, stop)
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
+        # `--detach` (so no local branch-name residue is left behind), and
+        # from a detached HEAD git cannot infer whether a SHORT destination
+        # names a branch or a tag -- it refuses rather than guessing:
+        #     error: The destination you provided is not a full refname
+        #     (i.e., starting with "refs/").
+        # Measured on the 0.3.7 release: the image built, smoked, recorded
+        # and published, and ONLY this push failed, leaving `:latest` moved
+        # off the version vibe-ic anchors -- the exact split vibe-ic#754
+        # closed. The other two callers create a NAMED branch and were not
+        # affected; spelling the ref in full is correct for them too and
+        # removes the dependency on how the worktree happened to be made.
+        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
+                        f"HEAD:refs/heads/{branch}"])
+        if rc != 0:
+            return (False, f"branch push failed: {out.strip()[:200]}")
+        bf = Path(tempfile.gettempdir()) / f"gk-anchor-body-{version}.md"
+        bf.write_text(body)
+        rc, out = _run(["gh", "pr", "create", "-R", GH_REPO, "--base", "main",
+                        "--head", branch, "--title", title, "--body-file", str(bf)])
+        if rc != 0:
+            return (False, f"gh pr create failed: {out.strip()[:200]}")
+        return (True, f"opened anchor PR: {out.strip().splitlines()[-1] if out.strip() else '(created)'}")
+    finally:
+        _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def tally_line(tool: str, a: dict) -> str | None:
@@ -497,121 +634,6 @@ def open_alert_pr(title: str, body_md: str, slug: str = "alert",
         _run(["git", "-C", str(REPO), "branch", "-D", branch])
 
 
-def push_anchor(version: str) -> tuple[bool, str]:
-    """Land the image anchor by DIRECT PUSH to vibe-ic's main.
-
-    THE PR WAS CEREMONY, NOT REVIEW. Every anchor advance since 0.3.6 went out
-    as a PR whose entire content is one version string moving through the fixed
-    set of files `sync_image_version.py --set` owns — #1738, #1746, #1748,
-    #1750, #1752, all rubber-stamped, because there is nothing in that diff a
-    human can meaningfully judge. Meanwhile the open PR made
-    `fork_github_convergence` non-zero, which skipped the NEXT round's certified
-    publish: the release blocked the release. Measured 2026-08-20 across five
-    rounds; round 5 was blocked by the three PRs round 5 itself had just opened.
-
-    This is the 2026-06-26 owner directive applied where it always belonged:
-    the maintainer's own mechanical changes land by direct push, and — as
-    CONTRIBUTING.md says in the same sentence — "with every gate retained".
-    vibe-ic's pre-push hook keeps its whole cheap tier and, for a diff that
-    touches only the anchor's own paths, runs `sync_image_version.py --check`
-    where the plugin-audit stamp would go. Scoped, not skipped: one path outside
-    that set and the full tier runs again.
-
-    Returns (ok, note). NEVER raises — an anchor hiccup must not fail a release
-    that already succeeded.
-    """
-    version = (version or "").strip()
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        return (False, f"refusing to anchor a malformed version: {version!r}")
-    if not REPO.is_dir():
-        return (False, f"vibe-ic clone not found at {REPO}")
-
-    dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
-    rc, out = _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
-    if rc != 0:
-        return (False, f"git fetch origin failed: {out.strip()[:200]}")
-
-    wt = Path(tempfile.gettempdir()) / f"gk-vibeic-anchor-{version}"
-    _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
-    shutil.rmtree(wt, ignore_errors=True)
-    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "--detach",
-                    str(wt), "origin/main"])
-    if rc != 0:
-        return (False, f"worktree add failed: {out.strip()[:200]}")
-    try:
-        context_ok, context_note = _prepare_push_gate_context(wt)
-        if not context_ok:
-            return (False, context_note)
-        tool = wt / ANCHOR_TOOL
-        if not tool.is_file():
-            return (False, f"{ANCHOR_TOOL} not present in vibe-ic — cannot anchor")
-
-        # HAND THE TOOL THE FACT, DO NOT MAKE IT RE-ASK A CACHE.
-        # Absent an override the anchor tool resolves "does this tag exist" via
-        # GHCR's /tags/list, which is CACHED: measured 2026-08-19, it still
-        # named 0.3.11 as newest a full HOUR after 0.3.12 was pushed and
-        # readable. A release we had already verified was refused as "does not
-        # exist on the registry", recorded itself anchor-blocked, and the public
-        # page told readers no version had shipped and the lag was real — three
-        # false statements, none of them ours to make. Whether OUR image reached
-        # the registry is this repo's question, and this round already answered
-        # it with `verify_remote_immutable_publication`'s `docker manifest
-        # inspect` readback. `VIBEIC_EDA_PUBLISHED_TAG` is the tool's own
-        # documented way to be told rather than to query.
-        rc, out = _run(["python3", str(tool), "--set", version], cwd=str(wt),
-                       env={"VIBEIC_EDA_PUBLISHED_TAG": version})
-        if rc != 0:
-            return (False, f"anchor tool refused {version}: {out.strip()[-300:]}")
-        rc, dirty = _run(["git", "-C", str(wt), "status", "--porcelain"])
-        if not [l for l in dirty.splitlines() if l and not l.startswith("??")]:
-            return (True, f"anchor already at {version} — nothing to push")
-
-        _run(["git", "-C", str(wt), "add", "-u"])
-        title = f"chore(image-anchor): adopt vibeic-eda {version}"
-        msg = (f"{title}\n\n"
-               f"`vibeic-eda:{version}` is published and verified by this round's "
-               f"own registry readback, so `:latest` no longer resolves to the "
-               f"version this repo anchors.\n\n"
-               f"Produced by `{ANCHOR_TOOL} --set {version}` — the one place that "
-               f"knows which pointers are live. Direct push per the 2026-06-26 "
-               f"owner directive; vibe-ic's pre-push hook scopes its tier to this "
-               f"diff and runs the anchor drift check in the stamp's place.\n")
-        rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", msg])
-        if rc != 0:
-            return (False, f"commit failed: {out.strip()[:200]}")
-
-        if dry:
-            rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
-            return (True, f"DRY-RUN — would push anchor {version}\n{diff.strip()[:800]}")
-
-        _nda_stop = _nda_block_push(wt)
-        if _nda_stop:
-            return (False, _nda_stop)
-
-        # MAIN MOVES. This round is not the only thing landing today, so a
-        # non-fast-forward here is ordinary, not an error — rebase onto the tip
-        # that arrived and try once more. A second rejection is reported rather
-        # than retried forever: something is contending, and a human should see
-        # that rather than watch a loop.
-        for attempt in (1, 2):
-            rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
-                            "HEAD:refs/heads/main"])
-            if rc == 0:
-                return (True, f"anchor {version} pushed to main")
-            if attempt == 2 or "non-fast-forward" not in (out or "").lower():
-                return (False, f"anchor push failed: {out.strip()[-300:]}")
-            _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
-            rc2, out2 = _run(["git", "-C", str(wt), "rebase", "origin/main"])
-            if rc2 != 0:
-                _run(["git", "-C", str(wt), "rebase", "--abort"])
-                return (False, f"anchor rebase onto origin/main failed: "
-                               f"{out2.strip()[-200:]}")
-        return (False, "anchor push failed")
-    finally:
-        _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
-        shutil.rmtree(wt, ignore_errors=True)
-
-
 def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
     """Open a vibe-ic REVIEW PR carrying the selective-merge assessments for the behind
     forks: one markdown per tool under tools/vibeic-eda/upstream-assessments/, plus a body
@@ -693,7 +715,7 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
         _nda_stop = _nda_block_push(wt)
         if _nda_stop:
             return (False, _nda_stop)
-        # FULL REFNAME. `push_anchor`'s worktree is created with
+        # FULL REFNAME. `open_anchor_pr`'s worktree is created with
         # `--detach` (so no local branch-name residue is left behind), and
         # from a detached HEAD git cannot infer whether a SHORT destination
         # names a branch or a tag -- it refuses rather than guessing:
