@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.18",
-  "pins_fingerprint": "d3a8ea2fa4a8",
+  "version": "0.3.19",
+  "pins_fingerprint": "c7fa1dedf82e",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "7a21e3d3a71d33f0e455d52aa7ed9dc9c65608e5",
+    "OpenROAD": "90d13ebc9f635e1b7daeb04235e15343534c9170",
     "OpenROAD-flow-scripts": "3476215b97b7f51960f7ca796e0b6835fd4d79d7",
     "Trilinos": "6825fd1246a3097a8d6fbeaa272aac7e35e3b858",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
@@ -33,10 +33,10 @@
     "slang": "7ce5f186b9eeadd0e9cede10e791533dc54724f0",
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
-    "verilator": "0d13e0f5f13ec2e2940acae9f0182030771d0de3",
+    "verilator": "b43601db0fce52555e7c9beccb96b09b4733e0dd",
     "xschem": "3890d7f030042153b213f8abe882853c4af4b495",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
     "yosys": "2360b52b2fcb59bec16982ac5f9481570051c33b"
   },
-  "manifest_identity": "a79a4b575d47293ddf65da05fde7689a39a561535388a7b1052777c5a5bb620c"
+  "manifest_identity": "86783cb42c46329177af61e3a4b76bfa64874f7f04bac3565d96917c192b881b"
 }
