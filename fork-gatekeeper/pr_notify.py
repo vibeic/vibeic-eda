@@ -58,7 +58,6 @@ LOG_FILE = "tools/vibeic-eda/EDA_FORK_SYNC_LOG.md"      # machine-owned append-o
 ANCHOR_TOOL = "tools/vibeic-eda/sync_image_version.py"
 BENCHMARK_TREE = "benchmark-data"
 ASSESS_DIR = "tools/vibeic-eda/upstream-assessments"   # per-tick selective-merge assessments
-ALERT_DIR = "tools/vibeic-eda/alerts"                  # operational alerts (publish silence, etc.)
 _PIN_RE = re.compile(r"(vibeic-eda:)\d+\.\d+\.\d+")
 
 
@@ -418,85 +417,6 @@ def tally_line(tool: str, a: dict) -> str | None:
     return line
 
 
-def open_alert_pr(title: str, body_md: str, slug: str = "alert",
-                  date: str = "undated") -> tuple[bool, str]:
-    """Open a vibe-ic PR carrying an OPERATIONAL alert.
-
-    `open_pr` is not this. It takes the fork-sync SUMMARY DICT, derives
-    verdict counts from it, and returns "nothing actionable" when that dict
-    has no rows — so calling it with a plain string raises
-    `AttributeError: 'str' object has no attribute 'get'`, which is exactly
-    what `check_publish_silence` did on its first real escalation
-    (2026-08-20, publish streak 2). The alerter refused rather than
-    degraded and reported NORECORD, so nothing was silently lost, but the
-    alert did not go out either.
-
-    An operational alert has no tool list and no verdicts. It is a dated
-    note plus a title, and this is the one path shaped for that.
-    """
-    if not REPO.is_dir():
-        return (False, f"vibe-ic clone not found at {REPO}")
-    if not (title.strip() and body_md.strip()):
-        return (False, "refusing to open an alert PR with an empty title or body")
-
-    branch = f"eda-fork-alert-{slug}-{date}"
-    dry = os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes")
-
-    rc, out = _run(["git", "-C", str(REPO), "fetch", "origin", "main", "-q"])
-    if rc != 0:
-        return (False, f"git fetch origin failed: {out.strip()[:200]}")
-    rc, out = _run(["git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch])
-    if rc == 0 and out.strip() and not dry:
-        return (True, f"alert branch {branch} already on origin — alert already raised")
-
-    wt = Path(tempfile.gettempdir()) / f"gk-vibeic-alert-{slug}-{date}"
-    _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
-    shutil.rmtree(wt, ignore_errors=True)
-    rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
-                    str(wt), "origin/main"])
-    if rc != 0:
-        _run(["git", "-C", str(REPO), "branch", "-D", branch])
-        rc, out = _run(["git", "-C", str(REPO), "worktree", "add", "-q", "-b", branch,
-                        str(wt), "origin/main"])
-        if rc != 0:
-            return (False, f"worktree add failed: {out.strip()[:200]}")
-    try:
-        context_ok, context_note = _prepare_push_gate_context(wt)
-        if not context_ok:
-            return (False, context_note)
-        adir = wt / ALERT_DIR
-        adir.mkdir(parents=True, exist_ok=True)
-        (adir / f"{date}-{slug}.md").write_text(f"# {title}\n\n{body_md}")
-        _run(["git", "-C", str(wt), "add", ALERT_DIR])
-        rc, out = _run(["git", "-C", str(wt), "commit", "-q", "-m", title])
-        if rc != 0:
-            return (False, f"commit failed: {out.strip()[:200]}")
-
-        body = (body_md.rstrip() + "\n\n---\n_Opened automatically by the "
-                "eda-fork-gatekeeper. Operational alert, not an auto-merge._\n")
-        if dry:
-            rc, diff = _run(["git", "-C", str(wt), "show", "--stat", "HEAD"])
-            return (True, f"DRY-RUN — would open alert PR '{title}'\n{diff.strip()[:800]}")
-
-        _nda_stop = _nda_block_push(wt)
-        if _nda_stop:
-            return (False, _nda_stop)
-        rc, out = _run(["git", "-C", str(wt), "push", "-q", "origin",
-                        f"HEAD:refs/heads/{branch}"])
-        if rc != 0:
-            return (False, f"branch push failed: {out.strip()[:200]}")
-        bf = Path(tempfile.gettempdir()) / f"gk-alert-body-{slug}-{date}.md"
-        bf.write_text(body)
-        rc, out = _run(["gh", "pr", "create", "-R", GH_REPO, "--base", "main",
-                        "--head", branch, "--title", title, "--body-file", str(bf)])
-        if rc != 0:
-            return (False, f"gh pr create failed: {out.strip()[:200]}")
-        url = out.strip().splitlines()[-1] if out.strip() else "(created)"
-        return (True, f"opened alert PR: {url}")
-    finally:
-        _run(["git", "-C", str(REPO), "worktree", "remove", "--force", str(wt)])
-        shutil.rmtree(wt, ignore_errors=True)
-        _run(["git", "-C", str(REPO), "branch", "-D", branch])
 
 
 def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:

@@ -1161,9 +1161,30 @@ def _maybe_notify(summary: dict, assessments: dict | None = None,
             if missing and assess_release:
                 for t in missing:
                     md[t] = assess_release.render_md(subset[t])
-            outcomes.append(("assess",) + tuple(pr_notify.open_assessment_pr(summary, subset, md)))
+            # NO PR. The assessment is WRITTEN — `tools/vibeic-eda/upstream-
+            # assessments/<date>-<tool>.md` — and whoever wants it reads the file.
+            # Opening a PR for it every round produced documents nobody acted on
+            # (#1753 was merged after reading it only to confirm it adopted no
+            # commits) while the open PR made `fork_github_convergence` non-zero
+            # and skipped the NEXT round's certified publish. The round blocked
+            # itself by finishing its own work.
+            outcomes.append(("assess", True,
+                             f"assessment written for {len(subset)} tool(s); no PR "
+                             "(see tools/vibeic-eda/upstream-assessments/)"))
         if c.get("MERGED", 0) > 0 or uncovered:
-            outcomes.append(("sync",) + tuple(pr_notify.open_pr(summary, _report_md(summary))))
+            # Same reason as the assessment above: the row lands in
+            # EDA_FORK_SYNC_LOG.md, which is where a reader looks. A PR for it
+            # was a notification nobody consumed, standing in the pipeline.
+            #
+            # BOTH PATHS HAD BEEN FAILING SILENTLY FOR WEEKS before this
+            # (`skip: branch push failed` — the vibe-ic push-gate context was
+            # prepared for one PR path and not the other two). Repairing that
+            # hole turned them back on, and the first thing three rounds of
+            # working notifications proved was that nothing consumes them. A
+            # mechanism worth repairing is one something reads.
+            outcomes.append(("sync", True,
+                             "daily report recorded; no PR "
+                             "(see tools/vibeic-eda/EDA_FORK_SYNC_LOG.md)"))
         if not outcomes:
             return
         for kind, ok, detail in outcomes:
