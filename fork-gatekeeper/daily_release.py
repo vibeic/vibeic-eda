@@ -3594,7 +3594,12 @@ def _main_under_release_lock(argv=None) -> int:
             if pushed:
                 try:
                     import pr_notify as _prn
-                    _aok, _anote = _prn.open_anchor_pr(new)
+                    # DIRECT PUSH, not a PR (2026-06-26 owner directive).
+                    # The anchor PR was rubber-stamped every time and its being
+                    # OPEN made fork_github_convergence non-zero, which skipped
+                    # the next round's certified publish — the release blocking
+                    # the release. See `pr_notify.push_anchor`.
+                    _aok, _anote = _prn.push_anchor(new)
                 except Exception as _e:      # noqa: BLE001
                     _aok, _anote = False, f"{_e.__class__.__name__}: {_e}"
                 print(f"  anchor: {_anote}")
@@ -3793,13 +3798,21 @@ def _main_under_release_lock(argv=None) -> int:
                 })
 
         # The release is not operationally converged until vibe-ic's image
-        # anchor is either already current or represented by a successfully
-        # opened review PR. Retry this on noops so a transient GitHub failure
-        # does not require a new image release to heal.
+        # anchor is either already current or has been pushed. Retry this on
+        # noops so a transient GitHub failure does not require a new image
+        # release to heal.
+        #
+        # It used to say "represented by a successfully opened review PR". That
+        # PR was rubber-stamped every time — its whole content is a version
+        # string moving through the files `sync_image_version.py --set` owns —
+        # and while it sat open it made `fork_github_convergence` non-zero,
+        # which skipped the NEXT round's certified publish. The release blocked
+        # the release. Direct push per the 2026-06-26 owner directive, with the
+        # gates retained and scoped by vibe-ic's pre-push hook.
         if not a.dry_run:
             try:
                 import pr_notify as _prn
-                anchor_ok, anchor_note = _prn.open_anchor_pr(
+                anchor_ok, anchor_note = _prn.push_anchor(
                     rec.get("version"))
             except Exception as exc:      # noqa: BLE001
                 anchor_ok = False

@@ -75,7 +75,7 @@ def _stub_release_inputs(monkeypatch, root: Path, record: dict) -> None:
     monkeypatch.setattr(R, "select_publish_version",
                         lambda *_a, **_k: ("0.2.30", "0.2.31", []))
     monkeypatch.setattr(R, "_existing_versions", lambda _root: [])
-    monkeypatch.setattr(P, "open_anchor_pr",
+    monkeypatch.setattr(P, "push_anchor",
                         lambda version: (True, f"anchor already at {version}"))
     monkeypatch.setattr(
         R, "recover_uncommitted_release_record",
@@ -715,7 +715,7 @@ def test_published_image_with_failed_anchor_is_not_a_green_round(
                             R.Presence.PRESENT,
                             "origin/main:RELEASED.json", "stubbed-git",
                             "published", "b" * 40))
-    monkeypatch.setattr(P, "open_anchor_pr",
+    monkeypatch.setattr(P, "push_anchor",
                         lambda _version: (False, "GitHub unavailable"))
     sidecar = tmp_path / "release.json"
 
@@ -847,7 +847,7 @@ def test_noop_retries_anchor_and_retains_failure_when_it_is_pending(
         calls.append(version)
         return False, f"eda-anchor-{version} PR pending"
 
-    monkeypatch.setattr(P, "open_anchor_pr", pending)
+    monkeypatch.setattr(P, "push_anchor", pending)
     sidecar = tmp_path / "release.json"
 
     rc = R.main(["--eda-root", str(root), "--json", str(sidecar)])

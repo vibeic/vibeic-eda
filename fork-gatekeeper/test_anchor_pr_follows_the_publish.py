@@ -19,7 +19,7 @@ import daily_release as DR                                     # noqa: E402
 def test_a_malformed_version_is_refused_before_any_git_runs(bad):
     """An anchor is a claim that a specific tag resolves. Nothing that is not a
     version may reach the tree, and the refusal must not depend on git."""
-    ok, note = P.open_anchor_pr(bad)
+    ok, note = P.push_anchor(bad)
     assert ok is False and "malformed" in note, note
 
 
@@ -32,11 +32,11 @@ def test_it_delegates_to_vibe_ics_own_anchor_tool():
     point at a tag `docker pull` cannot resolve, which a regex would happily
     write."""
     src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("def push_anchor", 1)[1].split("\ndef ", 1)[0]
     assert "ANCHOR_TOOL" in body, "the anchor PR must run vibe-ic's own tool"
     assert "--set" in body
     assert "_PIN_RE" not in body, (
-        "open_anchor_pr re-derived where the version is written; that second "
+        "push_anchor re-derived where the version is written; that second "
         "list is exactly what drifts from the first")
 
 
@@ -66,10 +66,10 @@ def test_the_release_opens_the_anchor_pr_only_on_a_real_publish():
     """A LOCAL ONLY build has nothing to anchor TO. Pointing the repo at a tag
     nobody can pull is worse than leaving it behind one that resolves."""
     src = Path(DR.__file__).read_text()
-    assert "open_anchor_pr" in src, (
+    assert "push_anchor" in src, (
         "the release path does not call it — the capability existing and the "
         "release not using it is the defect #754 describes")
-    seg = src.split("open_anchor_pr", 1)[0]
+    seg = src.split("push_anchor", 1)[0]
     tail = seg[-900:]
     assert re.search(r"if pushed:", tail), (
         "the anchor call is not guarded by `pushed`")
@@ -82,8 +82,8 @@ def test_an_anchor_exception_is_captured_as_a_terminal_round_result():
     current-round sidecar is written. A later noop retries the anchor.
     """
     src = Path(DR.__file__).read_text()
-    seg = src.split("open_anchor_pr", 1)[1][:400]
-    assert "except Exception" in src.split("open_anchor_pr", 1)[0][-600:] or \
+    seg = src.split("push_anchor", 1)[1][:400]
+    assert "except Exception" in src.split("push_anchor", 1)[0][-600:] or \
            "except Exception" in seg, "the call is not wrapped"
     assert '"stage": "anchor_pr"' in Path(DR.__file__).read_text()
 
@@ -91,9 +91,16 @@ def test_an_anchor_exception_is_captured_as_a_terminal_round_result():
 def test_noop_retries_anchor_and_main_already_current_is_success():
     release = Path(DR.__file__).read_text()
     anchor = Path(P.__file__).read_text()
-    assert release.count("open_anchor_pr") >= 2
-    assert "anchor already at {version} — nothing to open" in anchor
-    assert "branch_exists" in anchor and "anchor PR pending" in anchor
+    assert release.count("push_anchor") >= 2
+    assert "anchor already at {version} — nothing to push" in anchor
+    # `branch_exists` / "anchor PR pending" were the PR-era guard against
+    # opening a second PR for a version whose branch was still on origin. A
+    # direct push has no pending branch: it lands or it is reported. The
+    # properties that carry over are asserted instead — "already at this
+    # version" is SUCCESS (above), and a contended push is retried ONCE and
+    # then reported rather than looped.
+    assert "non-fast-forward" in anchor
+    assert "for attempt in (1, 2)" in anchor
 
 
 def test_the_anchor_branch_is_pushed_by_full_refname():
@@ -117,16 +124,16 @@ def test_the_anchor_branch_is_pushed_by_full_refname():
     this file exists to keep closed.
     """
     src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
-    assert '"push"' in body, "open_anchor_pr no longer pushes the anchor branch"
+    body = src.split("def push_anchor", 1)[1].split("\ndef ", 1)[0]
+    assert '"push"' in body, "push_anchor no longer pushes the anchor"
     # Match the refspec itself rather than a source LINE: the call is wrapped,
     # so a line-wise check passes or fails on formatting instead of on the
     # thing under test.
-    assert 'f"HEAD:refs/heads/{branch}"' in body, (
+    assert '"HEAD:refs/heads/main"' in body, (
         "the anchor branch is not pushed by full refname; from the detached "
         "anchor worktree git refuses a short destination")
     assert 'f"HEAD:{branch}"' not in body, (
-        "a short-name push destination survives in open_anchor_pr")
+        "a short-name push destination survives in push_anchor")
 
 
 def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
@@ -152,9 +159,9 @@ def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
     already answered by this repo's readback.
     """
     src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("def push_anchor", 1)[1].split("\ndef ", 1)[0]
     call = [l for l in body.splitlines() if "ANCHOR_TOOL" in l or '"--set"' in l]
-    assert call, "open_anchor_pr no longer invokes the anchor tool"
+    assert call, "push_anchor no longer invokes the anchor tool"
     # CODE ONLY. The rationale above the call names the variable too, so a
     # substring check over the whole body passes on the comment alone -- it
     # stayed green with the override deleted.
@@ -168,7 +175,7 @@ def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
 
 # ---------------------------------------------------------------------------
 # The gap that produced this test: the benchmark-tree context was written for
-# `open_anchor_pr` and never called from `open_pr` or `open_assessment_pr`, so
+# `push_anchor` and never called from `open_pr` or `open_assessment_pr`, so
 # on 2026-08-20 `[notify:assess]` and `[notify:sync]` both failed the vibe-ic
 # push gate with "UNDETERMINED: --tree benchmark-data is not a directory", the
 # gatekeeper tick exited 4, and no PR went out. Naming the helper after one
