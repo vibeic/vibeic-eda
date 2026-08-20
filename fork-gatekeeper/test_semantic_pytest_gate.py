@@ -11,7 +11,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import semantic_pytest_gate as G  # noqa: E402
 
 
-def _run(tmp_path: Path, body: str, *, grace: float = 0.18) -> tuple[int, dict]:
+#: Stall grace for tests that are NOT about stalling.
+#:
+#: It was 0.18s, which is not a property of the gate — it is a bet that this
+#: machine can start a pytest subprocess and get its first byte out inside
+#: 180ms. Measured 2026-08-21 at load 30 (other agents on the box): it cannot,
+#: and `test_complete_green_record_passes` — a test about whether a GREEN
+#: record reads as green — failed with WATCHDOG_STALLED. The round runs this
+#: suite as a gate, so a timing bet nobody meant to make blocked the pipeline.
+#:
+#: Generous on purpose. A test that does not exercise the watchdog should never
+#: be able to trip it; the ones that DO exercise it pass their own short value
+#: explicitly, where the number is the point rather than an accident.
+NON_STALL_GRACE_S = 30.0
+
+#: Stall grace for the two tests that DO exercise the watchdog. They run an
+#: infinite loop and must wait out the whole grace before the kill lands, so
+#: the number is both the assertion and the runtime — raising it to
+#: NON_STALL_GRACE_S turned each into a 30-second test (measured: 30.65s,
+#: 61 of the file's 66 seconds) for no extra proof.
+#:
+#: Still generous enough not to race process startup: the subject only has to
+#: reach `collection_finish` and then produce nothing the gate counts as
+#: DOMAIN progress, and the assertions check exactly that checkpoint.
+STALL_GRACE_S = 2.0
+
+
+def _run(tmp_path: Path, body: str, *, grace: float = NON_STALL_GRACE_S) -> tuple[int, dict]:
     test = tmp_path / "test_subject.py"
     test.write_text(body, encoding="utf-8")
     record = tmp_path / "record.json"
@@ -48,6 +74,7 @@ def test_chatty_hang_cannot_impersonate_pytest_progress(tmp_path) -> None:
         "    import sys\n"
         "    while True:\n"
         "        print('noise', flush=True)\n",
+        grace=STALL_GRACE_S,
     )
     assert rc == G.RC_NORECORD
     assert record["outcome"] == "stalled"
@@ -60,6 +87,7 @@ def test_cpu_busy_hang_cannot_impersonate_pytest_progress(tmp_path) -> None:
         "def test_hangs():\n"
         "    while True:\n"
         "        pass\n",
+        grace=STALL_GRACE_S,
     )
     assert rc == G.RC_NORECORD
     assert record["outcome"] == "stalled"
@@ -74,7 +102,11 @@ def test_finite_domain_checkpoints_let_long_test_finish(tmp_path) -> None:
         "    for i in range(1, 7):\n"
         "        time.sleep(.08)\n"
         "        domain_progress('chunks', i, 6)\n",
-        grace=0.25,
+        # The checkpoints are what must keep this alive, not the wall clock:
+        # the subject emits progress every 0.1s for 1s, so any grace above that
+        # interval proves the point. 0.25 also had to cover process startup,
+        # which is what made it flaky under load.
+        grace=1.0,
     )
     assert rc == G.RC_OK
     assert record["elapsed_seconds"] > 0.4
