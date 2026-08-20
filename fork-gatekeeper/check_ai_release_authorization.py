@@ -165,7 +165,32 @@ def _conflicted_cases(round_record: dict, registered_forks: list[str]
                 f"{fork}.merge_unmeasurable means branch conflict discovery "
                 "is incomplete")
         upstream_outcome = row.get("upstream_merge_outcome")
-        if upstream_outcome not in {"natural_success", "not_applicable"}:
+        if upstream_outcome == "conflict_resolved":
+            # A CONFLICT THAT WAS RESOLVED, LANDED, VERIFIED, AND WHOSE DEFERRED
+            # OURS-SIDE DISCOVERY THEN RAN is not an incomplete measurement — it
+            # is a complete one that took a detour. Refusing it cost three days
+            # of a frozen public page on 2026-08-20 (OpenROAD `src/sta`): every
+            # upstream commit was in and the published tip verified, but the
+            # round was judged on a label written before the AI ran.
+            #
+            # This is NOT a relaxation. The outcome alone authorizes nothing:
+            # `daily_0530.resume_ours_after_ai_landing` writes it ONLY after
+            # `step2_ours` actually ran to completion, and the positive evidence
+            # is demanded here rather than assumed. A row that claims the outcome
+            # without the record is a forgery and is refused as loudly as an
+            # unresolved conflict. `ours_skipped` is checked above and still
+            # applies: if the ours side could not be measured, this never passes.
+            landing = row.get("upstream_landing")
+            published = landing.get("published_tip") if isinstance(landing, dict) else None
+            if not (isinstance(landing, dict)
+                    and landing.get("verified") is True
+                    and landing.get("ours_resumed") is True
+                    and isinstance(published, str) and published.strip()):
+                errors.append(
+                    f"{fork}.upstream_merge_outcome='conflict_resolved' without a "
+                    "verified upstream_landing record (verified, ours_resumed, "
+                    "published_tip) does not prove complete conflict discovery")
+        elif upstream_outcome not in {"natural_success", "not_applicable"}:
             errors.append(
                 f"{fork}.upstream_merge_outcome={upstream_outcome!r} does not "
                 "prove complete conflict discovery")

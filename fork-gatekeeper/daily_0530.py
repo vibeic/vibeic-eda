@@ -98,6 +98,16 @@ from daily_merge import post_merge_checks, run_post_merge_checks
 # The step it guards only fires on a real merge conflict, and a conflict that
 # never happens on a given morning is not evidence the handoff works.
 FORKS = Path(os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
+
+# Step 1 defers branch consolidation when the upstream merge did not land on its
+# own. The exact text is a CONSTANT because two places must agree on it: the step
+# that defers, and `resume_ours_after_ai_landing` below, which is allowed to
+# resume only THIS deferral -- never the `BRANCH LIST UNKNOWN` one, which means
+# the branch list was never read and no later evidence can supply it.
+OURS_DEFERRED_BY_UPSTREAM_CONFLICT = (
+    "upstream landing did not form a verified successful "
+    "record; branch consolidation waits for the required "
+    "upstream-first base")
 EDA = Path("/home/reyerchu/vibeic-eda")
 OURS = ("reyer", "vibeic")
 # Destructive fork cleanup is scoped to the organisation this gate owns.  A
@@ -1874,6 +1884,165 @@ def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
     return result
 
 
+def resume_ours_after_ai_landing(report, ai, apply):
+    """Do the consolidation an upstream conflict DEFERRED, once the AI landed it.
+
+    THE ROUND USED TO STOP AT A LABEL THAT DESCRIBED HOW IT GOT SOMEWHERE, NOT
+    WHETHER IT ARRIVED. Measured 2026-08-20 on OpenROAD: step 1 hit a `src/sta`
+    conflict taking 12 upstream commits, aborted the merge, and handed the case
+    to step 2b — which resolved it, pushed it, and had the landing VERIFIED
+    (`source tip is an ancestor of the published mainline`, published tip
+    e739571b2618). Every upstream commit was in. Nothing was outstanding.
+
+    And the round still refused, because two fields were written before the AI
+    ran and nobody ever revisited them: `upstream_merge_outcome` stayed frozen
+    at "conflict", and `ours_skipped` — set as a SEQUENCING precaution, whose own
+    text says consolidation "waits for the required upstream-first base" — was
+    never told the base had arrived. `check_ai_release_authorization` read both,
+    correctly concluded that branch conflict discovery was incomplete, and
+    returned NORECORD. That blocked run_tick, which blocked build_page, and
+    https://vibeic.ai/eda-forks.html silently served three-day-old numbers until
+    a person noticed. A merge that succeeded was reported as a failure.
+
+    The fix is NOT to teach the gate that "conflict" is fine — the gate was
+    right: the ours-side discovery genuinely had not run, and certifying an
+    unmeasured thing as complete is a worse defect than the one being closed.
+    The fix is to DO THE DEFERRED WORK. This runs after step 2b, and only for a
+    fork whose deferral was exactly this sequencing one and whose upstream case
+    the AI verification proves landed. Then `step2_ours` runs for real, and the
+    round says `conflict_resolved` only because the measurement was taken.
+
+    Fails closed everywhere: an unverified case, a mainline that will not
+    fast-forward to the published tip, a `step2_ours` that cannot read the
+    branch list, or any exception, all leave the deferral in place and the round
+    NORECORD. Returns a summary for the round record.
+    """
+    summary = {"program": "resume_ours_after_ai_landing", "schema_version": 1,
+               "applied": bool(apply), "resumed": [], "declined": []}
+    if not apply:
+        return summary
+
+    verified = {}
+    for v in ((ai or {}).get("verification") or []):
+        if isinstance(v, dict) and v.get("verified") is True:
+            verified.setdefault(str(v.get("fork") or ""), []).append(v)
+
+    for fork, rep in sorted(report.items()):
+        if fork.startswith("_") or not isinstance(rep, dict):
+            continue
+        # ONLY the sequencing deferral. `BRANCH LIST UNKNOWN` is a different
+        # skip: it means the branch list was never read, and no later evidence
+        # about the UPSTREAM side can supply the OURS side it never measured.
+        if rep.get("ours_skipped") != OURS_DEFERRED_BY_UPSTREAM_CONFLICT:
+            continue
+        if rep.get("upstream_merge_outcome") != "conflict":
+            continue
+
+        # Match the verification to the case step 1 filed, by the branch it
+        # recorded — not merely "this fork has some verified case". A verified
+        # OURS-direction case says nothing about the upstream landing.
+        upstream_refs = {str(c.get("branch") or "")
+                         for c in (rep.get("conflicted") or [])
+                         if isinstance(c, dict)
+                         and c.get("direction") == "upstream -> our mainline"}
+        landing = next((v for v in verified.get(fork, [])
+                        if str(v.get("branch") or "") in upstream_refs), None)
+        if landing is None:
+            summary["declined"].append(
+                {"fork": fork,
+                 "reason": "no verified upstream-direction landing for this fork"})
+            continue
+
+        main = str(rep.get("main") or "")
+        published_tip = str(landing.get("published_tip") or "")
+        path = FORKS / fork
+        if not (main and published_tip and path.is_dir()):
+            summary["declined"].append(
+                {"fork": fork,
+                 "reason": "handoff lacks a mainline, published tip, or checkout"})
+            continue
+
+        g = ["git", "-C", str(path)]
+        try:
+            # The AI may have landed from a temporary worktree, so this clone's
+            # mainline is not automatically at the published tip. Fast-forward
+            # ONLY: a mainline that cannot reach it is not the line that landed,
+            # and resetting onto it would discard whatever it actually holds.
+            local_tip = out(*g, "rev-parse", "--verify", main)
+            if local_tip != published_tip:
+                ff = sh(*g, "merge", "--ff-only", published_tip)
+                if ff.returncode != 0:
+                    summary["declined"].append(
+                        {"fork": fork, "local_tip": local_tip or None,
+                         "published_tip": published_tip,
+                         "reason": "mainline will not fast-forward to the "
+                                   "published tip: " + _first_error_line(ff)})
+                    continue
+
+            # Clear the DEFERRAL before consolidating, so the only
+            # `ours_skipped` that can be present afterwards is one `step2_ours`
+            # set itself. Leaving the old marker in place made the step's own
+            # success read as "could not measure" — caught by
+            # test_a_verified_landing_runs_the_consolidation_it_deferred.
+            rep.pop("ours_skipped", None)
+            step2_ours(g, main, rep)
+        except Exception as exc:                      # never take the round down
+            rep.setdefault("ours_skipped", OURS_DEFERRED_BY_UPSTREAM_CONFLICT)
+            summary["declined"].append(
+                {"fork": fork, "reason": f"{type(exc).__name__}: {exc}"})
+            continue
+
+        # `step2_ours` sets its OWN `ours_skipped` when it cannot read the branch
+        # list. That is a fresh, unmeasured state — leave it, and leave the
+        # outcome at "conflict" so the gate still refuses.
+        if rep.get("ours_skipped"):
+            summary["declined"].append(
+                {"fork": fork,
+                 "reason": "step2_ours could not measure: "
+                           + str(rep.get("ours_skipped"))[:120]})
+            continue
+
+        # THE PUSH STEP HAS ALREADY RUN FOR THIS FORK. `resume` happens after
+        # step 2b, which happens after the whole fork loop — so anything
+        # `step2_ours` merges just now is sitting on the LOCAL mainline with no
+        # publication and no post-merge check behind it. Discovery is what this
+        # resume can honestly complete; publishing is not.
+        #
+        # So: a resume that merged nothing (the ordinary case — every other fork
+        # in the 2026-08-20 round reported `merged: []`) has genuinely finished
+        # the deferred measurement and says so. A resume that DID merge leaves
+        # the round refusing, because certifying a release whose consolidation is
+        # unpublished is the same class of lie this whole change exists to stop.
+        # It is not a permanent block: the next round's step 1 finds upstream
+        # already in, runs `step2_ours` in its normal place BEFORE the push, and
+        # publishes. One day, not never.
+        merged_now = [m for m in (rep.get("merged") or []) if m]
+        if merged_now:
+            rep["ours_skipped"] = (
+                "branch consolidation ran after this round's push step and "
+                f"merged {len(merged_now)} branch(es); they are on the local "
+                "mainline and NOT published, so this round cannot certify them. "
+                "The next round consolidates them in the normal order.")
+            summary["declined"].append(
+                {"fork": fork, "merged_unpublished": len(merged_now),
+                 "reason": "consolidation merged after the push step"})
+            continue
+
+        rep["upstream_merge_outcome"] = "conflict_resolved"
+        rep["upstream_landing"] = {
+            "verified": True,
+            "published_tip": published_tip,
+            "source_tip": landing.get("source_tip"),
+            "reason": landing.get("reason"),
+            "ours_resumed": True,
+        }
+        rep["upstream"] = (str(rep.get("upstream") or "").rstrip()
+                           + " — RESOLVED and landed; branch consolidation ran")
+        summary["resumed"].append({"fork": fork, "published_tip": published_tip})
+
+    return summary
+
+
 def same_content_divergence(g, main: str) -> str | None:
     """The remote's sha when it holds the SAME TREE as ours under a different
     commit, else None. vibeic-eda#61.
@@ -2084,10 +2253,7 @@ def main_(argv=None) -> int:
                     "natural_success", "not_applicable"}:
                 step2_ours(g, main, rep)
             else:
-                rep["ours_skipped"] = (
-                    "upstream landing did not form a verified successful "
-                    "record; branch consolidation waits for the required "
-                    "upstream-first base")
+                rep["ours_skipped"] = OURS_DEFERRED_BY_UPSTREAM_CONFLICT
 
             # POST-MERGE CHECKS (vibeic-eda#89), BEFORE the push.
             #
@@ -2228,6 +2394,12 @@ def main_(argv=None) -> int:
     ai = step2b_ai_decisions(report, gk_state.state_dir(), args.apply and not args.no_ai,
                              stall_grace_s=args.ai_stall_grace)
     report["_ai_decisions"] = ai
+    # THE DEFERRED HALF OF THE ROUND, now that step 2b has supplied the base it
+    # was waiting for. Placed here and not inside the fork loop because the AI
+    # runs once, after every fork has been walked. See the function's docstring
+    # for the 2026-08-20 OpenROAD round this closes.
+    report["_ours_resumed"] = resume_ours_after_ai_landing(
+        report, ai, args.apply and not args.no_ai)
     report["_watch_only_resets"] = watch_only_reset.make_round_evidence(
         round_at=round_at, run_id=run_id, applied=args.apply,
         registry=registry, results=reset_results)

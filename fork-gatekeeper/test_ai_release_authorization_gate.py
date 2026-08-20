@@ -630,3 +630,68 @@ def test_outer_round_maps_inner_authorization_refusal_to_norecord(tmp_path):
     assert captured["tick_state"] == "not_checked_ai_norecord"
     assert "forced NORECORD" in (state / "daily_0530.log").read_text()
     assert json.loads(prior_release.read_text())["status"] == "published"
+
+
+# ---------------------------------------------------------------------------
+# A conflict that was resolved, landed, verified, and whose deferred ours-side
+# discovery then RAN. Before 2026-08-20 the gate judged this on the label step 1
+# wrote before the AI ran, so a fully-merged OpenROAD round returned NORECORD and
+# froze https://vibeic.ai/eda-forks.html for three days. The outcome authorizes
+# only WITH its evidence — the negative controls below are the load-bearing half.
+# ---------------------------------------------------------------------------
+
+def _landed(**over):
+    landing = {"verified": True, "ours_resumed": True, "published_tip": "d" * 40}
+    landing.update(over)
+    return landing
+
+
+def test_resolved_and_landed_upstream_conflict_authorizes_the_release():
+    record, boundary = _record("verified")
+    record["Demo"].update(upstream_merge_outcome="conflict_resolved",
+                          upstream_landing=_landed())
+
+    rc, result = _assess(record, boundary)
+
+    assert rc == A.RC_AUTHORIZED, result.get("source_errors")
+    assert not result["source_errors"]
+
+
+@pytest.mark.parametrize("landing", [
+    None,                                   # the outcome with no record at all
+    {},                                     # a record proving nothing
+    _landed(verified=False),                # landing not verified
+    _landed(ours_resumed=False),            # ours side never resumed
+    _landed(published_tip=""),              # no tip to point at
+    _landed(published_tip="   "),           # whitespace is not a tip
+    "d" * 40,                               # a string where a record belongs
+])
+def test_conflict_resolved_without_its_evidence_is_refused(landing):
+    """The outcome is not a password. Claiming it without the record is a
+    forgery and must be refused exactly as loudly as an unresolved conflict."""
+    record, boundary = _record("verified")
+    record["Demo"]["upstream_merge_outcome"] = "conflict_resolved"
+    if landing is not None:
+        record["Demo"]["upstream_landing"] = landing
+
+    rc, result = _assess(record, boundary)
+
+    assert rc == A.RC_NORECORD
+    assert any("conflict_resolved" in error for error in result["source_errors"])
+
+
+def test_conflict_resolved_cannot_paper_over_an_unmeasured_ours_side():
+    """`ours_skipped` outranks the outcome: if branch discovery did not happen,
+    no upstream evidence supplies it."""
+    record, boundary = _record("verified")
+    record["Demo"].update(
+        upstream_merge_outcome="conflict_resolved",
+        upstream_landing=_landed(),
+        ours_skipped="BRANCH LIST UNKNOWN — origin fetch failed",
+        merged=[],
+    )
+
+    rc, result = _assess(record, boundary)
+
+    assert rc == A.RC_NORECORD
+    assert any("ours_skipped" in error for error in result["source_errors"])
