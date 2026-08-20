@@ -38,5 +38,27 @@
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
     "yosys": "2360b52b2fcb59bec16982ac5f9481570051c33b"
   },
-  "manifest_identity": "86783cb42c46329177af61e3a4b76bfa64874f7f04bac3565d96917c192b881b"
+  "manifest_identity": "86783cb42c46329177af61e3a4b76bfa64874f7f04bac3565d96917c192b881b",
+  "recipes": {
+    "recipe:__compose__": "6a644b",
+    "recipe:ciel": "adea1b",
+    "recipe:fastercap": "b84994",
+    "recipe:fault": "9a9a54",
+    "recipe:gtkwave": "2166b3",
+    "recipe:ihp-open-pdk": "a9f473",
+    "recipe:iverilog": "7e8bf2",
+    "recipe:klayout": "134d73",
+    "recipe:lvs": "19b4e7",
+    "recipe:ngspice": "1aaa99",
+    "recipe:openroad": "4ef4c9",
+    "recipe:sat-solvers": "755999",
+    "recipe:slang": "ef514c",
+    "recipe:sv-elab": "06cea9",
+    "recipe:sv2v": "3a8690",
+    "recipe:verilator": "46188a",
+    "recipe:xschem": "a8609b",
+    "recipe:xyce": "3e66ef",
+    "recipe:yices2": "04c594",
+    "recipe:yosys": "fcfca8"
+  }
 }

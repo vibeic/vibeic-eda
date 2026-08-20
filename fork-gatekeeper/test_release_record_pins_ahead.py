@@ -103,7 +103,14 @@ def test_recipe_hashes_are_deliberately_not_part_of_the_split():
     """`recipe:` entries hash file CONTENT, so an unrelated Dockerfile edit moves
     them with no pin having moved. The question is 'did the PINS move', and the
     recorded `pins` map is the only thing that answers it — comparing recipe
-    hashes would classify every doc edit as a pin advance."""
+    hashes would classify every doc edit as a pin advance.
+
+    #77 NARROWED WHAT THIS FORBIDS, and the narrowing matters. Recipe hashes are
+    still barred from the PINS split — that is what this asserts. What they are
+    no longer barred from is HAVING THEIR OWN BRANCH: the original reading left
+    a recipe-only change with nowhere to go but UNREPRODUCIBLE, which reported a
+    correct record as broken. They are compared before this point and reported
+    as RECIPE_AHEAD, never as a pin advance."""
     src = _CHECK.read_text(encoding="utf-8")
     i = src.index('stats["pins_moved"]')
     seg = src[max(0, i - 1200):i + 400]
@@ -115,3 +122,113 @@ def test_the_record_still_names_the_pins_it_was_built_from():
     """The whole split rests on this field existing. If a future record drops
     it, the checker must not silently fall back to calling everything broken."""
     assert isinstance(_released().get("pins"), dict)
+
+
+# --- #77: the same split, arriving through the recipe side -------------------
+#
+# `pins_fingerprint` is computed over the pins AND the `recipe:` hashes, but the
+# record preserved only the pins. So a recipe-only edit moved the fingerprint
+# with every pin identical, and the two-way split above had nowhere to put it
+# but UNREPRODUCIBLE — #73's own complaint, one field over.
+#
+# MEASURED on the live repo: adding image-version labels to `docker-bake.hcl`
+# moved `recipe:__compose__` 6a644b -> 94f87d, all 34 pins unchanged, and
+# 0.3.19 — a record that reproduces EXACTLY from its release commit f46c287 —
+# was reported as a broken record and held the round red.
+#
+# The record now carries the recipes too, which buys a STRONGER guarantee than
+# the fix needed: "does this record contradict itself" is answerable without
+# the tree, so no amount of drift can mask a corrupt fingerprint. It could
+# before — a moved pin explained any mismatch away.
+
+
+def _self_consistent(**overrides):
+    """A record that digests to its own fingerprint — the shape a correct
+    release writes. Drift is then expressed against the TREE, not by corrupting
+    the record, so the branch under test is the one that actually runs."""
+    spec = importlib.util.spec_from_file_location(
+        "daily_release", _HERE / "daily_release.py")
+    DR = importlib.util.module_from_spec(spec)
+    sys.modules["daily_release"] = DR
+    try:
+        spec.loader.exec_module(DR)
+    except SystemExit:
+        pass
+    d = _released()
+    d["version"] = (_ROOT / "VERSION").read_text().strip()
+    d.update(overrides)
+    d["pins_fingerprint"] = DR.pins_fingerprint({**d["pins"], **d["recipes"]})
+    return d
+
+
+def _with_record(d):
+    p = _ROOT / "RELEASED.json"
+    orig = p.read_text()
+    p.write_text(json.dumps(d, indent=2) + "\n")
+    try:
+        r = _run()
+        return r.returncode, r.stdout + r.stderr
+    finally:
+        p.write_text(orig)
+
+
+def test_a_recipe_advance_is_named_not_called_unreproducible():
+    """The case that started #77. A build recipe moving between releases is the
+    same benign state as a pin moving, and must be reported as such."""
+    d = _self_consistent()
+    moved = dict(d["recipes"])
+    moved[sorted(moved)[0]] = "0" * 6            # the TREE is now ahead of it
+    rc, out = _with_record(_self_consistent(recipes=moved))
+    assert rc == 0, out[-400:]
+    assert "RECIPE_AHEAD" in out
+    assert "UNREPRODUCIBLE" not in out
+    assert "with a fingerprint this tree reproduces" not in out, (
+        "the green line states something untrue on this path too — it was "
+        "keyed on pins_moved, so RECIPE_AHEAD fell through to it")
+
+
+def test_a_recipe_advance_is_never_reported_as_a_pin_advance():
+    """`recipe:` entries hash file CONTENT. Naming them a pin advance would be
+    the untrue-green-line failure wearing a different label."""
+    d = _self_consistent()
+    moved = dict(d["recipes"])
+    moved[sorted(moved)[0]] = "0" * 6
+    rc, out = _with_record(_self_consistent(recipes=moved))
+    assert rc == 0
+    assert "PINS_AHEAD" not in out
+
+
+def test_drift_cannot_mask_a_corrupt_fingerprint(tmp_path):
+    """THE DIRECTION THAT MAKES THE SPLIT SAFE, strengthened. Before the record
+    named its own inputs, a mismatch was judged against the TREE, so anything
+    having moved explained a corrupt fingerprint away. Self-consistency is
+    decided from the record alone and cannot be explained away by drift."""
+    d = _self_consistent()
+    d["pins"] = dict(d["pins"])
+    d["pins"][sorted(d["pins"])[0]] = "0" * 40     # pins drifted from the tree
+    d["pins_fingerprint"] = "deadbeefcafe"         # AND the record is corrupt
+    rc, out = _with_record(d)
+    assert rc == 1, out[-400:]
+    assert "CONTRADICTS ITSELF" in out
+    assert "AHEAD" not in out, "drift was allowed to explain corruption away"
+
+
+def test_a_record_that_cannot_say_which_side_moved_is_not_called_fine():
+    """NOT KNOWING IS NOT THE SAME AS BEING FINE — the empty-pin-map reasoning
+    in the checker, one field over. A record predating the recipe field cannot
+    attribute a mismatch, and the benign default is exactly how an
+    unreproducible record would slip through."""
+    d = _self_consistent()
+    d.pop("recipes")
+    d["pins_fingerprint"] = "deadbeefcafe"
+    rc, out = _with_record(d)
+    assert rc == 1, out[-400:]
+    assert "CANNOT BE DECIDED" in out
+
+
+def test_the_record_names_the_recipes_it_was_built_from():
+    """The split rests on the record preserving every input its fingerprint was
+    computed from. If a future writer drops this, attribution silently degrades
+    to the guess this fixed."""
+    assert isinstance(_released().get("recipes"), dict)
+    assert _released()["recipes"], "an empty recipe map cannot attribute either"

@@ -679,6 +679,12 @@ def retag_images(eda_root: Path, refs_now: Dict[str, str],
     return touched
 
 
+# The one spelling of the recipe namespace inside the fingerprint's input set.
+# Producer (`release_record_value`) and consumer (`check_release_recorded`) both
+# read it from here, so the two cannot drift apart on a bare string literal.
+RECIPE_KEY_PREFIX = "recipe:"
+
+
 def pins_fingerprint(pins: Dict[str, str]) -> str:
     """A stable digest of the whole pin set — what a released image was built from."""
     blob = ";".join(f"{k}={v}" for k, v in sorted(pins.items()))
@@ -712,6 +718,10 @@ def release_record_value(eda_root: Path, version: str,
                          targets: Dict[str, List[str]], *,
                          manifest_identity: Optional[str] = None) -> dict:
     """Construct the canonical record without changing the working tree."""
+    digest_inputs = {
+        **pinned_refs(eda_root),
+        **{f"{RECIPE_KEY_PREFIX}{k}": recipe_hash(eda_root, k) for k in targets},
+        f"{RECIPE_KEY_PREFIX}__compose__": compose_recipe_hash(eda_root)}
     rec = {
         "_comment": "What the last PUBLISHED image was built from. A pin set "
                     "not matching this has never been released, however current "
@@ -719,11 +729,22 @@ def release_record_value(eda_root: Path, version: str,
                     "this run made, so a later run can reproduce it from the "
                     "tree that shipped.",
         "version": version,
-        "pins_fingerprint": pins_fingerprint({
-            **pinned_refs(eda_root),
-            **{f"recipe:{k}": recipe_hash(eda_root, k) for k in targets},
-            "recipe:__compose__": compose_recipe_hash(eda_root)}),
+        "pins_fingerprint": pins_fingerprint(digest_inputs),
         "pins": {k: v for k, v in sorted(pinned_refs(eda_root).items())},
+        # #77 — RECORD EVERYTHING THE FINGERPRINT WAS COMPUTED FROM. The digest
+        # covers the pins AND the recipe hashes, but the record preserved only
+        # the pins, so its own input set could not be reconstructed from it. A
+        # later mismatch was therefore unattributable: a recipe-only edit moves
+        # the fingerprint with every pin identical, and `check_release_recorded`
+        # had nowhere to put that but UNREPRODUCIBLE — reporting a CORRECT
+        # record as broken and holding the tick red until the next release.
+        # That is #73's own complaint, arriving through the recipe side.
+        # MEASURED: adding the image-version labels to `docker-bake.hcl` moved
+        # `recipe:__compose__` 6a644b -> 94f87d with all 34 pins unchanged, and
+        # 0.3.19's record — which reproduces EXACTLY from its release commit —
+        # was called unreproducible.
+        "recipes": {k: v for k, v in sorted(digest_inputs.items())
+                    if k.startswith(RECIPE_KEY_PREFIX)},
     }
     if manifest_identity is not None:
         rec["manifest_identity"] = manifest_identity

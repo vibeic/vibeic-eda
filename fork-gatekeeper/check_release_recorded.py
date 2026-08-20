@@ -186,11 +186,39 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
 
     if recorded == version:
         targets = DR.bake_targets(eda_root)
-        fp_now = DR.pins_fingerprint({
-            **DR.pinned_refs(eda_root),
-            **{f"recipe:{k}": DR.recipe_hash(eda_root, k) for k in targets},
-            "recipe:__compose__": DR.compose_recipe_hash(eda_root)})
+        tree_pins = DR.pinned_refs(eda_root)
+        tree_recipes = {
+            **{f"{DR.RECIPE_KEY_PREFIX}{k}": DR.recipe_hash(eda_root, k)
+               for k in targets},
+            f"{DR.RECIPE_KEY_PREFIX}__compose__":
+                DR.compose_recipe_hash(eda_root)}
+        fp_now = DR.pins_fingerprint({**tree_pins, **tree_recipes})
         stats["fingerprint_now"] = fp_now
+        # #77 — THE RECORD MUST FIRST BE ASKED ABOUT ITSELF. Since the record
+        # now preserves every input its fingerprint was computed from, "does
+        # this record contradict itself" is decidable WITHOUT the tree — and a
+        # tree-independent question cannot be masked by tree drift. The old
+        # order asked the tree first, so a moved pin explained the mismatch
+        # away and a genuinely corrupt fingerprint went unreported for as long
+        # as anything in the tree had moved. This runs unconditionally.
+        recorded_pins = rec.get("pins")
+        recorded_recipes = rec.get("recipes")
+        record_is_self_describing = (isinstance(recorded_recipes, dict)
+                                     and bool(recorded_recipes))
+        if record_is_self_describing:
+            self_fp = DR.pins_fingerprint({
+                **(recorded_pins if isinstance(recorded_pins, dict) else {}),
+                **recorded_recipes})
+            stats["fingerprint_of_recorded_inputs"] = self_fp
+            if self_fp != rec.get("pins_fingerprint"):
+                findings.append(
+                    f"RELEASED.json names {version} and CONTRADICTS ITSELF: "
+                    f"the pins and build recipes it records digest to "
+                    f"{self_fp}, not to the fingerprint "
+                    f"{rec.get('pins_fingerprint')!r} it carries. The record "
+                    f"is UNREPRODUCIBLE — the 0.2.45 shape, and the SAME pin "
+                    f"set cannot explain it. Decided from the record alone, so "
+                    f"no amount of drift in the tree can mask it.")
         if rec.get("pins_fingerprint") != fp_now:
             # #73 — a fingerprint mismatch has TWO causes and they need opposite
             # actions. The record names the pin set it was built from, so the
@@ -210,8 +238,6 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
             # CONTENT, so an unrelated Dockerfile edit changes them without any
             # pin moving. The question here is "did the PINS move", and the
             # recorded `pins` map is the only thing that answers it.
-            recorded_pins = rec.get("pins")
-            tree_pins = DR.pinned_refs(eda_root)
             # AN EMPTY PIN MAP CANNOT ESTABLISH THAT THE PINS MOVED. `{}` compares
             # unequal to any real tree, so without the truth test below, a record
             # carrying no pins read as PINS_AHEAD — the branch that says "nothing is
@@ -244,15 +270,56 @@ def audit(eda_root: Path, image: str = IMAGE) -> tuple[str, list[str], dict]:
                     + (", …" if len(moved) > 4 else "") + "). The current pin "
                     "set has genuinely not been released; the next release "
                     "closes it. NOT a broken record.")
-            else:
+            elif (record_is_self_describing
+                    and recorded_recipes != tree_recipes):
+                # THE SIBLING #73 MISSED. A build recipe changing between one
+                # release and the next is the same benign state as a pin
+                # advancing: the record is right, the tree has moved past it,
+                # and the next release closes it. It reached the branch below
+                # instead, which called a record that reproduces EXACTLY from
+                # its own release commit "unreproducible" and held the tick red.
+                # It is reported under its own name and never as PINS_AHEAD —
+                # these hash file CONTENT, so they move when no pin has.
+                moved = sorted(
+                    k for k in set(recorded_recipes) | set(tree_recipes)
+                    if recorded_recipes.get(k) != tree_recipes.get(k))
+                stats["recipes_moved"] = True
+                stats["recipes_moved_names"] = moved
+                stats["note"] = (
+                    f"RECIPE_AHEAD — {version} is recorded correctly and "
+                    f"{len(moved)} build recipe(s) have changed since it "
+                    f"shipped ({', '.join(moved[:4])}"
+                    + (", …" if len(moved) > 4 else "") + "). The current tree "
+                    "has genuinely not been released; the next release closes "
+                    "it. NOT a broken record.")
+            elif not record_is_self_describing:
+                # A record written before the inputs were preserved cannot say
+                # which side moved, and NOT KNOWING IS NOT THE SAME AS BEING
+                # FINE — the empty-pin-map reasoning above, one field over. It
+                # stays a finding rather than defaulting to benign, because the
+                # benign default is exactly how an unreproducible record would
+                # slip through. The repair is to reconstruct the inputs from
+                # the release commit and verify they reproduce the recorded
+                # fingerprint before writing them back; a plain re-release also
+                # closes it.
                 findings.append(
                     f"RELEASED.json names {version} and records the SAME pin "
                     f"set this tree has, yet its fingerprint "
                     f"{rec.get('pins_fingerprint')!r} is not the one recomputed "
-                    f"({fp_now}). The record is UNREPRODUCIBLE — the 0.2.45 "
-                    f"failure, from the other direction. (A pin advance would "
-                    f"show as PINS_AHEAD instead; it does not, so the record "
-                    f"itself is wrong.)")
+                    f"({fp_now}) — and the record predates the field naming the "
+                    f"build recipes it was made from, so WHICH SIDE MOVED "
+                    f"CANNOT BE DECIDED from it. Either a recipe changed since "
+                    f"it shipped (benign) or the record is unreproducible (the "
+                    f"0.2.45 shape); this refuses to guess between them.")
+            else:
+                findings.append(
+                    f"RELEASED.json names {version} and records the SAME pin "
+                    f"set AND the same build recipes this tree has, yet its "
+                    f"fingerprint {rec.get('pins_fingerprint')!r} is not the "
+                    f"one recomputed ({fp_now}). The record is UNREPRODUCIBLE "
+                    f"— the 0.2.45 failure, from the other direction. (An "
+                    f"advance on either side would be named as such; neither "
+                    f"is, so the record itself is wrong.)")
 
     return ("FINDINGS" if findings else "OK"), findings, stats
 
@@ -284,10 +351,15 @@ def main(argv=None) -> int:
         # states something untrue is the shape this repo keeps paying for: the
         # reader stops looking, and the fact that the current pin set is
         # unreleased goes unsaid.
-        if stats.get("pins_moved"):
+        # #77 — the branch was keyed on `pins_moved`, so the RECIPE_AHEAD path
+        # fell through to the green line and stated the very untruth this
+        # comment was written about. Key it on the NOTE instead: whatever moved,
+        # a drift note existing is exactly the condition under which "a
+        # fingerprint this tree reproduces" is false.
+        if stats.get("note"):
             print(f"[PASS] {a.image}:{stats['version']} is published and "
                   f"RELEASED.json records it correctly. "
-                  f"{stats.get('note', '')}")
+                  f"{stats['note']}")
         else:
             print(f"[PASS] {a.image}:{stats['version']} is published and "
                   f"RELEASED.json records it, with a fingerprint this tree "
