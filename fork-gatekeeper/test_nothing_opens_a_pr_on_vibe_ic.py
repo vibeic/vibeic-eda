@@ -10,7 +10,7 @@ finishing its own work.
                             `test_anchor_pr_follows_the_publish`)
   * the release assessment— written to tools/vibeic-eda/upstream-assessments/
   * the daily sync report — written to tools/vibeic-eda/EDA_FORK_SYNC_LOG.md
-  * the publish-silence alarm — added 2026-08-20 and removed the same day
+  * the publish-silence alarm — briefly filed here, now files on THIS repo
 
 HOW TWO OF THEM CAME BACK is the part worth remembering. The assessment and
 sync paths had been failing silently for weeks (`skip: branch push failed`):
@@ -19,15 +19,12 @@ Repairing that hole turned them back on, and three rounds of working
 notifications proved only that nothing consumes them. A mechanism worth
 repairing is one something reads.
 
-The alarm is the sharpest case. It was built because detection that lands in a
-log nobody opens is not an alert — so removing its only channel and leaving it
-logging would have rebuilt exactly the thing it was written to replace. Without
-a channel the owner wants, the honest move was to remove the program, not to
-keep a version of it that cannot do its job.
-
-If silence detection is wanted again, it needs a channel someone actually
-watches. A PR on vibe-ic is not that channel: it is a queue this pipeline then
-has to wait on.
+The alarm still exists and still opens a PR — on `vibeic/vibeic-eda`. That is
+both the right owner (a stalled fork page is this pipeline's failure) and the
+only workable one: `fork_github_convergence`'s denominator is the registered
+forks plus `vibeic/vibe-ic`, so an alarm filed there would make the next round's
+publish non-zero. The alarm about a stalled page would stall the page.
+`test_publish_silence_is_audible` asserts its target.
 """
 from __future__ import annotations
 

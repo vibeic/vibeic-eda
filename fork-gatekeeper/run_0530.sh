@@ -473,10 +473,14 @@ if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
         >> "${LOG}" 2>&1
     PAGE=$?
     echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
-    if [ "${PAGE}" -ne 0 ]; then
+    if [ "${PAGE}" -eq 0 ]; then
+        PAGE_PUBLISHED=1
+    else
+        PAGE_PUBLISHED=0
         PAGE_SKIP="build_page ran and failed (rc=${PAGE})"
     fi
 else
+    PAGE_PUBLISHED=0
     # PAGE remains zero because the source gate already owns the round failure.
     # Do not write a fake `build_page exit 0`: a step that did not run says so.
     if [ "${TESTS}" -ne 0 ]; then
@@ -505,12 +509,47 @@ else
     echo "[$(date -Is)] build_page SKIPPED — ${PAGE_SKIP}; last good page preserved" >> "${LOG}"
 fi
 
+# THE SILENCE MUST BE AUDIBLE, NOT MERELY MEASURED (vibeic-eda#58, again).
+#
+# #58 added the measurement after three silent days were found by a person. On
+# 2026-08-20 three more silent days were found the SAME WAY — by a person opening
+# https://vibeic.ai/eda-forks.html and seeing numbers that had not moved since
+# 08-18T07:48. Every one of those rounds DID notice: each wrote `build_page
+# SKIPPED — <reason>` right here. It wrote it into daily_0530.log, which nobody
+# opens, so the detection existed and the alert did not.
+#
+# This runs LAST and UNCONDITIONALLY, like the convergence report above and for
+# the same reason: after a failed publish is exactly when it matters, so it must
+# not sit behind any of the exits. It owns the publish history end to end, and
+# when the page has been silent for the threshold it opens a PR on vibe-ic —
+# a PR on THIS repo — vibe-ic is not in fork_github_convergence's denominator
+# for a reason, and neither is this alarm allowed to be.
+#
+# Its rc=2 (NORECORD) is a round failure below, and deliberately so: an alerter
+# that cannot deliver but reports "nothing to report" is worse than no alerter,
+# because the pipeline then looks healthy in exactly the case it is not.
+SILENCE_JSON="${GK_STATE_DIR}/publish-silence.json"
+python3 "${DIR}/check_publish_silence.py" \
+    --history "${GK_STATE_DIR}/publish_history.jsonl" \
+    --round-at "${ROUND_AT}" \
+    --published "${PAGE_PUBLISHED:-0}" \
+    --reason "${PAGE_SKIP:-unstated}" \
+    --threshold "${GK_PUBLISH_SILENCE_THRESHOLD:-2}" \
+    --json "${SILENCE_JSON}" >> "${LOG}" 2>&1
+SILENCE=$?
+echo "[$(date -Is)] check_publish_silence exit ${SILENCE} (0=published or below threshold, 1=silent and escalated, 2=NORECORD)" >> "${LOG}"
+if [ "${SILENCE}" -ne 0 ]; then
+    # cron.log is the file a person actually opens. The log above is for audit.
+    echo "[$(date -Is)] PUBLISH SILENCE rc=${SILENCE} — see ${SILENCE_JSON}" >> "${GK_STATE_DIR}/cron.log"
+fi
+
 # 0 only when BOTH are clean: the delivery pipeline and every
 # evidence/convergence boundary. The six steps' own 1 means "a case still needs
 # a human", which is information, not noise.
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
    || [ "${TESTS}" -ne 0 ] || [ "${INPUT_CLEAR}" -ne 0 ] \
+   || [ "${SILENCE}" -eq 2 ] \
    || [ "${AI_AUTH}" -ne 0 ] \
    || [ "${GAP_FATAL}" -ne 0 ] \
    || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
