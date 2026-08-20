@@ -180,13 +180,25 @@ def _mark_escalated(history: Path) -> None:
     tmp.replace(history)
 
 
-def _default_escalate(summary: str, report_md: str):
+def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
+    """Raise the alert through the PR channel.
+
+    NOT `pr_notify.open_pr`. That one takes the fork-sync SUMMARY DICT and
+    derives verdict counts from it, so a string argument dies on
+    `AttributeError: 'str' object has no attribute 'get'` — measured on this
+    program's first real escalation, 2026-08-20, publish streak 2. The alerter
+    behaved correctly then (NORECORD, reason printed, round failed) but the
+    alert did not go out, which is the one thing it exists to do.
+    `open_alert_pr` is the path shaped for a dated note plus a title.
+    """
     try:
         import pr_notify
     except Exception as exc:                       # noqa: BLE001 - reported, not raised
         return (False, f"pr_notify unavailable: {type(exc).__name__}: {exc}")
+    date = (round_at or "undated")[:10] or "undated"
     try:
-        return pr_notify.open_pr(summary, report_md)
+        return pr_notify.open_alert_pr(summary, report_md,
+                                       slug="publish-silence", date=date)
     except Exception as exc:                       # noqa: BLE001
         return (False, f"pr_notify raised: {type(exc).__name__}: {exc}")
 
@@ -208,7 +220,8 @@ def main(argv=None) -> int:
         return RC_NORECORD
 
     escalate = ((lambda s, r: (True, "escalation suppressed by --no-escalate"))
-                if args.no_escalate else _default_escalate)
+                if args.no_escalate
+                else (lambda s, r: _default_escalate(s, r, args.round_at)))
     rc, result = assess(Path(args.history), published=args.published == "1",
                         reason=args.reason, round_at=args.round_at,
                         threshold=args.threshold, escalate=escalate)

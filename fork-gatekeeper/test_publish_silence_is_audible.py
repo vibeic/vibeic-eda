@@ -164,3 +164,45 @@ def test_cli_reports_the_streak_and_refuses_a_nonsense_threshold(tmp_path, capsy
                    "--no-escalate"]) == S.RC_SILENT
     assert S.main(["--history", str(h), "--round-at", "r3",
                    "--published", "1", "--threshold", "0"]) == S.RC_NORECORD
+
+
+# ---------------------------------------------------------------------------
+# The bug these two catch: every test above stubs the escalator, so all of them
+# passed while the REAL call was `pr_notify.open_pr(<str>, ...)` — a function
+# that wants the fork-sync summary DICT and calls `.get()` on it. The first real
+# escalation (2026-08-20, streak 2) died with
+# `AttributeError: 'str' object has no attribute 'get'`. Stubbing the boundary
+# proves the logic; only touching the real one proves the contract.
+# ---------------------------------------------------------------------------
+
+def test_the_real_escalator_accepts_what_this_program_sends(monkeypatch, tmp_path):
+    """Call the REAL pr_notify with a repo path that does not exist.
+
+    A clean "clone not found" means the arguments were understood and the
+    function got as far as looking for the checkout. An AttributeError means we
+    are calling something that wants a different shape — the actual defect."""
+    import pr_notify
+
+    monkeypatch.setattr(pr_notify, "REPO", tmp_path / "no-such-clone")
+    ok, detail = S._default_escalate(
+        "fork page has not published for 2 consecutive rounds",
+        "## body\n\n- a\n- b\n",
+        "2026-08-20T05:30:01+08:00")
+
+    assert ok is False
+    assert "clone not found" in detail, detail
+    assert "AttributeError" not in detail, detail
+    assert "raised" not in detail, detail
+
+
+def test_the_alert_path_refuses_an_empty_alert(monkeypatch, tmp_path):
+    """An alert with no text is not an alert. Refuse before making a branch."""
+    import pr_notify
+
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    monkeypatch.setattr(pr_notify, "REPO", repo)
+    for title, body in (("", "body"), ("title", "   "), ("  ", "")):
+        ok, detail = pr_notify.open_alert_pr(title, body)
+        assert ok is False
+        assert "empty title or body" in detail, detail
