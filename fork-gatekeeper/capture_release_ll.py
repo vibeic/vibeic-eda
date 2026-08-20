@@ -1567,6 +1567,22 @@ def _validate_github_v2_sources(record: dict, items: list[dict],
             if counts.get(field) != expected:
                 errors.append(f"counts.{field}={counts.get(field)!r}, "
                               f"expected {expected}")
+        # COUNT THE EXCLUDED ALARMS TOO — `by_source` never dropped them.
+        #
+        # The producer removes publish-silence alarms from `items` (a notice is
+        # not a debt) but `counts.by_source` is derived before that split, so
+        # comparing per-source tallies against `items` alone is comparing two
+        # different populations. This is the SECOND place that reconciliation
+        # lives; I fixed the inventory one last round and stopped there, and
+        # this one surfaced as
+        # "exact_repository_pull_requests retained item count contradicts
+        # source evidence" the very next round.
+        #
+        # Counted over items + alarms, so the check keeps its whole force:
+        # anything vanishing for any OTHER reason still fails here.
+        items = list(items) + [
+            a for a in (record.get("alarm_items") or [])
+            if isinstance(a, dict)]
         item_source_counts = {
             "exact_repository_issues": sum(
                 item.get("type") == "issue"
