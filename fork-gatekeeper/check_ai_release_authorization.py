@@ -135,7 +135,19 @@ def _conflicted_cases(round_record: dict, registered_forks: list[str]
     keys: list[tuple[str, str]] = []
     errors: list[str] = []
     expected_top = set(registered_forks) | {"_ai_decisions", "_round"}
-    allowed_top = expected_top | {"_watch_only_resets"}
+    # OPTIONAL round-level rows. `daily_0530` may or may not write these, so
+    # they are allowed but not required.
+    #
+    # A ROW THIS CHECKER HAS NOT BEEN TAUGHT IS A NORECORD, AND THAT IS HOW A
+    # NEW KEY TAKES THE PAGE DOWN. Measured 2026-08-20 15:13: `_ours_resumed`
+    # was added to the round record the same afternoon, every fork merged
+    # cleanly, `daily_0530` exited 0 for the first time in days — and this line
+    # rejected the whole record over a key it had never heard of, so the release
+    # was NORECORD and build_page was skipped again. Refusing an unknown row is
+    # right; not noticing that the producer had grown one is the defect.
+    # `test_every_round_level_key_is_known_to_this_checker` reads the keys
+    # `daily_0530` actually writes and fails if any is missing here.
+    allowed_top = expected_top | {"_watch_only_resets", "_ours_resumed"}
     observed_top = set(round_record)
     missing = sorted(expected_top - observed_top)
     extra = sorted(observed_top - allowed_top)

@@ -695,3 +695,37 @@ def test_conflict_resolved_cannot_paper_over_an_unmeasured_ours_side():
 
     assert rc == A.RC_NORECORD
     assert any("ours_skipped" in error for error in result["source_errors"])
+
+
+def test_every_round_level_key_is_known_to_this_checker():
+    """The producer and the checker must not drift apart silently.
+
+    2026-08-20: `daily_0530` grew a `_ours_resumed` round-level row. This
+    checker rejects any top-level row it does not recognise — correctly, since
+    an unmeasured row must not be waved through — so the first round after that
+    change returned NORECORD over the KEY, not over anything it said. Every fork
+    had merged cleanly and `daily_0530` had exited 0; the page was skipped
+    anyway.
+
+    Asserting the property, not a copy of the list: any future round-level key
+    added to daily_0530 without teaching this checker fails here instead of in
+    production."""
+    import ast
+    import re
+
+    here = Path(A.__file__).resolve().parent
+    producer = (here / "daily_0530.py").read_text()
+    written = set(re.findall(r'report\[\s*"(_[a-z_]+)"\s*\]\s*=', producer))
+    assert written, "found no round-level keys in daily_0530 — the scan is broken"
+
+    checker = ast.parse((here / "check_ai_release_authorization.py").read_text())
+    known = {c.value for n in ast.walk(checker)
+             if isinstance(n, ast.Set)
+             for c in n.elts if isinstance(c, ast.Constant)}
+
+    unknown = sorted(k for k in written if k not in known)
+    assert not unknown, (
+        f"daily_0530 writes round-level row(s) {unknown} that this checker does "
+        "not allow. Every round carrying one is NORECORD, which skips the "
+        "release and the page. Add them to `allowed_top` (or `expected_top` if "
+        "the round must always produce them).")
