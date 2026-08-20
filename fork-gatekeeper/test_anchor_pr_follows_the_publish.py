@@ -47,7 +47,7 @@ def test_anchor_worktree_has_an_empty_tree_for_diff_scoped_benchmark_gates(tmp_p
     paths.  A real empty directory provides that context without borrowing the
     primary checkout's unrelated HEAD through a symlink.
     """
-    ok, note = P._prepare_anchor_gate_context(tmp_path)
+    ok, note = P._prepare_push_gate_context(tmp_path)
     assert ok is True, note
     tree = tmp_path / P.BENCHMARK_TREE
     assert tree.is_dir()
@@ -57,7 +57,7 @@ def test_anchor_worktree_has_an_empty_tree_for_diff_scoped_benchmark_gates(tmp_p
 
 def test_anchor_gate_context_refuses_a_non_directory_collision(tmp_path):
     (tmp_path / P.BENCHMARK_TREE).write_text("not a corpus")
-    ok, note = P._prepare_anchor_gate_context(tmp_path)
+    ok, note = P._prepare_push_gate_context(tmp_path)
     assert ok is False
     assert "not a directory" in note
 
@@ -164,3 +164,49 @@ def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
         "the anchor tool is invoked without VIBEIC_EDA_PUBLISHED_TAG, so it "
         "re-discovers the published tag from GHCR's cached /tags/list and can "
         "refuse a release we have already verified")
+
+
+# ---------------------------------------------------------------------------
+# The gap that produced this test: the benchmark-tree context was written for
+# `open_anchor_pr` and never called from `open_pr` or `open_assessment_pr`, so
+# on 2026-08-20 `[notify:assess]` and `[notify:sync]` both failed the vibe-ic
+# push gate with "UNDETERMINED: --tree benchmark-data is not a directory", the
+# gatekeeper tick exited 4, and no PR went out. Naming the helper after one
+# caller is part of how that survived; asserting the property is the rest.
+# ---------------------------------------------------------------------------
+
+def test_every_pr_path_prepares_the_push_gate_context():
+    """Any function that creates a throwaway worktree must prepare the context.
+
+    A structural assertion, not a list of three names: a FOURTH pushing path
+    added later is caught by the same test, which is the failure mode that
+    actually happened."""
+    import ast
+
+    src = Path(P.__file__).read_text()
+    tree = ast.parse(src)
+
+    def _calls(node):
+        return {n.func.id for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+
+    def _makes_worktree(node):
+        for n in ast.walk(node):
+            if not isinstance(n, ast.List):
+                continue
+            parts = [e.value for e in n.elts if isinstance(e, ast.Constant)]
+            if "worktree" in parts and "add" in parts:
+                return True
+        return False
+
+    pushing = [f for f in ast.walk(tree)
+               if isinstance(f, ast.FunctionDef) and _makes_worktree(f)]
+    assert pushing, "no worktree-creating function found — the scan is broken"
+
+    missing = [f.name for f in pushing
+               if "_prepare_push_gate_context" not in _calls(f)]
+    assert not missing, (
+        "these functions create a worktree they will push from but never "
+        f"prepare the vibe-ic push gate's benchmark tree: {missing}. "
+        "Without it the gate reports UNDETERMINED and the push is refused.")
+    assert len(pushing) >= 3, f"expected the three known PR paths, saw {pushing}"

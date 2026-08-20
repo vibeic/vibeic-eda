@@ -111,11 +111,20 @@ def _run(args, cwd=None, env=None):
         return 1, f"{e.__class__.__name__}: {e}"
 
 
-def _prepare_anchor_gate_context(wt: Path) -> tuple[bool, str]:
+def _prepare_push_gate_context(wt: Path) -> tuple[bool, str]:
     """Give vibe-ic's push gate an honest benchmark-tree context.
 
-    ``benchmark-data`` is intentionally untracked and is therefore absent from
-    every throwaway worktree.  vibe-ic's pre-push gate nevertheless receives
+    EVERY worktree this module pushes from needs this, which is why the name no
+    longer says "anchor". It did, and that is exactly how the gap survived: the
+    fix was written for `open_anchor_pr` and the two other functions that create
+    a throwaway worktree — `open_pr` and `open_assessment_pr` — never called it.
+    Measured 2026-08-20: `[notify:assess]` and `[notify:sync]` both failed with
+    "UNDETERMINED: --tree benchmark-data is not a directory", the tick exited 4,
+    and no PR went out. `test_every_pr_path_prepares_the_push_gate_context`
+    now fails if a fourth path is added without it.
+
+    ``benchmark-data`` is absent from `origin/main` and is therefore absent from
+    every throwaway worktree made from it.  vibe-ic's pre-push gate nevertheless receives
     ``--tree benchmark-data --changed-since origin/main``.  An absent path means
     "the gate could not look" and correctly blocks; an empty, present path lets
     the changed-since check prove the fact relevant to this anchor commit: it
@@ -238,6 +247,9 @@ def open_pr(summary, report_md) -> tuple[bool, str]:
             return (False, f"worktree add failed: {out.strip()[:200]}")
 
     try:
+        context_ok, context_note = _prepare_push_gate_context(wt)
+        if not context_ok:
+            return (False, context_note)
         changed = []
         # MERGED → bump the image-version pins in the user docs to the shipped version
         newver = summary.get("image_version")
@@ -393,7 +405,7 @@ def open_anchor_pr(version: str) -> tuple[bool, str]:
     if rc != 0:
         return (False, f"worktree add failed: {out.strip()[:200]}")
     try:
-        context_ok, context_note = _prepare_anchor_gate_context(wt)
+        context_ok, context_note = _prepare_push_gate_context(wt)
         if not context_ok:
             return (False, context_note)
         tool = wt / ANCHOR_TOOL
@@ -577,6 +589,9 @@ def open_assessment_pr(summary, assessments, rendered) -> tuple[bool, str]:
             return (False, f"worktree add failed: {out.strip()[:200]}")
 
     try:
+        context_ok, context_note = _prepare_push_gate_context(wt)
+        if not context_ok:
+            return (False, context_note)
         adir = wt / ASSESS_DIR
         adir.mkdir(parents=True, exist_ok=True)
         tally = []
