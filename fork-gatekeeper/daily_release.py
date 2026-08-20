@@ -363,6 +363,7 @@ def compose_with_retries(bake: List[str], root: Path,
                          sleep: Optional[Callable[[float], None]] = None,
                          max_transient_attempts: int = COMPOSE_TRANSIENT_ATTEMPTS,
                          delays: Tuple[int, ...] = COMPOSE_RETRY_DELAYS,
+                         extra_env: Optional[dict] = None,
                          ) -> Tuple[int, str, List[dict]]:
     """Compose with bounded, classified retries and return an audit trail.
 
@@ -380,12 +381,14 @@ def compose_with_retries(bake: List[str], root: Path,
         started = _utcnow()
         if run is None:
             rc, _, err = _sh(
-                bake, cwd=root, stream=True, env=BUILD_ENV,
+                bake, cwd=root, stream=True,
+                env={**BUILD_ENV, **(extra_env or {})},
                 stall_grace=BUILD_STALL_GRACE_S,
             )
         else:
             rc, _, err = run(
-                bake, cwd=root, stream=True, env=BUILD_ENV,
+                bake, cwd=root, stream=True,
+                env={**BUILD_ENV, **(extra_env or {})},
                 stall_grace=BUILD_STALL_GRACE_S,
             )
         category = transient_failure_category(err)
@@ -3210,10 +3213,24 @@ def _main_under_release_lock(argv=None) -> int:
             # no CPU, no disk, no network, three lines of log, and the only way to
             # tell was reading dockerd's journal. A build that cannot be watched
             # cannot be diagnosed.
+            # THE VERSION LABEL COMES FROM THE `TAG` VARIABLE, VIA THE ENV.
+            #
+            # `--set eda.tags=` replaces the tags without touching the bake
+            # variable `TAG`, which stays at its default "dev" — so the labels
+            # that reference ${TAG} would stamp every published image
+            # `version=dev`. A different wrong answer than the 2026.06 this
+            # replaced, but wrong the same way: a value nobody set on purpose.
+            #
+            # NOT `--set eda.labels.org.opencontainers.image.ref.name=`:
+            # `--set` treats dots as path separators, so that spelling creates
+            # a NEW label `ref-name` and leaves the real `ref.name` at "dev" —
+            # measured. Setting TAG in the environment resolves tags and both
+            # labels from one value, with no key that has to be spelled twice.
             bake = ["docker", "buildx", "bake", *bflag, "-f",
                     str(root / "docker-bake.hcl"), "--load", "--progress",
                     "plain", "--set", f"eda.tags={tag}", "eda"]
-            rc, err, attempts = compose_with_retries(bake, root)
+            rc, err, attempts = compose_with_retries(
+                bake, root, extra_env={"TAG": tag.rsplit(":", 1)[-1]})
             result["compose_attempts"] = attempts
             if rc != 0:
                 # NO LOCAL FALLBACK. There used to be one — compose `eda-local`,

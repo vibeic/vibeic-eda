@@ -290,10 +290,16 @@ def test_main_composes_the_measured_free_tag_not_remote_existing_candidate(
         return R.PresenceMeasurement(state, ref, "registry", state.value)
 
     monkeypatch.setattr(R, "_probe_remote_manifest", registry)
+    composed_env: list = []
     composed = []
 
-    def stop_at_compose(command, _root):
+    def stop_at_compose(command, _root, **kwargs):
+        # `**kwargs` models the real signature, which gained `extra_env` when
+        # the release started handing bake a TAG (so the image labels say OUR
+        # version rather than the base image's 2026.06). A stub with a frozen
+        # positional signature asserts a contract the producer no longer has.
         composed.append(command)
+        composed_env.append(kwargs.get("extra_env"))
         return 1, "deterministic fixture stop", [{
             "category": "compose_failed", "summary": "fixture stop",
         }]
@@ -309,6 +315,15 @@ def test_main_composes_the_measured_free_tag_not_remote_existing_candidate(
     command_text = " ".join(composed[0])
     assert "eda.tags=ghcr.io/vibeic/vibeic-eda:0.3.1" in command_text  # image-version:history — fixture
     assert "eda.tags=ghcr.io/vibeic/vibeic-eda:0.3.0" not in command_text  # image-version:history — fixture
+    # THE LABEL FIX HAS A TEST NOW. The same version that becomes the tag must
+    # reach bake as `TAG`, or `org.opencontainers.image.version` falls back to
+    # the bake default and every release ships labelled `dev` — a different
+    # wrong answer than the base image's 2026.06 this replaced, wrong the same
+    # way: a value nobody set on purpose.
+    assert composed_env and composed_env[0], (
+        "compose ran without extra_env — the published image would carry the "
+        "bake default as its version label")
+    assert composed_env[0].get("TAG") == "0.3.1", composed_env[0]
 
 
 def test_unknown_candidate_registry_state_blocks_selection(

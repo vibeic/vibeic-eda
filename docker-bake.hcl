@@ -285,6 +285,21 @@ target "eda" {
   tags       = ["${REGISTRY}/vibeic-eda:${TAG}", "${REGISTRY}/vibeic-eda:latest"]
   cache-from = ["type=gha"]
   cache-to   = ["type=gha,mode=max"]
+
+  # THE IMAGE SAID IT WAS 2026.06.
+  #
+  # `org.opencontainers.image.version` and `.ref.name` were never set here, so
+  # they came through from the iic-osic-tools base — the version of what we
+  # BUILD ON, presented as the version of what we SHIP. Measured 2026-08-21 on
+  # 0.3.17: anything asking the standard question "which version is this image"
+  # got 2026.06, and nothing had ever checked, because nothing asked.
+  #
+  # The base version is not deleted, it is moved somewhere it is true.
+  labels = {
+    "org.opencontainers.image.version"  = "${TAG}"
+    "org.opencontainers.image.ref.name" = "${TAG}"
+    "io.vibeic.base.version"            = "2026.06"
+  }
 }
 
 # Local iteration. `contexts` redirects each `COPY --from=${IMG_X}` at the
