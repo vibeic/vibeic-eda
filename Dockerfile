@@ -31,13 +31,13 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:a47e38e-88efe0
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:5dc5667-42fc67
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:2459a3f-5af392
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:5d87083-7e8bf2
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:0226ed0-b61b9d
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:1322717-71c3b6
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:0d13e0f-0efe60
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c43da8c-c50932
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:7ce5f18-ef514c
