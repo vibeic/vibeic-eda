@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.14",
-  "pins_fingerprint": "cfa86ccfb806",
+  "version": "0.3.15",
+  "pins_fingerprint": "cdbaede22ee9",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -24,7 +24,7 @@
     "gtkwave": "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b",
     "iverilog": "5d87083a0be13e09aefffaa3ab22f9be02181b74",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
-    "klayout": "08cf213ad18e737b4aa7995d2de580110524203f",
+    "klayout": "0226ed01c76f13eef67a78d0d14921fab5dcd70c",
     "magic": "02e5d4ac00e9702cdc679b1cd76a4be96e2a9454",
     "netgen": "b7941fafb91317b6a5845d9e9765cea278aa31c3",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
@@ -33,10 +33,10 @@
     "slang": "7ce5f186b9eeadd0e9cede10e791533dc54724f0",
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
-    "verilator": "be3b0cd25e10c396b54b5f9fd7c20dc3f9bcaae3",
+    "verilator": "132271747d219ee00cacf5083446406c3c81c961",
     "xschem": "c43da8c6dd52544a5eb97d3556e7608be62c0dea",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "76f25b3253eabab27f726e8caf9e3b18774657e0"
+    "yosys": "5dc56671a162b9bd18a7d34fcd39daa2253cdf61"
   },
-  "manifest_identity": "381e0cbfa430c6fdc3c2b4f4b5bd66e7ec21a54acd2b2dd57edce6e81fb161a8"
+  "manifest_identity": "57858650c5125681bb384799dc5dc8d91dbb16f8f6414da4aeff885abbe270f0"
 }
