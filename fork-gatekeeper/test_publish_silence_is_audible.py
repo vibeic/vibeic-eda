@@ -10,6 +10,7 @@ matters -- a program that cannot deliver says NORECORD instead of "all clear".
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 
@@ -241,3 +242,36 @@ def test_a_streak_already_on_origin_is_not_raised_twice(monkeypatch, tmp_path):
     assert ok is True and "already raised" in detail
     assert not any("create" in a for a in calls), \
         "it reached gh pr create despite the branch already existing"
+
+
+def test_the_alarm_reports_a_refused_push_instead_of_swallowing_it():
+    """THE FAILURE MODE THAT COST WEEKS, guarded here rather than assumed away.
+
+    Two vibe-ic PR paths failed silently for weeks with `skip: branch push
+    failed`, because that repo's pre-push hook needs a `benchmark-data`
+    directory the throwaway worktree does not have. vibeic-eda's own hook has
+    no such gate — checked, not assumed — so this alarm is not exposed to that
+    particular trap.
+
+    But "not exposed today" is not a guarantee. What makes it safe is that a
+    refused push comes back as (False, <the git output>), which
+    `check_publish_silence` turns into NORECORD and a failed round. A version
+    that returned True, or dropped the reason, would reproduce the original
+    defect exactly: an alarm that reports success while nothing was raised."""
+    src = pathlib.Path(S.__file__).read_text(encoding="utf-8")
+    seg = src[src.index("def _default_escalate"):]
+    assert 'return (False, f"branch push failed:' in seg, (
+        "a refused push must surface as a failure carrying git's own words")
+    assert 'return (False, f"gh pr create failed:' in seg
+
+
+def test_a_failed_escalation_is_still_NORECORD_not_a_quiet_pass():
+    """The property the whole program rests on, re-asserted against the new
+    escalator: rc=1 claims the alarm is out."""
+    h = pathlib.Path(__file__).parent / "does-not-matter"
+    rc, result = S.assess(
+        pathlib.Path("/tmp") / f"gk-silence-test-{os.getpid()}.jsonl",
+        published=False, reason="x", round_at="r1", threshold=1,
+        escalate=lambda *_a: (False, "branch push failed: refused by hook"))
+    assert rc == S.RC_NORECORD
+    assert any("escalation did not go out" in e for e in result["errors"])

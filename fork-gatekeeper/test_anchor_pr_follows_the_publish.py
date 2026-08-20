@@ -120,7 +120,14 @@ def test_every_pr_path_prepares_the_push_gate_context():
         "these functions create a worktree they will push from but never "
         f"prepare the vibe-ic push gate's benchmark tree: {missing}. "
         "Without it the gate reports UNDETERMINED and the push is refused.")
-    assert len(pushing) >= 3, f"expected the three known PR paths, saw {pushing}"
+    # NOT a count. It was `>= 3` while three PR paths lived here; the alarm has
+    # since moved its worktree into `check_publish_silence` (it files on THIS
+    # repo, not vibe-ic), so pinning the number turned a correct removal into a
+    # red suite that blocked a round. The property is "every worktree-creating
+    # function here prepares the context", and that holds at any count above
+    # zero — the `assert pushing` above already refuses zero, which is the case
+    # that would mean the scan itself broke.
+    assert len(pushing) >= 1
 
 
 
@@ -151,6 +158,8 @@ def test_the_anchor_capability_is_gone_from_pr_notify():
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "open_anchor_pr" not in names
     assert "push_anchor" not in names
-    # the paths that DO remain must still be there — this file's other tests
-    # guard their shared push-gate context
-    assert {"open_pr", "open_alert_pr", "open_assessment_pr"} <= names
+    # `open_alert_pr` is gone too: the publish-silence alarm files on THIS repo
+    # now, so its worktree and PR live in `check_publish_silence` rather than in
+    # the vibe-ic notifier. What must not vanish silently are the two paths this
+    # file's other tests guard.
+    assert {"open_pr", "open_assessment_pr"} <= names
