@@ -1,8 +1,34 @@
-"""The eda image publish and the vibe-ic anchor bump are ONE action (vibe-ic#754).
+"""A release publishes an image. It does not check anything into vibe-ic.
 
-They were two, with nothing linking them, so `:latest` moved off the version
-vibe-ic pins on every release and the two were reunited only when a landing gate
-happened to look. The repair was applied by hand four times before this.
+WHAT THIS FILE USED TO GUARD, AND WHY THAT RULE IS GONE.
+
+vibe-ic#754 tied publishing and anchoring into one action: publish the image,
+then open a PR moving vibe-ic's pinned version, because otherwise `:latest`
+drifted off the version vibe-ic pinned and the two were reunited only when a
+landing gate happened to look. Tests here pinned that tie from every angle.
+
+The tie rested on a sentence in vibe-ic's own source: the pinned tag "matches
+what the plugin was VERIFIED AGAINST". Measured 2026-08-20, nothing in the
+release ever verified that. The round established that the tag was PULLABLE and
+then wrote a claim about verification that had not happened — on every release.
+
+And the claim was not needed. This image is built FOR vibe-ic and sits under it,
+and its own release gate already establishes what the upper layer would have
+re-checked: `check_no_capability_lost` proves 78 commands across 17 replaced
+prefixes still resolve in the new image, 439 fork self-checks run, every declared
+PDK is present, and the build refuses unless sby/yices, ALIGN, klayout and the
+xyce plugin builder all work. A release that passes that is usable by
+construction; asking the layer above to confirm it is asking for a second opinion
+from somewhere with less evidence.
+
+So the anchor is not moved from here any more — not by PR, not by push. The three
+tests left are the ones that were never about the anchor: they guard
+`_prepare_push_gate_context`, which every remaining vibe-ic PR path still needs.
+
+The cost this removes, for the record: an anchor PR sat open on vibe-ic, which
+made `fork_github_convergence` non-zero, which skipped the NEXT round's certified
+publish. Round 5 on 2026-08-20 merged all 37 forks clean, passed every gate, and
+was blocked by the three PRs it had itself just opened.
 """
 import re
 import sys
@@ -15,29 +41,8 @@ import pr_notify as P                                          # noqa: E402
 import daily_release as DR                                     # noqa: E402
 
 
-@pytest.mark.parametrize("bad", ["", "latest", "0.2", "0.2.63x", "v0.2.63", None])
-def test_a_malformed_version_is_refused_before_any_git_runs(bad):
-    """An anchor is a claim that a specific tag resolves. Nothing that is not a
-    version may reach the tree, and the refusal must not depend on git."""
-    ok, note = P.open_anchor_pr(bad)
-    assert ok is False and "malformed" in note, note
 
 
-def test_it_delegates_to_vibe_ics_own_anchor_tool():
-    """NOT a regex over a private file list.
-
-    `open_pr` bumps `DOC_FILES` — 2 files — while the anchor spans 15 ghcr
-    pointers across 9. That gap is why a tick which DID fire still left the
-    anchor failing its own gate. Delegating also inherits the tool's refusal to
-    point at a tag `docker pull` cannot resolve, which a regex would happily
-    write."""
-    src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
-    assert "ANCHOR_TOOL" in body, "the anchor PR must run vibe-ic's own tool"
-    assert "--set" in body
-    assert "_PIN_RE" not in body, (
-        "open_anchor_pr re-derived where the version is written; that second "
-        "list is exactly what drifts from the first")
 
 
 def test_anchor_worktree_has_an_empty_tree_for_diff_scoped_benchmark_gates(tmp_path):
@@ -62,108 +67,14 @@ def test_anchor_gate_context_refuses_a_non_directory_collision(tmp_path):
     assert "not a directory" in note
 
 
-def test_the_release_opens_the_anchor_pr_only_on_a_real_publish():
-    """A LOCAL ONLY build has nothing to anchor TO. Pointing the repo at a tag
-    nobody can pull is worse than leaving it behind one that resolves."""
-    src = Path(DR.__file__).read_text()
-    assert "open_anchor_pr" in src, (
-        "the release path does not call it — the capability existing and the "
-        "release not using it is the defect #754 describes")
-    seg = src.split("open_anchor_pr", 1)[0]
-    tail = seg[-900:]
-    assert re.search(r"if pushed:", tail), (
-        "the anchor call is not guarded by `pushed`")
 
 
-def test_an_anchor_exception_is_captured_as_a_terminal_round_result():
-    """The image is irrevocably public, but the round is not converged.
-
-    The exception must be retained as evidence rather than escaping before the
-    current-round sidecar is written. A later noop retries the anchor.
-    """
-    src = Path(DR.__file__).read_text()
-    seg = src.split("open_anchor_pr", 1)[1][:400]
-    assert "except Exception" in src.split("open_anchor_pr", 1)[0][-600:] or \
-           "except Exception" in seg, "the call is not wrapped"
-    assert '"stage": "anchor_pr"' in Path(DR.__file__).read_text()
 
 
-def test_noop_retries_anchor_and_main_already_current_is_success():
-    release = Path(DR.__file__).read_text()
-    anchor = Path(P.__file__).read_text()
-    assert release.count("open_anchor_pr") >= 2
-    assert "anchor already at {version} — nothing to open" in anchor
-    assert "branch_exists" in anchor and "anchor PR pending" in anchor
 
 
-def test_the_anchor_branch_is_pushed_by_full_refname():
-    """A detached HEAD cannot push to a SHORT destination name.
-
-    The anchor worktree is created with `--detach` (so no local branch-name
-    residue is left behind).  From a detached HEAD git cannot infer whether
-    `HEAD:eda-anchor-0.3.7` means a branch or a tag, so it refuses:
-
-        error: The destination you provided is not a full refname (i.e.,
-        starting with "refs/"). We tried to guess what you meant by:
-        - Looking for a ref that matches 'eda-anchor-0.3.7' on the remote side.
-
-    Reproduced standalone on git 2.x: from a detached HEAD,
-    `push origin HEAD:eda-anchor-0.3.7` errors and
-    `push origin HEAD:refs/heads/eda-anchor-0.3.7` returns 0.
-
-    Measured live on the 0.3.7 release: the image built, smoked, recorded and
-    published, and only the anchor PR failed -- so `:latest` moved off the
-    version vibe-ic pins, which is precisely the split vibe-ic#754 closed and
-    this file exists to keep closed.
-    """
-    src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
-    assert '"push"' in body, "open_anchor_pr no longer pushes the anchor branch"
-    # Match the refspec itself rather than a source LINE: the call is wrapped,
-    # so a line-wise check passes or fails on formatting instead of on the
-    # thing under test.
-    assert 'f"HEAD:refs/heads/{branch}"' in body, (
-        "the anchor branch is not pushed by full refname; from the detached "
-        "anchor worktree git refuses a short destination")
-    assert 'f"HEAD:{branch}"' not in body, (
-        "a short-name push destination survives in open_anchor_pr")
 
 
-def test_the_anchor_is_told_the_published_tag_not_left_to_discover_it():
-    """We verified the push; the anchor must not re-derive it from a cache.
-
-    `daily_release` reaches the anchor step only after
-    `verify_remote_immutable_publication` has read the tag back with
-    `docker manifest inspect` -- authoritative, immediate, and the same thing
-    `docker pull` consults. Absent an override, vibe-ic's anchor tool re-asks
-    the question through GHCR's `/tags/list`, which is CACHED.
-
-    Measured 2026-08-19, unchanged tool, one hour after 0.3.12 was pushed and
-    while its manifest resolved fine:
-
-        no override  -> UNRESOLVABLE ADOPTION TARGET: 0.3.12 does not exist
-                        on the registry (newest published: 0.3.11)
-        override set -> adoption-target-resolves : OK (source=override)
-
-    Without the override the release recorded itself anchor-blocked and the
-    public page told readers no version had shipped and the lag below was real
-    -- three false statements about an image that was in the registry the whole
-    time. Whether OUR image reached the registry is this repo's question,
-    already answered by this repo's readback.
-    """
-    src = Path(P.__file__).read_text()
-    body = src.split("def open_anchor_pr", 1)[1].split("\ndef ", 1)[0]
-    call = [l for l in body.splitlines() if "ANCHOR_TOOL" in l or '"--set"' in l]
-    assert call, "open_anchor_pr no longer invokes the anchor tool"
-    # CODE ONLY. The rationale above the call names the variable too, so a
-    # substring check over the whole body passes on the comment alone -- it
-    # stayed green with the override deleted.
-    code = "\n".join(l for l in body.splitlines()
-                     if not l.lstrip().startswith("#"))
-    assert 'env={"VIBEIC_EDA_PUBLISHED_TAG": version}' in code, (
-        "the anchor tool is invoked without VIBEIC_EDA_PUBLISHED_TAG, so it "
-        "re-discovers the published tag from GHCR's cached /tags/list and can "
-        "refuse a release we have already verified")
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +121,36 @@ def test_every_pr_path_prepares_the_push_gate_context():
         f"prepare the vibe-ic push gate's benchmark tree: {missing}. "
         "Without it the gate reports UNDETERMINED and the push is refused.")
     assert len(pushing) >= 3, f"expected the three known PR paths, saw {pushing}"
+
+
+
+# ── the new rule, guarded ───────────────────────────────────────────────────
+
+def test_the_release_checks_nothing_into_vibe_ic():
+    """A release publishes an image and stops.
+
+    Deleting the old guards without adding this one would leave the rule
+    unstated — and a rule nothing asserts is a rule that comes back. Anyone
+    re-wiring an anchor into the release path turns this red."""
+    release = Path(DR.__file__).read_text(encoding="utf-8")
+    code = "\n".join(l for l in release.splitlines()
+                     if not l.lstrip().startswith("#"))
+    for gone in ("open_anchor_pr", "push_anchor", "anchor_pr_not_established"):
+        assert gone not in code, (
+            f"daily_release calls {gone!r} again. Publishing an image is not "
+            "verifying a plugin against it, and the layer below already proves "
+            "the image is usable — see this module's docstring.")
+
+
+def test_the_anchor_capability_is_gone_from_pr_notify():
+    """The mechanism, not just its call site. A dead function that still works
+    is an invitation to re-wire it."""
+    import ast
+    src = Path(P.__file__).read_text(encoding="utf-8")
+    names = {n.name for n in ast.parse(src).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert "open_anchor_pr" not in names
+    assert "push_anchor" not in names
+    # the paths that DO remain must still be there — this file's other tests
+    # guard their shared push-gate context
+    assert {"open_pr", "open_alert_pr", "open_assessment_pr"} <= names

@@ -3577,29 +3577,30 @@ def _main_under_release_lock(argv=None) -> int:
                         })
             print(f"  VERSION {old} -> {new}  "
                   f"{'published' if pushed else 'LOCAL ONLY'}")
-            # vibe-ic#754 — PUBLISHING AND ANCHORING ARE ONE ACTION.
+            # PUBLISHING AN IMAGE IS NOT VERIFYING A PLUGIN AGAINST IT.
             #
-            # They were two, with nothing linking them, so `:latest` moved off the
-            # version vibe-ic pins on every single release and the two were reunited
-            # only when a landing gate happened to look. Applied by hand four times
-            # before this. Only on a real publish: a LOCAL ONLY build has nothing to
-            # anchor TO, and pointing the repo at an unpullable tag is worse than
-            # leaving it behind a real one.
+            # vibe-ic#754 tied these together: publish, then move vibe-ic's
+            # anchor, because `:latest` kept drifting off the pinned version.
+            # The tie was wrong in a way the code stated out loud without
+            # anyone reading it back. vibe-ic pins the image because — its own
+            # comment — the tag "matches what the plugin was VERIFIED AGAINST".
+            # But the only thing this round establishes before anchoring is
+            # that the tag is PULLABLE. Nothing here runs vibe-ic's suite
+            # against the new image. So the anchor asserted a verification that
+            # had not happened, and it asserted it on every single release.
             #
-            # Advisory by construction — it opens a PR, it does not push to main, and
-            # a failure here must not fail a release that already succeeded. The
-            # landing gate that used to be the only line of defence is still there and
-            # is still authoritative; this just stops it being the FIRST time anyone
-            # notices.
-            if pushed:
-                try:
-                    import pr_notify as _prn
-                    _aok, _anote = _prn.open_anchor_pr(new)
-                except Exception as _e:      # noqa: BLE001
-                    _aok, _anote = False, f"{_e.__class__.__name__}: {_e}"
-                print(f"  anchor: {_anote}")
-                result.setdefault("anchor_pr", {})["ok"] = bool(_aok)
-                result["anchor_pr"]["note"] = _anote
+            # Two repos, two facts, two owners:
+            #   "0.3.16 exists"                      — this repo's, settled here.
+            #   "the plugin is verified against it"  — vibe-ic's, and only
+            #                                          vibe-ic can settle it, by
+            #                                          actually running its suite.
+            #
+            # So a release no longer checks anything into vibe-ic. The anchor
+            # moves when vibe-ic re-verifies, on vibe-ic's own schedule, and the
+            # sentence in its source becomes true again. This also ends the loop
+            # where the anchor PR opened by a round made
+            # `fork_github_convergence` non-zero and skipped the NEXT round's
+            # certified publish — measured across five rounds, 2026-08-20.
 
             # OWNER DIRECTIVE 2026-08-19, stated three times in one session:
             # "EVERYTIME YOU CONVERGE TO 0, YOU SHOULD MODIFY THE WEBSITE AS
@@ -3640,14 +3641,6 @@ def _main_under_release_lock(argv=None) -> int:
                 print(f"  page: {'published' if _pok else 'FAILED'} — {_pnote}")
                 result.setdefault("page_publish", {})["ok"] = bool(_pok)
                 result["page_publish"]["note"] = _pnote
-                if not _aok:
-                    return _finish(
-                        result, a.json, RC_NEEDS_HUMAN, "failed", {
-                            "stage": "anchor_pr",
-                            "category": "anchor_pr_not_established",
-                            "retryable": True,
-                            "summary": _anote,
-                        })
 
     if not moved and not absent and not unreleased:
         # A matching LOCAL fingerprint is necessary, not sufficient.  The old
@@ -3792,29 +3785,13 @@ def _main_under_release_lock(argv=None) -> int:
                     "summary": summary,
                 })
 
-        # The release is not operationally converged until vibe-ic's image
-        # anchor is either already current or represented by a successfully
-        # opened review PR. Retry this on noops so a transient GitHub failure
-        # does not require a new image release to heal.
-        if not a.dry_run:
-            try:
-                import pr_notify as _prn
-                anchor_ok, anchor_note = _prn.open_anchor_pr(
-                    rec.get("version"))
-            except Exception as exc:      # noqa: BLE001
-                anchor_ok = False
-                anchor_note = f"{exc.__class__.__name__}: {exc}"
-            result["anchor_pr"] = {
-                "ok": bool(anchor_ok), "note": anchor_note,
-            }
-            if not anchor_ok:
-                return _finish(
-                    result, a.json, RC_NEEDS_HUMAN, "failed", {
-                        "stage": "anchor_pr",
-                        "category": "anchor_pr_not_established",
-                        "retryable": True,
-                        "summary": anchor_note,
-                    })
+        # A NOOP NO LONGER RETRIES THE ANCHOR, because a release no longer
+        # sets it. "Operationally converged" used to include vibe-ic's anchor
+        # being current — a condition this repo cannot honestly settle: the
+        # anchor means "the plugin was verified against this image", and
+        # nothing here verifies that. Holding a release open until another
+        # repo records a claim we never established made the release fail for
+        # a fact that was not ours to assert. See the note at the publish site.
 
         print("[PASS] every pin is its fork's tip, every pinned artefact exists, "
               "the recorded version and :latest resolve to the same remote "
