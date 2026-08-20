@@ -28,7 +28,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Optional
+from typing import Optional, Tuple
 
 import gk_state
 import watch_only_reset
@@ -182,6 +182,42 @@ def _strict_when(value: object) -> Optional[datetime]:
         return None
     return parsed
 
+
+def _carries_subsecond(value: object) -> bool:
+    """A stamp has sub-second precision only if it WROTE one. `isoformat()`
+    emits `.ffffff`; `isoformat(timespec="seconds")` emits nothing at all, and
+    that absence is data — not a run of zeros."""
+    return isinstance(value, str) and ("." in value or "," in value)
+
+
+def _at_shared_precision(first: object,
+                         second: object) -> Optional[Tuple[datetime, datetime]]:
+    """The two stamps, at a precision BOTH of them actually carry.
+
+    STEP ORDER IS COMPARED ACROSS PRODUCERS THAT DO NOT AGREE ON PRECISION, and
+    comparing at the finer one is not a stricter check — it is an invalid one.
+    `fork_gap_report` writes a full `isoformat()`; `fork_github_convergence`,
+    `daily_0530`, `discover_forks` and `gatekeeper` write
+    `isoformat(timespec="seconds")`. A step that genuinely ran second then
+    records an earlier-LOOKING stamp whenever both land in the same second.
+
+    MEASURED: fork-gap completed 2026-08-20T20:36:07.244550+00:00 and GitHub
+    convergence started 2026-08-21T04:36:07+08:00 — the SAME second, .244550
+    against a stamp carrying no fraction at all. The round reported "GitHub
+    convergence started before fork-gap collection finished" and carried that
+    source error round after round with nothing whatsoever out of order.
+
+    If either stamp omits the fraction, neither one's is used. A violation of a
+    second or more still fires; a sub-second one was never observable through a
+    second-precision stamp, and reading the digits that were never written as
+    zeros is what manufactured the phantom.
+    """
+    a, b = _strict_when(first), _strict_when(second)
+    if a is None or b is None:
+        return None
+    if not (_carries_subsecond(first) and _carries_subsecond(second)):
+        return a.replace(microsecond=0), b.replace(microsecond=0)
+    return a, b
 
 def _round_provenance_errors(left: object, right: object, *,
                              left_name: str, right_name: str) -> list[str]:
@@ -3055,40 +3091,38 @@ def main(argv=None) -> int:
         }
         release_pins_errors = []
     ordering_errors: list[str] = []
-    ai_checked = (_strict_when(ai_authorization.get("checked_at"))
-                  if isinstance(ai_authorization, dict) else None)
     semantic_started = (_strict_when(semantic.get("started_at"))
                         if isinstance(semantic, dict) else None)
     semantic_elapsed = (semantic.get("elapsed_seconds")
                         if isinstance(semantic, dict) else None)
-    release_started = (_strict_when(release.get("started_at"))
-                       if isinstance(release, dict) else None)
-    release_finished = (_strict_when(release.get("finished_at"))
-                        if isinstance(release, dict) else None)
-    pins_checked = (_strict_when(release_pins.get("checked_at"))
-                    if isinstance(release_pins, dict) else None)
-    if (ai_checked is not None and semantic_started is not None
-            and ai_checked > semantic_started):
+    ai_vs_semantic = _at_shared_precision(
+        ai_authorization.get("checked_at")
+        if isinstance(ai_authorization, dict) else None,
+        semantic.get("started_at") if isinstance(semantic, dict) else None)
+    if ai_vs_semantic and ai_vs_semantic[0] > ai_vs_semantic[1]:
         ordering_errors.append(
             "semantic pytest started before AI authorization finished")
-    if (semantic_started is not None
+    semantic_vs_release = _at_shared_precision(
+        semantic.get("started_at") if isinstance(semantic, dict) else None,
+        release.get("started_at") if isinstance(release, dict) else None)
+    if (semantic_vs_release
             and isinstance(semantic_elapsed, (int, float))
             and not isinstance(semantic_elapsed, bool)
             and math.isfinite(float(semantic_elapsed))
-            and release_started is not None
-            and semantic_started + timedelta(
-                seconds=float(semantic_elapsed)) > release_started):
+            and semantic_vs_release[0] + timedelta(
+                seconds=float(semantic_elapsed)) > semantic_vs_release[1]):
         ordering_errors.append(
             "daily release started before semantic pytest finished")
-    if (release_finished is not None and pins_checked is not None
-            and release_finished > pins_checked):
+    release_vs_pins = _at_shared_precision(
+        release.get("finished_at") if isinstance(release, dict) else None,
+        release_pins.get("checked_at") if isinstance(release_pins, dict) else None)
+    if release_vs_pins and release_vs_pins[0] > release_vs_pins[1]:
         ordering_errors.append(
             "release pins were checked before the release finished")
     if gap is not None and fork_github is not None:
-        gap_completed = _strict_when(gap.get("completed_at"))
-        github_started = _strict_when(fork_github.get("started_at"))
-        if (gap_completed is not None and github_started is not None
-                and gap_completed > github_started):
+        gap_vs_github = _at_shared_precision(gap.get("completed_at"),
+                                             fork_github.get("started_at"))
+        if gap_vs_github and gap_vs_github[0] > gap_vs_github[1]:
             ordering_errors.append(
                 "GitHub convergence started before fork-gap collection finished")
     errors = [e for e in (release_err, semantic_err) if e]

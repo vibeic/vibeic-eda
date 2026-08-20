@@ -256,17 +256,17 @@ def load_publication_evidence(*, round_at: str, run_id: str,
         if release.get("status") not in {"published", "noop"}:
             errors.append("release is neither published nor an explicit current noop")
         if isinstance(selftest, dict):
-            selftest_started = release_ll._strict_when(selftest.get("started_at"))
             elapsed = selftest.get("elapsed_seconds")
-            release_started = release_ll._strict_when(release.get("started_at"))
-            if (selftest_started is not None
+            # #77 — same cross-producer precision problem as the block below.
+            selftest_vs_release = release_ll._at_shared_precision(
+                selftest.get("started_at"), release.get("started_at"))
+            if (selftest_vs_release
                     and isinstance(elapsed, (int, float))
                     and not isinstance(elapsed, bool)
                     and math.isfinite(float(elapsed))
-                    and release_started is not None
-                    and selftest_started
+                    and selftest_vs_release[0]
                     + timedelta(seconds=float(elapsed))
-                    > release_started):
+                    > selftest_vs_release[1]):
                 errors.append("release started before semantic pytest finished")
 
     pins = ll.get("release_pins")
@@ -305,22 +305,27 @@ def load_publication_evidence(*, round_at: str, run_id: str,
     # falls somewhere after 05:30.  Without these edges, yesterday's shape can
     # be recreated with individually current records whose producers ran in the
     # wrong order (for example a ledger measured before the release it claims).
-    ai_checked = (release_ll._strict_when(accepted_ai.get("checked_at"))
-                  if isinstance(accepted_ai, dict) else None)
-    selftest_started = (release_ll._strict_when(selftest.get("started_at"))
-                        if isinstance(selftest, dict) else None)
-    release_finished = (release_ll._strict_when(release.get("finished_at"))
-                        if isinstance(release, dict) else None)
-    pins_checked = (release_ll._strict_when(pins.get("checked_at"))
-                    if isinstance(pins, dict) else None)
-    if (ai_checked is not None and selftest_started is not None
-            and ai_checked > selftest_started):
+    # #77 — these stamps cross producers that do not agree on precision, so they
+    # are compared at one BOTH carry. `_at_shared_precision` says why; the short
+    # version is that reading digits a producer never wrote as zeros turned a
+    # correctly-ordered round into "started before ... finished".
+    ai_vs_selftest = release_ll._at_shared_precision(
+        accepted_ai.get("checked_at") if isinstance(accepted_ai, dict) else None,
+        selftest.get("started_at") if isinstance(selftest, dict) else None)
+    release_vs_pins = release_ll._at_shared_precision(
+        release.get("finished_at") if isinstance(release, dict) else None,
+        pins.get("checked_at") if isinstance(pins, dict) else None)
+    if ai_vs_selftest and ai_vs_selftest[0] > ai_vs_selftest[1]:
         errors.append("semantic pytest started before AI authorization finished")
-    if (release_finished is not None and pins_checked is not None
-            and release_finished > pins_checked):
+    if release_vs_pins and release_vs_pins[0] > release_vs_pins[1]:
         errors.append("release pins were checked before the release finished")
-    if (_when(gap["completed_at"], "gap.completed_at")
-            > _when(github["started_at"], "github.started_at")):
+    # Validated by name first, so a missing or malformed stamp keeps its own
+    # error rather than being silently uncomparable.
+    _when(gap["completed_at"], "gap.completed_at")
+    _when(github["started_at"], "github.started_at")
+    gap_vs_github = release_ll._at_shared_precision(gap["completed_at"],
+                                                    github["started_at"])
+    if gap_vs_github and gap_vs_github[0] > gap_vs_github[1]:
         errors.append("GitHub convergence started before fork-gap collection finished")
 
     watch = ll.get("watch_only_reset")
