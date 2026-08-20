@@ -68,6 +68,13 @@ def _run(rows, monkeypatch, baseline=None):
 
     rep = {
         "q1_image_behind_upstream": 0, "q1_forks_behind": 0, "q1_sync_lag": 0,
+        # Same reason as `assertions` below: `analyse` always produces these and
+        # `_verdict` reads the first one directly. Omitting it would not model a
+        # shape `analyse` can emit — it would model a MISSING measurement, which
+        # `_verdict` fails closed on, so the stub would be testing the wrong
+        # branch of a rule these tests are not about.
+        "q1_image_behind_upstream_at_merge": 0,
+        "q1_unmeasured_image_behind_at_merge": [],
         "q1_release_lag": 0, "q1_unmeasured": [], "q2_unmeasured_ship": [],
         "q2_forks_not_built_from_ours": [r["tool"] for r in rows
                                          if not r["integrated"]],

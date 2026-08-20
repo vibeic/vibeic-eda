@@ -641,6 +641,7 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
                "asserted_contents": None,
                "sync_lag": None, "sync_lag_at_merge": None,
                "release_lag": None, "image_behind": None,
+               "image_behind_at_merge": None,
                "tip_state": None, "tip_note": None,
                "note": None}
 
@@ -780,6 +781,29 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         if row["pin"]:
             row["release_lag"] = count(clone, row["pin"], tip)
             row["image_behind"] = count(clone, row["pin"], up)
+            # THE SAME MEASUREMENT, TAKEN AT THE MOMENT THE ROUND CONVERGED.
+            # `image_behind` counts to the LIVE upstream tip, which keeps moving
+            # while the round builds — measured 2026-08-20: every fork merged
+            # clean and convergence read `sync lag 0`, then the ~45-minute
+            # release phase ran and YosysHQ pushed two commits, so the publish
+            # gate saw a gap of 2 and skipped the page. Nothing was wrong; the
+            # goalpost had moved. Requiring the live figure to be zero is
+            # requiring upstream to hold still while we build, which no active
+            # project does.
+            #
+            # `merge_ref_seen` is the upstream tip THIS round's merge actually
+            # saw. Counting to it asks the honest question — did the image ship
+            # what this round converged on — and it is NOT a relaxation: a fork
+            # the round genuinely failed to take still counts, because its
+            # tip_seen is still ahead of the pin. When the tip was never
+            # observed this stays None, which `_measurement_incomplete` turns into NORECORD
+            # rather than a plausible zero.
+            if row.get("merge_ref_seen"):
+                row["image_behind_at_merge"] = count(
+                    clone, row["pin"], row["merge_ref_seen"])
+            elif row.get("sync_lag_at_merge") == row["sync_lag"]:
+                # standalone legacy path: same conservative fallback as sync
+                row["image_behind_at_merge"] = row["image_behind"]
             ours = ours_past_the_pin(clone, row["pin"], up, tip)
             row["ours_unshipped"] = None if ours is None else len(ours)
             row["ours_unshipped_substantive"] = (
@@ -830,6 +854,11 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         "assertions": [{"tool": r["tool"], "contents": r["asserted_contents"]}
                        for r in asserted],
         "q1_image_behind_upstream": sum(r["image_behind"] for r in measurable),
+        "q1_image_behind_upstream_at_merge": sum(
+            r.get("image_behind_at_merge") or 0 for r in measurable),
+        "q1_unmeasured_image_behind_at_merge": [
+            r["tool"] for r in measurable
+            if r.get("image_behind_at_merge") is None],
         "q1_forks_behind": len([r for r in measurable if r["image_behind"]]),
         "q1_sync_lag": sum(r["sync_lag"] or 0 for r in measurable),
         "q1_sync_lag_at_merge": sum(r.get("sync_lag_at_merge") or 0
@@ -1224,11 +1253,43 @@ def _measurement_incomplete(rep: dict) -> bool:
                 or rep.get("fleet_errors")
                 or rep.get("q1_unmeasured")
                 or rep.get("q1_unmeasured_at_merge")
+                or rep.get("q1_unmeasured_image_behind_at_merge")
                 or rep.get("q2_unmeasured_ship")
                 or not isinstance(rep.get("q2_unmeasured_stranded"), list)
                 or rep.get("q2_unmeasured_stranded")
                 or rep.get("tip_rejected")
                 or disagreed)
+
+
+def _verdict(rep: dict) -> int:
+    """0 only when the round converged AND shipped what it converged on.
+
+    JUDGED AT THE MOMENT THE ROUND CONVERGED, NOT AT PUBLISH TIME.
+    `q1_image_behind_upstream` counts to the LIVE upstream tip, which keeps
+    moving while the round builds. Measured 2026-08-20: every fork merged
+    clean, convergence read `sync lag 0`, then the ~45-minute release phase ran
+    and YosysHQ pushed two commits — so the publish gate saw a gap of 2 and
+    skipped the page. Half an hour later the same figure read 4. Nothing had
+    gone wrong; the goalpost was moving. Gating on it means requiring upstream
+    to hold still while we build, which no active project does.
+
+    The live figure is still measured and still printed — it is the number to
+    read for drift. It is simply not the verdict.
+
+    This is NOT a relaxation. A fork the round genuinely failed to take still
+    counts, because its `tip_seen` is still ahead of the pin. And a round whose
+    at-merge figure could not be taken never reaches here:
+    `_measurement_incomplete` lists
+    `q1_unmeasured_image_behind_at_merge` and returns NORECORD instead.
+    """
+    at_merge = rep.get("q1_image_behind_upstream_at_merge")
+    if at_merge is None:
+        # ABSENT IS NOT ZERO. `.get(key, 0)` here would turn "this report does
+        # not carry the figure" into "the figure is clean", which is the exact
+        # shape of silent-pass this file spends its length refusing elsewhere.
+        return 1
+    return 0 if (at_merge == 0
+                 and rep["q2_ours_past_the_pin_substantive"] == 0) else 1
 
 
 def main(argv=None) -> int:
@@ -1318,6 +1379,11 @@ def main(argv=None) -> int:
     print(f"  Q1  image behind upstream : {rep['q1_image_behind_upstream']} "
           f"across {rep['q1_forks_behind']} fork(s)"
           f"   [sync {rep['q1_sync_lag']} · release {rep['q1_release_lag']}]")
+    print(f"      AT MERGE (the verdict)  : "
+          f"{rep.get('q1_image_behind_upstream_at_merge', '—')}"
+          f"   — the live figure above counts to an upstream tip that may have "
+          f"moved during the release phase; this one counts to what this round "
+          f"actually converged on")
     print(f"  Q2  forks the image does NOT build from : "
           f"{len(rep['q2_forks_not_built_from_ours'])}"
           f" ({', '.join(rep['q2_forks_not_built_from_ours']) or 'none'})")
@@ -1412,8 +1478,7 @@ def main(argv=None) -> int:
               f"{', '.join(_new)}")
         return 1
 
-    return 0 if (rep["q1_image_behind_upstream"] == 0
-                 and rep["q2_ours_past_the_pin_substantive"] == 0) else 1
+    return _verdict(rep)
 
 
 if __name__ == "__main__":

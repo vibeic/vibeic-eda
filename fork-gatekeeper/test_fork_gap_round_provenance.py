@@ -24,6 +24,10 @@ def _payload(*, tools=TOOLS, unmeasured=False) -> dict:
         "q1_sync_lag": 0,
         "q1_sync_lag_at_merge": 0,
         "q1_unmeasured_at_merge": [],
+        # `_verdict` reads this and fails closed when it is absent, so a stub
+        # without it would be exercising "measurement missing", not this test.
+        "q1_image_behind_upstream_at_merge": 0,
+        "q1_unmeasured_image_behind_at_merge": [],
         "q1_release_lag": 0,
         "q1_unmeasured": ["yosys"] if unmeasured else [],
         "q2_forks_not_built_from_ours": [],
