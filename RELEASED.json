@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.13",
-  "pins_fingerprint": "1eec9d2eba02",
+  "version": "0.3.14",
+  "pins_fingerprint": "cfa86ccfb806",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,9 +11,9 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "543c33894f8e7d683ce5b06c69405206bc5f3817",
-    "OpenROAD-flow-scripts": "6101364b2d7909dd797e1e3e7f80695401cfa4e4",
-    "Trilinos": "05046163f68d087e51707c7778e8620265e3ee31",
+    "OpenROAD": "a47e38e03fc096fd1c47f9b161eb284c315bf767",
+    "OpenROAD-flow-scripts": "3476215b97b7f51960f7ca796e0b6835fd4d79d7",
+    "Trilinos": "6825fd1246a3097a8d6fbeaa272aac7e35e3b858",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "9f95dae104ee3fd4708339b1188ec9dec6b3867c",
@@ -33,10 +33,10 @@
     "slang": "7ce5f186b9eeadd0e9cede10e791533dc54724f0",
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
-    "verilator": "4cb1a0c57837e4a39125bc5fb48a2f8d6f034499",
-    "xschem": "cd839861c3ad9fba23a7ef373fb21f0665585c9f",
+    "verilator": "be3b0cd25e10c396b54b5f9fd7c20dc3f9bcaae3",
+    "xschem": "c43da8c6dd52544a5eb97d3556e7608be62c0dea",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
-    "yosys": "0048145dd1ffca90ca6a01fce33f6d3ad12defdd"
+    "yosys": "76f25b3253eabab27f726e8caf9e3b18774657e0"
   },
-  "manifest_identity": "84878149b2dad3b1521cdf5518344e2fa01abc0931e538b0ac68f653d1f72ab3"
+  "manifest_identity": "381e0cbfa430c6fdc3c2b4f4b5bd66e7ec21a54acd2b2dd57edce6e81fb161a8"
 }
