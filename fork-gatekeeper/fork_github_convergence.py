@@ -121,6 +121,27 @@ query ForkConvergenceRepositoryOpenItems(
 """
 
 VIBEIC_EDA_REPOSITORY = "vibeic/vibeic-eda"
+
+#: Branch prefix the publish-silence alarm files under, on this repo.
+#:
+#: AN ALARM IS NOT UNFINISHED WORK. Every other item here is a delivery the
+#: fleet owes somebody; this one is the round telling a human that the public
+#: page has stopped publishing. Counting it as open work made the alarm block
+#: the very thing it reports on — measured 2026-08-21, where #138 ("fork page
+#: has not published for 2 consecutive rounds") was the sole item keeping
+#: convergence non-zero, which skipped build_page, which extended the silence
+#: the PR exists to report.
+#:
+#: Matched on repository AND head_ref, not on title or author: a branch name
+#: this program writes itself is the narrowest handle available in the PR
+#: listing. Excluded items are still REPORTED — see `alarm_items` — so this
+#: hides nothing, it only stops one kind of notice from being read as a debt.
+ALARM_BRANCH_PREFIX = "publish-silence-"
+
+
+def _is_alarm(item: dict) -> bool:
+    return (item.get("repository") == VIBEIC_EDA_REPOSITORY
+            and str(item.get("head_ref") or "").startswith(ALARM_BRANCH_PREFIX))
 DELIVERY_REPOSITORY = "vibeic/vibe-ic"
 DELIVERY_PR_HEAD_PATTERNS = {
     "anchor": re.compile(r"^eda-anchor-(\d+\.\d+\.\d+)$"),
@@ -1384,7 +1405,9 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "forks": round_rows,
     }
 
-    items = acc.items()
+    all_items = acc.items()
+    alarm_items = [i for i in all_items if _is_alarm(i)]
+    items = [i for i in all_items if not _is_alarm(i)]
     issue_count = sum(item["type"] == "issue" for item in items)
     pr_count = sum(item["type"] == "pull_request" for item in items)
     counts = {
@@ -1399,7 +1422,13 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "fork_delivery_items": sum(
             "fork_delivery" in item["scopes"] for item in items),
         "by_source": source_counts,
+        # REPORTED, NOT HIDDEN. A silent exclusion is how a filter becomes a
+        # blind spot: the next reader sees "0 open" and cannot tell whether
+        # nothing was open or something was quietly dropped.
+        "alarm_items_excluded": len(alarm_items),
     }
+    # The excluded notices themselves, so a reader can see WHICH ones.
+    alarm_record = alarm_items
     if errors:
         status, rc = "norecord", RC_NORECORD
     elif items:
@@ -1420,6 +1449,7 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "round_upstream": round_upstream,
         "status": status,
         "counts": counts,
+        "alarm_items": alarm_record,
         "items": items,
         "source_errors": errors,
     }
@@ -1487,9 +1517,16 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner | None = None,
         print(f"fork_github_convergence: could not write {args.json}: {exc}",
               file=sys.stderr)
         return RC_NORECORD
+    # The excluded alarms are NAMED on the same line as the count they are not
+    # part of. A reader who sees "converged — 0 open" must be able to tell that
+    # from "converged, and one notice was set aside".
+    excluded = record["counts"].get("alarm_items_excluded", 0)
     print(f"fork_github_convergence: {record['status']} — "
           f"{record['counts']['items']} open item(s), "
-          f"{len(record['source_errors'])} source error(s)")
+          f"{len(record['source_errors'])} source error(s)"
+          + (f"; {excluded} publish-silence alarm(s) NOT counted as open work "
+             f"({', '.join('#' + str(i['number']) for i in record['alarm_items'])})"
+             if excluded else ""))
     return rc
 
 
