@@ -195,7 +195,8 @@ def _mark_escalated(history: Path) -> None:
     tmp.replace(history)
 
 
-def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
+def _default_escalate(summary: str, report_md: str, round_at: str = "undated",
+                      kind: str = "publish-silence"):
     """Raise the alarm as a PR on THIS repo.
 
     NOT on vibe-ic, and the reason is both ownership and mechanics. A stalled
@@ -212,7 +213,13 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
     repo it must not touch.
     """
     date = (round_at or "undated")[:10] or "undated"
-    branch = f"publish-silence-{date}"
+    # #82 — `kind` names the alarm, and it is the ONE place the branch name and
+    # the alert filename come from. A second alarm that copied these forty
+    # lines would be a second thing to keep in step with
+    # `fork_github_convergence._is_alarm`, and an alarm that is not excluded
+    # there gets counted as open work — it would block the very round it is
+    # reporting on.
+    branch = f"{kind}-{date}"
     if not REPO.is_dir():
         return (False, f"eda repo not found at {REPO}")
     if not (summary.strip() and report_md.strip()):
@@ -225,7 +232,7 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
     if rc == 0 and out.strip():
         return (True, f"alert branch {branch} already on origin — already raised")
 
-    wt = Path(tempfile.gettempdir()) / f"gk-eda-alert-{date}"
+    wt = Path(tempfile.gettempdir()) / f"gk-eda-alert-{kind}-{date}"
     _sh("git", "-C", str(REPO), "worktree", "remove", "--force", str(wt))
     shutil.rmtree(wt, ignore_errors=True)
     rc, out = _sh("git", "-C", str(REPO), "worktree", "add", "-q", "--detach",
@@ -235,7 +242,7 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
     try:
         adir = wt / ALERT_DIR
         adir.mkdir(parents=True, exist_ok=True)
-        (adir / f"{date}-publish-silence.md").write_text(
+        (adir / f"{date}-{kind}.md").write_text(
             f"# {summary}\n\n{report_md}", encoding="utf-8")
         _sh("git", "-C", str(wt), "add", ALERT_DIR)
         rc, out = _sh("git", "-C", str(wt), "commit", "-q", "-m", summary)
@@ -251,7 +258,7 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated"):
         body = (report_md.rstrip() +
                 "\n\n---\n_Opened by the round itself. Operational alert, not an "
                 "auto-merge._\n")
-        bf = Path(tempfile.gettempdir()) / f"gk-eda-alert-body-{date}.md"
+        bf = Path(tempfile.gettempdir()) / f"gk-eda-alert-body-{kind}-{date}.md"
         bf.write_text(body, encoding="utf-8")
         rc, out = _sh("gh", "pr", "create", "-R", GH_REPO, "--base", "main",
                       "--head", branch, "--title", summary, "--body-file", str(bf))

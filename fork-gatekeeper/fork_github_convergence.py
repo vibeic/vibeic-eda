@@ -136,12 +136,18 @@ VIBEIC_EDA_REPOSITORY = "vibeic/vibeic-eda"
 #: this program writes itself is the narrowest handle available in the PR
 #: listing. Excluded items are still REPORTED — see `alarm_items` — so this
 #: hides nothing, it only stops one kind of notice from being read as a debt.
-ALARM_BRANCH_PREFIX = "publish-silence-"
+# #82 — EVERY alarm prefix belongs here, not just the first one. A round opens
+# these PRs to REPORT a problem; counting one as open work makes the alarm block
+# the round it is reporting on, which is the failure #138 fixed for
+# publish-silence. `release-failed-` is the second: a release that dies mid-build
+# used to be visible only when publish-silence noticed the page had gone stale
+# DAYS later, so the round now says so on the round it happened.
+ALARM_BRANCH_PREFIXES = ("publish-silence-", "release-failed-")
 
 
 def _is_alarm(item: dict) -> bool:
     return (item.get("repository") == VIBEIC_EDA_REPOSITORY
-            and str(item.get("head_ref") or "").startswith(ALARM_BRANCH_PREFIX))
+            and str(item.get("head_ref") or "").startswith(ALARM_BRANCH_PREFIXES))
 DELIVERY_REPOSITORY = "vibeic/vibe-ic"
 DELIVERY_PR_HEAD_PATTERNS = {
     "anchor": re.compile(r"^eda-anchor-(\d+\.\d+\.\d+)$"),

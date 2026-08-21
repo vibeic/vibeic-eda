@@ -268,6 +268,26 @@ PY
     fi
 fi
 
+# Say so on the day a release FAILS. Until this existed the only signal was
+# `check_publish_silence`, which measures the PAGE going stale — a consequence,
+# counted in DAYS. 2026-08-22: the build died on a klayout version assertion,
+# build_page was skipped, the round finished normally and NOTHING was raised,
+# because the page had published the day before and the streak was under the
+# threshold. A build failing identically every round could have sat most of a
+# week first.
+#
+# It stays quiet on a successful release and on a round that never authorised
+# one, and it never stops the round: an alarm that cannot be raised must not
+# also cost the reporting steps that follow it.
+if [ -x "${DIR}/check_release_failed.py" ] || [ -f "${DIR}/check_release_failed.py" ]; then
+    python3 "${DIR}/check_release_failed.py" \
+        --tick-exit "${TICK}" --tick-state "${TICK_STATE}" \
+        --round-at "${ROUND_AT}" >> "${LOG}" 2>&1
+    echo "[$(date -Is)] check_release_failed exit $? (0=nothing to raise, 1=raised, 2=NORECORD)" >> "${LOG}"
+else
+    echo "[$(date -Is)] check_release_failed NOT CHECKED — checker missing" >> "${LOG}"
+fi
+
 # Step 6 — refresh the fork ledger.  Publication is deliberately later, after
 # every current-round delivery/convergence source has produced its verdict.
 #
