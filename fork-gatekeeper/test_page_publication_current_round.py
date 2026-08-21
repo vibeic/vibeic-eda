@@ -786,3 +786,75 @@ def test_atomic_page_failure_preserves_existing_bytes(tmp_path, monkeypatch):
 
     assert out.read_text(encoding="utf-8") == "LAST GOOD"
     assert not list(tmp_path.glob(".eda-forks.html.*"))
+
+
+# --- #79: the round is judged where the page says it is ----------------------
+
+def _upstream_moved_after_the_merge(paths: dict) -> None:
+    """What every real round looks like by the time the gap is measured.
+
+    The image takes ~45 minutes to compose and upstream does not wait. On the
+    round of 2026-08-21 the release landed at 12:01 and the gap was measured at
+    12:06 with the live pair already at 2, while both at-merge figures were 0.
+    """
+    gap = json.loads(paths["gap"].read_text())
+    # The totals are cross-checked against the retained per-fork rows, so the
+    # drift has to be expressed where it actually happens: on one fork.
+    gap["rows"][0]["image_behind"] = 2
+    gap["rows"][0]["sync_lag"] = 2
+    gap["q1_image_behind_upstream"] = 2
+    gap["q1_sync_lag"] = 2
+    gap["q1_forks_behind"] = 1
+    paths["gap"].write_text(json.dumps(gap))
+    ll = json.loads(paths["ll"].read_text())
+    ll["convergence"].update({
+        "live_sync_lag": 2, "image_behind_upstream": 2,
+        "delivery_converged": False, "converged": False,
+    })
+    paths["ll"].write_text(json.dumps(ll))
+
+
+def test_upstream_moving_during_the_build_does_not_block_the_page(tmp_path):
+    """THE RACE NO ROUND CAN WIN. The gate demanded the LIVE gap be zero while
+    the page's own caption says the round is judged at its merge boundary and
+    its renderer derives convergence from `q1_sync_lag_at_merge` under the
+    comment "the live sum can essentially never read 0". The page had not
+    published for 12 consecutive rounds."""
+    paths = _strict_fixture(tmp_path)
+    _upstream_moved_after_the_merge(paths)
+
+    evidence = _load_strict(paths)          # must not raise
+
+    assert evidence is not None
+
+
+def test_a_gap_that_was_never_closed_still_blocks_the_page(tmp_path):
+    """THE DIRECTION THAT MAKES THE SWITCH SAFE. Judging at the merge boundary
+    is not the same as not judging: a round that did NOT take everything it saw
+    is still refused."""
+    paths = _strict_fixture(tmp_path)
+    gap = json.loads(paths["gap"].read_text())
+    gap["q1_image_behind_upstream_at_merge"] = 3
+    paths["gap"].write_text(json.dumps(gap))
+
+    with pytest.raises(PAGE.PublicationEvidenceError) as caught:
+        _load_strict(paths)
+    assert "q1_image_behind_upstream_at_merge" in str(caught.value)
+
+
+@pytest.mark.parametrize("field", [
+    "q1_unmeasured", "q1_unmeasured_at_merge",
+    "q1_unmeasured_image_behind_at_merge", "q2_unmeasured_ship",
+])
+def test_a_tool_that_could_not_be_measured_is_not_a_zero(tmp_path, field):
+    """ABSENT IS NOT ZERO. Both at-merge sums add `value or 0`, so an
+    unmeasurable tool contributes nothing and reads as converged. Without this
+    the switch to the at-merge figures would trade a race for a blind spot."""
+    paths = _strict_fixture(tmp_path)
+    gap = json.loads(paths["gap"].read_text())
+    gap[field] = ["some-tool"]
+    paths["gap"].write_text(json.dumps(gap))
+
+    with pytest.raises(PAGE.PublicationEvidenceError) as caught:
+        _load_strict(paths)
+    assert field in str(caught.value)

@@ -416,15 +416,46 @@ def load_publication_evidence(*, round_at: str, run_id: str,
                 errors.append(
                     "release target differs from VERSION/RELEASED.json at current HEAD")
 
+    # #79 — THIS GATE CONTRADICTED THE PAGE IT PUBLISHES. The page's own caption
+    # reads: "The upstream-gap card is a live follow-up measurement. The 05:30
+    # round is judged against the commits visible at its merge boundary; commits
+    # published upstream while the image is composing remain visible here for
+    # the next round." Its renderer agrees — `convergedRound` comes from
+    # `q1_sync_lag_at_merge`, under a comment that says the live sum "can
+    # essentially never read 0".
+    #
+    # And then this demanded the LIVE numbers be zero, which is a race no round
+    # can win: upstream keeps moving through the ~45 minutes the image takes to
+    # compose. MEASURED on the round of 2026-08-21 — released 0.3.21 at 12:01,
+    # gap measured 12:06: q1_image_behind_upstream_at_merge=0 and
+    # q1_sync_lag_at_merge=0 (the round took everything it saw) while the live
+    # pair had already reached 2. The page had not published for 12 consecutive
+    # rounds and this is why.
+    #
+    # `q1_forks_behind` gets no at-merge twin because it would be one: a sum of
+    # non-negative per-fork counts is zero exactly when every fork's count is,
+    # so `q1_image_behind_upstream_at_merge == 0` already says no fork was
+    # behind at the merge boundary.
     zero_fields = (
-        "q1_image_behind_upstream", "q1_forks_behind", "q1_sync_lag",
-        "q1_sync_lag_at_merge", "q1_release_lag",
+        "q1_image_behind_upstream_at_merge", "q1_sync_lag_at_merge",
+        "q1_release_lag",
         "q2_our_commits_stranded", "q2_ours_past_the_pin",
         "q2_ours_past_the_pin_substantive",
     )
     nonzero = [name for name in zero_fields if gap.get(name) != 0]
     if nonzero:
         errors.append("fork gap is nonzero: " + ", ".join(nonzero))
+    # ABSENT IS NOT ZERO. Both at-merge sums add `value or 0`, so a tool that
+    # could not be measured contributes nothing and reads as converged. The
+    # report names those tools in its own lists; requiring them empty is what
+    # keeps the switch above from trading a race for a blind spot.
+    unmeasured = [name for name in ("q1_unmeasured", "q1_unmeasured_at_merge",
+                                    "q1_unmeasured_image_behind_at_merge",
+                                    "q2_unmeasured_ship")
+                  if gap.get(name)]
+    if unmeasured:
+        errors.append("fork gap could not measure every tool, which is not the "
+                      "same as zero: " + ", ".join(unmeasured))
     if github.get("status") != "converged":
         errors.append(f"GitHub convergence status is {github.get('status')!r}")
     counts = github.get("counts") if isinstance(github.get("counts"), dict) else {}
@@ -449,11 +480,17 @@ def load_publication_evidence(*, round_at: str, run_id: str,
             if (type(convergence.get(name)) is not type(expected_value)
                     or convergence.get(name) != expected_value):
                 errors.append(f"release LL convergence.{name} differs from gap")
+        # #79 — the live pair goes for the same reason. `converged` and
+        # `round_converged` differ ONLY in their delivery term; github_converged,
+        # inputs_authoritative and whole_round_clear are shared, so the round
+        # pair keeps every other guarantee. And `delivery_converged` was false
+        # for exactly one reason: the live image lag, the number the page says
+        # it does not judge the round on.
         required_true = (
-            "measured", "round_measured", "delivery_converged",
+            "measured", "round_measured",
             "delivery_round_converged", "tick_authorized", "ai_authorized",
             "release_pins_committed", "watch_only_reset_clear",
-            "anchor_complete", "converged", "round_converged",
+            "anchor_complete", "round_converged",
         )
         false_fields = [name for name in required_true
                         if convergence.get(name) is not True]

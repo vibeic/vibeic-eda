@@ -347,6 +347,11 @@ def _gap_record(**updates) -> dict:
         "assertions": [],
         "q1_sync_lag_at_merge": 0,
         "q1_unmeasured_at_merge": [],
+        # #79 — the round is judged at the merge boundary, so a fixture for a
+        # converged round has to carry the at-merge pair and say that nothing
+        # went unmeasured. Absent is not zero.
+        "q1_image_behind_upstream_at_merge": 0,
+        "q1_unmeasured_image_behind_at_merge": [],
         "q1_sync_lag": 0,
         "q1_release_lag": 0,
         "q1_image_behind_upstream": 0,
