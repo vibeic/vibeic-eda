@@ -942,14 +942,15 @@ RUN --mount=type=bind,from=img-fault,source=/foss/tools/fault,target=/tmp/vibeic
 # Fixing the runner (vibe-ic v1.8.9) fixes OUR consumer. This fixes every other
 # one: PDK decks, user scripts, anything that reasonably assumes the canonical
 # path is the tool. Measured after the swap, in a login shell, no resolver
-# involved: `klayout -v` -> 0.30.10, the grid fixture -> 0 off-grid vertices
+# involved: `klayout -v` -> the vibeic build's own version, the grid fixture
+# -> 0 off-grid vertices
 # (8 before), all 13 of the base's executables still resolve.
 #
 # The parallel install was the conservative choice when our build was Qt-less
 # and produced no `klayout` binary at all. It now produces the binary, the DRC
 # and LVS engines, the pymod and every strm2* buddy — a superset of the base's
 # tree, compared file by file: 67 differences, all of them the base's 0.30.9
-# sonames superseded by our 0.30.10, plus __pycache__ and a SOURCES listing.
+# sonames superseded by our build, plus __pycache__ and a SOURCES listing.
 #
 # The base is KEPT at /foss/tools/klayout-base, with a stated criterion for
 # removing it rather than a vague "just in case": once a full sign-off run
@@ -965,8 +966,13 @@ RUN --mount=type=bind,from=img-klayout,source=/klayout/bld,target=/tmp/vibeic-kl
       test -x "/foss/tools/klayout/$b" \
         || { echo "FAIL: the swap lost $b, which the base image provided"; exit 1; }; \
     done \
- && LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/klayout/klayout -v | grep -q 0.30.10 \
- && echo "klayout swap OK: /foss/tools/klayout is the vibeic build; base kept at klayout-base"
+ && SWAP_SRC_V="$(LD_LIBRARY_PATH=/tmp/vibeic-klayout /tmp/vibeic-klayout/klayout -v 2>/dev/null)" \
+ && SWAP_GOT_V="$(LD_LIBRARY_PATH=/foss/tools/klayout /foss/tools/klayout/klayout -v 2>/dev/null)" \
+ && { [ -n "$SWAP_SRC_V" ] \
+      || { echo "FAIL: the mounted vibeic klayout will not report a version, so this swap cannot be verified against anything"; exit 1; }; } \
+ && { [ "$SWAP_GOT_V" = "$SWAP_SRC_V" ] \
+      || { echo "FAIL: /foss/tools/klayout reports '$SWAP_GOT_V' but the artefact copied in reports '$SWAP_SRC_V'"; exit 1; }; } \
+ && echo "klayout swap OK: /foss/tools/klayout is the vibeic build ($SWAP_GOT_V); base kept at klayout-base"
 
 # --- the fork's standalone sign-off engines (vibeic/klayout#113 finding 3) ---
 # Twelve engine entry points the klayout fork adds shipped in NO artefact: the
