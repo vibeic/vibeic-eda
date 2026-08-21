@@ -691,11 +691,14 @@ def test_same_nonce_with_different_round_times_cannot_replace_the_page(tmp_path)
 
 
 @pytest.mark.parametrize("mutation,needle", [
+    # #78 — a certified page is a RAN tick, so the record on disk is run_tick's
+    # re-verification: the out-of-order shape is an authorization OLDER than the
+    # gate run it vouches for, not newer. See `capture_release_ll`.
     pytest.param(
         lambda _github, ll: ll["selftest"].update(
-            started_at="2026-08-17T06:01:30+08:00"),
-        "semantic pytest started before AI authorization finished",
-        id="selftest-before-ai"),
+            started_at="2026-08-17T06:03:00+08:00"),
+        "AI authorization predates the semantic pytest run it authorized",
+        id="ai-predates-selftest"),
     pytest.param(
         lambda _github, ll: ll["release_pins"].update(
             checked_at="2026-08-17T06:03:45+08:00"),

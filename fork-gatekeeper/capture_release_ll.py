@@ -3095,13 +3095,49 @@ def main(argv=None) -> int:
                         if isinstance(semantic, dict) else None)
     semantic_elapsed = (semantic.get("elapsed_seconds")
                         if isinstance(semantic, dict) else None)
+    # #78 — WHICH ORDER IS CORRECT DEPENDS ON WHICH WRITER WROTE THE RECORD.
+    # `ai-release-authorization.json` is written TWICE a round, and the second
+    # write is deliberate: run_0530.sh checks before the gate, then run_tick.sh
+    # re-verifies against its one-use capability and `mv -f`s the result over
+    # the same path — so a stale green record cannot vouch for a tick whose
+    # re-check failed, and a re-check that formed no record removes it outright.
+    #
+    # The record therefore means "authorized the tests" on a round that never
+    # reached the tick, and "authorized THIS release" on one that did. Those two
+    # have OPPOSITE correct orderings, and the record does not say which it is.
+    # `tick_state` does, and the LL already carries it.
+    #
+    # Asserting only the first meaning made the check unsatisfiable on exactly
+    # the rounds that worked. MEASURED across the round log: 10 of 10 rounds
+    # whose tick ran reported "semantic pytest started before AI authorization
+    # finished"; 0 of 4 rounds whose tick did not. A source error skips the
+    # page, so the certified page could not form on any round that released —
+    # observed 2026-08-21T03:11:29, tick exit 0 and "build_page SKIPPED —
+    # current-round release LL is invalid or nonzero".
     ai_vs_semantic = _at_shared_precision(
         ai_authorization.get("checked_at")
         if isinstance(ai_authorization, dict) else None,
         semantic.get("started_at") if isinstance(semantic, dict) else None)
-    if ai_vs_semantic and ai_vs_semantic[0] > ai_vs_semantic[1]:
-        ordering_errors.append(
-            "semantic pytest started before AI authorization finished")
+    if ai_vs_semantic:
+        ai_when, semantic_when = ai_vs_semantic
+        if a.tick_state == "ran":
+            # The re-verification authorized a release that happens AFTER the
+            # gate, so it must not be OLDER than the run it vouches for.
+            # Anchored on completion when the gate measured one; that is the
+            # hazard this direction catches.
+            semantic_end = semantic_when
+            if (isinstance(semantic_elapsed, (int, float))
+                    and not isinstance(semantic_elapsed, bool)
+                    and math.isfinite(float(semantic_elapsed))):
+                semantic_end = semantic_when + timedelta(
+                    seconds=float(semantic_elapsed))
+            if ai_when < semantic_end:
+                ordering_errors.append(
+                    "AI authorization predates the semantic pytest run it "
+                    "authorized")
+        elif ai_when > semantic_when:
+            ordering_errors.append(
+                "semantic pytest started before AI authorization finished")
     semantic_vs_release = _at_shared_precision(
         semantic.get("started_at") if isinstance(semantic, dict) else None,
         release.get("started_at") if isinstance(release, dict) else None)

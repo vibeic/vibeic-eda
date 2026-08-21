@@ -309,14 +309,31 @@ def load_publication_evidence(*, round_at: str, run_id: str,
     # are compared at one BOTH carry. `_at_shared_precision` says why; the short
     # version is that reading digits a producer never wrote as zeros turned a
     # correctly-ordered round into "started before ... finished".
+    # #78 — the same record, the same two writers, the same split. See
+    # `capture_release_ll`: the correct order is opposite depending on whether
+    # the tick ran, and `tick_state` is the only thing that says which.
     ai_vs_selftest = release_ll._at_shared_precision(
         accepted_ai.get("checked_at") if isinstance(accepted_ai, dict) else None,
         selftest.get("started_at") if isinstance(selftest, dict) else None)
     release_vs_pins = release_ll._at_shared_precision(
         release.get("finished_at") if isinstance(release, dict) else None,
         pins.get("checked_at") if isinstance(pins, dict) else None)
-    if ai_vs_selftest and ai_vs_selftest[0] > ai_vs_selftest[1]:
-        errors.append("semantic pytest started before AI authorization finished")
+    if ai_vs_selftest:
+        ai_when, selftest_when = ai_vs_selftest
+        if (release.get("tick_state") if isinstance(release, dict) else None) == "ran":
+            selftest_elapsed = (selftest.get("elapsed_seconds")
+                                if isinstance(selftest, dict) else None)
+            selftest_end = selftest_when
+            if (isinstance(selftest_elapsed, (int, float))
+                    and not isinstance(selftest_elapsed, bool)
+                    and math.isfinite(float(selftest_elapsed))):
+                selftest_end = selftest_when + timedelta(
+                    seconds=float(selftest_elapsed))
+            if ai_when < selftest_end:
+                errors.append("AI authorization predates the semantic pytest "
+                              "run it authorized")
+        elif ai_when > selftest_when:
+            errors.append("semantic pytest started before AI authorization finished")
     if release_vs_pins and release_vs_pins[0] > release_vs_pins[1]:
         errors.append("release pins were checked before the release finished")
     # Validated by name first, so a missing or malformed stamp keeps its own

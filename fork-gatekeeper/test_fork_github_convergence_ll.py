@@ -372,11 +372,23 @@ def _gap_record(**updates) -> dict:
     return record
 
 
-def _ai_authorization_record() -> dict:
+# #78 — the default is the shape a round that RELEASES actually produces. The
+# record is written twice: run_0530.sh checks before the gate, then run_tick.sh
+# re-verifies against its one-use capability and replaces the file. So on a
+# round whose tick ran, the record on disk is the re-verification and postdates
+# the gate (here: selftest 06:02:10 + 42s = 06:02:52, re-verified 06:02:55,
+# release 06:03:30). The old default 06:02:00 modelled the pre-#132 shape, which
+# no round has produced since. Tests about a tick that did NOT run pass the
+# earlier stamp explicitly — that is the other meaning of the same field.
+AI_CHECKED_AT_TICK_RAN = "2026-08-17T06:02:55+08:00"
+AI_CHECKED_AT_TICK_NOT_RUN = "2026-08-17T06:02:00+08:00"
+
+
+def _ai_authorization_record(checked_at: str = AI_CHECKED_AT_TICK_RAN) -> dict:
     return {
         "program": "check_ai_release_authorization",
         "schema_version": 1,
-        "checked_at": "2026-08-17T06:02:00+08:00",
+        "checked_at": checked_at,
         "round_at": ROUND_AT,
         "source": "/state/daily_0530.json",
         "registered_forks": REGISTERED_FORKS,

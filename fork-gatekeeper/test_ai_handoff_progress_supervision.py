@@ -424,7 +424,15 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
     }
 
 
-def _ai_authorization_record(*, status="authorized", run_id=None) -> dict:
+# #78 — kept in step with the copy in `test_fork_github_convergence_ll`. The
+# default is the shape a round that RELEASES produces: the record on disk is
+# run_tick's re-verification, so it POSTDATES the gate it authorized.
+AI_CHECKED_AT_TICK_RAN = "2026-08-17T06:02:55+08:00"
+AI_CHECKED_AT_TICK_NOT_RUN = "2026-08-17T06:02:00+08:00"
+
+
+def _ai_authorization_record(*, status="authorized", run_id=None,
+                             checked_at=AI_CHECKED_AT_TICK_RAN) -> dict:
     verified = status == "authorized"
     result = {
         "fork": "Demo", "branch": "origin/vibeic/topic",
@@ -436,7 +444,7 @@ def _ai_authorization_record(*, status="authorized", run_id=None) -> dict:
     return {
         "program": "check_ai_release_authorization",
         "schema_version": 1,
-        "checked_at": "2026-08-17T06:02:00+08:00",
+        "checked_at": checked_at,
         "round_at": "2026-08-17T05:30:00+08:00",
         "source": "/state/daily_0530.json",
         "registered_forks": _REGISTERED_FORKS,
@@ -584,7 +592,8 @@ def test_stalled_norecord_is_retained_without_reusing_old_release(
     fork_github = tmp_path / "fork-github.json"
     fork_github.write_text(json.dumps(_fork_github_record()))
     ai_authorization = tmp_path / "ai-authorization.json"
-    ai_record = _ai_authorization_record()
+    ai_record = _ai_authorization_record(
+        checked_at=AI_CHECKED_AT_TICK_NOT_RUN)   # this test's tick is NOT CHECKED
     _bind_ai_record_to_registry(ai_record, forks_json, registry_digest)
     ai_authorization.write_text(json.dumps(ai_record))
 
@@ -651,7 +660,8 @@ def _capture_ai_gate(tmp_path: Path, ai_value: dict | None,
 
 def test_ll_retains_the_exact_ai_postcondition_that_blocked_release(
         tmp_path, capsys):
-    blocked = _ai_authorization_record(status="blocked")
+    blocked = _ai_authorization_record(status="blocked",
+                                       checked_at=AI_CHECKED_AT_TICK_NOT_RUN)
     rc, full, narrow = _capture_ai_gate(
         tmp_path, blocked, "not_checked_ai_unverified")
     capsys.readouterr()
@@ -829,11 +839,16 @@ def test_complete_release_terminal_proof_can_form_a_clean_ll(
 
 
 @pytest.mark.parametrize("mutate,needle", [
+    # #78 — this fixture is a RAN tick, so the record on disk is run_tick's
+    # re-verification and the out-of-order shape is the OTHER one: an
+    # authorization older than the gate run it vouches for. Pushing the gate
+    # past the authorization (06:02:55) is how that is expressed without
+    # reaching into the AI record.
     pytest.param(
         lambda release, semantic: semantic.update(
-            started_at="2026-08-17T06:01:30+08:00"),
-        "semantic pytest started before AI authorization finished",
-        id="selftest-before-ai"),
+            started_at="2026-08-17T06:03:00+08:00"),
+        "AI authorization predates the semantic pytest run it authorized",
+        id="ai-predates-selftest"),
     pytest.param(
         lambda release, _semantic: release.update(
             started_at="2026-08-17T06:02:30+08:00"),

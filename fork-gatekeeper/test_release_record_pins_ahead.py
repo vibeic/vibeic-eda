@@ -156,6 +156,17 @@ def _self_consistent(**overrides):
         pass
     d = _released()
     d["version"] = (_ROOT / "VERSION").read_text().strip()
+    # BASELINE IS "NO DRIFT", stated rather than borrowed. Anchoring on whatever
+    # the committed record happens to hold made these tests depend on the tree
+    # being at a release boundary: a round that advances pins mid-flight moved
+    # the tree under them, `pins_moved` won the branch, and a test about the
+    # RECIPE branch silently asserted against PINS_AHEAD instead. The fixture
+    # now matches the tree on both sides, so the only drift is the injected one.
+    d["pins"] = DR.pinned_refs(_ROOT)
+    d["recipes"] = {
+        **{f"{DR.RECIPE_KEY_PREFIX}{k}": DR.recipe_hash(_ROOT, k)
+           for k in DR.bake_targets(_ROOT)},
+        f"{DR.RECIPE_KEY_PREFIX}__compose__": DR.compose_recipe_hash(_ROOT)}
     d.update(overrides)
     d["pins_fingerprint"] = DR.pins_fingerprint({**d["pins"], **d["recipes"]})
     return d
