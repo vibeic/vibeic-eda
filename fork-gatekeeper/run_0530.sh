@@ -33,6 +33,20 @@ export GK_CURRENT_ROUND_AT="${ROUND_AT}"
   echo "════════ ${ROUND_AT} 05:30 round ════════"
 } >> "${LOG}"
 
+# A release writes its pins BEFORE building and commits them only once the image
+# is in a registry, so a build that cannot publish leaves them uncommitted — and
+# the page-publication tests check the real repository, so a dirty tree turns 5
+# of them red, the semantic pytest gate goes RED, run_tick is NOT CHECKED, and
+# the release that would retry never runs. Round 12 (2026-08-21) died exactly
+# there after round 11 lost its upload to a network timeout. Recovering that
+# state is the FIRST thing a round does, so nothing downstream inherits it.
+# The recovery refuses anything that is not a pin-shaped unstaged edit, and a
+# refusal does not stop the round: the round then reports the dirty tree the
+# way it always has, rather than this quietly deciding a human's edit is ours.
+if ! python3 "${DIR}/recover_pin_only_dirty_tree.py" >> "${LOG}" 2>&1; then
+    echo "[$(date -Is)] pin-only dirty-tree recovery REFUSED — the tree carries work this round cannot own; see above" >> "${LOG}"
+fi
+
 # Step 1-4 + the AI half.  The gatekeeper may read real code across several
 # forks, so elapsed runtime is not a verdict.  This is a ZERO-PROGRESS grace:
 # stream-json/tool activity renews it, and a progressing turn runs to completion.
