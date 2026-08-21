@@ -7,6 +7,7 @@ each side of those bindings and require refusal before the last-good page moves.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -248,17 +249,18 @@ def test_nonintegrated_health_fields_cannot_diverge_from_normalized_gap_row(
     assert out.read_text(encoding="utf-8") == "LAST GOOD"
 
 
-def _docker_inspect(ref: str, identity: str, *, returncode: int = 0):
-    value = [{
-        "Id": f"sha256:{identity}",
-        "RepoTags": [ref],
-        "RepoDigests": [f"vibeic/vibeic-eda@sha256:{identity}"],
-    }]
-    return subprocess.CompletedProcess(
-        ["docker", "image", "inspect", ref], returncode,
-        stdout=json.dumps(value),
-        stderr="fixture: image absent" if returncode else "",
-    )
+# #80 — THE INVARIANT IS UNCHANGED AND THE MECHANISM IS NOT. A certified page
+# must never count an image it cannot bind to the release. It used to satisfy
+# that by refusing to count at all, which is why the page read "37 · ?" from the
+# moment the certified path started working. It now satisfies it by BINDING:
+# re-measure the registry tag the way the release did, compare with the identity
+# the LL recorded, and count `image@sha256:…`. Both scenarios below are the
+# reasons that binding can fail, and both must still end at `NTOOLS = null`.
+CERTIFIED_MANIFEST = {"schemaVersion": 2, "layers": [{"size": 1}]}
+CERTIFIED_IDENTITY = hashlib.sha256(
+    json.dumps(CERTIFIED_MANIFEST, sort_keys=True, separators=(",", ":"),
+               ensure_ascii=False).encode("utf-8")).hexdigest()
+CERTIFIED_DIGEST = "sha256:" + "c" * 64
 
 
 @pytest.mark.parametrize("scenario", ["released-absent", "identity-mismatch"])
@@ -272,32 +274,35 @@ def test_certified_inventory_never_uses_an_unbound_local_image(
     monkeypatch.delenv("GK_INVENTORY_IMAGE", raising=False)
 
     version = evidence.ll["release"]["target"]
-    released_ref = f"vibeic/vibeic-eda:{version}"
-    latest_ref = "vibeic/vibeic-eda:latest"
-    released_identity = evidence.ll["release"]["remote_publication"][
-        "manifests"]["version"]["identity"]
-    wrong_identity = "b" * 64
-    assert wrong_identity != released_identity
+    image = PAGE.release_program.RELEASE_IMAGE
+    pinned = f"{image}@{CERTIFIED_DIGEST}"
+    if scenario == "released-absent":
+        # The registry answer IS the recorded image, so the binding succeeds and
+        # the only thing left to fail is the local presence of those bits.
+        evidence.ll["release"]["remote_publication"]["manifests"]["version"][
+            "identity"] = CERTIFIED_IDENTITY
 
     real_run = subprocess.run
 
     def fake_docker(argv, *args, **kwargs):
         if argv and argv[0] == "/usr/bin/git":
             return real_run(argv, *args, **kwargs)
-        ref = next((part for part in argv
-                    if isinstance(part, str)
-                    and part.startswith("vibeic/vibeic-eda:")), None)
-        assert ref in {released_ref, latest_ref}, argv
-        if ref == released_ref and scenario == "released-absent":
-            return _docker_inspect(ref, wrong_identity, returncode=1)
-        return _docker_inspect(ref, wrong_identity)
+        if argv[:3] == ["docker", "manifest", "inspect"]:
+            assert f"{image}:{version}" in argv, argv
+            body = json.dumps([{"Descriptor": {"digest": CERTIFIED_DIGEST},
+                                "OCIManifest": CERTIFIED_MANIFEST}])
+            return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            absent = scenario == "released-absent"
+            return subprocess.CompletedProcess(
+                argv, 1 if absent else 0, stdout="[]",
+                stderr="fixture: image absent" if absent else "")
+        raise AssertionError(f"unexpected command {argv}")
 
     measured_refs: list[str] = []
 
     def fake_collect(ref: str):
         measured_refs.append(ref)
-        if scenario == "released-absent" and ref == released_ref:
-            raise RuntimeError("released version image is absent")
         return {"a": [{"dir": f"local-tool-{index}"} for index in range(59)]}
 
     monkeypatch.setattr(PAGE.subprocess, "run", fake_docker)
@@ -314,5 +319,7 @@ def test_certified_inventory_never_uses_an_unbound_local_image(
         assert "const NTOOLS = null;" in html
         assert "const NTOOLS = 59;" not in html
 
-    if scenario == "released-absent":
-        assert latest_ref not in measured_refs
+    # Never a tag, and never the ambient `:latest` the old refusal was written
+    # about — a certified count is taken from the digest or not at all.
+    assert all(ref == pinned for ref in measured_refs), measured_refs
+    assert not any(":latest" in ref for ref in measured_refs), measured_refs

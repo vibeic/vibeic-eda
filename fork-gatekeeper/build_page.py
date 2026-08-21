@@ -19,6 +19,7 @@ evidence explicitly as unmeasured.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -37,6 +38,7 @@ sys.path.insert(0, str(HERE))
 import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic/vibeic-eda#12)
 import inventory  # noqa: E402 — the tool inventory, measured at build time
 import capture_release_ll as release_ll  # noqa: E402 — canonical evidence validators
+import daily_release as release_program  # noqa: E402 — RELEASE_IMAGE, the one image name
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
@@ -2106,6 +2108,79 @@ def build_footer_site(out: Path) -> str:
     return "".join(_canonical_menu(out))
 
 
+def _certified_image_by_digest(publication) -> tuple:
+    """The released image pinned by its registry DIGEST, or (None, why not).
+
+    #80 — the certified page rendered "?" for the image tool count. The reason
+    given was sound as far as it went: `manifest_identity` is a hash of
+    normalized manifest JSON, not an OCI digest, so it cannot qualify a Docker
+    reference — and inspecting an ambient `:latest` would attach some other
+    image's number to a certified release.
+
+    But that identity is exactly what turns a tag back into proof. Re-measure
+    the registry tag the way the release measured it — `docker manifest
+    inspect`, canonical JSON, sha256 — and compare against the identity the
+    release RECORDED. Equal means this tag IS the certified image rather than a
+    guess. The same inspect yields the OCI digest, and the count is taken from
+    `image@sha256:...`, which no later retag can move.
+
+    MEASURED 2026-08-21 on 0.3.22: the recomputed identity c86d53d6… equals the
+    recorded one, the digest sha256:034828bb… equals the local RepoDigest, and
+    the image ships 60 tools under /foss/tools. The page had been rendering "?"
+    ever since the certified path started working.
+
+    EVERY failure returns None. An unmeasured count stays unmeasured; the one
+    thing this must never do is put up a number nobody proved.
+    """
+    release = (publication.ll or {}).get("release") or {}
+    version = release.get("target")
+    if not isinstance(version, str) or not version:
+        return None, "the release LL names no published version"
+
+    # The identity comes from the LL, which is THIS round's certified evidence
+    # and is already validated by the gate above — not from a second read of
+    # RELEASED.json, which would be a different record to keep in step.
+    published = ((release.get("remote_publication") or {})
+                 .get("manifests") or {}).get("version") or {}
+    identity = published.get("identity")
+    if not (isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{64}", identity)):
+        return None, "the release recorded no usable manifest identity"
+
+    ref = f"{release_program.RELEASE_IMAGE}:{version}"
+    probe = subprocess.run(["docker", "manifest", "inspect", "--verbose", ref],
+                           capture_output=True, text=True, timeout=180)
+    if probe.returncode != 0:
+        return None, f"the registry did not answer for {ref}"
+    try:
+        verbose = json.loads(probe.stdout)
+    except (TypeError, ValueError):
+        return None, f"the registry answer for {ref} did not parse"
+    entry = verbose[0] if isinstance(verbose, list) and verbose else verbose
+    if not isinstance(entry, dict):
+        return None, f"the registry answer for {ref} had no manifest"
+    manifest = entry.get("OCIManifest") or entry.get("SchemaV2Manifest")
+    digest = (entry.get("Descriptor") or {}).get("digest")
+    if not isinstance(manifest, dict) or not isinstance(digest, str):
+        return None, f"the registry answer for {ref} carried no manifest/digest"
+
+    # The SAME canonicalisation the release used, so the comparison means what
+    # it says. A tag name is not part of a manifest, which is why two tags on
+    # one image agree here without trusting any local tag or cache.
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8")
+    if hashlib.sha256(canonical).hexdigest() != identity:
+        return None, (f"{ref} no longer has the manifest identity the release "
+                      f"recorded")
+
+    pinned = f"{release_program.RELEASE_IMAGE}@{digest}"
+    local = subprocess.run(["docker", "image", "inspect", pinned],
+                           capture_output=True, text=True)
+    if local.returncode != 0:
+        return None, (f"the certified image is not present locally as {digest} "
+                      f"and this will not pull one to count it")
+    return pinned, ""
+
+
 def _image_ref() -> str:
     """The image the inventory measures, resolved to one that actually exists.
 
@@ -2134,12 +2209,19 @@ def _image_ref() -> str:
     if forced:
         return forced
     v = (HERE.parent / "VERSION").read_text().strip()
-    for ref in (f"vibeic/vibeic-eda:{v}", "vibeic/vibeic-eda:latest"):
+    # #80 — this looked for `vibeic/vibeic-eda`, which is not what anything
+    # builds or pulls: every local tag and the registry itself carry the
+    # `ghcr.io/` prefix, so BOTH candidates missed and the resolver fell through
+    # to a reference no daemon has. The uncertified page's tool count was
+    # therefore unmeasurable for the same reason the certified one was, by a
+    # completely different mistake. One name, from the release program.
+    for ref in (f"{release_program.RELEASE_IMAGE}:{v}",
+                f"{release_program.RELEASE_IMAGE}:latest"):
         r = subprocess.run(["docker", "image", "inspect", ref],
                            capture_output=True, text=True)
         if r.returncode == 0:
             return ref
-    return f"vibeic/vibeic-eda:{v}"          # let collect() report it as unmeasured
+    return f"{release_program.RELEASE_IMAGE}:{v}"   # let collect() report it unmeasured
 
 
 def _validate_ledger_round(ledgers: list[dict], evidence: PublicationEvidence
@@ -2375,10 +2457,27 @@ def build(out: Path, *, publication: PublicationEvidence | None = None):
         # one canonical manifest identity during this round.  That identity is
         # a hash of normalized manifest JSON, not an OCI digest that can safely
         # qualify a Docker reference.  A local version/latest tag therefore
-        # cannot be proved to be that manifest here.  Publish an explicit
-        # unmeasured tool count instead of inspecting an ambient ``:latest`` and
-        # attaching its number to the certified release.
-        ntools = "null"
+        # cannot be proved to be that manifest here — which is why this used to
+        # publish an explicit unmeasured count rather than inspect an ambient
+        # ``:latest`` and attach its number to the certified release.
+        #
+        # #80 — the refusal was right and the conclusion was too strong. The
+        # recorded identity is what turns the tag back into proof: recompute it
+        # from the registry the way the release did, and if it matches, the same
+        # answer carries the OCI digest to pin the count to. Still unmeasured on
+        # any doubt — the count that cannot be proved is never guessed.
+        pinned, why = _certified_image_by_digest(publication)
+        if pinned is None:
+            print(f"  inventory: tool count left UNMEASURED — {why}")
+            ntools = "null"
+        else:
+            try:
+                _inv = inventory.collect(pinned)
+                _ntools = len(_inv.get("a") or _inv.get("tools") or [])
+                ntools = str(_ntools) if _ntools else "null"
+            except Exception as exc:                               # noqa: BLE001
+                print(f"  inventory: could not count tools in {pinned} ({exc})")
+                ntools = "null"
     else:
         try:
             _inv = inventory.collect(_image_ref())
