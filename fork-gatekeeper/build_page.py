@@ -1591,8 +1591,14 @@ function enhBlock(tool){
        // and our tip that is also in upstream is counted twice), so `28 (sync 14
        // · release 17)` was three apart and looked like a bug in the page.
        ,
-     {en:"Live commits behind upstream" + notFreshTxt,
-      zh:"目前落後上游的 commit 數" + notFreshZh}],
+     // #81 — "Live"/"目前" was true when this card could only ever show the
+     // live sum. It now shows the figure at the round's MERGE BOUNDARY when
+     // there is one, and the `最後檢查時間` card beside it names that moment,
+     // so the word became the wrong half of the sentence. Dropped rather than
+     // replaced with a clause: owner instruction 2026-08-05 keeps these cards
+     // at the number and little else.
+     {en:"Commits behind upstream" + notFreshTxt,
+      zh:"落後上游的 commit 數" + notFreshZh}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is

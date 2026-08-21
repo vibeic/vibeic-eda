@@ -280,7 +280,10 @@ def test_the_card_label_stays_short():
     src = (HERE / "build_page.py").read_text(encoding="utf-8")
     i = src.index("const kpis = [")
     block = src[i:src.index("\n  ];", i)]
-    for needle in ('zh:"目前落後上游的 commit 數"',
+    # #81 — "目前" went with the number it described: the card shows the merge
+    # boundary figure now, dated by the card beside it. Still ONE literal, which
+    # is what this pins — the label may be corrected, never grown.
+    for needle in ('zh:"落後上游的 commit 數"',
                    'zh:"進到 image 的自有 commit"'):
         assert needle in block, (
             f"the KPI label {needle} has grown clauses again; the split and the "
