@@ -509,6 +509,14 @@ def load_publication_evidence(*, round_at: str, run_id: str,
         "round_at": round_at,
         "run_id": run_id,
         "captured_at": ll["captured_at"],
+        # #81 — THE MOMENT THE AT-MERGE FIGURES ARE TRUE AS OF. `round_at` is
+        # when the round STARTED and `captured_at` is when the LL was written
+        # ~45 minutes later; neither is the boundary. `sync_lag_at_merge` is
+        # counted against `tip_seen`, the upstream tip daily_0530's own fetch
+        # resolved before merging, so the honest stamp is when that merge round
+        # finished. The LL already carries it as validated round provenance.
+        "merged_at": ((ll.get("fork_github") or {}).get("round")
+                      or {}).get("finished_at"),
         "registered_forks": expected,
         "registered_count": len(expected),
         "github": {
@@ -1235,14 +1243,44 @@ function enhBlock(tool){
   const syncRows = LEDGERS.filter(
       d=>typeof d.sync_lag === "number" && d.pin_kind !== "contents_assertion");
   const syncSum = syncRows.reduce((a,d)=>a+d.sync_lag, 0);
-  const convergedRound = (typeof REPORT !== "undefined" && REPORT
-      && typeof REPORT.q1_sync_lag_at_merge === "number")
+  // #81 — A CERTIFIED PAGE HAS THE AT-MERGE FIGURE; IT IS JUST NOT IN `REPORT`.
+  // REPORT is the gap report, which a page published straight after a release
+  // carries and a CERTIFIED page does not — its REPORT is the small round view
+  // `{date, round_at, run_id}`. Two earlier attempts died right here: first
+  // reading REPORT only, then summing a per-fork `sync_lag_at_merge` the ledger
+  // rows do not carry. Both fell through to the LIVE sum, which upstream keeps
+  // moving and so can essentially never read 0 — the branch below was dead on
+  // every certified page and the card always showed live drift.
+  //
+  // The certified round view carried it the whole time, under
+  // `convergence.sync_lag_at_merge`, alongside the `round_at` the number is
+  // true AS OF. MEASURED 2026-08-21T18:10: sync_lag_at_merge 0, live 1.
+  const roundConv = (typeof CURRENT_ROUND !== "undefined" && CURRENT_ROUND
+      && CURRENT_ROUND.convergence) || null;
+  const convergedRound =
+      (typeof REPORT !== "undefined" && REPORT
+       && typeof REPORT.q1_sync_lag_at_merge === "number")
         ? REPORT.q1_sync_lag_at_merge === 0
+      : (roundConv && typeof roundConv.sync_lag_at_merge === "number")
+        ? roundConv.sync_lag_at_merge === 0
         : (syncRows.length > 0 && syncSum === 0);
+  // The moment the number is true as of, to the minute. A count that is not
+  // "now" must say when it IS, or showing 0 beside a table row reading 1 is
+  // just a contradiction the reader has to resolve alone.
+  // `merged_at`, NOT `round_at`: the number is true as of the MERGE boundary,
+  // and the round started ten minutes before it. There is deliberately no
+  // fallback — stamping the wrong minute is worse than not stamping, so a page
+  // that cannot say WHEN keeps showing the live count instead.
+  const roundStamp = (typeof CURRENT_ROUND !== "undefined" && CURRENT_ROUND
+      && typeof CURRENT_ROUND.merged_at === "string")
+        ? CURRENT_ROUND.merged_at.slice(0, 16).replace("T", " ") : "";
   // THE MOMENT WE CONVERGED, NOT THE MOMENT YOU LOOKED. Upstream keeps
   // moving, so the live sum can essentially never read 0; this preserves the
   // record of a gap that was actually closed.
-  commitsBehind = convergedRound ? 0 : liveBehind;
+  // The converged figure and its "as of" travel TOGETHER. A 0 sitting above a
+  // table row that reads 1 is only coherent when the card says which moment it
+  // is describing, so losing the stamp loses the 0 too.
+  commitsBehind = (convergedRound && roundStamp) ? 0 : liveBehind;
 
   // ============ HOW OLD IS EACH COUNT? (vibeic-eda#91) ==========================
   //
@@ -1417,8 +1455,21 @@ function enhBlock(tool){
   // page, an implementation detail that ran minutes before the gap was
   // actually measured. The gap report's `completed_at` is the instant the
   // check completed, so it is preferred and the ledger stamp is the fallback.
+  // #81 — A CERTIFIED PAGE HAS NO `completed_at`, so this fell through to
+  // `round_at`: the moment the round STARTED, ten minutes before it had
+  // measured anything. MEASURED 2026-08-21: the card read 18:10 while the
+  // merge boundary its figures are counted against was 18:20.
+  //
+  // The card must name the moment the numbers beside it are true AS OF. On a
+  // gap-report page that is when the gap was measured and closed, which is what
+  // the note above defends and is kept first. On a certified page the figures
+  // are the at-merge ones, so it is the merge boundary. `round_at` remains only
+  // as the last resort it always was.
   const checkStamp = (typeof REPORT !== "undefined" && REPORT
-      && (REPORT.completed_at || REPORT.round_at)) || generatedAt;
+        && REPORT.completed_at)
+      || (roundStamp && CURRENT_ROUND.merged_at)
+      || (typeof REPORT !== "undefined" && REPORT && REPORT.round_at)
+      || generatedAt;
   const lastCheck = checkStamp
       ? new Date(checkStamp).toLocaleString("sv-SE",
           {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
