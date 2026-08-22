@@ -47,6 +47,23 @@ if ! python3 "${DIR}/recover_pin_only_dirty_tree.py" >> "${LOG}" 2>&1; then
     echo "[$(date -Is)] pin-only dirty-tree recovery REFUSED — the tree carries work this round cannot own; see above" >> "${LOG}"
 fi
 
+# Give buildkit a concurrency ceiling before anything builds. Tool artefacts now
+# build two at a time (GK_BUILD_PARALLEL), which bounds how many TOOLS overlap
+# but not how many steps buildkit runs inside them; `--oci-max-parallelism` is
+# the daemon's own ceiling and can only be set when the builder is created.
+#
+# Here, at the start, because that is the one moment in a round when no bake is
+# in flight. It is a no-op once the ceiling is set, it carries the builder's
+# existing config across by READING it off the live builder, and it never removes
+# a builder without --keep-state — the state volume held 98.89 GB of cache when
+# this landed, and dropping it would rebuild every artefact from scratch.
+#
+# A refusal does not stop the round: building without the ceiling is what every
+# round did until now, so it is a worse round, not a broken one.
+if ! python3 "${DIR}/ensure_builder_ceiling.py" >> "${LOG}" 2>&1; then
+    echo "[$(date -Is)] buildkit concurrency ceiling NOT SET — see above; the round builds without it" >> "${LOG}"
+fi
+
 # Step 1-4 + the AI half.  The gatekeeper may read real code across several
 # forks, so elapsed runtime is not a verdict.  This is a ZERO-PROGRESS grace:
 # stream-json/tool activity renews it, and a progressing turn runs to completion.

@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 import difflib
 from enum import Enum
 import fcntl
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -423,8 +424,41 @@ def compose_with_retries(bake: List[str], root: Path,
         sleeper(delay)
 
 
+#: How many tool artefacts build at once.
+#:
+#: The cap is about MEMORY, not cores. Each build runs its own `make -j`, so two
+#: concurrent C++ links can want far more RAM than two cores' worth — and an
+#: unbounded yosys took down two machines on 2026-08-19. Two is the smallest
+#: number that delivers what sequential building could not: yosys and OpenROAD
+#: overlapping instead of costing the sum of both.
+#:
+#: `GK_BUILD_PARALLEL` raises it for a host that can carry more. A value that is
+#: not a positive integer is REFUSED rather than silently treated as the default,
+#: because a typo that quietly serialises the build is invisible — it just looks
+#: slow, which is the state this changed.
+BUILD_PARALLEL_DEFAULT = 2
+
+
+def _build_parallelism(pending: int) -> int:
+    raw = os.environ.get("GK_BUILD_PARALLEL")
+    if raw is None or raw == "":
+        want = BUILD_PARALLEL_DEFAULT
+    else:
+        try:
+            want = int(raw)
+        except (TypeError, ValueError):
+            raise SystemExit(
+                f"GK_BUILD_PARALLEL={raw!r} is not an integer. Refusing rather "
+                f"than falling back to {BUILD_PARALLEL_DEFAULT}: a typo that "
+                f"quietly serialises every build only looks slow.")
+        if want < 1:
+            raise SystemExit(
+                f"GK_BUILD_PARALLEL={raw!r} must be at least 1.")
+    return max(1, min(want, pending))
+
+
 def _sh(cmd, cwd=None, timeout=None, stream=False, env=None,
-        stall_grace=None, progress=False):
+        stall_grace=None, progress=False, line_prefix=""):
     """Run a command. `stream=True` lets its output through to OUR stdout.
 
     Capturing is right for the short API calls, and wrong for the two builds:
@@ -462,6 +496,7 @@ def _sh(cmd, cwd=None, timeout=None, stream=False, env=None,
             tail: deque[bytes] = deque()
             tail_size = 0
             progress_bytes = 0
+            nonlocal_buf = [""]          # the partial line `line_prefix` holds
 
             def pump() -> None:
                 nonlocal tail_size, progress_bytes
@@ -472,7 +507,17 @@ def _sh(cmd, cwd=None, timeout=None, stream=False, env=None,
                         break
                     progress_bytes += len(chunk)
                     text = chunk.decode("utf-8", errors="replace")
-                    sys.stdout.write(text)
+                    if line_prefix:
+                        # CONCURRENT BUILDS SHARE ONE LOG. Chunks are not line
+                        # aligned, so prefixing a chunk would cut lines in half
+                        # and two tools would produce something neither of them
+                        # said. Hold the partial line until its newline arrives.
+                        nonlocal_buf[0] += text
+                        while "\n" in nonlocal_buf[0]:
+                            line, nonlocal_buf[0] = nonlocal_buf[0].split("\n", 1)
+                            sys.stdout.write(f"{line_prefix}{line}\n")
+                    else:
+                        sys.stdout.write(text)
                     sys.stdout.flush()
                     tail.append(chunk)
                     tail_size += len(chunk)
@@ -3138,33 +3183,50 @@ def _main_under_release_lock(argv=None) -> int:
             if build:
                 print(f"  artefacts to build (absent, not merely moved): "
                       f"{', '.join(build)}")
-            for t in build:
-                print(f"  building {t} …", flush=True)
-                # `--push` is what makes the next hop incremental FOR ANYONE
-                # ELSE. Without it the artefact exists on one machine, and the
-                # release image can only be composed here, from this cache — a
-                # per-tool architecture whose incrementality is an accident of
-                # local state. Measured 2026-07-29: all 8 artefacts existed
-                # locally and ghcr held none of them.
-                # `--set` because the bake file's own tag expression knows only
-                # the source commit. Overriding here keeps ONE definition of an
-                # artefact's identity — this function's — rather than two that
-                # can disagree.
-                # refs_NOW, not refs_all: refs_all is the pre-move reading, so
-                # a run that moved a pin would build the artefact and tag it with
-                # the commit it replaced.
+            # BUILD THE TOOLS CONCURRENTLY. These were built one at a time,
+            # so a round that touched yosys and OpenROAD paid for both end to
+            # end even though nothing connects them — measured 2026-08-22:
+            # OpenROAD alone ran 40+ minutes while every other artefact sat
+            # idle. buildkit already parallelises WITHIN one target's DAG; what
+            # was missing is that two targets never overlapped.
+            #
+            # Each tool keeps its OWN bake invocation rather than one bake over
+            # many targets. That is what preserves per-tool attribution: an
+            # exit code, a captured tail, a stall verdict and a retry category
+            # that all belong to ONE tool. A single bake returns one number for
+            # everything, and this morning's klayout failure was diagnosed in
+            # minutes precisely because the failure named its target.
+            #
+            # Bounded, and low by default: each build runs its own `make -j`, so
+            # the cap is about MEMORY, not cores. This host has 32 cores and a
+            # yosys OOM took down two machines on 2026-08-19. GK_BUILD_PARALLEL
+            # raises it for a host that can carry more.
+            parallel = _build_parallelism(len(build))
+            print(f"  building {len(build)} tool(s), {parallel} at a time: "
+                  f"{', '.join(build)}", flush=True)
+
+            def _build_one(t: str):
                 want = artefact_tag(root, t, targets[t], refs_now)
-                # `--progress plain` here too. I added it to the compose after a
-                # wedged build was indistinguishable from a quiet one, and left
-                # the TOOL builds — the LONGER of the two — still writing nothing
-                # to the log. Fixing one instance of a defect and not its sibling
-                # is how the sibling gets found the hard way.
                 rc, _, err = _sh(["docker", "buildx", "bake", *bflag, "-f",
                                   str(root / "docker-bake.hcl"), "--push",
                                   "--progress", "plain",
-                                 "--set", f"{t}.tags={want}", t], cwd=root,
+                                  "--set", f"{t}.tags={want}", t], cwd=root,
                                  stream=True, env=BUILD_ENV,
-                                 stall_grace=BUILD_STALL_GRACE_S)
+                                 stall_grace=BUILD_STALL_GRACE_S,
+                                 line_prefix=(f"[{t}] " if parallel > 1 else ""))
+                return t, rc, err
+
+            outcomes: dict = {}
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=parallel) as pool:
+                for t, rc, err in pool.map(_build_one, build):
+                    outcomes[t] = (rc, err)
+
+            # REPORTED IN THE ORDER THE ROUND ASKED FOR, not the order they
+            # happened to finish. Two tools failing must produce the same
+            # verdict every time, or a rerun disagrees with its own log.
+            for t in build:
+                rc, err = outcomes[t]
                 if rc != 0:
                     build_category = (
                         "progress_stall" if watchdog.RC_STALLED == rc
