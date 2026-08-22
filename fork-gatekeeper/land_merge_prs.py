@@ -42,6 +42,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -72,6 +73,36 @@ def _registry(path: Path):
     if not tools:
         return None, f"{path} lists no named forks"
     return [f"{org}/{t}" for t in tools], ""
+
+
+#: How long to wait for GitHub to compute a merge state, and how often to ask.
+#:
+#: A PR opened seconds ago has NO computed mergeability — GitHub works it out on
+#: first request and recomputes it whenever the base moves. Landing in the round
+#: that opened the PR means asking at exactly the moment the answer is missing,
+#: so a single query would refuse every time and the whole point would be lost.
+#: Bounded, because "not computed yet" must eventually become a refusal rather
+#: than an indefinite wait inside a round.
+MERGE_STATE_ATTEMPTS = 6
+MERGE_STATE_WAIT_S = 5.0
+
+
+def _settled(repo: str, pr: dict, sleep=time.sleep) -> dict:
+    """The PR with a computed merge state, or the last unknown answer."""
+    for attempt in range(MERGE_STATE_ATTEMPTS):
+        if pr.get("mergeable") != "UNKNOWN":
+            return pr
+        sleep(MERGE_STATE_WAIT_S)
+        rc, out = _sh("gh", "pr", "view", str(pr.get("number")), "-R", repo,
+                      "--json", "number,headRefName,isDraft,mergeable,"
+                                "mergeStateStatus,title")
+        if rc != 0:
+            return pr
+        try:
+            pr = json.loads(out)
+        except ValueError:
+            return pr
+    return pr
 
 
 def _open_merge_prs(repo: str):
@@ -136,7 +167,7 @@ def main(argv=None) -> int:
             unreadable.append(f"{repo}: {err}")
             continue
         for pr in prs:
-            ok, note = _land(repo, pr, dry)
+            ok, note = _land(repo, _settled(repo, pr), dry)
             (landed if ok else refused).append(note)
 
     for note in landed:

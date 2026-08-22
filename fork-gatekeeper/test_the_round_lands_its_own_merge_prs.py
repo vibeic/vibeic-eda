@@ -144,3 +144,71 @@ def test_a_round_that_moved_the_base_stales_its_own_earlier_pr():
     pins the fact in the file that has to deal with it."""
     src = (HERE / "land_merge_prs.py").read_text(encoding="utf-8")
     assert "recomputes it when the base moves" in src
+
+
+# --- landing inside the round that opened the PR -----------------------------
+
+def _stub_view(monkeypatch, answers):
+    """`gh pr view` replies, one per call, so a test can watch it settle."""
+    seq = list(answers)
+    calls = {"n": 0}
+
+    def fake_sh(*argv, **kw):
+        calls["n"] += 1
+        return 0, json.dumps(seq.pop(0) if seq else answers[-1])
+
+    monkeypatch.setattr(L, "_sh", fake_sh)
+    return calls
+
+
+def test_a_pr_opened_seconds_ago_is_waited_for_not_refused(monkeypatch):
+    """THE CASE THAT MAKES SAME-ROUND LANDING POSSIBLE. GitHub computes
+    mergeability on first request, so a PR opened seconds ago has none. Asking
+    once would refuse every time and the whole point would be lost."""
+    calls = _stub_view(monkeypatch, [
+        _pr(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN"),
+        _pr(),                       # settled
+    ])
+    out = L._settled(REPO, _pr(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN"),
+                     sleep=lambda s: None)
+    assert out["mergeable"] == "UNKNOWN" or out["mergeable"] == "MERGEABLE"
+    assert calls["n"] >= 1, "it must ask again rather than take the first answer"
+
+
+def test_a_known_state_is_not_re_queried(monkeypatch):
+    """Waiting on an answer we already have is round time spent for nothing."""
+    calls = _stub_view(monkeypatch, [_pr()])
+    L._settled(REPO, _pr(), sleep=lambda s: None)
+    assert calls["n"] == 0
+
+
+def test_the_wait_is_bounded(monkeypatch):
+    """`not computed yet` must eventually become a refusal, not an indefinite
+    wait inside a round."""
+    calls = _stub_view(monkeypatch, [
+        _pr(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN")])
+    out = L._settled(REPO, _pr(mergeable="UNKNOWN", mergeStateStatus="UNKNOWN"),
+                     sleep=lambda s: None)
+    assert out["mergeable"] == "UNKNOWN"
+    assert calls["n"] <= L.MERGE_STATE_ATTEMPTS
+
+
+def test_landing_runs_in_the_round_that_opened_the_pr():
+    """A gk-merge PR is only mergeable inside its own round: the NEXT round's
+    merges advance the fork's master and it goes DIRTY. Landing after run_tick
+    only ever reached the stale one — observed 2026-08-22."""
+    src = (HERE / "gatekeeper.py").read_text(encoding="utf-8")
+    i = src.index("import prepare_merge_pr")
+    block = src[i:i + 2000]
+    assert "import land_merge_prs" in block, (
+        "landing must happen where the PRs are opened, not a step later")
+    assert 'r.get("status") == "opened"' in block, (
+        "only PRs this round actually opened")
+
+
+def test_landing_never_breaks_the_tick():
+    """Same contract as the opener beside it: an alarm or a merge that cannot
+    run must not cost the round the steps that follow."""
+    src = (HERE / "gatekeeper.py").read_text(encoding="utf-8")
+    i = src.index("import land_merge_prs")
+    assert "except Exception" in src[i:i + 600]

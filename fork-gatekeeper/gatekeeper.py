@@ -682,9 +682,32 @@ def tick() -> dict:
     if fresh and os.environ.get("GK_MERGE_PR") in ("1", "true", "yes"):
         try:
             import prepare_merge_pr
+            opened = []
             for r in prepare_merge_pr.prepare(fresh, date):
                 print(f"  [merge-pr] {r.get('tool'):16} {r.get('status')} "
                       f"{r.get('url') or r.get('note') or ''}"[:110])
+                if r.get("status") == "opened" and r.get("url"):
+                    opened.append(r)
+            # LAND THEM HERE, IN THE ROUND THAT OPENED THEM. A `gk-merge` PR is
+            # only mergeable inside its own round: the NEXT round's merges
+            # advance the fork's master and the PR goes DIRTY, so by the time
+            # anything downstream looks it cannot be landed at all. That is why
+            # vibeic/OpenROAD#5 and #6 were CLOSED rather than merged, and why
+            # landing after run_tick only ever reached the stale one — observed
+            # 2026-08-22, when this round moved OpenROAD's master and its own
+            # earlier PR turned CONFLICTING.
+            #
+            # OWNER OVERRIDE 2026-08-22, and the reversal it carries is recorded
+            # in land_merge_prs.py, which is also where everything it still
+            # refuses lives. Never breaks the tick, exactly like the opener.
+            if opened:
+                try:
+                    import land_merge_prs
+                    rc = land_merge_prs.main([])
+                    print(f"  [merge-pr] landing exit {rc} "
+                          f"({len(opened)} PR(s) opened this round)")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  [merge-pr] landing error (ignored): {e}")
         except Exception as e:  # noqa: BLE001
             print(f"  [merge-pr] error (ignored): {e}")
 
