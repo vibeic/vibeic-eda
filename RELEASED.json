@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.27",
-  "pins_fingerprint": "57b04c73b055",
+  "version": "0.3.28",
+  "pins_fingerprint": "d7530ccd28ca",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "e392ae4789eb49193a4865244d8cc31dbe1744b7",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22f2a25f1734796de3debbbf29cf697cbbc54081",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "e29ae70ad4226e4b94c8571b4ef603cfe4622751",
+    "OpenROAD": "0df45e52352ed08caca4de52d50caaae52dd42dd",
     "OpenROAD-flow-scripts": "be7c423dfd8d1c19e7334cedd8ca7cf82d4443ff",
     "Trilinos": "6825fd1246a3097a8d6fbeaa272aac7e35e3b858",
     "Xyce": "24e13434180c40f32f16101f4e236819c9809f62",
@@ -34,12 +34,12 @@
     "sv-elab": "ce38835520fbdf422304a6f6a2f1c437c3ba98c2",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
     "verilator": "708c1e0019e61bde9758aad0263b2d22066f5c2e",
-    "xschem": "9af04dc0d042b7e83d659a66978b643d68f3c98c",
+    "xschem": "f7fa702c13cd1f5479e2aa414fe25c001148f8d1",
     "yices2": "05178c03ddf49c6bba63c5c7153774c11a5da12d",
     "yosys": "fb2c75a82c57b53a2ea2afdc22b6f296393fcded"
   },
   "recipes": {
-    "recipe:__compose__": "6d74c4",
+    "recipe:__compose__": "e3f544",
     "recipe:ciel": "adea1b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "9a9a54",
@@ -49,16 +49,16 @@
     "recipe:klayout": "6a3699",
     "recipe:lvs": "19b4e7",
     "recipe:ngspice": "1aaa99",
-    "recipe:openroad": "a713c4",
+    "recipe:openroad": "8127a8",
     "recipe:sat-solvers": "755999",
     "recipe:slang": "953729",
     "recipe:sv-elab": "06cea9",
     "recipe:sv2v": "3a8690",
     "recipe:verilator": "ce8742",
-    "recipe:xschem": "67636d",
+    "recipe:xschem": "b7466e",
     "recipe:xyce": "3e66ef",
     "recipe:yices2": "04c594",
     "recipe:yosys": "b3ceb9"
   },
-  "manifest_identity": "6c1f69af1ca10e1e7358425aeade06a73802cfd0cb8afa602fb5bb026869ba5f"
+  "manifest_identity": "6c76d83699bf6ee5cc99848f787b68d46ddf2c836e639e4dc9221c88b16bf6c3"
 }

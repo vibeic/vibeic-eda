@@ -50,7 +50,7 @@ variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22f2a25f1734796de3debbbf29cf697cbbc54081" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "a9f473" }
-variable "OPENROAD_RECIPE" { default = "a713c4" }
+variable "OPENROAD_RECIPE" { default = "8127a8" }
 variable "YOSYS_RECIPE" { default = "b3ceb9" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
@@ -60,7 +60,7 @@ variable "IVERILOG_RECIPE" { default = "7e8bf2" }
 variable "KLAYOUT_RECIPE" { default = "6a3699" }
 variable "VERILATOR_RECIPE" { default = "ce8742" }
 variable "GTKWAVE_RECIPE" { default = "2166b3" }
-variable "XSCHEM_RECIPE" { default = "67636d" }
+variable "XSCHEM_RECIPE" { default = "b7466e" }
 variable "SLANG_RECIPE" { default = "953729" }
 variable "XYCE_RECIPE" { default = "3e66ef" }
 variable "YICES2_RECIPE" { default = "04c594" }
@@ -73,7 +73,7 @@ variable "SV_ELAB_RECIPE" { default = "06cea9" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "e29ae70ad4226e4b94c8571b4ef603cfe4622751" }
+variable "OPENROAD_REF"    { default = "0df45e52352ed08caca4de52d50caaae52dd42dd" }
 variable "YOSYS_REF"       { default = "fb2c75a82c57b53a2ea2afdc22b6f296393fcded" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -91,7 +91,7 @@ variable "IVERILOG_REF"    { default = "5d87083a0be13e09aefffaa3ab22f9be02181b74
 variable "KLAYOUT_REF"     { default = "b46c3ef4d3639b11d7b6cdb2ac82145ecdac416d" }
 variable "VERILATOR_REF"   { default = "708c1e0019e61bde9758aad0263b2d22066f5c2e" }
 variable "GTKWAVE_REF" { default = "7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b" }
-variable "XSCHEM_REF" { default = "9af04dc0d042b7e83d659a66978b643d68f3c98c" }
+variable "XSCHEM_REF" { default = "f7fa702c13cd1f5479e2aa414fe25c001148f8d1" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
 variable "SLANG_REF" { default = "4196d4ce4fc47fa130f2b98d90dced229c636497" }
 variable "XYCE_REF" { default = "24e13434180c40f32f16101f4e236819c9809f62" }
