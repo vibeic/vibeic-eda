@@ -121,3 +121,26 @@ def test_the_override_is_recorded_where_it_lives():
     assert "OWNER OVERRIDE" in src
     assert "Never auto-merges" in src, "it must quote what it reverses"
     assert "OpenROAD#6" in src, "it must name the case the old gate caught"
+
+
+def test_unknown_is_not_reported_as_git_refusing():
+    """GitHub computes mergeability lazily and recomputes it whenever the base
+    moves — which a round does to its own forks. MEASURED 2026-08-22: the round
+    advanced OpenROAD's master, `land_merge_prs` queried its own earlier PR
+    mid-recompute and got UNKNOWN, and reported "git says no". Git had not been
+    asked yet. It settled to CONFLICTING seconds later, so the REFUSAL was
+    right and the REASON was invented."""
+    ok, note = L._land(REPO, _pr(mergeable="UNKNOWN",
+                                 mergeStateStatus="UNKNOWN"), dry=True)
+    assert ok is False
+    assert "git says no" not in note
+    assert "no computed merge state yet" in note
+
+
+def test_a_round_that_moved_the_base_stales_its_own_earlier_pr():
+    """Why #5 and #6 were CLOSED, not merged: a gk-merge PR is only mergeable
+    inside the round that opened it. The next round's merges advance the fork's
+    master and the PR conflicts, so by the time anyone looks it is DIRTY. This
+    pins the fact in the file that has to deal with it."""
+    src = (HERE / "land_merge_prs.py").read_text(encoding="utf-8")
+    assert "recomputes it when the base moves" in src

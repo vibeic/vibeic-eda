@@ -550,10 +550,22 @@ def _validate_release_terminal(record: object, *, round_at: str,
     if status == "noop":
         if moved or built or attempts:
             errors.append("release noop carries moved/built/compose work")
-        if (not isinstance(anchor, dict) or anchor.get("ok") is not True
-                or not isinstance(anchor.get("note"), str)
-                or not anchor["note"]):
-            errors.append("release noop has no successful anchor verification")
+        # THE SAME RULE AS THE PUBLISHED BRANCH, which is where this fix was
+        # applied and where it stopped. The anchor was removed (vibeic-eda
+        # 8ed5f33) and `published` was taught that absence is the expected
+        # shape — but `noop` was left demanding it, so the first noop release
+        # after the removal failed on evidence nothing writes any more.
+        # 2026-08-22 was that release: run_tick exit 0, nothing to rebuild, and
+        # the LL rejected the round for a missing anchor.
+        #
+        # Half a fix is how a consumer outlives its producer in the one branch
+        # nobody exercised. A present-but-failed anchor is still an error here
+        # too, for the reason the published branch gives.
+        if anchor is not None:
+            if (not isinstance(anchor, dict) or anchor.get("ok") is not True
+                    or not isinstance(anchor.get("note"), str)
+                    or not anchor["note"]):
+                errors.append("release noop carries a failed anchor verification")
     else:
         candidate = record.get("version_candidate")
         if (not isinstance(candidate, dict) or not isinstance(version, dict)

@@ -92,6 +92,15 @@ def _land(repo: str, pr: dict, dry: bool):
     n = pr.get("number")
     if pr.get("isDraft"):
         return False, f"{repo}#{n} is a DRAFT — not offered for landing"
+    # UNKNOWN IS NOT A REFUSAL BY GIT. GitHub computes mergeability lazily and
+    # recomputes it whenever the base moves — which a round does to its own
+    # forks — so the first query after a merge returns UNKNOWN while the answer
+    # is still being worked out. Reporting that as "git says no" was untrue and
+    # would have made every freshly-moved fork look conflicted.
+    if pr.get("mergeable") == "UNKNOWN":
+        return False, (f"{repo}#{n} has no computed merge state yet (GitHub "
+                       f"recomputes it when the base moves). Not landed this "
+                       f"round; the next one asks again")
     if pr.get("mergeable") != "MERGEABLE" or pr.get("mergeStateStatus") != "CLEAN":
         return False, (f"{repo}#{n} is {pr.get('mergeable')}/"
                        f"{pr.get('mergeStateStatus')} — git says no, and taking it "
