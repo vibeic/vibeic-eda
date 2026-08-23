@@ -30,15 +30,15 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:0df45e5-8127a8
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:5f70b3b-930019
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:fb2c75a-b3ceb9
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:02e5d4a-b7941fa-19b4e7
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:5d87083-7e8bf2
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:b46c3ef-6a3699
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:708c1e0-ce8742
-ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:7d7b4db-2166b3
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:7ae6f94-7a310d
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f2c2e95-bcd24c
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:00f7455-34865f
+ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:f7fa702-b7466e
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:4196d4c-953729
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
@@ -217,7 +217,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=be7c423dfd8d1c19e7334cedd8ca7cf82d4443ff  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=8c009b0b663703fc3fe2f474eab918b12fffbaf6  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0

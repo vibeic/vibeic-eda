@@ -21,7 +21,7 @@
 FROM ubuntu:24.04 AS build
 
 ARG GTKWAVE_REPO=https://github.com/vibeic/gtkwave.git
-ARG GTKWAVE_REF=7d7b4db9e2f5485afe2aeeab0ad112f5b6a9b94b
+ARG GTKWAVE_REF=132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git meson ninja-build pkg-config gperf flex bison patchelf \
