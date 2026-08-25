@@ -62,7 +62,7 @@ variable "VERILATOR_RECIPE" { default = "b05106" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
 variable "XSCHEM_RECIPE" { default = "726260" }
 variable "SLANG_RECIPE" { default = "953729" }
-variable "XYCE_RECIPE" { default = "113d27" }
+variable "XYCE_RECIPE" { default = "433a4f" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
 variable "SV_ELAB_RECIPE" { default = "06cea9" }
@@ -94,7 +94,7 @@ variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
 variable "XSCHEM_REF" { default = "219167e2a6eddfbed510be8b4ca93f9f53766896" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
 variable "SLANG_REF" { default = "4196d4ce4fc47fa130f2b98d90dced229c636497" }
-variable "XYCE_REF" { default = "24e13434180c40f32f16101f4e236819c9809f62" }
+variable "XYCE_REF" { default = "1fab4581ab6f2410eabf42543daf17242c27ab9f" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
 variable "SV_ELAB_REF" { default = "ce38835520fbdf422304a6f6a2f1c437c3ba98c2" }
 
