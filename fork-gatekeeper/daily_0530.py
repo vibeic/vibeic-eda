@@ -93,6 +93,7 @@ import watch_only_reset
 # other one would have produced a gate that is correct, tested, and absent from
 # the path that actually merges every morning — the defect the issue is about.
 from daily_merge import post_merge_checks, run_post_merge_checks
+from daily_merge import _declared_branch as declared_branch
 
 # Overridable so the AI-handoff path can be exercised against a synthetic fork.
 # The step it guards only fires on a real merge conflict, and a conflict that
@@ -215,6 +216,83 @@ def mainline(g):
         if out(*g, "rev-parse", "--verify", "-q", f"refs/heads/{c}"):
             return c
     return None
+
+
+def published_mainline(g, repo):
+    """Return the declared line this fork actually publishes.
+
+    ``main``/``master`` is only a naming convention.  The release pipeline
+    already treats ``FORKS.json`` as authoritative for branch identity, so the
+    earlier 05:30 merge must use the same declaration.  Otherwise a maintained
+    image branch can stay frozen while this program successfully merges and
+    pushes a different conventional branch (measured on Trilinos, 2026-08-25).
+
+    A declared branch must already be visible locally or under ``origin``.  The
+    production caller fetches origin immediately before asking; absence is
+    therefore NORECORD, not permission to guess main/master.
+    """
+    branch = declared_branch(repo)
+    if branch:
+        for ref in (f"refs/heads/{branch}",
+                    f"refs/remotes/origin/{branch}"):
+            if out(*g, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}"):
+                return branch
+        return None
+    # Compatibility for synthetic/legacy registries. Production declares all
+    # 37 rows, while tests and old callers historically supplied only a clone.
+    return mainline(g)
+
+
+def checkout_published_line(g, branch):
+    """Check out the freshly fetched published branch without discarding work.
+
+    A shared clone can have a stale local branch.  Fast-forward it when safe;
+    retain and refuse when it diverged.  Returning structured evidence keeps a
+    failed branch selection from being flattened into a generic checkout error.
+    """
+    remote = f"origin/{branch}"
+    remote_tip = out(*g, "rev-parse", "--verify", "-q",
+                     f"{remote}^{{commit}}")
+    evidence = {
+        "declared_branch": branch,
+        "remote_ref": remote,
+        "remote_tip": remote_tip or None,
+        "local_tip_before": out(*g, "rev-parse", "--verify", "-q",
+                                f"refs/heads/{branch}^{{commit}}") or None,
+        "outcome": "norecord",
+    }
+    if not remote_tip:
+        evidence["reason"] = f"freshly fetched {remote} is absent or unreadable"
+        return False, evidence
+
+    if evidence["local_tip_before"]:
+        checkout = sh(*g, "checkout", branch, progress=True)
+    else:
+        checkout = sh(*g, "checkout", "--track", "-b", branch, remote,
+                      progress=True)
+    evidence["checkout_rc"] = checkout.returncode
+    if checkout.returncode != 0:
+        evidence["outcome"] = (
+            "stalled" if checkout.returncode == watchdog.RC_STALLED
+            else "natural_failure")
+        evidence["reason"] = _first_error_line(checkout)
+        return False, evidence
+
+    # This is deliberately a merge, not reset/update-ref: an ahead local line
+    # remains intact, a behind one advances, and a divergent one is refused.
+    ff = sh(*g, "merge", "--ff-only", remote, progress=True)
+    evidence["fast_forward_rc"] = ff.returncode
+    if ff.returncode != 0:
+        evidence["outcome"] = (
+            "stalled" if ff.returncode == watchdog.RC_STALLED
+            else "diverged")
+        evidence["reason"] = _first_error_line(ff)
+        evidence["local_tip_after"] = out(*g, "rev-parse", "HEAD") or None
+        return False, evidence
+
+    evidence["local_tip_after"] = out(*g, "rev-parse", "HEAD") or None
+    evidence["outcome"] = "complete"
+    return True, evidence
 
 
 def image_pins(eda_root=None, *, fail_closed=False):
@@ -520,7 +598,12 @@ def _fork_branches(g, main):
     # `origin/master` for deletion because the local mainline is `main` while the
     # fork's default branch is `master`; the comparison was against the local
     # name and the remote default did not match it.
-    protected_names = {"main", "master", main.split("/")[-1]}
+    # ``main`` may itself contain slashes (Trilinos publishes from
+    # ``vibeic/xyce-trilinos-17.2-epetra-restored``).  Keeping only its final
+    # path component does not match the remote-tracking spelling and offers the
+    # published line back as a topic/prune candidate.
+    protected_names = {"main", "master",
+                       main.removeprefix("origin/")}
     refs = sh(*g, "for-each-ref", "--format=%(refname:short)",
               "refs/remotes/origin")
     if refs.returncode != 0:
@@ -2207,21 +2290,44 @@ def main_(argv=None) -> int:
         g = ["git", "-C", str(d)]
         upstream_prs = _upstream_pull_request_evidence(g)
         pr_norecord = upstream_prs.get("outcome") != "complete"
-        main = mainline(g)
-        if not main:
-            report[d.name] = {
-                "error": "no main/master",
-                "pin": pins.get(d.name.lower()),
-                "needs_human": True,
-                "upstream_pull_requests": upstream_prs,
-            }
-            needs_human = True
-            continue
         if out(*g, "status", "--porcelain", "-uno", "--ignore-submodules=all"):
             report[d.name] = {"error": "dirty worktree — skipped, nothing discarded",
                               "pin": pins.get(d.name.lower()),
                               "needs_human": True,
                               "upstream_pull_requests": upstream_prs}
+            needs_human = True
+            continue
+        # Branch identity is a release fact, not a naming convention.  Refresh
+        # origin before resolving the declaration so a deleted/renamed branch
+        # becomes NORECORD instead of silently falling back to main/master.
+        if args.apply:
+            origin_ok, origin_why = _fetch(g, "origin", "--prune")
+            if not origin_ok:
+                report[d.name] = {
+                    "error": "declared published branch could not be refreshed: "
+                             + origin_why,
+                    "mainline_selection": {
+                        "outcome": "norecord", "stage": "origin_fetch",
+                    },
+                    "pin": pins.get(d.name.lower()),
+                    "needs_human": True,
+                    "upstream_pull_requests": upstream_prs,
+                }
+                needs_human = True
+                continue
+        main = published_mainline(g, d.name)
+        if not main:
+            report[d.name] = {
+                "error": ("FORKS.json has no usable published branch, or the "
+                          "fresh origin does not expose it"),
+                "mainline_selection": {
+                    "outcome": "norecord", "stage": "declared_branch",
+                    "declared_branch": declared_branch(d.name),
+                },
+                "pin": pins.get(d.name.lower()),
+                "needs_human": True,
+                "upstream_pull_requests": upstream_prs,
+            }
             needs_human = True
             continue
         # Step 4 owns the PR-evidence verdict for a usable checkout: it records
@@ -2232,16 +2338,15 @@ def main_(argv=None) -> int:
                "pin": pins.get(d.name.lower()),
                "upstream_pull_requests": upstream_prs}
         if args.apply:
-            checkout = sh(*g, "checkout", main, progress=True)
-            if checkout.returncode != 0:
+            selected, selection = checkout_published_line(g, main)
+            rep["mainline_selection"] = selection
+            if not selected:
                 rep["error"] = (
-                    "CHECKOUT STALLED — outcome UNKNOWN"
-                    if checkout.returncode == watchdog.RC_STALLED else
-                    f"checkout failed (rc={checkout.returncode}): "
-                    f"{_first_error_line(checkout)}")
-                rep["checkout_outcome"] = (
-                    "stalled" if checkout.returncode == watchdog.RC_STALLED
-                    else "natural_failure")
+                    "PUBLISHED-LINE SELECTION STALLED — outcome UNKNOWN"
+                    if selection.get("outcome") == "stalled" else
+                    "published-line selection refused: "
+                    + str(selection.get("reason") or "no diagnostic"))
+                rep["checkout_outcome"] = selection.get("outcome")
                 rep["needs_human"] = True
                 needs_human = True
                 report[d.name] = rep
