@@ -15,7 +15,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG IHP_OPEN_PDK_REPO=https://github.com/vibeic/IHP-Open-PDK.git
-ARG IHP_OPEN_PDK_REF=22f2a25f1734796de3debbbf29cf697cbbc54081  # pinned; branch main — identical to IHP-GmbH/IHP-Open-PDK@main today
+ARG IHP_OPEN_PDK_REF=331c00484213b13414777eec1336ef5c29b969bd  # pinned; branch main — identical to IHP-GmbH/IHP-Open-PDK@main today
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
