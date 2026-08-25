@@ -28,7 +28,7 @@
 FROM ubuntu:24.04 AS build
 
 ARG XSCHEM_REPO=https://github.com/vibeic/xschem.git
-ARG XSCHEM_REF=64bb8f9f8dd4560effc93f2a9a756ba06ebbdc00
+ARG XSCHEM_REF=219167e2a6eddfbed510be8b4ca93f9f53766896
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git flex bison pkg-config ca-certificates python3 \
