@@ -317,7 +317,7 @@ def _page_state(tmp_path: Path, monkeypatch) -> Path:
     return state
 
 
-def test_strict_zero_round_is_rendered_with_github_and_whole_round_truth(
+def test_strict_zero_round_keeps_github_truth_without_an_internal_status_card(
         tmp_path, monkeypatch):
     paths = _strict_fixture(tmp_path)
     evidence = _load_strict(paths)
@@ -332,7 +332,14 @@ def test_strict_zero_round_is_rendered_with_github_and_whole_round_truth(
     assert '"status": "converged"' in html
     assert '"converged": true' in html
     assert '"round_converged": true' in html
-    assert "Open delivery PRs · GitHub" in html
+    assert "Open delivery PRs · GitHub" not in html
+    assert "未完成交付 PR · GitHub" not in html
+    assert '{en:"Last check time", zh:"最後檢查時間", wide:true}' in html
+    assert ".fork-kpi.is-wide{grid-column:span 2}" in html
+    assert "The upstream-gap card is a live follow-up measurement" not in html
+    assert "上游落後數是即時追蹤值" not in html
+    assert "Last Gatekeeper run:" not in html
+    assert "最後 Gatekeeper 執行：" not in html
     assert "Whole 05:30 round converged" in html
     assert not list(out.parent.glob(".eda-forks.html.*"))
 

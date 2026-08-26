@@ -418,11 +418,10 @@ def load_publication_evidence(*, round_at: str, run_id: str,
                 errors.append(
                     "release target differs from VERSION/RELEASED.json at current HEAD")
 
-    # #79 — THIS GATE CONTRADICTED THE PAGE IT PUBLISHES. The page's own caption
-    # reads: "The upstream-gap card is a live follow-up measurement. The 05:30
-    # round is judged against the commits visible at its merge boundary; commits
-    # published upstream while the image is composing remain visible here for
-    # the next round." Its renderer agrees — `convergedRound` comes from
+    # #79 — THIS GATE CONTRADICTED THE VERDICT IT PUBLISHES. The 05:30 round is
+    # judged against the commits visible at its merge boundary, while the live
+    # follow-up measurement may include commits published upstream during image
+    # composition. Its renderer agrees — `convergedRound` comes from
     # `q1_sync_lag_at_merge`, under a comment that says the live sum "can
     # essentially never read 0".
     #
@@ -813,6 +812,7 @@ STYLE = """<style>
 .fork-kpi.is-stale{border-color:#7a3030;background:#221316}
 .fork-kpi.is-stale .n{color:#ff9d9d}
 .fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
+.fork-kpi.is-wide{grid-column:span 2}
 .fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:#f5f8fb;word-break:break-all}
 .fork-kpi .l{font-size:.8rem;color:#9fb0c0;margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
 .fork-table{width:100%;border-collapse:collapse;font-size:.92rem;margin-top:1rem}
@@ -927,10 +927,7 @@ __NAV__
         <div class="fork-stale" id="forkStale" hidden></div>
         <div class="fork-release" id="forkRelease" hidden></div>
         <div class="fork-metrics" id="forkMetrics"></div>
-        <p class="fork-caption" data-en="The upstream-gap card is a live follow-up measurement. The 05:30 round is judged against the commits visible at its merge boundary; commits published upstream while the image is composing remain visible here for the next round." data-zh="上游落後數是即時追蹤值。05:30 本輪以 merge 邊界當時可見的 commit 判定；image compose 期間上游新出的 commit 會保留顯示在這裡，交給下一輪處理。">The upstream-gap card is a live follow-up measurement. The 05:30 round is judged against the commits visible at its merge boundary; commits published upstream while the image is composing remain visible here for the next round.</p>
 <div class="fork-gap" id="forkGap"></div>
-
-        <p class="fork-caption" id="forkUpdated"></p>
 
         <div class="fork-scroll">
         <table class="fork-table">
@@ -1511,10 +1508,6 @@ function enhBlock(tool){
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
   const enhOpen = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.todo)||0)+((e.counts&&e.counts.deferred)||0)),0);
-  const githubRound = (CURRENT_ROUND && CURRENT_ROUND.github) || {};
-  const githubDeliveryOpen = Number.isInteger(githubRound.open_delivery_count)
-      ? githubRound.open_delivery_count : null;
-  const githubStatus = githubRound.status || "unmeasured";
   const kpis = [
     // CARD ORDER, owner instruction 2026-08-05: when it was measured, what
     // shipped, what we carry, then the two gap numbers. A reader wants the
@@ -1527,16 +1520,10 @@ function enhBlock(tool){
     // so that is the single value shown. The ledger's own write time is an
     // implementation detail of how the page was assembled.
     [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
-     {en:"Last check time", zh:"最後檢查時間"}],
-    // Shown only when the GitHub inventory was actually taken. Rendering "?"
-    // for it -- which is what happens on any page published outside a full
-    // 05:30 tick, now the normal case -- spends a KPI slot on a non-answer and
-    // pushes the real figures down a row. Same rule as the round-converged
-    // card removed just below: absent evidence means the question was not
-    // asked, which is not a number worth a card.
-    ...(githubDeliveryOpen === null ? [] : [[`${githubDeliveryOpen}`,
-     {en:`Open delivery PRs · GitHub ${githubStatus}`,
-      zh:`未完成交付 PR · GitHub ${githubStatus}`}]]),
+     {en:"Last check time", zh:"最後檢查時間", wide:true}],
+    // REMOVED, owner instruction 2026-08-26: the GitHub delivery card. GitHub
+    // convergence remains part of the certified publication evidence, but a
+    // zero internal delivery-queue count is not public dashboard content.
     // REMOVED, owner instruction 2026-08-19: the "Whole 05:30 round converged"
     // card. It rendered "?" whenever the page was published outside a full
     // tick -- which is now the normal case, since a release publishes the page
@@ -1653,7 +1640,7 @@ function enhBlock(tool){
     // around it says what it is.
   ];
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
-    `<div class="fork-kpi${l.en==="Last daily check"&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+    `<div class="fork-kpi${l.wide?" is-wide":""}${l.wide&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
   const staleEl = document.getElementById("forkStale");
   if (staleEl && (stale || ahead || (generatedAt && !isFinite(genMs)))) {
     const en = ahead
@@ -1880,9 +1867,6 @@ function enhBlock(tool){
     return row+detail;
   }).join("");
   document.getElementById("forkRows").innerHTML = rows;
-  document.getElementById("forkUpdated").innerHTML = REPORT
-    ? `<span data-en="Last Gatekeeper run: ${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}" data-zh="最後 Gatekeeper 執行：${esc(REPORT.date||'')} · image vibeic-eda:${esc(imageVer)}">Last Gatekeeper run: ${esc(REPORT.date||'')}</span>`
-    : `<span data-en="Ledger seeded from live state; the daily Gatekeeper has not run yet." data-zh="Ledger 由即時狀態種入；每日 Gatekeeper 尚未執行。">Ledger seeded from live state; the daily Gatekeeper has not run yet.</span>`;
   // The capability-coverage summary line was REMOVED on owner instruction
   // 2026-08-05: the capability-coverage headline above the table.
   // The per-tool enhancement backlog it pointed at is unchanged and still
