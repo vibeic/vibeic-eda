@@ -4,8 +4,9 @@
 # Mirrors the awesome-open-ic enrich cron: flock so rounds never overlap, a fixed
 # headless PATH/HOME, and gh OAuth resolved to GH_TOKEN (the vibeic org rejects
 # long-lived fine-grained PATs; the gho_ OAuth token works headless). Then runs the
-# gatekeeper tick, which re-seeds ledgers, decides merge/defer/clean per fork, writes
-# the daily report, and regenerates the vibeic.ai monitor page.
+# gatekeeper tick, which re-seeds ledgers and writes the daily assessment/report.
+# The outer 05:30 wrapper alone regenerates the public monitor page after it has
+# assembled and verified the current round's convergence certificate.
 #
 # Invoked by run_0530.sh after that wrapper has produced this round's merge and
 # AI-delivery evidence.  It deliberately refuses a direct/manual invocation:
@@ -246,12 +247,6 @@ if [ -z "${TOKEN}" ]; then
     exit 2
 fi
 export GH_TOKEN="${TOKEN}"
-
-# ARMED: when a fork is behind, after the (safe, tool-less) LLM usefulness judgment, open a
-# cherry-pick MERGE PR for the clearly-safe commits (real upstream commits, human-reviewed,
-# never auto-merged, never force-push — reviewed push-safe). Only fires on a behind fork; opens
-# nothing on a clean day. Set GK_MERGE_PR=0 to disable.
-export GK_MERGE_PR="${GK_MERGE_PR:-1}"
 
 # The fork-only rule, enforced HERE because GitHub Actions does not run on this
 # repo. Measured 2026-07-29: `actions/runs` -> total_count 0, for every workflow
@@ -1029,7 +1024,20 @@ else
     reach_rc=2
 fi
 
-log "[start] eda-fork gatekeeper tick (merge-pr=${GK_MERGE_PR})"
+# The owner ruling implemented by daily_merge.py supersedes selective adoption
+# in this release path: it merges the complete upstream tip, checks the merged
+# candidate, and does so BEFORE daily_release builds the image. This call is
+# after daily_release so its reports describe the image just published. It may
+# refresh local assessment state, but it may neither move a fork nor replace the
+# public page with an uncertified render. Leaving GK_MERGE_PR inheritable allowed
+# the 2026-08-26 round to publish 0.3.32 and then open+land OpenROAD#8, creating
+# two commits past its own image pin. Force both historical fork-write paths off;
+# standalone gatekeeper runs may still opt into them explicitly. run_0530.sh
+# publishes the page later, and only from the current-round LL.
+export GK_MERGE_PR=0
+unset GK_RUN_HARNESS
+export GK_DEFER_PUBLIC_PAGE=1
+log "[start] eda-fork gatekeeper assessment (fork-writes=off, public-page=deferred)"
 cd "${DIR}" || exit 2
 python3 gatekeeper.py >>"${LOG}" 2>&1
 rc=$?

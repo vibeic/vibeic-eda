@@ -677,8 +677,10 @@ def tick() -> dict:
 
     # Phase 3: open a cherry-pick MERGE PR (deterministic; holds token) for the clearly-safe
     # commits — real upstream commits, human-reviewed, never auto-merged, never force-push.
-    # Gated on GK_MERGE_PR, which run_tick.sh (the cron entrypoint) defaults to 1 = ARMED.
-    # Never breaks the tick.
+    # Gated on GK_MERGE_PR. Standalone assessment runs may opt in, but the 05:30
+    # release path forces it off: daily_merge.py has already superseded this
+    # selective path and the gatekeeper runs after the image publication
+    # boundary. Never breaks the tick.
     if fresh and os.environ.get("GK_MERGE_PR") in ("1", "true", "yes"):
         try:
             import prepare_merge_pr
@@ -1050,10 +1052,19 @@ def tick() -> dict:
             print(f"  [FATAL] published documents disagree — {c}")
         raise CountsDisagree(f"{len(disk)} mismatch(es) between the report and the "
                              f"assessments published for {date}")
-    try:
-        build_page.build(build_page.DEFAULT_OUT)
-    except Exception as e:
-        print(f"  (page rebuild failed: {e})")
+    # run_0530 publishes the public page only after gap/GitHub/LL evidence has
+    # formed one current-round certificate.  This gatekeeper runs earlier than
+    # that final boundary (and after image publication), so writing its ordinary
+    # uncertified render here can leak a live, moving upstream count when the
+    # certified publication is correctly refused.  Standalone ticks keep their
+    # historical convenience; the release runner explicitly defers this write.
+    if os.environ.get("GK_DEFER_PUBLIC_PAGE") in ("1", "true", "yes"):
+        print("  (public page deferred to run_0530's certified page publisher)")
+    else:
+        try:
+            build_page.build(build_page.DEFAULT_OUT)
+        except Exception as e:
+            print(f"  (page rebuild failed: {e})")
     _maybe_notify(summary, fresh, rendered)   # cached (unchanged-range) assessments file no new PR
     return summary
 

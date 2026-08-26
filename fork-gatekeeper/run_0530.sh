@@ -305,24 +305,13 @@ else
     echo "[$(date -Is)] check_release_failed NOT CHECKED — checker missing" >> "${LOG}"
 fi
 
-# Land the merge PRs this round opened, BEFORE convergence measures. An unlanded
-# `gk-merge/` PR makes fork_github_convergence report open work, which skips
-# build_page, which silently stops the certified page until someone happens to
-# look — the state the 2026-08-22 round ended in.
-#
-# OWNER OVERRIDE 2026-08-22: `prepare_merge_pr.py` opens these "FOR HUMAN REVIEW"
-# and never merges them, and that gate has caught something (vibeic/OpenROAD#6,
-# closed as superseded). The decision to land them automatically, and everything
-# it still refuses, is recorded in land_merge_prs.py — not here.
-#
-# A refusal does not stop the round: convergence will report the PR as open work
-# on its own, which is the honest outcome when it could not be landed.
-if [ -f "${DIR}/land_merge_prs.py" ]; then
-    python3 "${DIR}/land_merge_prs.py" --forks-json "${DIR}/FORKS.json" >> "${LOG}" 2>&1
-    echo "[$(date -Is)] land_merge_prs exit $? (0=landed or nothing waiting, 1=refused, 2=NORECORD)" >> "${LOG}"
-else
-    echo "[$(date -Is)] land_merge_prs NOT CHECKED — lander missing" >> "${LOG}"
-fi
+# RELEASE BOUNDARY: run_tick has already cut (or refused) the image.  Nothing
+# after it may advance a fork tip.  This used to call the selective-PR lander;
+# on 2026-08-26 that made OpenROAD#8 land after image 0.3.32 was published,
+# creating the very past-pin work the convergence check below then rejected.
+# The release path's only fork mutation authority is daily_merge.py inside
+# run_tick, before selftests and daily_release.  Gatekeeper's late pass is forced
+# to assessment-only there, so there is deliberately no post-release lander.
 
 # Step 6 — refresh the fork ledger.  Publication is deliberately later, after
 # every current-round delivery/convergence source has produced its verdict.
