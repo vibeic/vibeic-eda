@@ -126,7 +126,8 @@ def test_real_entrypoint_overwrites_stale_json_on_an_early_guard_return(tmp_path
     assert got["started_at"] and got["finished_at"]
 
 
-def test_page_reads_the_release_programs_own_blocker(tmp_path, monkeypatch):
+def test_page_retains_the_release_blocker_without_publishing_internal_copy(
+        tmp_path, monkeypatch):
     state = tmp_path / "daily-release.json"
     state.write_text(json.dumps({
         "program": "daily_release", "schema_version": 2, "status": "failed",
@@ -137,7 +138,11 @@ def test_page_reads_the_release_programs_own_blocker(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "RELEASE_STATE", state)
     assert B._release_state()["failure"]["category"] == "dns"
     assert 'id="forkRelease"' in B.PAGE
-    assert "Release ${target} is blocked at ${stage}" in B.PAGE
+    assert "Release ${target} is blocked at ${stage}" not in B.PAGE
+    assert "Release record did not reach a terminal state" not in B.PAGE
+    assert "Release 紀錄沒有抵達終態" not in B.PAGE
+    assert 'releaseEl.innerHTML = ""' in B.PAGE
+    assert "releaseEl.hidden = true" in B.PAGE
     assert ".replace(\"__RELEASE__\"" in Path(B.__file__).read_text()
 
 
