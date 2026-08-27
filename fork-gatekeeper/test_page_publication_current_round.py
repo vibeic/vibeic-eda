@@ -340,6 +340,10 @@ def test_strict_zero_round_keeps_github_truth_without_an_internal_status_card(
     assert "上游落後數是即時追蹤值" not in html
     assert "Last Gatekeeper run:" not in html
     assert "最後 Gatekeeper 執行：" not in html
+    assert "Release record did not reach a terminal state" not in html
+    assert "Release 紀錄沒有抵達終態" not in html
+    assert "The 05:30 process stopped while preparing" not in html
+    assert "05:30 流程在準備" not in html
     assert "Whole 05:30 round converged" in html
     assert not list(out.parent.glob(".eda-forks.html.*"))
 

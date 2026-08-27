@@ -1656,29 +1656,14 @@ function enhBlock(tool){
     staleEl.innerHTML = `<span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>`;
     staleEl.hidden = false;
   }
-  // RELEASE LAG MUST NAME ITS BLOCKER.  The fork rows can show that a pin did
-  // not reach the image, but they cannot say whether the release is building,
-  // retrying DNS, or failed a deterministic gate.  That answer comes from the
-  // release program's own terminal record, not by interpreting the count.
+  // Operational release diagnostics stay in the retained LL, not on the
+  // public page.  Strict publication above already refuses a non-terminal
+  // release record, so exposing internal stages here is both unnecessary and
+  // misleading when somebody opens a locally generated draft.
   const releaseEl = document.getElementById("forkRelease");
-  const releaseStatus = RELEASE && RELEASE.status;
-  if (releaseEl && ["failed", "not_checked", "running"].includes(releaseStatus)) {
-    const failure = RELEASE.failure || {};
-    const stage = failure.stage || "unknown stage";
-    const category = String(failure.category || "unknown cause").replaceAll("_", " ");
-    const target = ((RELEASE.version_candidate||{}).to)
-                || ((RELEASE.version||{}).to) || "next image";
-    const attempts = (RELEASE.compose_attempts||[]).length;
-    const retry = attempts ? ` after ${attempts} compose attempt${attempts===1?'':'s'}` : "";
-    const retryZh = attempts ? `（compose 已嘗試 ${attempts} 次）` : "";
-    const en = releaseStatus === "running"
-      ? `Release record did not reach a terminal state. The 05:30 process stopped while preparing ${target}; do not read the release lag as an unexplained queue.`
-      : `Release ${target} is blocked at ${stage}: ${category}${retry}. No version was published, so the lag below remains real.`;
-    const zh = releaseStatus === "running"
-      ? `Release 紀錄沒有抵達終態。05:30 流程在準備 ${target} 時中止；下方 release lag 不是一個沒有原因的佇列。`
-      : `Release ${target} 卡在 ${stage}：${category}${retryZh}。沒有發布任何版本，所以下方 lag 仍然是真實未收斂。`;
-    releaseEl.innerHTML = `<span data-en="${esc(en)}" data-zh="${esc(zh)}">${esc(en)}</span>`;
-    releaseEl.hidden = false;
+  if (releaseEl) {
+    releaseEl.innerHTML = "";
+    releaseEl.hidden = true;
   }
   // CONTENTS ASSERTIONS — STATED, NOT SUBTRACTED (vibeic-eda#81). These rows leave
   // the gap count above because there is no ref for the artefact to be behind. They

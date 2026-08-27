@@ -702,8 +702,6 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         if rc_add != 0:
             _sh(["git", "-C", str(src), "remote", "set-url", "upstream", url])
         out = url
-    parent = out.strip()
-
     tmp = Path(tempfile.mkdtemp(prefix=f"daily_merge_{repo}_"))
     wt = tmp / "wt"
     try:
@@ -731,6 +729,20 @@ def merge_one(repo: str, branch: str, dry: bool = False,
             res.update(state=("FETCH_STALLED" if rc == watchdog.RC_STALLED
                               else "FETCH_FAILED"), detail=err.strip()[:200])
             return res
+        # A clone may have been created with --single-branch.  Widen upstream
+        # before fetching for the same reason origin is widened above: the
+        # live default branch can change, and a cached upstream/HEAD is not
+        # proof of what the remote calls HEAD now.
+        rc, _, err = _sh([
+            "git", "-C", str(src), "remote", "set-branches", "upstream", "*",
+        ])
+        if rc != 0:
+            res.update(
+                state="UPSTREAM_DEFAULT_UNMEASURABLE",
+                detail=("could not widen the upstream refspec; the live "
+                        "default branch cannot be verified"),
+            )
+            return res
         rc, _, err = _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
                          progress=True)
         if rc != 0:
@@ -738,25 +750,58 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                               else "FETCH_FAILED"), detail=err.strip()[:200])
             return res
 
-        # The upstream default branch, asked rather than assumed. Defaulting to
-        # `master` made sby and ALIGN-pdk-sky130 report COUNT_FAILED against a
-        # branch upstream does not have — the count was fine, the branch name
-        # was invented.
-        rc, out, _ = _sh(["git", "-C", str(src), "symbolic-ref",
-                          "refs/remotes/upstream/HEAD"])
-        up = out.strip().split("/")[-1] if rc == 0 and out.strip() else ""
-        if not up:
-            slug = parent.rstrip("/").removesuffix(".git").split("github.com/")[-1]
-            _, api, _ = _sh(["gh", "api", f"repos/{slug}",
-                             "--jq", ".default_branch // empty"], timeout=120)
-            up = api.strip()
-        if not up or _sh(["git", "-C", str(src), "rev-parse", "--verify",
-                          f"upstream/{up}"])[0] != 0:
-            for cand in ("master", "main", "develop"):
-                if _sh(["git", "-C", str(src), "rev-parse", "--verify",
-                        f"upstream/{cand}"])[0] == 0:
-                    up = cand
-                    break
+        # Ask the remote itself every round.  A local upstream/HEAD is only a
+        # cached symbolic ref: Trilinos changed its default from master to
+        # develop while that cache continued to resolve cleanly, making this
+        # entry point report zero commits as the live branch moved ahead.
+        rc, out, err = _sh([
+            "git", "-C", str(src), "ls-remote", "--symref", "upstream", "HEAD",
+        ], timeout=120)
+        symrefs = []
+        head_oids = []
+        if rc == 0:
+            for line in out.splitlines():
+                if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                    symrefs.append(line[len("ref: refs/heads/"):-len("\tHEAD")])
+                elif re.fullmatch(r"[0-9a-fA-F]{40}\tHEAD", line):
+                    head_oids.append(line.split("\t", 1)[0].lower())
+        if rc != 0 or len(symrefs) != 1 or len(head_oids) != 1 or not symrefs[0]:
+            diagnostic = " ".join((err or out).split())
+            res.update(
+                state="UPSTREAM_DEFAULT_UNMEASURABLE",
+                detail=("live upstream HEAD did not resolve to exactly one "
+                        "branch and one full commit id"
+                        + (f" (rc={rc}: {diagnostic[:220]})"
+                           if diagnostic else f" (rc={rc})")),
+            )
+            return res
+        up = symrefs[0]
+        observed_upstream_tip = head_oids[0]
+        upstream_tracking_ref = f"refs/remotes/upstream/{up}"
+        urc, uout, uerr = _sh([
+            "git", "-C", str(src), "rev-parse", "--verify",
+            f"{upstream_tracking_ref}^{{commit}}",
+        ])
+        tracking_rows = [line.strip().lower() for line in uout.splitlines()
+                         if line.strip()]
+        tracking_tip = tracking_rows[0] if len(tracking_rows) == 1 else ""
+        res["upstream_default"] = {
+            "branch": up,
+            "remote_tip": observed_upstream_tip,
+            "tracking_tip": tracking_tip or None,
+        }
+        if (urc != 0 or not re.fullmatch(r"[0-9a-f]{40}", tracking_tip)
+                or tracking_tip != observed_upstream_tip):
+            diagnostic = " ".join((uerr or uout).split())
+            res.update(
+                state="UPSTREAM_DEFAULT_UNMEASURABLE",
+                detail=(f"fresh upstream/{up} does not exactly match live "
+                        f"upstream HEAD {observed_upstream_tip[:12]}; nothing "
+                        "was measured, merged, or pushed"
+                        + (f" (rc={urc}: {diagnostic[:180]})"
+                           if diagnostic else f" (rc={urc})")),
+            )
+            return res
 
         # A SHALLOW clone cannot be counted and must not be merged. The shared
         # OpenROAD checkout is grafted at one commit, and `rev-list --count` over
@@ -878,7 +923,7 @@ def merge_one(repo: str, branch: str, dry: bool = False,
             return res
 
         rc, out, _ = _sh(["git", "rev-list", "--count",
-                          f"HEAD..upstream/{up}"], wt)
+                          f"HEAD..{observed_upstream_tip}"], wt)
         if rc != 0 or not out.strip().isdigit():
             # My first version stored -1 here and printed `WOULD_MERGE -1
             # commit(s)`. That reads as a merge decision when it is a FAILED
@@ -901,7 +946,7 @@ def merge_one(repo: str, branch: str, dry: bool = False,
 
         rc, _, err = _sh(["git", "-c", "user.name=vibeic-fork-gatekeeper",
                           "-c", "user.email=fork-gatekeeper@vibeic.ai",
-                          "merge", f"upstream/{up}", "-m",
+                          "merge", observed_upstream_tip, "-m",
                           f"Merge upstream/{up} into {branch} (daily, owner ruling 2026-07-29)"],
                          wt, progress=True)
         if rc != 0:
@@ -927,7 +972,7 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         # Our own commits must still be REACHABLE. A merge that exits 0 having
         # dropped them is the failure this check exists for.
         rc, out, _ = _sh(["git", "rev-list", "--count",
-                          f"upstream/{up}..HEAD"], wt)
+                          f"{observed_upstream_tip}..HEAD"], wt)
         ours = int(out.strip() or 0) if rc == 0 else -1
 
         # POST-MERGE CHECKS (vibeic-eda#89) — BEFORE the push, deliberately.

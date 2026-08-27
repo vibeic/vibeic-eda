@@ -310,15 +310,18 @@ def _merge_identity_probe(tmp_path, monkeypatch, identity_rc):
         joined = " ".join(cmd)
         if "remote get-url upstream" in joined:
             return 0, "https://github.com/YosysHQ/yosys.git\n", ""
-        if "symbolic-ref refs/remotes/upstream/HEAD" in joined:
-            return 0, "refs/remotes/upstream/master\n", ""
+        if "ls-remote --symref upstream HEAD" in joined:
+            return 0, ("ref: refs/heads/master\tHEAD\n"
+                       f"{ORIGIN_TIP}\tHEAD\n"), ""
         if "rev-parse --is-shallow-repository" in joined:
             return 0, "false\n", ""
+        if "rev-parse --verify refs/remotes/upstream/master^{commit}" in joined:
+            return 0, f"{ORIGIN_TIP}\n", ""
         if "rev-parse --verify refs/remotes/origin/main^{commit}" in joined:
             return 0, f"{ORIGIN_TIP}\n", ""
         if "merge-base --is-ancestor" in joined:
             return identity_rc, "", ("missing object" if identity_rc > 1 else "")
-        if "rev-list --count HEAD..upstream/master" in joined:
+        if f"rev-list --count HEAD..{ORIGIN_TIP}" in joined:
             return 0, "0\n", ""
         return 0, "", ""
 
@@ -418,6 +421,68 @@ def _publication_race_fleet(tmp_path):
     _git(src, "fetch", "--quiet", "upstream")
     _git(src, "remote", "set-head", "upstream", "master")
     return forks_root, origin, observed, {"advance": advance, "rewind": rewind}
+
+
+def test_live_default_branch_replaces_a_valid_but_stale_cached_head(
+        tmp_path, monkeypatch):
+    """A resolving upstream/HEAD is still only cache, not remote evidence.
+
+    This is the exact Trilinos failure: the checkout retained master while the
+    remote moved HEAD to develop.  The old implementation returned
+    ALREADY_CURRENT and took zero; the live branch actually had one commit.
+    """
+    origin = tmp_path / "origin.git"
+    upstream = tmp_path / "upstream.git"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    _git(tmp_path, "init", "--bare", "-b", "master", str(upstream))
+
+    seed = tmp_path / "seed-default-change"
+    seed.mkdir()
+    _git(seed, "init", "-b", "master")
+    _git(seed, "config", "user.name", "default-branch-test")
+    _git(seed, "config", "user.email", "default-branch@test.invalid")
+    (seed / "base").write_text("base\n")
+    _git(seed, "add", "base")
+    _git(seed, "commit", "-m", "base")
+    observed = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "remote", "add", "origin-test", str(origin))
+    _git(seed, "remote", "add", "upstream-test", str(upstream))
+    _git(seed, "push", "origin-test", "HEAD:refs/heads/main")
+    _git(seed, "push", "upstream-test", "HEAD:refs/heads/master")
+
+    forks_root = tmp_path / "forks-default-change"
+    forks_root.mkdir()
+    src = forks_root / "Trilinos"
+    _git(tmp_path, "clone", "--quiet", str(origin), str(src))
+    _git(src, "remote", "add", "upstream", str(upstream))
+    _git(src, "fetch", "--quiet", "upstream")
+    _git(src, "remote", "set-head", "upstream", "master")
+    assert _git(src, "symbolic-ref", "refs/remotes/upstream/HEAD").endswith(
+        "/master")
+
+    _git(seed, "checkout", "-b", "develop")
+    (seed / "develop-only").write_text("new default\n")
+    _git(seed, "add", "develop-only")
+    _git(seed, "commit", "-m", "develop becomes default")
+    develop_tip = _git(seed, "rev-parse", "HEAD")
+    _git(seed, "push", "upstream-test", "HEAD:refs/heads/develop")
+    _git(upstream, "symbolic-ref", "HEAD", "refs/heads/develop")
+
+    monkeypatch.setattr(M, "FORKS_ROOT", forks_root)
+    monkeypatch.setattr(M, "_declared_branch", lambda repo: "main")
+    result = M.merge_one(
+        "Trilinos", "main", dry=False, checks=[], expected_pin=observed,
+    )
+
+    assert result["state"] == "MERGED", result
+    assert result["took"] == 1
+    assert result["upstream_default"] == {
+        "branch": "develop",
+        "remote_tip": develop_tip,
+        "tracking_tip": develop_tip,
+    }
+    published = _git(origin, "rev-parse", "refs/heads/main")
+    _git(origin, "merge-base", "--is-ancestor", develop_tip, published)
 
 
 @pytest.mark.parametrize("race", ["advance", "rewind"])
