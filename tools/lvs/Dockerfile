@@ -19,7 +19,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG MAGIC_REPO=https://github.com/vibeic/magic.git
-ARG MAGIC_REF=02e5d4ac00e9702cdc679b1cd76a4be96e2a9454  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
+ARG MAGIC_REF=2915463dfabb04e2e6064f2e76882577cff320b8  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
 ARG NETGEN_REPO=https://github.com/vibeic/netgen.git
 ARG NETGEN_REF=b7941fafb91317b6a5845d9e9765cea278aa31c3  # pinned; branch vibeic/connectivity-match (netgen PR#1: plain-mode lvs finishes + stdout==report, resolves vibe-ic#191 tool layer; report byte-identical so #189 classifier/Step-31 unaffected)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
