@@ -451,12 +451,35 @@ def step1_upstream(g, main, rep):
         ev["fetch"] = "no_upstream_remote"
         rep["upstream_merge_outcome"] = "not_applicable"
         return
-    # Snapshot BOTH candidate names before the fetch: which one this clone
-    # tracks is not known until after, and on a first-ever fetch neither exists.
-    # An absent `before` compares unequal to a present `after`, which is the
-    # right answer — a ref that appeared was demonstrably fetched.
-    pre = {c: out(*g, "rev-parse", "--verify", "-q", c)
-           for c in ("upstream/main", "upstream/master")}
+    # Snapshot EVERY upstream tracking ref before the fetch.  The remote's
+    # default branch is resolved below from its live HEAD symref, so limiting
+    # this to the conventional main/master pair would make a default-branch
+    # rename (Trilinos master -> develop, 2026-08-27) invisible.  The old code
+    # fetched develop successfully and then selected the still-resolving master
+    # ref, certifying 0 while the real default was 69 commits ahead.
+    pre = {}
+    pre_refs = sh(*g, "for-each-ref",
+                  "--format=%(refname:short)%09%(objectname)",
+                  "refs/remotes/upstream")
+    if pre_refs.returncode == 0:
+        for line in (pre_refs.stdout or "").splitlines():
+            fields = line.split("\t", 1)
+            if len(fields) == 2 and _FULL_OBJECT_ID.fullmatch(fields[1]):
+                pre[fields[0]] = fields[1]
+
+    # A clone made with --single-branch may still have a one-branch upstream
+    # refspec.  Widen it before fetching, otherwise discovering that HEAD moved
+    # to a new branch only tells us about an object the fetch never retained.
+    widen = sh(*g, "remote", "set-branches", "upstream", "*")
+    if widen.returncode != 0:
+        rep["upstream"] = (
+            "UNVERIFIED — could not configure upstream to fetch its current "
+            f"default branch (rc={widen.returncode}: "
+            f"{_first_error_line(widen)}). UNKNOWN, not current.")
+        ev["fetch"] = "failed"
+        rep["upstream_merge_outcome"] = "unmeasurable"
+        rep["needs_human"] = True
+        return
     ok, why = _fetch(g, "upstream")
     if not ok:
         rep["upstream"] = why
@@ -466,14 +489,49 @@ def step1_upstream(g, main, rep):
         rep["needs_human"] = True
         return
     ev["fetch"] = "ok"
-    ref = ("upstream/main" if out(*g, "rev-parse", "--verify", "-q", "upstream/main")
-           else "upstream/master")
-    ub = out(*g, "rev-parse", "--verify", "-q", ref)
+    # ASK THE REMOTE WHICH BRANCH IS DEFAULT on every round.  A cached
+    # refs/remotes/upstream/HEAD is configuration, not evidence: ordinary fetch
+    # does not update it when GitHub changes the default branch.  Parse both the
+    # symref and its immutable tip, then require the freshly fetched tracking
+    # ref to equal that same tip.  This also closes the fetch-vs-ls-remote race
+    # in the conservative direction: a mismatch is UNKNOWN, never a smaller
+    # reassuring count.
+    remote_head = sh(*g, "ls-remote", "--symref", "upstream", "HEAD",
+                     timeout=LS_REMOTE_TIMEOUT_S)
+    symbolic_targets = []
+    remote_tips = []
+    for line in (remote_head.stdout or "").splitlines():
+        fields = line.strip().split()
+        if len(fields) == 3 and fields[0] == "ref:" and fields[2] == "HEAD":
+            symbolic_targets.append(fields[1])
+        elif (len(fields) == 2 and fields[1] == "HEAD"
+              and _FULL_OBJECT_ID.fullmatch(fields[0].lower())):
+            remote_tips.append(fields[0].lower())
+    if (remote_head.returncode != 0 or len(symbolic_targets) != 1
+            or len(remote_tips) != 1
+            or not symbolic_targets[0].startswith("refs/heads/")):
+        rep["upstream"] = (
+            "UNVERIFIED — the upstream fetch succeeded, but the remote's "
+            "current default branch could not be resolved unambiguously "
+            f"(ls-remote rc={remote_head.returncode}: "
+            f"{_first_error_line(remote_head)}). UNKNOWN, not current.")
+        rep["upstream_merge_outcome"] = "unmeasurable"
+        rep["needs_human"] = True
+        return
+    branch = symbolic_targets[0].removeprefix("refs/heads/")
+    ref = f"upstream/{branch}"
+    ub = out(*g, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
     ev["ref"] = ref
     ev["tip_before_fetch"] = pre.get(ref) or None
     ev["tip_seen"] = ub or None
-    if not ub:
-        rep["upstream"] = "no upstream branch"
+    ev["remote_tip"] = remote_tips[0]
+    if not ub or ub != remote_tips[0]:
+        rep["upstream"] = (
+            "REF NOT CONFIRMED CURRENT — the fetch succeeded, but "
+            f"{ref} is {(ub or 'absent')[:12]} while the remote reports "
+            f"its default branch at {remote_tips[0][:12]}. Either the refspec "
+            "did not retain that branch or upstream moved during the check; "
+            "both mean UNKNOWN, not current.")
         rep["upstream_merge_outcome"] = "unmeasurable"
         rep["needs_human"] = True
         return
@@ -484,16 +542,7 @@ def step1_upstream(g, main, rep):
         # merge morning look unverified.
         ev["confirmed_by"] = "fetch_moved_ref"
     else:
-        # The fetch changed nothing. Legitimate the great majority of mornings —
-        # and indistinguishable, locally, from a fetch that refreshed nothing.
-        ok, why, remote_sha = _remote_confirms(
-            g, "upstream", ref.split("/", 1)[1], ub)
-        ev["remote_tip"] = remote_sha
-        if not ok:
-            rep["upstream"] = why
-            rep["upstream_merge_outcome"] = "unmeasurable"
-            rep["needs_human"] = True
-            return
+        # The live HEAD observation above confirmed the unchanged ref.
         ev["confirmed_by"] = "ls_remote"
     behind = out(*g, "rev-list", "--count", f"{main}..{ub}")
     ev["behind"] = int(behind) if behind.isdigit() else None

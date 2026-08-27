@@ -273,6 +273,23 @@ def fetch_confirms_current(clone: Path, up_ref: str, do_fetch: bool = True):
                        f"current: {_first_error_line(fr)}")
 
     after = _git(clone, "rev-parse", "-q", "--verify", up_ref)
+    if after is None and up_ref.startswith("upstream/"):
+        # A newly selected default branch can be absent from a clone whose
+        # upstream refspec was narrowed by an old --single-branch clone.  The
+        # general fetch above succeeds in that state while retaining nothing.
+        # Fetch the one ledger-declared branch explicitly; this creates only
+        # its remote-tracking ref and cannot move a worktree branch.
+        exact = _run(
+            clone, "fetch", "--progress", "upstream",
+            f"+refs/heads/{branch}:refs/remotes/upstream/{branch}",
+            progress=True,
+        )
+        if exact.returncode != 0:
+            return False, (
+                f"{up_ref} was absent after the general fetch and its exact "
+                f"branch fetch failed (rc={exact.returncode}): "
+                f"{_first_error_line(exact)} — NOT MEASURED")
+        after = _git(clone, "rev-parse", "-q", "--verify", up_ref)
     if after is None:
         return False, f"{up_ref} does not resolve after fetch — NOT MEASURED"
     if before is not None and after != before:
@@ -302,7 +319,20 @@ def count(repo: Path, a: str, b: str) -> Optional[int]:
         return None
 
 
-def upstream_head(clone: Path) -> Optional[str]:
+def upstream_head(clone: Path, default_branch: Optional[str] = None) -> Optional[str]:
+    """The upstream branch this ledger says is current.
+
+    Prefer the freshly discovered upstream default branch.  Conventional names
+    are only a compatibility fallback for old ledgers that predate that field.
+    A cached ``upstream/master`` can keep resolving forever after the remote
+    changes HEAD; selecting it first made the 2026-08-27 Trilinos audit report
+    0 against master while discovery correctly measured 69 against develop.
+    """
+    if default_branch:
+        # Return the authoritative name even when this clone has never fetched
+        # it.  ``fetch_confirms_current`` owns the fetch and can materialize the
+        # exact tracking ref without first pretending the branch is absent.
+        return f"upstream/{default_branch}"
     for cand in ("upstream/master", "upstream/main"):
         if _git(clone, "rev-parse", "--verify", "-q", cand):
             return cand
@@ -711,9 +741,13 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         if not clone.is_dir():
             row["note"] = "no clone — NOT MEASURED"
             rows.append(row); continue
-        up = upstream_head(clone)
+        up = upstream_head(clone, led.get("upstream_default_branch"))
         if up is None:
-            row["note"] = "no upstream remote — NOT MEASURED"
+            branch = led.get("upstream_default_branch")
+            row["note"] = ((f"upstream default branch {branch!r} does not "
+                            "resolve in this clone — NOT MEASURED")
+                           if branch else
+                           "no upstream remote — NOT MEASURED")
             rows.append(row); continue
         # RESOLVED BEFORE THE FETCH, so the guard can snapshot the ref it is about
         # to refresh. The fetch used to run first and its result was thrown away;

@@ -144,6 +144,23 @@ def test_a_working_fetch_reports_the_real_distance(fleet):
     assert rep["q1_unmeasured"] == []
 
 
+def test_the_auditor_uses_the_discovered_default_after_a_rename(fleet):
+    """A stale-but-resolving master must not hide work on the new default."""
+    _git(fleet["up"], "checkout", "-q", "-b", "develop")
+    for i in range(3):
+        _commit(fleet["up"], f"develop-{i}.txt", f"develop-{i}")
+
+    ledger_file = fleet["ledger"] / "toolx.json"
+    led = json.loads(ledger_file.read_text(encoding="utf-8"))
+    led["upstream_default_branch"] = "develop"
+    ledger_file.write_text(json.dumps(led), encoding="utf-8")
+
+    rep, row = _row(fleet)
+    assert row["image_behind"] == 3, row
+    assert row["sync_lag"] == 3, row
+    assert rep["q1_unmeasured"] == [], rep
+
+
 # ── the defect ───────────────────────────────────────────────────────────────
 def test_a_failed_fetch_is_not_reported_as_zero(fleet):
     """THE ONE THAT MATTERS. Upstream is 3 ahead; the fetch cannot run; the clone's

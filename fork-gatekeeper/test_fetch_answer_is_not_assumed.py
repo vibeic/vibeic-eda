@@ -85,6 +85,26 @@ def test_a_working_fetch_that_finds_commits_still_merges_them(fleet):
     assert rep["upstream"] == "merged 3 upstream commit(s)", rep
 
 
+def test_a_remote_default_branch_rename_is_followed_automatically(fleet):
+    """A resolving old master must not outrank the remote's current HEAD.
+
+    This is the production Trilinos shape from 2026-08-27: upstream/master
+    remained in the clone and was level with our branch, while GitHub had moved
+    the default to develop and develop carried the commits the round owed.
+    """
+    _run("git", "checkout", "-q", "-b", "develop", cwd=str(fleet["up"]))
+    for n in ("develop-b", "develop-c"):
+        _commit(fleet["up"], n)
+
+    rep = {}
+    D.step1_upstream(fleet["g"], "master", rep)
+
+    assert rep["upstream"] == "merged 2 upstream commit(s)", rep
+    ev = rep["upstream_evidence"]
+    assert ev["ref"] == "upstream/develop", ev
+    assert ev["tip_seen"] == ev["remote_tip"], ev
+
+
 # ── 2. rc 0 is not enough: the ref must be CONFIRMED, not assumed ─────────────
 def test_rc_zero_over_a_stale_ref_is_unknown_not_current(fleet, monkeypatch):
     """THE CASE AN rc-ONLY GUARD DOES NOT COVER.
@@ -467,10 +487,8 @@ def test_a_remote_that_cannot_be_asked_is_recorded_as_unconfirmed(fleet, monkeyp
     assert ev["remote_tip"] is None, ev        # it could not be asked, so no number
 
 
-def test_a_working_fetch_with_no_upstream_branch_is_recorded_as_unconfirmed(fleet):
-    """`fetch: ok` is NOT the confirmation. Here the fetch works perfectly and
-    there is still nothing to compare against, because the remote's mainline is
-    called neither `main` nor `master`."""
+def test_an_unconventional_upstream_default_branch_is_measured(fleet):
+    """The remote HEAD, not a main/master name list, defines its mainline."""
     other = fleet["tmp"] / "trunk-only"
     other.mkdir()
     _run("git", "init", "-q", "-b", "trunk", str(other))
@@ -481,6 +499,7 @@ def test_a_working_fetch_with_no_upstream_branch_is_recorded_as_unconfirmed(flee
     rep = {}
     D.step1_upstream(fleet["g"], "master", rep)
     ev = _evidence(rep)
-    assert rep["upstream"] == "no upstream branch", rep
+    assert rep["upstream"] == "already current", rep
     assert ev["fetch"] == "ok", ev
-    assert ev["confirmed_by"] is None, ev
+    assert ev["confirmed_by"] == "fetch_moved_ref", ev
+    assert ev["ref"] == "upstream/trunk", ev
