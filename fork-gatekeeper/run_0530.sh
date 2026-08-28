@@ -206,8 +206,35 @@ except Exception:
 ' "${PYTEST_RETAINED}" 2>/dev/null)"
         TEST_KIND="NORECORD (outcome=${TEST_OUTCOME})"
     fi
-    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — semantic pytest ${TEST_KIND}; no release was authorised" >> "${LOG}"
-    echo "[$(date -Is)] run_tick NOT CHECKED — semantic pytest ${TEST_KIND}; see ${PYTEST_RETAINED}" >> "${GK_STATE_DIR}/cron.log"
+    # NAME THE TREE THE TESTS RAN ON, when it is not the tree that would publish.
+    #
+    # `check_round_code_is_current` has already run and its verdict is in
+    # ${CODE}. When that verdict is non-zero the suite just measured a checkout
+    # that is NOT the code this round would report, so "semantic pytest RED"
+    # points a reader at a test defect when the actual situation is a checkout
+    # left on something else.
+    #
+    # MEASURED 2026-08-29. The 05:30 round logged, in this order:
+    #     check_round_code_is_current exit 1
+    #     fork-gatekeeper tests exit 1
+    #     run_tick NOT CHECKED — semantic pytest RED
+    # and cron.log carried only the third line. The checkout was parked on an
+    # unmerged feature branch; the one red test guarded a `COPY` of a file that
+    # exists ONLY on that branch. A reader following cron.log — which is the
+    # channel a human actually reads — went looking for a test bug, and began
+    # fixing `.dockerignore` on main, where the file the test names does not
+    # exist. The information needed to stop that was already computed, one
+    # variable away, and simply was not written down.
+    #
+    # This does not change what is gated: the pytest result still decides, and
+    # a red suite still blocks the publish. It changes only what the refusal
+    # SAYS, so the first line a human reads names the tree as well as the tests.
+    CHECKOUT_NOTE=""
+    if [ "${CODE}" -ne 0 ]; then
+        CHECKOUT_NOTE=" — and this checkout is NOT the current round code (check_round_code_is_current exit ${CODE}), so the suite measured a tree that would not have published; fix the checkout before reading the test as a defect"
+    fi
+    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — semantic pytest ${TEST_KIND}${CHECKOUT_NOTE}; no release was authorised" >> "${LOG}"
+    echo "[$(date -Is)] run_tick NOT CHECKED — semantic pytest ${TEST_KIND}${CHECKOUT_NOTE}; see ${PYTEST_RETAINED}" >> "${GK_STATE_DIR}/cron.log"
 elif [ "${CODE}" -ne 0 ]; then
     TICK=2
     if [ "${CODE}" -eq 1 ]; then
