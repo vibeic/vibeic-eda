@@ -14,6 +14,13 @@ upstream, the deferred ones, and the one that turned out non-reproducible).
 This is the toolchain the **Vibe-IC plugin** runs on — the MCP `eda_*` tools drive these
 binaries by `docker exec` into a container built from this image.
 
+The image also ships `vibeic-rtl-reentry-guard`, the provenance boundary used
+when the plugin validates AI-backup or AI-repaired RTL.  It records the supplied
+RTL hashes before a validation-only re-entry and verifies afterward that
+`rtl_gen` was `SKIPPED-BY-ENTRY`, the bytes are unchanged, and downstream
+PROGRAM gates were actually dispatched.  It deliberately has no access to
+benchmark answers, testbenches, or scores.
+
 You do **not** need to fork or build the individual tools yourself — pull one image and
 you have the whole fixed toolchain. The image is published to the **GitHub Container
 Registry (GHCR)** and is public (no login required):

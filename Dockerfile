@@ -1564,9 +1564,15 @@ COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
 # BLOCKS the build if any tool cannot be probed or written: "not known to be
 # correct" is not a pass. The script's own first draft reported success for four
 # writes that had all failed with EACCES, so it now reads the file back.
-COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv /vibeic/
+# A supplied RTL repair must pass the normal validation gates without the
+# generation step overwriting the reviewed bytes.  The re-entry guard shares
+# this existing image layer: adding a separate COPY would consume the last
+# reserved layer.  It binds before/after RTL hashes to SKIPPED-BY-ENTRY and
+# never reads benchmark answers, testbenches, or scores.
+COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv tools/rtl_reentry_guard.py /vibeic/
 USER root
 RUN set -e; \
+    install -m 0755 /vibeic/rtl_reentry_guard.py /foss/tools/bin/vibeic-rtl-reentry-guard; \
     bash /vibeic/refresh_versions_manifest.sh /vibeic/tool_version_probes.tsv; \
     python3 /vibeic/pdk/pdk_local_mods.py verify \
         --root /foss/pdks/ciel \
