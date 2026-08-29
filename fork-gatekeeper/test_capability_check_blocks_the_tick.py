@@ -41,6 +41,17 @@ HERE = Path(__file__).resolve().parent
 TICK = HERE / "run_tick.sh"
 
 OK = "#!/usr/bin/env python3\nimport sys\nprint('stub ok')\nsys.exit(0)\n"
+CLOSURE_OK = r'''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[sys.argv.index("--json") + 1])
+path.write_text(json.dumps({
+    "program": "vendored_dependency_closure",
+    "status": "complete", "dry_run": False,
+    "passes": [], "updated_hosts": [], "source_errors": [],
+}))
+print("closure stub ok")
+'''
 
 
 def _stub(path: Path, body: str, mode=0o755):
@@ -72,6 +83,7 @@ def _fleet(tmp_path: Path, cap: str | None) -> tuple[Path, dict]:
     for name in ("daily_merge.py", "daily_release.py", "check_our_commits_ship.py",
                  "gatekeeper.py", "check_fork_selftests.py"):
         _stub(dirp / name, OK)
+    _stub(dirp / "vendored_dependency_closure.py", CLOSURE_OK)
     if cap is not None:
         _stub(dirp / "check_no_capability_lost.py", cap)
 
@@ -138,6 +150,14 @@ def test_a_green_tick_exits_zero(tmp_path):
     that fails for an unrelated reason, and the stubbing is unverified."""
     p = _run(tmp_path, OK)
     assert p.returncode == 0, f"stubbed-green tick exited {p.returncode}\n{p.stdout[-3000:]}"
+
+
+def test_zero_closure_exit_without_terminal_evidence_blocks_release(tmp_path):
+    script, env = _fleet(tmp_path, OK)
+    _stub(script.parent / "vendored_dependency_closure.py", OK)
+    p = _authorized_tick(script, env)
+    assert p.returncode == 9, p.stdout[-3000:]
+    assert "zero exit lacked an exact complete sidecar" in p.stdout
 
 
 def test_a_lost_capability_stops_the_round(tmp_path):

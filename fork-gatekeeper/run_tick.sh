@@ -311,22 +311,25 @@ fi
 #    不等人"  and  "只要有任何一個工具有新版，我們的 image 也就重新再出一版 …
 #    最晚會在隔天早上的 5 點半，提供一個 daily 的新版 updated docker image"
 #
-# Four hops, and every one of them has been the place the work stopped:
+# Five hops, and every one of them has been the place the work stopped:
 #
-#   upstream -> fork branch   daily_merge.py       merge everything, no PR
-#   fork branch -> pin        daily_release.py     move the pin at all 3 sites
-#   pin -> tool artefact      daily_release.py     rebuild what changed
-#   artefact -> image         daily_release.py     recompose + cut a version
+#   upstream -> fork branch   daily_merge.py                    merge everything, no PR
+#   vendored fork -> host     vendored_dependency_closure.py    advance host gitlinks
+#   fork branch -> pin        daily_release.py                  move the pin at all 3 sites
+#   pin -> tool artefact      daily_release.py                  rebuild what changed
+#   artefact -> image         daily_release.py                  recompose + cut a version
 #
 # On 2026-07-29 `vibeic/yosys#2` was merged and every run that day still used the
-# pre-merge yosys, because hop 2 never happened and nothing looked. Running these
+# pre-merge yosys, because a delivery hop never happened and nothing looked.
+# Running these
 # in the tick is what makes the rulings take effect; until this block existed
 # they were a policy nobody executed.
 #
-# NEITHER GATES THE TICK. A fork that conflicts is left at its previous tip and
-# reported; upstream tracking and the gatekeeper round still run. What must never
-# happen is a SILENT skip, so both write their own log and a non-zero exit is
-# carried into the tick's exit code rather than discarded.
+# A failed delivery hop does not suppress the later assessment: a fork that
+# conflicts is left at its previous tip and reported, and the gatekeeper still
+# records the state.  It does block release and the tick's final zero.  What must
+# never happen is a SILENT skip, so every hop writes retained evidence and its
+# non-zero result is carried into the final status rather than discarded.
 MERGE_OUT="${LOG_DIR}/daily-merge.txt"
 merge_rc=0
 # Reuse below is permitted only from evidence produced by THIS invocation. A
@@ -344,6 +347,65 @@ else
     echo "MISSING: fork-gatekeeper/daily_merge.py — nothing was merged" > "${MERGE_OUT}"
     log "[merge] MISSING — nothing was merged, which is not a clean result"
     merge_rc=1
+fi
+
+# A fork can reach the image through another fork's gitlink rather than through
+# an ARG of its own.  daily_merge advances the child branch; this fixed-point
+# step advances the published host gitlink before daily_release decides whether
+# the host pin moved.  Without it OpenSTA moved while OpenROAD stayed byte-for-
+# byte identical, daily_release returned noop, and the round finished with a
+# real image/release gap which only a later report could see.
+VENDORED_OUT="${LOG_DIR}/vendored-closure.txt"
+vendored_rc=0
+rm -f "${LOG_DIR}/vendored-closure.json"
+if [ -f "${DIR}/vendored_dependency_closure.py" ]; then
+    log "[closure] closing vendored fork gitlinks to their published tips"
+    python3 "${DIR}/vendored_dependency_closure.py" \
+        --eda-root "${DIR}/.." --forks-root "/home/reyerchu/vibe-ic-forks" \
+        --forks-json "${DIR}/FORKS.json" \
+        --json "${LOG_DIR}/vendored-closure.json" \
+        > "${VENDORED_OUT}" 2>&1
+    vendored_rc=$?
+    head -1 "${VENDORED_OUT}" | sed 's/^/[closure]   /' | tee -a "${LOG}"
+    grep -E "NEEDS_HUMAN|CHECK_FAILED|UNMEASURED" "${VENDORED_OUT}" \
+        | sed 's/^/[closure]   /' | tee -a "${LOG}" || true
+    # A zero process status without the exact terminal sidecar proves nothing.
+    # Validate it here, independently of the later self-test reuse planner, so
+    # malformed/missing evidence cannot authorise daily_release.
+    if [ "${vendored_rc}" = "0" ]; then
+        python3 - "${LOG_DIR}/vendored-closure.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+if not (
+    isinstance(value, dict)
+    and value.get("program") == "vendored_dependency_closure"
+    and value.get("status") == "complete"
+    and value.get("dry_run") is False
+    and isinstance(value.get("passes"), list)
+    and isinstance(value.get("updated_hosts"), list)
+    and all(isinstance(tool, str) and tool for tool in value["updated_hosts"])
+    and value.get("source_errors") == []
+):
+    raise SystemExit("vendored closure sidecar is not an exact complete record")
+PY
+        closure_evidence_rc=$?
+        if [ "${closure_evidence_rc}" -ne 0 ]; then
+            echo "vendored closure terminal evidence validation failed" \
+                >> "${VENDORED_OUT}"
+        fi
+        if [ "${closure_evidence_rc}" -ne 0 ]; then
+            log "[closure] NORECORD — zero exit lacked an exact complete sidecar"
+            vendored_rc=2
+        fi
+    fi
+else
+    echo "MISSING: fork-gatekeeper/vendored_dependency_closure.py" > "${VENDORED_OUT}"
+    log "[closure] MISSING — vendored forks cannot be proven delivered"
+    vendored_rc=2
 fi
 
 # --- PRE-RELEASE BLOCKING GATE ------------------------------------------------
@@ -370,16 +432,26 @@ SELFTEST_ARGS=()
 selftest_plan_rc=1
 selftest_reused_checks=0
 selftest_reused_tools=""
-if [ -f "${DIR}/FORKS.json" ] && [ -s "${LOG_DIR}/daily-merge.json" ]; then
+if [ -f "${DIR}/FORKS.json" ] && [ -s "${LOG_DIR}/daily-merge.json" ] \
+   && [ -s "${LOG_DIR}/vendored-closure.json" ]; then
     SELFTEST_PLAN="$(python3 - "${DIR}/FORKS.json" \
-        "${LOG_DIR}/daily-merge.json" <<'PY'
+        "${LOG_DIR}/daily-merge.json" \
+        "${LOG_DIR}/vendored-closure.json" <<'PY'
 import json
 import sys
 
 registry = json.load(open(sys.argv[1], encoding="utf-8"))
 merge = json.load(open(sys.argv[2], encoding="utf-8"))
+closure = json.load(open(sys.argv[3], encoding="utf-8"))
 if merge.get("program") != "daily_merge" or not isinstance(merge.get("forks"), list):
     raise ValueError("not a complete daily_merge record")
+if (closure.get("program") != "vendored_dependency_closure"
+        or closure.get("status") != "complete"
+        or not isinstance(closure.get("updated_hosts"), list)):
+    raise ValueError("not a complete vendored dependency closure record")
+closure_updated = set(closure["updated_hosts"])
+if not all(isinstance(tool, str) and tool for tool in closure_updated):
+    raise ValueError("malformed updated host list")
 
 declared = {}
 for fork in registry.get("forks", []):
@@ -410,6 +482,7 @@ for tool, declarations in declared.items():
         if isinstance(observed, list) else []
     reusable = (
         row.get("state") == "MERGED"
+        and tool not in closure_updated
         and len(declared_names) == len(declarations)
         and observed_names == declared_names
         and all(c.get("ok") is True and c.get("outcome") == "natural"
@@ -519,6 +592,7 @@ fi
 blocking_rc=0
 [ "${guard_rc}" != "0" ] && blocking_rc=1
 [ "${merge_rc}" != "0" ] && blocking_rc=1
+[ "${vendored_rc}" != "0" ] && blocking_rc=1
 [ "${selftest_rc}" != "0" ] && blocking_rc=1
 
 RELEASE_OUT="${LOG_DIR}/daily-release.txt"
@@ -526,15 +600,15 @@ if [ "${blocking_rc}" != "0" ]; then
     # Do not leave yesterday's successful sidecar looking like evidence from a
     # release that was never authorized today.
     rm -f "${LOG_DIR}/daily-release.json"
-    echo "BLOCKED: source guards, daily merge, or fork self-checks are not green; daily_release was not invoked" \
+    echo "BLOCKED: source guards, daily merge, vendored closure, or fork self-checks are not green; daily_release was not invoked" \
         > "${RELEASE_OUT}"
-    log "[blocking] REFUSE daily_release — source guards, daily merge, and fork self-checks must all be green"
+    log "[blocking] REFUSE daily_release — source guards, daily merge, vendored closure, and fork self-checks must all be green"
     # This is not a daily_release failure: no release was attempted.  The
     # originating guard/selftest rc is folded into the final tick status below,
     # preserving the useful diagnosis instead of replacing it with rc=5.
     release_rc=0
 elif [ -f "${DIR}/daily_release.py" ]; then
-    log "[blocking] PASS — source guards, daily merge, and fork self-checks authorize candidate construction"
+    log "[blocking] PASS — source guards, daily merge, vendored closure, and fork self-checks authorize candidate construction"
     # The check_no_capability_lost block later in this file observes a released
     # image. Moving it here would test yesterday's tag and falsely call that
     # candidate evidence. The exact candidate's authority remains inside
@@ -1058,5 +1132,9 @@ rc=$?
 # regression suite is unwired has not had a clean day, and reporting 0 would say
 # it did. rc=8: 7 was taken by the capability gate while this was in flight.
 [ "${selftest_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=8
+# A child fork that did not reach its host gitlink is the missing delivery hop
+# between merge and release.  Keep its typed failure distinct from a merge
+# conflict and from a host self-check failure.
+[ "${vendored_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=9
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}

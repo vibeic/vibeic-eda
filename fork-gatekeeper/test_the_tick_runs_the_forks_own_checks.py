@@ -41,6 +41,17 @@ WATCHDOG = HERE / "progress_watchdog.py"
 SEMANTIC_PYTEST = HERE / "semantic_pytest_gate.py"
 PYTEST_PLUGIN = HERE / "_pytest_progress_plugin.py"
 
+CLOSURE_OK_STUB = r'''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+Path(sys.argv[sys.argv.index("--json") + 1]).write_text(json.dumps({
+    "program": "vendored_dependency_closure",
+    "status": "complete", "dry_run": False,
+    "passes": [], "updated_hosts": [], "source_errors": [],
+}))
+print("closure stub ok")
+'''
+
 STUB = '''#!/usr/bin/env python3
 """Stub that verifies the INVOCATION CONTRACT, then obeys a control file."""
 import json, os, sys
@@ -246,6 +257,11 @@ print("fork self-checks: selected checks pass")
     (state / "daily-merge.json").write_text(json.dumps({
         "program": "daily_merge", "forks": merge_rows,
     }), encoding="utf-8")
+    (state / "vendored-closure.json").write_text(json.dumps({
+        "program": "vendored_dependency_closure",
+        "status": "complete", "dry_run": False,
+        "passes": [], "updated_hosts": [], "source_errors": [],
+    }), encoding="utf-8")
     return tick_dir, marker
 
 
@@ -427,6 +443,7 @@ def _tick_fleet(tmp_path: Path, selftest_body: str):
                  "check_no_capability_lost.py",
                  "gatekeeper.py"):
         _stub(dirp / name, _OK_STUB)
+    _stub(dirp / "vendored_dependency_closure.py", CLOSURE_OK_STUB)
     _stub(dirp / "daily_release.py", _RELEASE_STUB)
     _stub(dirp / "check_fork_selftests.py", selftest_body)
     _stub(home / ".local" / "bin" / "gh",

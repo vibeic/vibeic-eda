@@ -447,6 +447,23 @@ python3 "${DIR}/capture_release_ll.py" \
 LL=$?
 echo "[$(date -Is)] capture_release_ll exit ${LL}" >> "${LOG}"
 
+# A zero capture rc proves that Release LL formed a valid record; it does not
+# prove that the record says this round converged.  The 2026-08-29 round formed
+# a valid `finished_with_gap` LL (release lag 3, image lag 2, past-pin 1) and the
+# shell still exited zero because its older fatal subset ignored those fields.
+# Make the current round's typed LL verdict the one terminal authority.
+LL_TERMINAL_JSON="${GK_STATE_DIR}/release-ll/latest.json"
+if [ -f "${DIR}/check_release_ll_terminal.py" ]; then
+    python3 "${DIR}/check_release_ll_terminal.py" \
+        --release-ll "${LL_TERMINAL_JSON}" \
+        --round-at "${ROUND_AT}" --run-id "${AI_RUN_ID}" >> "${LOG}" 2>&1
+    TERMINAL=$?
+else
+    echo "[$(date -Is)] check_release_ll_terminal MISSING — a valid audit record cannot authorize convergence by itself" >> "${LOG}"
+    TERMINAL=2
+fi
+echo "[$(date -Is)] check_release_ll_terminal exit ${TERMINAL} (0=converged, 1=open, 2=NORECORD)" >> "${LOG}"
+
 python3 "${DIR}/check_ledger_is_fresh.py" \
     --ledger "${GK_STATE_DIR}/ledger" \
     --json "${GK_STATE_DIR}/ledger_freshness.json" >> "${LOG}" 2>&1
@@ -545,6 +562,7 @@ if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
    && [ "${AI_AUTH}" -eq 0 ] && [ "${TICK}" -eq 0 ] \
    && [ "${DISC}" -eq 0 ] && [ "${GAP}" -eq 0 ] \
    && [ "${FORK_GH}" -eq 0 ] && [ "${LL}" -eq 0 ] \
+   && [ "${TERMINAL}" -eq 0 ] \
    && [ "${FRESH}" -eq 0 ] && [ "${INPUT_CLEAR}" -eq 0 ] \
    && [ "${GAP_FATAL}" -eq 0 ]; then
     python3 "${DIR}/build_page.py" \
@@ -560,7 +578,29 @@ if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
     PAGE=$?
     echo "[$(date -Is)] build_page exit ${PAGE}" >> "${LOG}"
     if [ "${PAGE}" -eq 0 ]; then
-        PAGE_PUBLISHED=1
+        SITE_PUBLISH_JSON="${GK_STATE_DIR}/site-page-publication.json"
+        rm -f "${SITE_PUBLISH_JSON}"
+        if [ -f "${DIR}/publish_site_page.py" ]; then
+            python3 "${DIR}/publish_site_page.py" \
+                --site-root /home/reyerchu/vibeic.ai \
+                --page eda-forks.html --branch main \
+                --matrix-page evaluation.html \
+                --matrix-page similiar_projects.html \
+                --message "dashboard: publish certified 05:30 fork state" \
+                --json "${SITE_PUBLISH_JSON}" >> "${LOG}" 2>&1
+            SITE_PUBLISH=$?
+        else
+            echo "[$(date -Is)] publish_site_page MISSING — generated page was not persisted to GitHub" >> "${LOG}"
+            SITE_PUBLISH=2
+        fi
+        echo "[$(date -Is)] publish_site_page exit ${SITE_PUBLISH}" >> "${LOG}"
+        if [ "${SITE_PUBLISH}" -eq 0 ]; then
+            PAGE_PUBLISHED=1
+        else
+            PAGE="${SITE_PUBLISH}"
+            PAGE_PUBLISHED=0
+            PAGE_SKIP="certified page was generated but its isolated GitHub publication failed (rc=${SITE_PUBLISH})"
+        fi
     else
         PAGE_PUBLISHED=0
         PAGE_SKIP="build_page ran and failed (rc=${PAGE})"
@@ -585,6 +625,8 @@ else
         PAGE_SKIP="current-round GitHub delivery is open or NORECORD (rc=${FORK_GH})"
     elif [ "${LL}" -ne 0 ]; then
         PAGE_SKIP="current-round release LL is invalid or nonzero (rc=${LL})"
+    elif [ "${TERMINAL}" -ne 0 ]; then
+        PAGE_SKIP="current-round release LL did not authorize convergence (rc=${TERMINAL})"
     elif [ "${FRESH}" -ne 0 ]; then
         PAGE_SKIP="ledger freshness is stale or NORECORD (rc=${FRESH})"
     elif [ "${INPUT_CLEAR}" -ne 0 ]; then
@@ -638,5 +680,6 @@ if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${SILENCE}" -eq 2 ] \
    || [ "${AI_AUTH}" -ne 0 ] \
    || [ "${GAP_FATAL}" -ne 0 ] \
-   || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ]; then exit 1; fi
+   || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ] \
+   || [ "${TERMINAL}" -ne 0 ]; then exit 1; fi
 exit 0

@@ -214,6 +214,18 @@ be a worse defect than the one it closes.
 
 ### Release self-healing and the 05:30 learning loop
 
+After `daily_merge.py` publishes fork tips and before any release self-check is
+reused, `vendored_dependency_closure.py` closes indirect delivery edges.  The
+edges are derived structurally: a composing Dockerfile must initialise the host
+submodules, the host's published tree must name a `vibeic/*` submodule, and both
+host and child must have valid declared branches in `FORKS.json`.  A stale
+gitlink is advanced in an isolated host worktree, the changed submodule is
+materialised, the host's declared checks run, and publication uses an exact
+force-with-lease plus remote readback.  Updated hosts cannot reuse checks from a
+pre-update `daily_merge` worktree.  The graph is rescanned to a bounded fixed
+point so nested vendoring converges child-first; divergence, missing evidence,
+red checks, and unconfirmed pushes all block release.
+
 The compose step classifies DNS, transport reset/timeout, and registry 429/5xx
 failures as transient. It retries the exact registry compose up to five times
 with `15, 45, 120, 300` second backoff. Tool artefacts have already been pushed
@@ -272,6 +284,13 @@ not prose inferred from a log. Missing, stale, malformed, or pre-schema inputs
 make the capture fail and therefore make the 05:30 round fail; they are retained
 as source errors and never become a clean or zero LL row.
 
+`capture_release_ll.py` returning zero means that audit evidence was valid, not
+that its verdict was green.  `check_release_ll_terminal.py` therefore consumes
+the exact current round and authorises the cron's terminal zero only when
+`round_measured` and `round_converged` are both the literal boolean `true`.  A
+valid `finished_with_gap` record remains useful evidence but can no longer be a
+successful cron exit.
+
 LL's generic `converged` and `round_converged` require delivery arithmetic,
 `fork_github.status=converged`, release tick exit 0, a complete consumer anchor,
 zero stranded commits, and no source error. The former arithmetic remains
@@ -290,6 +309,11 @@ run nonce and registered denominator, and embeds both the GitHub open-delivery
 count/status and LL's whole-round convergence booleans in the page model. Only
 after the complete HTML has rendered and passed NDA redaction does it atomically
 replace `eda-forks.html`; any refusal leaves the last good page unchanged.
+`publish_site_page.py` then commits and CAS-pushes that one certified page.  The
+two hourly IC-matrix pages may join the commit only when their changes are
+strictly confined between their `IC_PDK_MATRIX` generator markers; any other
+tracked, staged, untracked, or marker-external site edit refuses publication
+rather than being swept into the 05:30 commit.
 
 The LL keeps the merge-boundary verdict separate from live drift. A round with
 `sync_lag_at_merge=0`, `release_lag=0`, and `ours_past_pin=0` converged on every

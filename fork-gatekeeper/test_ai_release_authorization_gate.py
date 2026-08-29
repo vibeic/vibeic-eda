@@ -383,7 +383,11 @@ state.joinpath("ll-captured.json").write_text(json.dumps({
  "tick_state":sys.argv[sys.argv.index("--tick-state")+1],
  "ai":json.loads(ai.read_text())}))
 ''')
+    _stub(gate / "check_release_ll_terminal.py",
+          "#!/usr/bin/env python3\nraise SystemExit(0)\n")
     _stub(gate / "check_ledger_is_fresh.py",
+          "#!/usr/bin/env python3\nraise SystemExit(0)\n")
+    _stub(gate / "publish_site_page.py",
           "#!/usr/bin/env python3\nraise SystemExit(0)\n")
     env = dict(os.environ)
     env.update(HOME=str(home), GK_STATE_DIR=str(state), AI_FIXTURE=mode)
@@ -443,6 +447,16 @@ def test_shell_and_python_entrypoints_parse():
 # be able to bypass that ordering just because its own source/merge checks pass.
 _DIRECT_OK_STUB = (
     "#!/usr/bin/env python3\nimport sys\nprint('stub ok')\nsys.exit(0)\n")
+_DIRECT_CLOSURE_STUB = r'''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+Path(sys.argv[sys.argv.index("--json") + 1]).write_text(json.dumps({
+    "program": "vendored_dependency_closure",
+    "status": "complete", "dry_run": False,
+    "passes": [], "updated_hosts": [], "source_errors": [],
+}))
+print("closure stub ok")
+'''
 _DIRECT_RELEASE_STUB = r'''#!/usr/bin/env python3
 import os
 from pathlib import Path
@@ -476,6 +490,7 @@ def _direct_tick_fleet(tmp_path: Path, mode: str):
                  "gatekeeper.py", "check_fork_selftests.py"):
         _stub(gate / name, _DIRECT_OK_STUB)
     _stub(gate / "daily_merge.py", _DIRECT_MERGE_STUB)
+    _stub(gate / "vendored_dependency_closure.py", _DIRECT_CLOSURE_STUB)
     _stub(gate / "daily_release.py", _DIRECT_RELEASE_STUB)
     _stub(home / ".local" / "bin" / "gh", r'''#!/usr/bin/env bash
 [ "$1" = auth ] && echo gho_stubtoken
