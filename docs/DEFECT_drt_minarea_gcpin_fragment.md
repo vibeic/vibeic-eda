@@ -65,24 +65,46 @@ refuses to stream a sign-off GDS behind it.
 
 ---
 
-## 3. Eight instances, one signature
+## 3. Eleven instances — one invariant, and it is NOT one fixed marker size
 
-Across three die sizes, six nets, two images and two plugin versions, **every
-marker is bit-identically 0.0400 x 0.0550 um = 0.0022 um^2**:
+**Corrected 2026-08-30, after this dossier was first filed.** The first draft said
+every marker is "bit-identically 0.0400 x 0.0550 um". That was true of the eight
+instances then in hand and is **wrong as a general claim** — a later run produced a
+**0.1000 x 0.1200 um** marker. The correction *widens* the defect; it does not
+weaken it, and the now-measured generalisation was explicitly listed as
+NOT_MEASURED in the first draft.
 
-| # | die um | net | driver | orient | via | marker |
-|---|---|---|---|---|---|---|
-| A | 412 | `__uuf__._040_` | `_348_` aoi211_1 | N | Via1_HV | 0.0400 x 0.0550 |
-| B | 412 | `__uuf__._048_` | `_356_` aoi211_1 | N | Via1_HV | 0.0400 x 0.0550 |
-| C | 285 | `__uuf__._044_` | `_352_` aoi211_1 | N | Via1_HV | 0.0400 x 0.0550 |
-| D | 329 | `__uuf__._034_` | `_342_` aoi211_1 | **FS** | Via1_HV | 0.0400 x 0.0550 |
-| E,F,G | 329 | `_038_`, `_043_`, `_044_` | — | — | — | 0.0400 x 0.0550 |
-| H | 285 | `__uuf__._044_` | `_352_` aoi211_1 | N | Via1_HV | **on 0.3.40** |
+**The invariant that actually holds**, on all eleven:
 
-Driver is `gf180mcu_fd_sc_mcu7t5v0__aoi211_1` pin `ZN` through a `Via1_HV` in
-every case.
+* the violating net's **only** Metal1 is bare Via1 landing pads — no Metal1 wire;
+* the marker is a **corner of one of those Via1 Metal1 pads**, sharing two of the
+  pad's own edges exactly, and strictly inside it;
+* the marker is **below Metal1's own `MINWIDTH 0.230`** — so it is not a routable
+  object;
+* the connected Metal1 polygon actually present there **satisfies `AREA 0.1444`**.
 
----
+| # | die um | net | driver master | orient | via master | marker um | vs MINWIDTH | corner |
+|---|---|---|---|---|---|---|---|---|
+| A | 412 | `_040_` | `aoi211_1` | N | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-bottom |
+| B | 412 | `_048_` | `aoi211_1` | N | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-bottom |
+| C | 285 | `_044_` | `aoi211_1` | N | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-bottom |
+| D | 329 | `_034_` | `aoi211_1` | **FS** | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-**top** |
+| E,F,G | 329 | `_038_`,`_043_`,`_044_` | — | — | — | 0.0400 x 0.0550 | 0.17x | — |
+| H | 285 | `_044_` | `aoi211_1` | N | Via1_HV | 0.0400 x 0.0550 | 0.17x | **on 0.3.40** |
+| I | 285 | `_028_` | **`nor3_1`** | FS | **Via1_VV** | **0.1000 x 0.1200** | **0.43x** | left-top |
+| J | 285 | `_048_` | `aoi211_1` | FS | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-top |
+| K | 285 | `_042_` | `aoi211_1` | FS | Via1_HV | 0.0400 x 0.0550 | 0.17x | right-top |
+
+So the fragment's **dimensions track the via master and the driver pin's own
+rectangle geometry** — `Via1_HV` (pad 0.380 x 0.260) gives 0.0400 x 0.0550
+(1.5% of the area rule); `Via1_VV` (pad 0.260 x 0.380) gives 0.1000 x 0.1200
+(8.3% of it). **Two different cell masters and two different via masters are
+affected**, so this is not an `aoi211_1` quirk.
+
+**The corner tracks cell orientation.** Instances A-C (`N`) report the
+right-**bottom** corner; D and J/K (`FS`, mirrored) report the right-**top**. The
+fragment is fixed in the *driver cell master's own frame*, not the die's and not
+the route's.
 
 ## 4. What the marker is
 
@@ -230,6 +252,9 @@ from what the shipped 0.3.40 binary does on this design.
 * **Whether the sources quoted in section 5 are the sources that built either
   binary.** See section 8. The symbol signature and the `NS Metal` string in the
   binary corroborate them; nothing more is claimed.
-* **Whether other PDKs or other cell masters are affected.** Only gf180mcuD and
-  only `aoi211_1`/`ZN` were observed. Whether the trigger is "any pin exposed as
-  abutting rectangles" is a plausible generalisation that was **not** tested.
+* **Whether other PDKs are affected.** Only gf180mcuD was exercised. Within it,
+  **two cell masters (`aoi211_1`, `nor3_1`) and two via masters (`Via1_HV`,
+  `Via1_VV`) are confirmed affected** — so the "only one cell master" limit
+  recorded in the first draft of this dossier is now measured and withdrawn.
+  Whether the trigger generalises to any pin exposed as abutting rectangles in
+  any PDK is still **not** tested.
