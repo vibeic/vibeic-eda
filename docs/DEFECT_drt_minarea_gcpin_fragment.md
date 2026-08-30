@@ -1,6 +1,42 @@
 # `drt` reports `NS Metal` (min-area) for a via-pad fragment, on a polygon 10x the rule
 
-**Status: OPEN.** Present in `vibeic-eda:0.3.40`
+> ## CORRECTION 2026-08-31 — this is NOT a min-area defect, and one third of it is fixed
+>
+> **`NS Metal` is `frcNonSufficientMetalConstraint`** (`frConstraint.cc:38`) —
+> a same-net OVERLAP check emitted by `checkMetalSpacing_short`. It has nothing
+> to do with the `AREA` rule. **Section 5 below reasons about the wrong
+> function** (`checkMetalShape_minArea`, gcPin polygons, `gtl::extents`, the
+> fixed-edge bail) and every inference drawn from it is void.
+>
+> How that was established: `checkMetalShape_minArea` was instrumented on this
+> dossier's own account and the reproducer emitted **three markers and zero
+> hits**. The zero is the evidence; the string lookup only confirmed it.
+>
+> The correction *explains* two things this dossier measured but could not
+> account for. The marker is "a corner of the via pad sharing two of the pad's
+> own edges" because it **is** the intersection rectangle of two same-net
+> shapes. It "flips with cell orientation" because that intersection follows
+> the master's own rectangle decomposition.
+>
+> **Fixed (vibeic/OpenROAD#12, `0dfe7d1293`):** the EDGE-ABUTMENT third.
+> `checkMetalSpacing_main` bloats markerRect by 1 dbu on any axis with zero
+> overlap — its own comment says this is so a zero-extent rectangle survives
+> boost::polygon's booleans — and `checkMetalSpacing_short` then measured that
+> workaround against MINWIDTH. Two same-net rectangles sharing an edge are one
+> continuous piece of metal and were reported as a 2-dbu neck. The caller
+> already computed `rects_abut` and already handed it to the blockage branch;
+> the same-net branch was never given it.
+>
+> **Still open:** markers whose rectangles overlap on BOTH axes never enter the
+> bloat path, so #12 does not touch them. On an independent reproduction
+> (CVDP `microcode_sequencer`, gf180mcu_fd_sc_mcu7t5v0, 638 instances, 230x230
+> die) the count went **3 -> 2** with the route unchanged in both arms
+> (DRT-0199 final 0, DRT-0198 complete). The surviving two are 80x110 and
+> 200x280 dbu real overlaps and are a separate question.
+>
+> Sections 1-4 and 6-9 below stand as measured. Section 5 does not.
+
+**Status: PARTIALLY FIXED.** Present in `vibeic-eda:0.3.40`
 (`sha256:fad41245fbff4f863a49f8663e3902a3d7100ce63c8fc073159452bd0c80a4a9`),
 i.e. **after** `vibeic/OpenROAD` #9, #10 and #11 landed. Filed 2026-08-30.
 
