@@ -1056,7 +1056,28 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       -e /opt/vibeic-forks/cocotb-coverage \
       -e /opt/vibeic-forks/pyuvm \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
- && chmod -R a+rX /opt/vibeic-forks
+ && chmod -R a+rX /opt/vibeic-forks \
+ && if ! getent passwd 1000 >/dev/null 2>&1; then \
+        useradd --uid 1000 --gid 0 --home-dir /headless --shell /bin/bash \
+                --no-create-home --no-user-group designer; \
+    fi \
+ && getent passwd 1000
+
+# GIVE uid 1000 A NAME (#145). Folded into the apt layer above rather than
+# given a layer of its own: the tree sits at 109 of the 110-layer budget, and
+# `test_this_tree_has_real_headroom` exists to stop exactly the reflex of
+# spending the last one on a one-line fix. The placement is load-bearing in the
+# other direction too — it must precede the first `USER 1000` below, because a
+# stage that runs before the account exists still sees a nameless uid.
+#
+# Both `USER 1000` lines run as a uid that no stage ever created: `getent passwd
+# 1000` was ABSENT in our image AND in the hpretl/iic-osic-tools base. That is
+# not cosmetic — getpass.getuser() raises KeyError, and `id -un` prints the bare
+# uid to stdout while exiting NON-ZERO, so `USER=$(id -un) || USER=designer`
+# captures BOTH arms and yields the literal '1000\ndesigner'. An embedded
+# newline is invisible in ordinary output, which is why it survived releases.
+#
+# Identity is unchanged: same uid 1000, same gid 0, same HOME=/headless.
 
 # vibeic-eda#13 — PROVE THE ENGINE ANSWERS, not merely that a file is present.
 # `--version` alone would pass against a binary that cannot solve, and this
