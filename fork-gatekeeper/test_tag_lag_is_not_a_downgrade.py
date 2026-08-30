@@ -165,7 +165,11 @@ def test_a_genuinely_forward_target_still_passes(fork):
 
 @pytest.mark.parametrize("tool,expected", [
     ("OpenROAD", "tag_lag"),   # pin 1140 ahead, tag ON master
-    ("cocotb", A.BEHIND),      # pin 544 ahead, tag OFF master
+    # cocotb moved 2026-08-31: upstream tagged v2.1.0rc1 CONTAINING our fork
+    # point (target_ahead=3, pin 20 ahead after the daily merges), so BEHIND
+    # became a genuine FORWARD — the world changed in the direction the
+    # predicate exists to track, and the ledger's why-line names the tag.
+    ("cocotb", A.FORWARD),
     ("Trilinos", A.BEHIND),    # pin 407 ahead, tag OFF master — the original case
 ])
 def test_the_real_fleet_agrees(tool, expected):
