@@ -39,6 +39,54 @@ RC_OK, RC_ESCALATED, RC_NORECORD = 0, 1, 2
 ALARM_KIND = "release-failed"
 
 
+_DETAIL_KEYS = ("summary", "reason", "category", "detail", "note", "subject",
+                "stage")
+
+
+def _detail_from(release: dict) -> str:
+    """Everything the release said about why it stopped.
+
+    THE EVIDENCE IS NESTED AND THIS USED TO READ ONLY THE TOP LEVEL. A release
+    that stops records its reason under `failure` (a dict carrying `stage`,
+    `category`, `subject`, `summary`) and, for an unmeasurable outcome, one
+    entry per obstacle under `unmeasured` — none of which are top-level keys.
+    So the alarm printed "(no detail captured)" while the record held the whole
+    story.
+
+    Observed on the 2026-08-30 round: `run_tick` exited 5 because the release
+    could not measure a registry artefact —
+
+        failure.category = registry_artefact_state_unmeasurable
+        failure.subject  = ghcr.io/vibeic/eda-tool-xyce:1fab458-71dfca
+        failure.summary  = registry presence unmeasured: Get "https://…" …
+        failure.retryable = true
+
+    a transient GHCR read, which is the difference between "retry it" and
+    "someone has to go and look". The alarm reported none of it, so the PR it
+    opened asked a human to go and find what the record already knew.
+
+    `retryable` is surfaced by name because it is the triage decision itself.
+    """
+    lines: list[str] = []
+
+    def _emit(prefix: str, obj) -> None:
+        if not isinstance(obj, dict):
+            if obj:
+                lines.append(f"{prefix}: {obj}")
+            return
+        for key in _DETAIL_KEYS:
+            if obj.get(key):
+                lines.append(f"{prefix}{key}: {obj[key]}")
+        if "retryable" in obj:
+            lines.append(f"{prefix}retryable: {obj['retryable']}")
+
+    _emit("", release)
+    _emit("failure.", release.get("failure"))
+    for i, item in enumerate(release.get("unmeasured") or []):
+        _emit(f"unmeasured[{i}].", item)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def _report(tick_exit, tick_state: str, round_at: str, detail: str) -> tuple:
     summary = (f"release failed on the {round_at[:10]} round "
                f"(run_tick exit {tick_exit})")
@@ -106,9 +154,7 @@ def main(argv=None) -> int:
     release, why = _load(Path(a.release_json))
     detail = ""
     if isinstance(release, dict):
-        for key in ("summary", "reason", "category", "note"):
-            if release.get(key):
-                detail += f"{key}: {release[key]}\n"
+        detail = _detail_from(release)
     elif why:
         detail = f"(the release record could not be read — {why})"
 
