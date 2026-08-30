@@ -34,9 +34,62 @@
 > (DRT-0199 final 0, DRT-0198 complete). The surviving two are 80x110 and
 > 200x280 dbu real overlaps and are a separate question.
 >
+> ## THE REMAINING TWO ARE REAL — measured 2026-08-31, no checker defect left
+>
+> The two markers #12 does not remove were checked before assuming they were
+> more of the same, and they are **not**. Dumping every same-net max-rectangle
+> and the merged polygon area at the emit point:
+>
+> ```
+>   case 1   A (159780,232700)-(160540,233220)  760x520   routed  <- Via1 Metal1 pad
+>            C (160460,233110)-(160920,234070)  460x960   FIXED   <- cell pin metal
+>            overlap 80x110      [poly] area = 828000
+>   case 2   A (254510,236260)-(255300,237340)  790x1080  FIXED
+>            C (255100,237060)-(255620,237820)  520x760   routed
+>            overlap 200x280     [poly] area = 1192400
+> ```
+>
+> `760*520 + 460*960 - 80*110 = 828000` and
+> `790*1080 + 520*760 - 200*280 = 1192400` — both match the polygon area the
+> checker reports **exactly**. So the two rectangles ARE merged into one
+> polygon, and that polygon is a staircase whose only path between its two bulk
+> regions is the overlap itself: **0.040 um against Metal1's MINWIDTH of
+> 0.230 um**.
+>
+> That is a real geometric neck. NS Metal is reporting it correctly, and
+> loosening the checker to make the count reach zero would be bending the
+> instrument to fit the conclusion. **There is no remaining checker defect
+> here.**
+>
+> ## Where the real gap is: the routing loop cannot see what verification sees
+>
+> The reproducer used for this has NO `repair_antennas` and no post-route
+> repair pass, so the geometry did not change after the last in-loop check.
+> Same geometry, two verdicts: in-loop 0, post-route 2.
+>
+> `FlexGCWorker::Impl::initDesign` (FlexGC_init.cpp:202):
+>
+> ```cpp
+>   // init all non-dr objs from design      <- always runs (fixed cell pin metal)
+>   if (getDRWorker() || skipDR) { return; } <- in-loop DR workers stop here
+>   // init all dr objs from design          <- only full-design workers get this
+> ```
+>
+> An in-loop worker is fed the routed shapes of the nets its DR worker is
+> currently modifying (`modifiedDRNets_`), not every routed net in the tile. A
+> net finished in an earlier iteration and not touched since is never re-paired
+> against the fixed pin metal beside it, so the loop's convergence count can
+> reach 0 with violations standing.
+>
+> This fork's own `DRT-0701` says exactly that — "violation(s) that the routing
+> loop did not report" — so the warning is working as designed; what is missing
+> is a repair pass that acts on what it finds. That is router-side work, not a
+> GC fix, and it is what this dossier's title (`postroute_drv_repair`) was
+> pointing at all along.
+>
 > Sections 1-4 and 6-9 below stand as measured. Section 5 does not.
 
-**Status: PARTIALLY FIXED.** Present in `vibeic-eda:0.3.40`
+**Status: THE GC HALF IS FIXED; THE ROUTER HALF IS OPEN.** Present in `vibeic-eda:0.3.40`
 (`sha256:fad41245fbff4f863a49f8663e3902a3d7100ce63c8fc073159452bd0c80a4a9`),
 i.e. **after** `vibeic/OpenROAD` #9, #10 and #11 landed. Filed 2026-08-30.
 
