@@ -1317,6 +1317,36 @@ ENV ALIGN_HOME=/foss/tools/align \
 # Reproduced identically on 0.2.41 and 0.2.43, so it is long-standing rather
 # than new. It survived because the build's self-test runs as root, where the
 # permission does not apply — the tool was verified in an identity no user has.
+# GIVE uid 1000 A NAME BEFORE ANYTHING RUNS AS IT. Both this stage and the
+# runtime stage below say `USER 1000`, and neither the base nor any stage of
+# ours ever created that account: `getent passwd 1000` is ABSENT, in our image
+# AND in hpretl/iic-osic-tools itself. A uid with no passwd entry is not a
+# cosmetic gap -- it makes the standard library raise:
+#
+#   >>> getpass.getuser()
+#   KeyError: 'getpwuid(): uid not found: 1000'
+#
+# and `id -un` prints the bare uid to stdout while exiting NON-ZERO, so a shell
+# fallback written as `USER=$(id -un) || USER=designer` captures BOTH arms and
+# yields the literal '1000\ndesigner' -- an embedded newline that is invisible
+# in ordinary output, which is exactly why it survived this long (#145).
+#
+# Any tool that asks the OS who it is is affected, and that is a large set:
+# every Python program calling getpass.getuser(), anything reading pwd, and any
+# script interpolating `id -un` into a path or a filename.
+#
+# Adding the entry changes NOTHING about the identity -- same uid 1000, same
+# gid 0, same HOME=/headless. Verified on 0.3.39: getpass.getuser() and
+# pwd.getpwuid both return 'designer', `id -un` exits 0, and all eight
+# top-level tools still resolve with /headless still writable.
+USER root
+RUN set -eu; \
+    if ! getent passwd 1000 >/dev/null 2>&1; then \
+        useradd --uid 1000 --gid 0 --home-dir /headless --shell /bin/bash \
+                --no-create-home --no-user-group designer; \
+    fi; \
+    getent passwd 1000
+
 # restore the base's non-root runtime user
 USER 1000
 
