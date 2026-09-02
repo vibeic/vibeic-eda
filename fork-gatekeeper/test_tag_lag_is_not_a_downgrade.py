@@ -111,17 +111,18 @@ def fork(tmp_path, monkeypatch):
     _git(d, "branch", "-f", "master", tip)
     # a tag on a SIDE branch, not reachable from master
     _git(d, "checkout", "-q", "-b", "side", base)
-    _commit(d, "side work")
+    side = _commit(d, "side work")
     _git(d, "tag", "v2.0-side")
     _git(d, "checkout", "-q", "master")
     monkeypatch.setattr(A, "FORKS_DIR", root)
-    return {"dir": d, "base": base, "tip": tip}
+    return {"dir": d, "base": base, "tip": tip, "side": side}
 
 
 def test_a_tag_on_the_tracked_branch_is_not_a_downgrade(fork):
     """THE REGRESSION. Our pin is ahead of `v1.0` because we follow master — the
     ordinary state of most of the fleet, and it must not be refused."""
     r = _direction("tool", fork["tip"], None, "v1.0", "master")
+    assert r.get("why"), "a verdict with no why-line is not reportable"
     assert r["verdict"] == A.FORWARD, (
         f"a tag that IS an ancestor of the branch we track was called "
         f"{r['verdict']!r}. Measured on the real fleet, this predicate alone "
@@ -137,6 +138,7 @@ def test_a_tag_off_the_tracked_branch_is_still_refused(fork):
     """THE BIDIRECTIONAL CONTROL. Softening the rule must not soften it into
     nothing — a guard that accepts everything passes the test above."""
     r = _direction("tool", fork["tip"], None, "v2.0-side", "master")
+    assert r.get("why"), "a verdict with no why-line is not reportable"
     assert r["verdict"] == A.BEHIND, (
         f"a tag on a SIDE branch we have already passed was called "
         f"{r['verdict']!r}; adopting it would drop work we build. "
@@ -154,44 +156,204 @@ def test_an_unmeasurable_branch_is_not_silently_forward(fork):
         f"not check' must never render as 'checked and fine'")
 
 
+def test_a_target_containing_our_fork_point_is_forward(fork):
+    """THE SECOND FORWARD BRANCH, and it had no test in this file.
+
+    Found by mutating the predicate on 2026-09-02: replacing the fork-point
+    branch with `if False` left every test here green, because no fleet row
+    happens to sit in that shape today. The branch is what makes `netgen 1.5.323`
+    a real target while Trilinos is not — a target that does not descend from our
+    pin but does contain the point we forked from lacks only our own carried
+    patches, which a merge re-applies.
+    """
+    r = _direction("tool", fork["side"], fork["base"], "master", "master")
+    assert r.get("why"), "a verdict with no why-line is not reportable"
+    assert r["verdict"] == A.FORWARD, (
+        f"a target containing our fork point was called {r['verdict']!r}; the "
+        f"only commits it lacks are our own. why={r.get('why')!r}")
+    assert not r.get("tag_lag_only"), (
+        "a genuine forward target was labelled tag-lag, which tells a reader "
+        "there is nothing to do when there is")
+
+
+def test_a_failed_ancestry_probe_is_not_read_as_not_an_ancestor(fork):
+    """rc 0 and rc 1 are the only two answers `--is-ancestor` gives. Anything
+    else is the PROBE failing, and folding that into False turns "git could not
+    tell us" into the substantive verdict BEHIND -- a downgrade refusal invented
+    out of an unavailable repository. The clone is fine here; only the probe is
+    made to fail, so nothing else about the world changes."""
+    real = A._git_in
+
+    def probe_fails(clone, *args, **kw):
+        if args[:2] == ("merge-base", "--is-ancestor"):
+            return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+        return real(clone, *args, **kw)
+
+    A._git_in = probe_fails
+    try:
+        r = _direction("tool", fork["tip"], None, "v1.0", "master")
+    finally:
+        A._git_in = real
+    assert r["verdict"] == A.DIR_UNKNOWN, (
+        f"a probe that did not answer produced the substantive verdict "
+        f"{r['verdict']!r}; 'we could not check' is its own state. "
+        f"why={r.get('why')!r}")
+    assert "did not answer" in (r.get("why") or ""), (
+        f"the why-line does not say the probe failed: {r.get('why')!r}")
+
+
 def test_a_genuinely_forward_target_still_passes(fork):
     """Control: the case the whole mechanism exists to allow."""
     r = _direction("tool", fork["base"], None, "master", "master")
     assert r["verdict"] == A.FORWARD
+    assert r.get("why"), (
+        "the pin-ancestor branch produced a verdict with no why-line; the row "
+        "would render on the page and in the ledger with nothing to read")
     assert not r.get("tag_lag_only"), (
         "a real forward target was mislabelled as tag-lag, which would tell a "
         "reader there is nothing to do when there is")
 
 
-@pytest.mark.parametrize("tool,expected", [
-    ("OpenROAD", "tag_lag"),   # pin 1140 ahead, tag ON master
-    # cocotb moved 2026-08-31: upstream tagged v2.1.0rc1 CONTAINING our fork
-    # point (target_ahead=3, pin 20 ahead after the daily merges), so BEHIND
-    # became a genuine FORWARD — the world changed in the direction the
-    # predicate exists to track, and the ledger's why-line names the tag.
-    ("cocotb", A.FORWARD),
-    ("Trilinos", A.BEHIND),    # pin 407 ahead, tag OFF master — the original case
-])
-def test_the_real_fleet_agrees(tool, expected):
+#: The fleet rows this file measures. NAMES ONLY — what each one's verdict
+#: SHOULD be is derived below from git, never typed here. See
+#: `test_the_real_fleet_agrees`.
+FLEET_ROWS = ("OpenROAD", "cocotb", "Trilinos")
+
+
+def _is_ancestor(clone: Path, a: str, b: str) -> bool | None:
+    """Raw ancestry, asked of git directly rather than through `assess_release`.
+
+    The point of the fleet test is that the predicate agrees with the repository.
+    Deriving the expectation through the predicate's own helpers would make it
+    agree with itself, which is not a measurement.
+    """
+    r = subprocess.run(["git", "-C", str(clone), "merge-base", "--is-ancestor", a, b],
+                       capture_output=True, text=True)
+    return r.returncode == 0 if r.returncode in (0, 1) else None
+
+
+def _expected_row(clone: Path, pin: str, fork_point: str | None,
+                  target: str, up_branch: str):
+    """What the four-branch predicate must answer, computed from git alone.
+
+    Mirrors `assess_release.target_direction`'s documented order — pin-ancestor,
+    then fork-point-contained, then tag-on-the-tracked-line, else BEHIND — using
+    nothing but `merge-base --is-ancestor` on the clone.
+    """
+    def resolve(ref):
+        r = subprocess.run(["git", "-C", str(clone), "rev-parse", "--verify",
+                            "--quiet", f"{ref}^{{commit}}"],
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    pin_sha, tgt_sha = resolve(pin), resolve(target)
+    if not pin_sha or not tgt_sha:
+        return None                                   # unmeasurable: nothing to assert
+    if _is_ancestor(clone, pin_sha, tgt_sha):
+        return (A.FORWARD, False)
+    if fork_point:
+        fp_sha = resolve(fork_point)
+        if fp_sha and _is_ancestor(clone, fp_sha, tgt_sha):
+            return (A.FORWARD, False)
+        if not fp_sha:
+            return None
+    up_sha = resolve(up_branch) or resolve(f"upstream/{up_branch}")
+    if up_sha and _is_ancestor(clone, tgt_sha, up_sha):
+        return (A.FORWARD, True)
+    if up_sha is None:
+        return None
+    return (A.BEHIND, False)
+
+
+@pytest.mark.parametrize("tool", FLEET_ROWS)
+def test_the_real_fleet_agrees(tool):
     """The fleet-shaped assertion, skipped when the clones are not present.
 
-    Named tools rather than a count: a count moves every time a pin moves, and a
-    test that has to be edited on every release is one people edit without
-    reading.
+    THE EXPECTATION IS DERIVED, NOT TYPED (measured 2026-09-02)
+    ----------------------------------------------------------
+    This test used to carry a literal verdict per tool. Those literals are a bet
+    on today's upstream, and the pipeline moves the world itself: on 2026-08-31
+    the cocotb row was changed BEHIND -> FORWARD at 07:06 against image 0.3.40's
+    pin, and at 08:41 the same morning's release moved `COCOTB_REF` to a merge
+    whose fork point sits AFTER the v2.1.0 branch point. The tag stopped
+    containing the fork point, the predicate correctly said BEHIND again, and the
+    literal was wrong 95 minutes after it was written. It went red on the next
+    round and stayed red, and because a red suite gates the release half, the
+    image and https://vibeic.ai/eda-forks.html both stopped moving.
+
+    A release moving a pin is the NORMAL operation of this pipeline. A test that
+    a normal operation turns red is not a guard; the docstring above already says
+    so about the predicate, and it is just as true of the test.
+
+    So the row names a tool and nothing else. What its verdict must be is
+    computed from `merge-base --is-ancestor` on the clone, asked of git directly
+    rather than through `assess_release`, and the assertion is that the predicate
+    agrees with the repository. The four constructed-repo tests above remain the
+    proof that the DISTINCTION itself is right; this one proves it still holds on
+    live data, whatever the live data happens to be today.
     """
     led = Path.home() / ".cache/eda-fork-gatekeeper/ledger" / f"{tool}.json"
-    if not led.is_file() or not (A.FORKS_DIR / tool / ".git").is_dir():
+    clone = A.FORKS_DIR / tool
+    if not led.is_file() or not (clone / ".git").is_dir():
         pytest.skip(f"{tool}: no ledger or no clone on this host")
     d = json.loads(led.read_text())
-    r = _direction(tool, d.get("pinned_ref_full") or d.get("pinned_ref"),
-        (d.get("fork_point") or {}).get("sha"),
-        d.get("upstream_latest_release"),
-        d.get("upstream_default_branch") or "master")
-    if expected == "tag_lag":
-        assert r["verdict"] == A.FORWARD and r.get("tag_lag_only"), (
-            f"{tool}: expected ordinary tag-lag, got {r['verdict']!r} "
-            f"tag_lag_only={r.get('tag_lag_only')!r} — why={r.get('why')!r}")
-    else:
-        assert r["verdict"] == expected, (
-            f"{tool}: expected {expected!r}, got {r['verdict']!r} — "
-            f"why={r.get('why')!r}")
+    pin = d.get("pinned_ref_full") or d.get("pinned_ref")
+    fork_point = (d.get("fork_point") or {}).get("sha")
+    target = d.get("upstream_latest_release")
+    up_branch = d.get("upstream_default_branch") or "master"
+    if not pin or not target:
+        pytest.skip(f"{tool}: ledger records no pin or no release target")
+
+    expected = _expected_row(clone, pin, fork_point, target, up_branch)
+    r = _direction(tool, pin, fork_point, target, up_branch)
+    if expected is None:
+        # git could not answer. The predicate must not answer either — "we could
+        # not check" is its own state and must never render as FORWARD.
+        assert r["verdict"] != A.FORWARD, (
+            f"{tool}: git could not resolve the refs this row compares, yet the "
+            f"predicate returned {r['verdict']!r} — why={r.get('why')!r}")
+        return
+    verdict, tag_lag = expected
+    assert (r["verdict"], bool(r.get("tag_lag_only"))) == (verdict, tag_lag), (
+        f"{tool}: git says {verdict!r} tag_lag_only={tag_lag!r} for pin "
+        f"{pin[:12]} / fork point {(fork_point or '-')[:12]} / target {target} "
+        f"on {up_branch}, but the predicate returned {r['verdict']!r} "
+        f"tag_lag_only={r.get('tag_lag_only')!r} — why={r.get('why')!r}")
+    assert r.get("why"), f"{tool}: a verdict with no why-line is not reportable"
+
+
+def test_an_unresolvable_ref_is_not_asserted_as_agreement(fork):
+    """THE QUIET BRANCH, and it is unreachable on this host so nothing exercised
+    it. When git cannot resolve a row's refs, `_expected_row` returns None and
+    the fleet assertion collapses to "the predicate did not say FORWARD". That
+    collapse has to be proved, not assumed: a rubber-stamp oracle that returned
+    None for everything would silently switch the whole fleet row off."""
+    d = fork["dir"]
+    assert _expected_row(d, "deadbeefdeadbeef", None, "v1.0", "master") is None
+    assert _expected_row(d, fork["tip"], None, "no-such-tag-deadbeef",
+                         "master") is None
+    assert _expected_row(d, fork["tip"], "deadbeefdeadbeef", "v2.0-side",
+                         "master") is None
+    # and the predicate must agree that it could not answer -- "we could not
+    # check" must never render as "checked and fine".
+    r = _direction("tool", fork["tip"], None, "no-such-tag-deadbeef", "master")
+    assert r["verdict"] != A.FORWARD and r.get("why")
+
+
+def test_the_derived_expectation_is_not_a_rubber_stamp(fork):
+    """THE CONTROL FOR THE CONTROL. `_expected_row` is the fleet test's oracle;
+    if it agreed with everything, the fleet row would assert nothing. On the
+    constructed repo it must separate the same three cases the tests above do."""
+    d = fork["dir"]
+    assert _expected_row(d, fork["tip"], None, "v1.0", "master") == (A.FORWARD, True)
+    assert _expected_row(d, fork["tip"], None, "v2.0-side", "master") == (A.BEHIND, False)
+    assert _expected_row(d, fork["base"], None, "master", "master") == (A.FORWARD, False)
+    # the fork-point branch: our pin is NOT an ancestor of the target, but the
+    # target contains the point we forked from, so the only thing it lacks is
+    # our own carried work. FORWARD, and not tag-lag.
+    assert _expected_row(d, fork["side"], fork["base"], "master",
+                         "master") == (A.FORWARD, False)
+    assert _expected_row(d, fork["tip"], None, "v2.0-side",
+                         "no-such-branch-deadbeef") is None
+    # the oracle must not answer None for everything: three of the four cases
+    # above returned a verdict, so None means "could not measure", not "off".
