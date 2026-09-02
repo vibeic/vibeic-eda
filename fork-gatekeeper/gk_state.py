@@ -59,6 +59,7 @@ from __future__ import annotations
 import datetime
 import functools
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -243,5 +244,49 @@ def strip_provenance(obj):
     `PUBLISHED_KEYS` pins the members whose survival is load-bearing.
     """
     if isinstance(obj, dict):
-        return {k: v for k, v in obj.items() if k != PROVENANCE_KEY}
+        obj = {k: v for k, v in obj.items() if k != PROVENANCE_KEY}
+    return _strip_host_paths(obj)
+
+
+#: Where this fleet's clones live on the machine that runs the round. A ledger
+#: records it because a measurement has to name what it measured; the page must
+#: not, because that is the operator's account name and directory layout.
+_HOST_HOME = str(Path.home())
+
+#: What a redacted path renders as. A marker rather than a deletion: a reader who
+#: sees `null` cannot tell "not measured" from "measured and withheld", and the
+#: page distinguishes those two states everywhere else.
+HOST_PATH_REDACTED = "<local checkout>"
+
+#: The home prefix plus whatever path characters follow it, so a path quoted
+#: mid-sentence is replaced rather than the sentence being dropped.
+_HOST_PATH_RE = re.compile(re.escape(_HOST_HOME) + r"[A-Za-z0-9/._~+-]*")
+
+
+def _strip_host_paths(obj):
+    """Every string naming a path under this host's home, redacted, at any depth.
+
+    `strip_provenance` was a denylist of exactly one TOP-LEVEL key, and the leak it
+    was written for had a second home: `release_containment.clone` carries the same
+    absolute clone path one level down, so 30 of them reached the published page
+    (2026-09-02). A denylist of key names cannot fix that class -- the next field to
+    hold a path will have a different name.
+
+    So the rule is on the VALUE, not the key: a string that starts with this host's
+    home directory does not cross the publish boundary. Paths INSIDE the container
+    image (`/foss/...`, `/vibeic/...`) are deliberately untouched -- the page lists
+    them on purpose, and a blanket "strip every absolute path" would delete the
+    inventory section's real content.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_host_paths(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_host_paths(v) for v in obj]
+    if isinstance(obj, str) and _HOST_HOME in obj:
+        # ANYWHERE in the string, not just at the start. The one path that
+        # survived the first draft of this was inside a sentence -- a why-line
+        # reading "<tag> does not resolve in <path>, so the target's direction
+        # was NOT measured". A field holding a path and a field holding prose
+        # that mentions one are the same disclosure.
+        return _HOST_PATH_RE.sub(HOST_PATH_REDACTED, obj)
     return obj
