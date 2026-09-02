@@ -48,24 +48,24 @@ variable "SV2V_REF"    { default = "493a88f930802da68f592c192ec86991eaf95c49" }
 variable "SV2V_RECIPE" { default = "3a8690" }
 variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
-variable "IHP_OPEN_PDK_REF"    { default = "331c00484213b13414777eec1336ef5c29b969bd" }
-variable "IHP_OPEN_PDK_RECIPE" { default = "941859" }
-variable "OPENROAD_RECIPE" { default = "d912ff" }
-variable "YOSYS_RECIPE" { default = "8d03b8" }
+variable "IHP_OPEN_PDK_REF"    { default = "5e6d592e4002946a4616f798c357f0f3c06cf3b6" }
+variable "IHP_OPEN_PDK_RECIPE" { default = "e28a45" }
+variable "OPENROAD_RECIPE" { default = "12d6e3" }
+variable "YOSYS_RECIPE" { default = "dc3ca9" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
-variable "LVS_RECIPE" { default = "84c146" }
+variable "LVS_RECIPE" { default = "df39a9" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
-variable "IVERILOG_RECIPE" { default = "bd013f" }
+variable "IVERILOG_RECIPE" { default = "5ce17a" }
 variable "KLAYOUT_RECIPE" { default = "cfb7cd" }
-variable "VERILATOR_RECIPE" { default = "5a83f0" }
+variable "VERILATOR_RECIPE" { default = "35c533" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
-variable "XSCHEM_RECIPE" { default = "733989" }
-variable "SLANG_RECIPE" { default = "2df92f" }
-variable "XYCE_RECIPE" { default = "71dfca" }
+variable "XSCHEM_RECIPE" { default = "3057c1" }
+variable "SLANG_RECIPE" { default = "3fc3ad" }
+variable "XYCE_RECIPE" { default = "f43f2f" }
 variable "YICES2_RECIPE" { default = "04c594" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
-variable "SV_ELAB_RECIPE" { default = "b2f5a1" }
+variable "SV_ELAB_RECIPE" { default = "4f4c16" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -73,13 +73,13 @@ variable "SV_ELAB_RECIPE" { default = "b2f5a1" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "4de296ee894fd873f5fbd6a19edbda82ca091999" }
-variable "YOSYS_REF"       { default = "41dcf1c19e07e109d0f7fc97edd55bfd58683315" }
+variable "OPENROAD_REF"    { default = "25b6420cdb5b444aad3bed74fdc87506721b90ef" }
+variable "YOSYS_REF"       { default = "dd8390b4f2a96daf77755d0fa2d95a50b6c2d7c2" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
-variable "MAGIC_REF"       { default = "2915463dfabb04e2e6064f2e76882577cff320b8" }
-variable "NETGEN_REF"      { default = "b7941fafb91317b6a5845d9e9765cea278aa31c3" }
+variable "MAGIC_REF"       { default = "ca88abcdf515576a03aab2ab1e9efb9e3fe99e2d" }
+variable "NETGEN_REF"      { default = "88ae14dfbe255ebc1be10877e76f253da272e53b" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
 # FasterCap checkout cannot configure. All three refs appear in the tag below, so
@@ -87,16 +87,16 @@ variable "NETGEN_REF"      { default = "b7941fafb91317b6a5845d9e9765cea278aa31c3
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "6bfd8d1f41c40090e936cfaedfc890d62370f983" }
+variable "IVERILOG_REF"    { default = "ae982e8311552a065c4c6fbfea63988a62e0af8a" }
 variable "KLAYOUT_REF"     { default = "82fc909f570b93d09bb403cff8cfe7cd280e8acb" }
-variable "VERILATOR_REF"   { default = "8927a3dd914ab38fb74128ca3d694137c0daf490" }
+variable "VERILATOR_REF"   { default = "9c2acaa8e7e533b2ed4e09d4844825e62c60ceda" }
 variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
-variable "XSCHEM_REF" { default = "ffa3f24ca9b13e5478dd6b5fd5f5d49bfff39c23" }
+variable "XSCHEM_REF" { default = "772878a0393fa073547fdab4612033ed0442de61" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "8d069050cecdf436fda3e2d5e724250823f65944" }
+variable "SLANG_REF" { default = "cf74bfcdfa7246b51b2399d53cec6f6ad25bb8b7" }
 variable "XYCE_REF" { default = "1fab4581ab6f2410eabf42543daf17242c27ab9f" }
 variable "YICES2_REF" { default = "05178c03ddf49c6bba63c5c7153774c11a5da12d" }
-variable "SV_ELAB_REF" { default = "84bbdaacf59f56ff9b5e7be486f9cc7df136b385" }
+variable "SV_ELAB_REF" { default = "20b52d325748fb00bfdad9d4ab183ea887e60d68" }
 
 function "short" {
   params = [ref]
