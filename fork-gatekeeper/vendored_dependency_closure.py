@@ -409,6 +409,39 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
                 materialise_args.extend([
                     "-c", f"url.{child_url.strip()}.insteadOf={edge['url']}",
                 ])
+                # ...AND NAME IT DIRECTLY. MEASURED 2026-09-05: three rounds
+                # refused to publish on
+                #     fatal: transport 'file' not allowed
+                #     clone of '/home/reyerchu/vibe-ic-forks/OpenROAD/src/sta'
+                #             into submodule path '<worktree>/src/sta' failed
+                # The host CLONE's own .git/config carries
+                # `submodule.module/OpenSTA.url = <a local absolute path>` --
+                # left there by whoever first materialised it -- and
+                # `git worktree add` SHARES that config, so the worktree
+                # inherited the local path. `.git/config` beats `.gitmodules`,
+                # so the insteadOf above rewrote a URL that was never consulted,
+                # and git >= 2.38 refuses the `file` transport for submodules
+                # (CVE-2022-39253). Setting the per-submodule key for this
+                # invocation overrides the inherited one without writing to the
+                # shared clone.
+                # The config key is the submodule NAME, which is not the path
+                # (here: `module/OpenSTA` for path `src/sta`), so ask the tree
+                # being materialised for it rather than guessing.
+                nrc, nout, _ = _git(
+                    wt, "config", "-f", ".gitmodules", "--get-regexp",
+                    r"^submodule\..*\.path$",
+                )
+                sub_name = None
+                if nrc == 0:
+                    for line in nout.splitlines():
+                        key, _, value = line.partition(" ")
+                        if value.strip() == edge["path"]:
+                            sub_name = key[len("submodule."):-len(".path")]
+                            break
+                if sub_name:
+                    materialise_args.extend([
+                        "-c", f"submodule.{sub_name}.url={child_url.strip()}",
+                    ])
             rc, _, err = _git(
                 wt, *materialise_args, "submodule", "update", "--init",
                 "--recursive", "--", edge["path"], timeout=1800,
