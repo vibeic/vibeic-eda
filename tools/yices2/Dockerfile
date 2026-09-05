@@ -25,7 +25,7 @@
 FROM ubuntu:24.04 AS build
 
 ARG YICES2_REPO=https://github.com/vibeic/yices2.git
-ARG YICES2_REF=05178c03ddf49c6bba63c5c7153774c11a5da12d
+ARG YICES2_REF=35c09acc442d918e07ea4711d02a39f05b781e71
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf automake libtool gperf ca-certificates \
