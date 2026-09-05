@@ -58,6 +58,37 @@ def _run(args: List[str], cwd: Optional[Path] = None,
         return 127, "", f"{type(exc).__name__}: {exc}"
 
 
+def _tail(text: str, limit: int = 400) -> str:
+    """The END of a tool's error, not its beginning.
+
+    MEASURED 2026-09-05. `git submodule update` failed twice for OpenSTA and both
+    times the recorded detail was exactly
+
+        could not materialise src/sta at 34bf022ea6f1: Cloning into '/tmp/vendored_closure_OpenROAD_b2kcey3j/wt/src/sta'...
+
+    which is git's PROGRESS line, not its failure. Every truncation in this file
+    took the first N characters, and a clone announces itself before it fails, so
+    the announcement is all that ever survived -- in the log, in the .txt sidecar
+    and in the JSON alike. Three rounds refused to publish on a diagnosis nobody
+    could read.
+
+    git puts the reason last ("fatal: ...", "error: ..."), so keep the tail, and
+    prefer whole lines carrying a recognised marker when there are any.
+    """
+    text = " ".join(text.split()) if "\n" not in text else text.strip()
+    if len(text) <= limit:
+        return text
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    flagged = [ln for ln in lines
+               if any(k in ln.lower() for k in
+                      ("fatal", "error", "cannot", "could not", "denied",
+                       "timed out", "unable", "refused", "not found"))]
+    picked = " | ".join(flagged[-4:]) if flagged else " | ".join(lines[-4:])
+    if len(picked) > limit:
+        picked = "..." + picked[-(limit - 3):]
+    return picked
+
+
 def _git(repo: Path, *args: str, timeout: int = 300) -> Tuple[int, str, str]:
     return _run(["git", "-C", str(repo), *args], timeout=timeout)
 
@@ -142,10 +173,10 @@ def _observe_branch(forks_root: Path, repo: str, branch: str) -> Tuple[Optional[
         return None, f"fork clone {clone} is missing"
     rc, _, err = _git(clone, "remote", "set-branches", "origin", "*")
     if rc != 0:
-        return None, f"could not widen {repo} origin refspec: {(err or '').strip()[:180]}"
+        return None, f"could not widen {repo} origin refspec: {_tail(err or '')}"
     rc, _, err = _git(clone, "fetch", "origin", "--prune", timeout=1800)
     if rc != 0:
-        return None, f"could not fetch vibeic/{repo}: {(err or '').strip()[:180]}"
+        return None, f"could not fetch vibeic/{repo}: {_tail(err or '')}"
     ref = f"refs/heads/{branch}"
     rc, out, err = _git(clone, "ls-remote", "--refs", "origin", ref)
     rows = [line.split() for line in out.splitlines() if line.strip()]
@@ -153,7 +184,7 @@ def _observe_branch(forks_root: Path, repo: str, branch: str) -> Tuple[Optional[
             or not OID.fullmatch(rows[0][0]) or rows[0][1] != ref):
         detail = " ".join((err or out).split())
         return None, (f"remote vibeic/{repo} {ref} did not resolve to exactly "
-                      f"one commit" + (f": {detail[:180]}" if detail else ""))
+                      f"one commit" + (f": {_tail(detail)}" if detail else ""))
     remote_tip = rows[0][0].lower()
     rc, out, err = _git(
         clone, "rev-parse", "--verify",
@@ -164,7 +195,7 @@ def _observe_branch(forks_root: Path, repo: str, branch: str) -> Tuple[Optional[
         detail = " ".join((err or out).split())
         return None, (f"fresh origin/{branch} for {repo} does not match remote "
                       f"tip {remote_tip[:12]}"
-                      + (f": {detail[:180]}" if detail else ""))
+                      + (f": {_tail(detail)}" if detail else ""))
     return {"clone": clone, "branch": branch, "tip": remote_tip}, None
 
 
@@ -176,7 +207,7 @@ def _gitlink(clone: Path, host_tip: str, path: str) -> Tuple[Optional[str], Opti
             or not OID.fullmatch(rows[0][2])):
         detail = " ".join((err or out).split())
         return None, (f"{host_tip[:12]}:{path} is not exactly one gitlink"
-                      + (f": {detail[:180]}" if detail else ""))
+                      + (f": {_tail(detail)}" if detail else ""))
     return rows[0][2].lower(), None
 
 
@@ -193,7 +224,7 @@ def _submodules(clone: Path, host_tip: str, host: str) -> Tuple[Optional[List[di
             return [], None
         return None, (f"{host}@{host_tip[:12]} is delivered with submodules, "
                       f"but .gitmodules could not be read: "
-                      f"{' '.join((err or out).split())[:180]}")
+                      f"{_tail(err or out)}")
     try:
         parsed = discover_forks.parse_gitmodules(out)
     except Exception as exc:
@@ -304,7 +335,7 @@ def _edge_scan(eda_root: Path, forks_root: Path, registry: Dict[str, dict],
                 findings.append({**edge, "state": "UNMEASURED",
                                  "detail": (f"could not prove {current[:12]} is an "
                                             f"ancestor of {child_observed['tip'][:12]}"
-                                            + (f": {diagnostic[:160]}" if diagnostic else ""))})
+                                            + (f": {_tail(diagnostic)}" if diagnostic else ""))})
             if recursive and depth + 1 < max_depth:
                 queue.append((child, True, depth + 1,
                               f"{host}:{submodule['path']}"))
@@ -345,7 +376,7 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
                           timeout=1800)
         if rc != 0:
             row.update(state="UNMEASURED",
-                       detail=f"could not create host worktree: {err.strip()[:180]}")
+                       detail=f"could not create host worktree: {_tail(err)}")
             return row
         for edge in edges:
             rc, _, err = _git(
@@ -355,7 +386,7 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
             if rc != 0:
                 row.update(state="UNMEASURED",
                            detail=(f"could not stage {edge['path']} at "
-                                   f"{edge['to'][:12]}: {err.strip()[:160]}"))
+                                   f"{edge['to'][:12]}: {_tail(err)}"))
                 return row
         rc, out, err = _git(wt, "diff", "--cached", "--name-only")
         changed = [line for line in out.splitlines() if line.strip()]
@@ -363,7 +394,7 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
         if rc != 0 or sorted(changed) != expected:
             row.update(state="UNMEASURED",
                        detail=(f"candidate index changed {sorted(changed)}, expected "
-                               f"{expected}: {err.strip()[:120]}"))
+                               f"{expected}: {_tail(err)}"))
             return row
         for edge in edges:
             child_clone = _clone_path(forks_root, edge["repo"])
@@ -385,7 +416,7 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
             if rc != 0:
                 row.update(state="UNMEASURED",
                            detail=(f"could not materialise {edge['path']} at "
-                                   f"{edge['to'][:12]}: {err.strip()[:180]}"))
+                                   f"{edge['to'][:12]}: {_tail(err)}"))
                 return row
 
         checks = registry[host.lower()].get("post_merge_check") or []
@@ -416,20 +447,20 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
         ], timeout=300)
         if rc != 0:
             row.update(state="UNMEASURED",
-                       detail=f"could not commit host gitlinks: {err.strip()[:180]}")
+                       detail=f"could not commit host gitlinks: {_tail(err)}")
             return row
         rc, out, err = _git(wt, "rev-parse", "HEAD^{commit}")
         candidate = out.strip().lower()
         if rc != 0 or not OID.fullmatch(candidate):
             row.update(state="UNMEASURED",
-                       detail=f"candidate commit did not resolve: {err.strip()[:180]}")
+                       detail=f"candidate commit did not resolve: {_tail(err)}")
             return row
         row["to"] = candidate
         rc, out, err = _git(wt, "merge-base", "--is-ancestor", observed_tip, candidate)
         if rc != 0:
             row.update(state="NEEDS_HUMAN" if rc == 1 else "UNMEASURED",
                        detail=(f"candidate does not prove a fast-forward from "
-                               f"{observed_tip[:12]}: {' '.join((err or out).split())[:160]}"))
+                               f"{observed_tip[:12]}: {_tail(err or out)}"))
             return row
         rc, push_out, push_err = _git(
             wt, "push", "--porcelain",
@@ -441,7 +472,7 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
             row.update(state="NEEDS_HUMAN" if "rejected" in detail.lower()
                        else "UNMEASURED",
                        detail=(f"CAS push of {host}/{branch} was not confirmed: "
-                               f"{detail[:200]}"))
+                               f"{_tail(detail)}"))
             return row
         rc, out, err = _git(clone, "ls-remote", "--refs", "origin",
                             f"refs/heads/{branch}")
@@ -558,14 +589,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"vendored dependency closure: {result['status']} — "
           f"{len(result.get('updated_hosts', []))} host(s) updated, "
           f"{stale} stale edge observation(s)")
+    # The detail is printed WHOLE. Truncating here is what made the earlier
+    # `_tail` fix invisible: a complete diagnosis assembled upstream was cut to
+    # 120 characters on the way out, so the log, the .txt sidecar and anything
+    # grepping them all still showed only "Cloning into '/tmp/...'". A line that
+    # is long is readable; a line that stops before the reason is not.
     for pass_row in result["passes"]:
         for update in pass_row.get("updates", []):
             print(f"  {update['host']:<16} {update['state']:<14} "
-                  f"{update.get('detail', '')[:120]}")
+                  f"{update.get('detail', '')}")
         for finding in pass_row.get("findings", []):
             print(f"  {finding.get('host', '?'):<16} "
                   f"{finding.get('state', 'UNMEASURED'):<14} "
-                  f"{finding.get('detail', '')[:120]}", file=sys.stderr)
+                  f"{finding.get('detail', '')}", file=sys.stderr)
     return rc
 
 
