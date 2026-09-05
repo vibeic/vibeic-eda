@@ -27,6 +27,8 @@ import json
 import pathlib
 import sys
 
+import pytest
+
 _HERE = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location(
     "cup", _HERE / "check_unshippable_patches.py")
@@ -113,12 +115,51 @@ def test_the_state_path_is_imported_not_respelled():
         "of asked of gk_state")
 
 
+def _ledger_is_settled(d, *, samples=3, gap=0.35):
+    """True when the ledger is not being rewritten underneath us.
+
+    MEASURED 2026-09-05. This test read the live ledger at 21:26:01 while
+    `discover_forks` was rewriting it -- 15 files changed inside that window, and
+    `FasterCap.json` was rewritten 54 seconds later. The half-written file said
+    `integrated=false` for a fork whose completed row says `integrated=true` and
+    whose `FASTERCAP_REF` is pinned in docker-bake.hcl. The suite went red on a
+    fork that is correctly shipped, the round refused to publish, and a
+    publish-silence PR was opened for a defect that did not exist.
+
+    A reader of shared mutable state has to establish that the state is at rest
+    before it may treat what it read as a finding. Same rule as every other gate
+    here: not being able to measure is its own outcome, never a finding.
+    """
+    import time
+
+    def fingerprint():
+        return sorted(
+            (f.name, f.stat().st_mtime_ns, f.stat().st_size)
+            for f in d.glob("*.json")
+        )
+
+    seen = fingerprint()
+    for _ in range(samples - 1):
+        time.sleep(gap)
+        again = fingerprint()
+        if again != seen:
+            return False
+        seen = again
+    return True
+
+
 def test_the_real_ledger_satisfies_the_invariant_today():
     """The measurement that made adding this cheap. If it ever fails here, the
-    guard has found a real one on the production ledger."""
+    guard has found a real one on the production ledger -- but only if the ledger
+    was actually at rest when we read it. See `_ledger_is_settled`."""
     import gk_state
     d = gk_state.state_dir() / "ledger"
     if not d.is_dir():
         return
+    if not _ledger_is_settled(d):
+        pytest.skip(
+            "the ledger is being rewritten right now (a round's discover_forks "
+            "is mid-flight); a row read mid-write is not evidence about any fork"
+        )
     rc, msg = C.report(d)
     assert rc in (0, 2), msg
