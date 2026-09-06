@@ -49,21 +49,43 @@ RUN set -e; \
         || { echo "FAIL: :poly2 itself was redefined; DPF.5 would measure a layer against itself" >&2; exit 1; }; \
     echo "OK 1/4 PL.8: poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"
 
-# --- 2/4  the seal-ring cell library the PDK's own sealring.py imports ---------
-# vibeic-eda#170. BLOCKING for gf180mcuD only. The two ihp families cannot draw a
-# seal ring either, for an unrelated reason (SG13_dev never registers because
-# sg13g2_pycell_lib needs a 'cni' module absent from this image); that is
-# REPORTED here, not fixed, and not allowed to gate this build.
+# --- 2/5  the PyCell runtime the ihp PDKs' own bootstrap puts on sys.path -----
+# vibeic-eda#173. libs.tech/klayout/python/{pycell4klayout-api,pypreprocessor}
+# are EMPTY submodule directories in the delivered ihp-sg13g2 tree; its
+# autorun.lym appends the first to sys.path and sg13g2_pycell_lib imports from
+# both, so SG13_dev never registered and nothing built on it could draw a
+# device or a seal ring. ihp-sg13cmos5l symlinks both directories into
+# ihp-sg13g2, so one install serves both families. Provenance (the gitlinks
+# the PDK's own recorded commit pins, blob-for-blob): tools/pdk/ihp_pycell_runtime/PROVENANCE.md.
+# BLOCKING for ihp-sg13g2. ihp-sg13cmos5l is REPORTED, not gated: its library
+# registers, and KLayout also reports two of its device modules unreadable --
+# dangling symlinks into a newer sg13g2 that no longer carries them (the two
+# families in the base image are from different upstream dates). That is a
+# base-image skew tracked as vibeic-eda#176; this step neither hides it nor owns it.
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_ihp_pycell_runtime_install.py \
+        --pdk ihp-sg13g2 --source /vibeic/pdk/ihp_pycell_runtime --expect 37; \
+    python3 /vibeic/pdk/pdk_pycell_lib_check.py --pdk ihp-sg13g2 --require ihp-sg13g2; \
+    echo "--- advisory: every shipped family, not gating ---"; \
+    python3 /vibeic/pdk/pdk_pycell_lib_check.py || true; \
+    find /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l -name __pycache__ -type d -prune -exec rm -rf {} + ; \
+    echo "OK 2/5 pycell: ihp-sg13g2 registers SG13_dev; ihp-sg13cmos5l state reported above"
+
+# --- 3/5  the seal-ring cell library the PDK's own sealring.py imports ---------
+# vibeic-eda#170. BLOCKING for gf180mcuD and, now that its PCell library loads
+# (2/5), for ihp-sg13g2. ihp-sg13cmos5l is REPORTED, not gated, for the reason
+# stated in 2/5.
 RUN set -e; \
     python3 /vibeic/pdk/pdk_gf180_sealring_install.py \
         --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4; \
-    python3 /vibeic/pdk/pdk_sealring_check.py --pdk gf180mcuD --require gf180mcuD; \
+    python3 /vibeic/pdk/pdk_sealring_check.py \
+        --pdk gf180mcuD --pdk ihp-sg13g2 --require gf180mcuD --require ihp-sg13g2; \
     echo "--- advisory: every shipped family, not gating ---"; \
     python3 /vibeic/pdk/pdk_sealring_check.py || true; \
-    find /foss/pdks/ciel -name __pycache__ -type d -prune -exec rm -rf {} + ; \
-    echo "OK 2/4 sealring: gf180mcuD draws a ring; ihp state reported above"
+    find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l -name __pycache__ -type d -prune -exec rm -rf {} + ; \
+    echo "OK 3/5 sealring: gf180mcuD and ihp-sg13g2 draw a ring; ihp-sg13cmos5l state reported above"
 
-# --- 3/4  the two OSDI objects ihp-sg13g2's own .spiceinit loads --------------
+# --- 4/5  the two OSDI objects ihp-sg13g2's own .spiceinit loads --------------
 # vibeic-eda#172. Both Verilog-A sources and the PDK's own compile script are
 # already in the image; the base image simply never produced these two.
 RUN set -e; \
@@ -72,9 +94,9 @@ RUN set -e; \
         openvaf-r -D__NGSPICE__ -o ../ngspice/osdi/$M.osdi $M/$M.va; \
     done; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
-    echo "OK 3/4 osdi: every OSDI object every shipped PDK loads now resolves"
+    echo "OK 4/5 osdi: every OSDI object every shipped PDK loads now resolves"
 
-# --- 4/4  OpenROAD, this org's fork at cad013df9821 ---------------------------
+# --- 5/5  OpenROAD, this org's fork at cad013df9821 ---------------------------
 # Built from a clean checkout of exactly that sha with --config=release so the
 # binary states its own provenance. /foss/tools/bin/openroad is a symlink to this
 # path. openroad-librelane is a separate install and is deliberately untouched.
@@ -85,7 +107,7 @@ RUN set -e; \
     [ "$V" = "26Q3-2065-gcad013df98" ] \
         || { echo "FAIL: openroad reports '$V', not the fork build 26Q3-2065-gcad013df98" >&2; exit 1; }; \
     printf 'openroad cad013df982140fb5c78fd584fb1c7ae8a0d3c55\n' > /foss/tools/openroad/SOURCES; \
-    echo "OK 4/4 openroad: $V"
+    echo "OK 5/5 openroad: $V"
 
 # --- the volume is what it says it is ----------------------------------------
 # Runs after every step that touches the tracked ciel volume. An undeclared file
