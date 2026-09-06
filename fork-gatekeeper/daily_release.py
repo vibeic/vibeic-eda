@@ -2844,6 +2844,19 @@ def _main_under_release_lock(argv=None) -> int:
                                   "behind": v.get("behind"),
                                   "branch_is_ours": False})
             continue
+        if v["verdict"] in ("PIN_OFF_DECLARED_BRANCH", "DECLARED_BRANCH_ABSENT"):
+            # The pin is not on the line FORKS.json declares for this fork, or
+            # that line does not exist.  Never advance on a guess: measured
+            # 2026-09-07, check_one answered `vibeic/antenna-best-iteration`
+            # for OpenROAD's pin (a topic branch that also contained it) and
+            # this loop moved the pin to that branch's tip -- a commit on no
+            # declared line -- and the next round's daily_merge refused every
+            # release with NO_BRANCH_AT_PIN.  Named here, not folded into the
+            # generic arm below, so the log says what to do: put the pin back
+            # on the declared branch first.
+            unresolved.append({"repo": repo, "verdict": v["verdict"],
+                               "why": f"{v['verdict']}: {v['detail']}"})
+            continue
         if v["verdict"] != "STALE":
             unresolved.append({"repo": repo, "verdict": v["verdict"],
                                "why": f"{v['verdict']}: {v['detail']}"})
