@@ -755,7 +755,7 @@ RUN set -e; \
 # build.
 #
 # MEASURED on the base image this Dockerfile pins: 13324 files, 1.8 GB, 0.5 s.
-COPY tools/pdk/pdk_local_mods.py /vibeic/pdk/pdk_local_mods.py
+COPY tools/pdk/pdk_local_mods.py tools/pdk/pdk_gf180_poly2_density_patch.py /vibeic/pdk/
 RUN set -e; \
     python3 /vibeic/pdk/pdk_local_mods.py baseline \
         --root /foss/pdks/ciel \
@@ -811,6 +811,76 @@ RUN set -e; \
 # is now enforced from both ends: `--layers met5` here, and a manifest entry
 # whose `paths` name only the sky130 HD/HVL tech LEFs, so a later sweep that
 # reached the gf180 files would fail as an undeclared modification.
+#
+# THE SAME RUN CARRIES A SECOND, UNRELATED PDK CORRECTION. It is one layer
+# rather than two on purpose: tools/image_layer_budget.json leaves the final
+# stage 53 instructions and 52 are spent, so a second RUN here would consume
+# the last one and fork-gatekeeper/test_image_layer_budget.py's
+# `final_layers == 52` tripwire exists precisely to make that a decision
+# somebody takes rather than a number somebody edits. Each half asserts and
+# announces itself separately below.
+#
+# The gf180mcu PL.8 poly-density rule does not count the dummy poly THIS PDK
+# writes.
+#
+# The deck states every half of the contradiction itself:
+#
+#   drc/rule_decks/density.rb    # Rule PL.8: Poly2 coverage over the entire die
+#                                # shall be 14%.
+#                                ## Dummy poly2 lines must be added to meet the
+#                                ## minimum poly2 density requirement.
+#                                if (poly2.area / chip_area) * 100 < 14
+#   drc/generic_layers.rb        :poly2 = 30/0 ;  :poly2_dummy = 30/4
+#   tech/scripts/fill_poly2.rb   fill_layer = Poly2_Dummy
+#   tech/scripts/fill_all.rb     Poly2_Dummy = $ly.layer(30, 4)
+#
+# So the rule tells the customer to add dummy poly, the PDK ships the script
+# that adds it, that script writes it on 30/4 — and the rule counts 30/0 alone.
+# A die that meets the density requirement WITH the fill this PDK generated is
+# reported as violating it. The metal rules in the same file do not have the
+# defect: `register_numbered_metal_layers` unions metal_drawn + metal_dummy and
+# M1.4..MT.3 read that union.
+#
+# This is a CORRECTION, not a relaxation, and the difference is measured rather
+# than asserted. Three generated 100x100um dies, run through the deck THIS image
+# ships (`-rd decks=density -rd variant=gf180mcuD -rd run_mode=flat`):
+#
+#     5% drawn (30/0) + 15% dummy (30/4)   PL.8 FAIL -> PASS   the defect
+#     5% drawn, no fill                    PL.8 FAIL -> FAIL   the control
+#     20% drawn, no fill                   PL.8 PASS -> PASS   unchanged path
+#
+# The middle row is the whole argument: a die genuinely short of polysilicon is
+# still reported. Re-run with `-rd decks=all`, the set of rules that fire is
+# identical before and after on all three dies except PL.8 leaving the first.
+#
+# SCOPE: `:poly2` is NOT redefined. Unlike metal, dummy poly carries its own
+# deck (rule_decks/dummy_poly2.rb) and DPF.5 is
+# `poly2_dummy.separation(poly2, 5.um)` — dummy measured AGAINST drawn. Folding
+# the two into one symbol would make that rule measure a layer against itself
+# and would silently change device extraction (`tgate = poly2.and(comp)`). The
+# union arrives under a new name, :poly2_result, and the density rule is its
+# only consumer.
+#
+# FIXED UPSTREAM ALREADY, and this volume is behind it:
+# fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv 2404d27b583b
+# (2026-07-04, "fix: ensure poly2 = poly2_drawn + poly2_dummy", 28 files).
+# Upstream instead RENAMES 30/0 to :poly2_drawn and gives the union the name
+# :poly2 via a level-0 row in the metal table — which also hands the union to
+# every rule that still says bare poly2 (geom.rb's off-grid check,
+# guard_ring.rb, others). Those verdict changes are not measured here, so this
+# step ports the PL.8 half only; adopting the rest belongs with ADVANCING the
+# PDK volume. There is therefore no upstream patch to send.
+#
+# WHY THIS LAYER OWNS IT MEANWHILE: the gf180mcuD this image ships is not built
+# from open_pdks source. It is a prebuilt ciel volume the base image bakes in at
+# /foss/pdks/ciel/gf180mcu/versions/<sha>/ whose deck predates 2404d27b583b, so
+# a commit in vibeic/open_pdks would ship nothing and this RUN is the only place
+# that owns the bytes a user gets. Full dossier:
+# docs/DEFECT_gf180mcu_pl8_poly_dummy_density.md.
+#
+# Declared in tools/pdk/local_mods.json as
+# `gf180mcu-pl8-poly-density-counts-dummy` and reconciled against a MEASURED
+# diff by the last step in this stage, so this comment cannot outlive the step.
 COPY tools/pdk/pdk_via_min_width_patch.py /tmp/pdk_via_min_width_patch.py
 RUN set -e; \
     HD=/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/techlef; \
@@ -822,7 +892,17 @@ RUN set -e; \
     g=$(grep -c 'RECT -0.8 -0.8 0.8 0.8' $HD/sky130_fd_sc_hd__nom.tlef); \
     [ "$g" = "5" ] || { echo "FAIL: expected 5 grown M4M5 met5 patches in __nom.tlef, found $g" >&2; exit 1; }; \
     rm -f /tmp/pdk_via_min_width_patch.py; \
-    echo "sky130A: met5 via patches raised to the layer's own 1.6um minimum (12 tech LEFs, 120 edits)"
+    echo "sky130A: met5 via patches raised to the layer's own 1.6um minimum (12 tech LEFs, 120 edits)"; \
+    python3 /vibeic/pdk/pdk_gf180_poly2_density_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 2; \
+    D=/foss/pdks/gf180mcuD/libs.tech/klayout/tech/drc; \
+    grep -q 'if (poly2_result.area / chip_area) \* 100 < 14' $D/rule_decks/density.rb \
+        || { echo "FAIL: PL.8 still reads drawn poly2 alone" >&2; exit 1; }; \
+    grep -q 'name: :poly2_result,    calc: ->(ctx) { ctx\[:poly2\] + ctx\[:poly2_dummy\] }' $D/generic_layers.rb \
+        || { echo "FAIL: :poly2_result was not registered" >&2; exit 1; }; \
+    grep -q 'extract_single_layer_from_design.call(:poly2, 30, 0)' $D/generic_layers.rb \
+        || { echo "FAIL: :poly2 itself was redefined; DPF.5 would measure a layer against itself" >&2; exit 1; }; \
+    echo "gf180mcuD: PL.8 counts poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future
 # recipe change that stops producing a file cannot silently leave the base's
