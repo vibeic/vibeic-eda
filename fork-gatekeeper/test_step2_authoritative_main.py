@@ -80,6 +80,21 @@ def _graph(tmp_path: Path, delivered: str) -> tuple[Path, Path, str]:
         _commit(publisher, "unrelated remote work")
         _git(publisher, "cherry-pick", source_tip)
         assert _git(publisher, "rev-parse", "HEAD").stdout.strip() != source_tip
+    elif delivered == "squash":
+        # A second branch commit, so the squash's single patch matches no
+        # individual commit's patch id -- the shape git cherry cannot see.
+        _git(publisher, "checkout", "-q", BRANCH)
+        (publisher / "second.txt").write_text("second\n", encoding="utf-8")
+        source_tip = _commit(publisher, "second branch commit")
+        _git(publisher, "push", "-q", "origin", BRANCH)
+        _git(publisher, "checkout", "-q", "master")
+        _git(publisher, "merge", "-q", "--squash", BRANCH)
+        _commit(publisher, "squash of the branch (a merged PR)")
+        # The mainline moved on afterwards, on the same file: re-merging the
+        # branch now can only conflict, exactly as OpenROAD did on 2026-09-07.
+        (publisher / "shared.txt").write_text("branch work, then more\n",
+                                              encoding="utf-8")
+        _commit(publisher, "later mainline work on the same file")
     elif delivered != "absent":
         raise AssertionError(f"unknown graph kind {delivered}")
     _git(publisher, "push", "-q", "origin", "master")
@@ -351,6 +366,11 @@ def test_empty_cherry_walk_with_unproven_merge_commit_is_norecord(
             return subprocess.CompletedProcess(args, 0, "", "")
         if "rev-list" in args:
             return subprocess.CompletedProcess(args, 0, merge_sha + "\n", "")
+        if "rev-parse" in args:
+            # the tree-identity probe reads the tip tree; its merge-base call
+            # then gets the scripted rc=1 above and the probe records norecord,
+            # which must NOT decide the branch -- cherry and the merge scan do
+            return subprocess.CompletedProcess(args, 0, "b" * 40 + "\n", "")
         raise AssertionError(args)
 
     monkeypatch.setattr(D, "sh", command)
@@ -361,6 +381,7 @@ def test_empty_cherry_walk_with_unproven_merge_commit_is_norecord(
     assert unique is None
     assert evidence["outcome"] == "norecord"
     assert evidence["stage"] == "merge_parents"
+    assert evidence["tree_identity"]["outcome"] == "norecord"
 
 
 def test_clean_automatic_merge_with_carried_patches_is_already_carried(
@@ -400,3 +421,73 @@ def test_merge_only_content_remains_norecord_even_when_cherry_is_empty(
     assert evidence["merge_proofs"][0]["commit"] == merge
     assert (evidence["merge_proofs"][0]["recreated_tree"]
             != evidence["merge_proofs"][0]["committed_tree"])
+
+
+# --------------------------------------------------------------------------
+# A squash-merged branch: every byte on the mainline, invisible to git cherry
+# --------------------------------------------------------------------------
+
+def test_squash_merged_branch_is_already_carried_by_tree_identity(tmp_path):
+    """OpenROAD `postroute-drv-repair`, 2026-09-07: four commits squash-merged
+    as PR #14, tip tree identical to the squash commit's, and git cherry
+    reporting all four as outstanding. Patch ids cannot see a squash; the
+    tree can."""
+    clone, _origin, source_tip = _graph(tmp_path, "squash")
+    g = ["git", "-C", str(clone)]
+    # THE CONTROL: cherry alone would call every branch commit outstanding.
+    cherry = _git(clone, "cherry", "origin/master", f"origin/{BRANCH}").stdout
+    assert [line[0] for line in cherry.strip().splitlines()] == ["+", "+"]
+    assert _git(clone, "merge-base", "--is-ancestor", source_tip,
+                "origin/master", check=False).returncode == 1
+
+    unique, evidence = D._branch_work_against(g, "origin/master", f"origin/{BRANCH}")
+
+    assert unique == []
+    assert evidence["method"] == "tree_identity"
+    carried_by = evidence["carried_by"]
+    assert (_git(clone, "rev-parse", f"{carried_by}^{{tree}}").stdout.strip()
+            == _git(clone, "rev-parse", f"{source_tip}^{{tree}}").stdout.strip())
+
+
+def test_squash_merged_branch_forms_no_ai_case(tmp_path):
+    """Step 2 must not merge it, must not conflict, must not hand it to the AI."""
+    clone, _origin, _source_tip = _graph(tmp_path, "squash")
+    rep = {}
+
+    D.step2_ours(["git", "-C", str(clone)], "master", rep)
+
+    assert rep["merged"] == []
+    assert rep["conflicted"] == []
+    assert "merge_unmeasurable" not in rep
+    assert rep["carried_nothing_new"] == 1
+    assert rep["ours_branch_evidence"][0]["outcome"] == "already_carried"
+    assert rep["ours_branch_evidence"][0]["checks"][-1]["method"] == "tree_identity"
+
+
+def test_a_declined_squash_case_verifies_by_tree_identity(tmp_path):
+    """The AI's only correct verdict on such a case is DECLINE, and before this
+    a DECLINE could never be verified, so the case stayed pending and blocked
+    every release. Tree identity is its postcondition."""
+    clone, _origin, source_tip = _graph(tmp_path, "squash")
+    case = {"fork": "fixture", "branch": f"origin/{BRANCH}", "mainline": "master",
+            "source_tip": source_tip, "path": str(clone)}
+
+    proof = D._verify_ai_case(case)
+
+    assert proof["verified"] is True, proof["reason"]
+    assert "tree" in proof["reason"] and "squash" in proof["reason"]
+    assert proof["tree_identity"]["carried_by"]
+
+
+def test_an_absent_branch_is_still_outstanding_after_the_tree_probe(tmp_path):
+    """THE BIDIRECTIONAL CONTROL: the tree probe must not turn genuinely absent
+    work into "carried". The absent graph still forms a real case."""
+    clone, _origin, source_tip = _graph(tmp_path, "absent")
+    unique, evidence = D._branch_work_against(
+        ["git", "-C", str(clone)], "origin/master", f"origin/{BRANCH}")
+    assert unique == [source_tip]
+    assert evidence["method"] == "outstanding_patches"
+    assert evidence.get("tree_identity", {}).get("carried_by") is None
+    case = {"fork": "fixture", "branch": f"origin/{BRANCH}", "mainline": "master",
+            "source_tip": source_tip, "path": str(clone)}
+    assert D._verify_ai_case(case)["verified"] is False

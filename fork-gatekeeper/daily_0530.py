@@ -854,6 +854,65 @@ def _authoritative_origin_mainline(g, local_main):
     return None, evidence
 
 
+def _tree_carried(g, target, branch):
+    """The commit on ``target`` whose TREE is ``branch``'s tip tree, or None.
+
+    A squash merge publishes every byte of a branch under ONE commit whose
+    patch is the sum of the branch's patches.  ``git cherry`` compares patch
+    ids one commit at a time, so it reports every commit of a squash-merged
+    branch as outstanding.  Measured 2026-09-07 on OpenROAD
+    ``postroute-drv-repair``: four commits, tip tree 6d330f6d..., squash commit
+    8a484c52 on master with the identical tree; cherry answered ``+ + + +``,
+    step 2 merged, conflicted on three files later PRs had changed, and handed
+    the gatekeeper AI a case whose only correct verdict -- DECLINE, nothing to
+    land -- had no verifiable postcondition.  The round then blocked every
+    release, and would have re-handed the same case every morning.
+
+    Tree identity is the stronger fact: not "equivalent patches", but "this
+    exact content is on the mainline".  The walk is bounded to the commits
+    ``target`` gained since the branch diverged, which is where a squash of it
+    can live.
+
+    Returns ``(sha, evidence)``; ``sha`` is None both when no such commit
+    exists and when git could not answer -- ``evidence["outcome"]`` separates
+    the two, and a caller must not read None as "not carried".
+    """
+    evidence = {"probe": "tree_identity"}
+    tip = sh(*g, "rev-parse", "--verify", "--quiet", f"{branch}^{{tree}}")
+    tip_tree = (tip.stdout or "").strip().lower()
+    if tip.returncode != 0 or not _FULL_OBJECT_ID.fullmatch(tip_tree):
+        evidence.update(outcome="norecord", stage="tip_tree",
+                        detail="could not read the branch tip tree: "
+                               + _first_error_line(tip))
+        return None, evidence
+    base = sh(*g, "merge-base", target, branch)
+    base_id = (base.stdout or "").strip().lower()
+    if base.returncode != 0 or not _FULL_OBJECT_ID.fullmatch(base_id):
+        evidence.update(outcome="norecord", stage="merge_base",
+                        detail="could not find where the branch diverged: "
+                               + _first_error_line(base))
+        return None, evidence
+    walk = sh(*g, "log", "--format=%H %T", f"{base_id}..{target}")
+    if walk.returncode != 0:
+        evidence.update(outcome="norecord", stage="tree_walk",
+                        detail="could not walk the mainline since divergence: "
+                               + _first_error_line(walk))
+        return None, evidence
+    scanned = 0
+    for line in (walk.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        scanned += 1
+        if parts[1].lower() == tip_tree:
+            evidence.update(outcome="complete", carried_by=parts[0].lower(),
+                            tip_tree=tip_tree, scanned=scanned)
+            return parts[0].lower(), evidence
+    evidence.update(outcome="complete", carried_by=None, tip_tree=tip_tree,
+                    scanned=scanned)
+    return None, evidence
+
+
 def _branch_work_against(g, target, branch):
     """Return branch commits whose patches are absent from one mainline.
 
@@ -882,6 +941,17 @@ def _branch_work_against(g, target, branch):
                     + _first_error_line(ancestor)),
         )
         return None, evidence
+
+    # A squash-merged branch: its exact tree is on the mainline under a commit
+    # git-cherry cannot match.  Checked before cherry because cherry answers
+    # "outstanding" for every commit of such a branch and step 2 would then
+    # try a merge that can only conflict or duplicate.
+    carried_by, tree_check = _tree_carried(g, target, branch)
+    evidence["tree_identity"] = tree_check
+    if carried_by:
+        evidence.update(outcome="complete", method="tree_identity",
+                        carried_by=carried_by, outstanding_count=0)
+        return [], evidence
 
     unique, cherry, why = _cherry_probe(g, target, branch)
     evidence["cherry_rc"] = cherry.returncode
@@ -1780,9 +1850,11 @@ def _verify_ai_case(case):
     may have used a temporary worktree, and a local commit that was never pushed
     is exactly the incomplete landing this check must retain as pending.
 
-    DECLINE has no repository postcondition in the current protocol, so it is
-    deliberately left unverified.  A future structured decision record can add
-    that proof; prose or rc=0 cannot stand in for one today.
+    A DECLINE has a repository postcondition in exactly one case, and it is
+    the case that produced this note: the source tip's TREE is already on the
+    published mainline (a squash merge), so "nothing to land" is a measured
+    fact and is verified here by tree identity.  Any other DECLINE remains
+    deliberately unverified: prose or rc=0 cannot stand in for a proof.
     """
     fork = str(case.get("fork") or "")
     branch = str(case.get("branch") or "")
@@ -1829,6 +1901,17 @@ def _verify_ai_case(case):
         )
         return result
 
+    carried_by, tree_check = _tree_carried(
+        ("git", "-C", str(path)), published_tip, source_tip)
+    result["tree_identity"] = tree_check
+    if carried_by:
+        result.update(
+            verified=True,
+            reason=(f"source tip's tree is published on origin/{main} at "
+                    f"{carried_by[:12]} (squash-merged: every byte of the "
+                    "branch is on the mainline; nothing was left to land)"),
+        )
+        return result
     carried = sh("git", "-C", str(path), "cherry", published_tip, source_tip)
     if carried.returncode != 0:
         result["reason"] = (
