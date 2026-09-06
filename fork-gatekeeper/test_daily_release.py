@@ -953,6 +953,68 @@ def _pin_check(monkeypatch, status, behind, ours):
     return C.check_one("Xyce", "a" * 40)
 
 
+def _pin_check_pool(monkeypatch, pool, compares, declared, ours=True):
+    """Drive the real check_one with several branches, each with its own
+    fabricated compare, and a fabricated FORKS.json declaration."""
+    import check_pins_current as C
+    monkeypatch.setattr(C, "_branches", lambda repo: pool)
+
+    def gh(path, jq=None, paginate=False):
+        branch = path.rsplit("...", 1)[1]
+        status, behind = compares[branch]
+        return json.dumps({"status": status, "total_commits": behind})
+    monkeypatch.setattr(C, "_gh", gh)
+    monkeypatch.setattr(C, "branch_is_ours", lambda repo, branch: ours)
+    monkeypatch.setattr(C, "declared_branch", lambda repo, forks_json=None: declared,
+                        raising=False)
+    return C.check_one("OpenROAD", "a" * 40)
+
+
+_TOPIC = "vibeic/antenna-best-iteration"
+
+
+def test_the_declared_build_branch_wins_over_a_preferred_topic_branch(monkeypatch):
+    """THE REGRESSION, 2026-09-07. OpenROAD's pin was on master AND the
+    merge-base of a squash-merged topic branch. `_preference` ranks `vibeic/`
+    first, the topic compared `ahead`, check_one answered it, and
+    daily_release moved the pin to the topic's tip -- a commit on no declared
+    line. daily_merge then said NO_BRANCH_AT_PIN and every release was refused.
+    FORKS.json declares master; master is the answer."""
+    r = _pin_check_pool(
+        monkeypatch, [(_TOPIC, "t"), ("master", "m")],
+        {_TOPIC: ("ahead", 1), "master": ("ahead", 5)}, declared="master")
+    assert r["branch"] == "master", r
+    assert r["verdict"] == "STALE" and r["behind"] == 5
+
+
+def test_a_pin_off_its_declared_branch_is_reported_not_advanced(monkeypatch):
+    """A pin sitting on the topic branch only, master `diverged`.
+    daily_release moves only STALE, so this verdict can never move a pin; it
+    names what to do instead."""
+    r = _pin_check_pool(
+        monkeypatch, [(_TOPIC, "t"), ("master", "m")],
+        {_TOPIC: ("identical", 0), "master": ("diverged", 3)}, declared="master")
+    assert r["verdict"] == "PIN_OFF_DECLARED_BRANCH", r
+    assert r["branch"] == "master" and r["verdict"] != "STALE"
+    assert "put it back on master" in r["detail"]
+
+
+def test_a_declared_branch_the_fork_does_not_have_is_named_not_guessed(monkeypatch):
+    r = _pin_check_pool(monkeypatch, [("main", "x")], {"main": ("ahead", 2)},
+                        declared="master")
+    assert r["verdict"] == "DECLARED_BRANCH_ABSENT" and r["branch"] == "master"
+
+
+def test_an_undeclared_fork_keeps_the_ranked_search(monkeypatch):
+    """THE COMPATIBILITY CONTROL: with no declaration the old ordering stands,
+    which is exactly the behaviour the regression test above forbids for a
+    declared fork."""
+    r = _pin_check_pool(
+        monkeypatch, [(_TOPIC, "t"), ("master", "m")],
+        {_TOPIC: ("ahead", 1), "master": ("ahead", 5)}, declared=None)
+    assert r["branch"] == _TOPIC and r["verdict"] == "STALE"
+
+
 def test_a_pin_held_on_upstream_history_is_a_decision_not_a_defect(monkeypatch):
     """Four pins sit on pure upstream mirrors DELIBERATELY (#23/#25).
 

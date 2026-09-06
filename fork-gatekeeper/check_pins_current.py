@@ -317,7 +317,29 @@ def check_one(repo: str, pin: str) -> dict:
         return {"repo": repo, "pin": pin[:9], "verdict": "NO_BRANCHES",
                 "detail": "the branch API completed and reported no branches"}
     names = [n for n, _ in pool]
-    cands = sorted(names, key=_preference)
+    # THE DECLARED BUILD BRANCH, NOT THE BEST-RANKED BRANCH THAT CONTAINS THE PIN.
+    #
+    # Measured 2026-09-07: OpenROAD's pin a7aee7bc76 was on master AND the
+    # merge-base of `vibeic/antenna-best-iteration` (PR #15, squash-merged).
+    # `_preference` ranks `vibeic/` first, that branch compared `ahead`, this
+    # function answered it, and daily_release moved the pin to its tip 15113a3
+    # -- a commit on no declared line.  The next round's daily_merge then
+    # reported NO_BRANCH_AT_PIN and every release was refused.  daily_release's
+    # own header records the same shape (netgen onto `vibeic/lvs-fidelity`).
+    # FORKS.json names the one line each fork publishes from; when it does,
+    # that line is the only candidate, exactly as daily_merge.branch_at_pin
+    # already does.  The ranked search remains only for an undeclared fork.
+    declared = declared_branch(repo)
+    if declared:
+        if declared not in names:
+            return {"repo": repo, "pin": pin[:9], "branch": declared,
+                    "verdict": "DECLARED_BRANCH_ABSENT", "behind": 0,
+                    "detail": (f"FORKS.json declares build branch {declared!r}, "
+                               f"which the fork does not currently have; a pin "
+                               f"cannot be placed on a line that does not exist")}
+        cands = [declared]
+    else:
+        cands = sorted(names, key=_preference)
 
     checked = 0
     for branch in cands[:8]:
@@ -378,7 +400,18 @@ def check_one(repo: str, pin: str) -> dict:
                     "detail": f"{branch} is {behind} commit(s) past the pin; "
                               f"those commits are OURS, merged and NOT shipping"}
         # `behind` or `diverged`: this branch does not contain the pin, so it is
-        # not the branch the pin came from. Keep looking.
+        # not the branch the pin came from.
+        if declared:
+            # A pin off its declared line is not advanced on a guess: it is
+            # reported, and someone puts it back on the line first.  Only a
+            # STALE verdict moves a pin (daily_release), so this cannot.
+            return {"repo": repo, "pin": pin[:9], "branch": declared,
+                    "verdict": "PIN_OFF_DECLARED_BRANCH", "behind": 0,
+                    "detail": (f"the pin is not on the declared build branch "
+                               f"{declared!r} (compare: {status or 'unknown'}); "
+                               f"put it back on {declared} before it can be "
+                               f"advanced")}
+        # Undeclared fork: keep looking.
 
     if not checked:
         return {"repo": repo, "pin": pin[:9], "branch": cands[0],
@@ -390,6 +423,36 @@ def check_one(repo: str, pin: str) -> dict:
             "detail": f"no vibeic branch reaches the pin ({len(cands[:8])} "
                       f"checked) — the pinned commit is on no branch, so the "
                       f"fork may garbage-collect it"}
+
+
+def declared_branch(repo: str,
+                    forks_json: Optional[Path] = None) -> Optional[str]:
+    """The ONE build line `FORKS.json` declares for this fork, or None.
+
+    Read the same way, from the same file, as `declared_upstream` below, so the
+    two can never disagree about which fork is meant.  `daily_merge` reads the
+    same declaration for the same reason: a commit may be reachable from many
+    branches, and reachability proves a branch CAN build the pin, not that it
+    is the line we advance.
+    """
+    f = forks_json or (Path(__file__).resolve().parent / "FORKS.json")
+    try:
+        d = json.loads(f.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    for entry in d.get("forks", []):
+        if str(entry.get("tool", "")).lower() != repo.lower():
+            continue
+        branch = entry.get("branch")
+        if not isinstance(branch, str) or not branch.strip():
+            return None
+        branch = branch.strip()
+        if any(ch.isspace() for ch in branch) or ".." in branch \
+                or branch.startswith(("-", "/")) or branch.endswith(("/", ".")) \
+                or any(ch in branch for ch in "~^:?*[\\"):
+            return None
+        return branch
+    return None
 
 
 def declared_upstream(repo: str,
