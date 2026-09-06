@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1
+#
+# 0.3.47, built as a DERIVED image on top of the 0.3.46 digest.
+#
+# WHY DERIVED AND NOT A RELEASE COMPOSITION. `docker buildx bake eda` needs the
+# private ghcr.io/vibeic/eda-tool-* artefacts. On the build host this was made on
+# (8HD-4) `docker buildx` is not installed at all and there is no
+# ~/.docker/config.json, so no credential exists with read:packages. Owner ruling
+# 2026-09-07: build 0.3.47 FROM the campaign digest, pulled by digest, and
+# distribute it to the fleet with docker save / scp / docker load, pinned by the
+# loaded image's ID. Nothing here is pushed to ghcr and no :latest tag is made.
+#
+# Build context is NOT this repository. It is a staging directory holding:
+#     pdk/          the contents of tools/pdk/ from this commit
+#     bin/openroad  the fork build (see tools/build_derived.sh)
+# The openroad binary is ~145 MB and is deliberately not committed here.
+#
+#   tools/build_derived.sh   builds it and states what it asserted.
+#
+# THE FOUR CHANGES, each asserted in the layer that makes it, so a change that
+# silently stops applying fails the build instead of shipping quietly.
+
+ARG BASE_IMAGE=ghcr.io/vibeic/vibeic-eda@sha256:06537f7e8d3c17c6c9c60c20638e94faab0421533a55656ad1819f383c373aba
+FROM ${BASE_IMAGE}
+USER root
+
+# The contents assertion the base image's own PDK provenance rests on. Passed in
+# so it lives in exactly one place; pdk_local_mods.py verify re-states it below.
+ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
+
+# Never leave a __pycache__ inside the tracked PDK volume: pdk_local_mods.py
+# digests that volume and an undeclared .pyc is an undeclared added file.
+ENV PYTHONDONTWRITEBYTECODE=1
+
+COPY pdk/ /vibeic/pdk/
+
+# --- 1/4  PL.8 counts the poly the PDK drew and not the poly the PDK filled ----
+# Carried from lane czpl8. Upstream fixed this at gf180mcu_fd_pv 2404d27b583b;
+# the prebuilt volume is three commits short of it.
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_gf180_poly2_density_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 2; \
+    D=/foss/pdks/gf180mcuD/libs.tech/klayout/tech/drc; \
+    grep -q 'if (poly2_result.area / chip_area) \* 100 < 14' $D/rule_decks/density.rb \
+        || { echo "FAIL: PL.8 still reads drawn poly2 alone" >&2; exit 1; }; \
+    grep -q 'name: :poly2_result,    calc: ->(ctx) { ctx\[:poly2\] + ctx\[:poly2_dummy\] }' $D/generic_layers.rb \
+        || { echo "FAIL: :poly2_result was not registered" >&2; exit 1; }; \
+    grep -q 'extract_single_layer_from_design.call(:poly2, 30, 0)' $D/generic_layers.rb \
+        || { echo "FAIL: :poly2 itself was redefined; DPF.5 would measure a layer against itself" >&2; exit 1; }; \
+    echo "OK 1/4 PL.8: poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"
+
+# --- 2/4  the seal-ring cell library the PDK's own sealring.py imports ---------
+# vibeic-eda#170. BLOCKING for gf180mcuD only. The two ihp families cannot draw a
+# seal ring either, for an unrelated reason (SG13_dev never registers because
+# sg13g2_pycell_lib needs a 'cni' module absent from this image); that is
+# REPORTED here, not fixed, and not allowed to gate this build.
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_gf180_sealring_install.py \
+        --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4; \
+    python3 /vibeic/pdk/pdk_sealring_check.py --pdk gf180mcuD --require gf180mcuD; \
+    echo "--- advisory: every shipped family, not gating ---"; \
+    python3 /vibeic/pdk/pdk_sealring_check.py || true; \
+    find /foss/pdks/ciel -name __pycache__ -type d -prune -exec rm -rf {} + ; \
+    echo "OK 2/4 sealring: gf180mcuD draws a ring; ihp state reported above"
+
+# --- 3/4  the two OSDI objects ihp-sg13g2's own .spiceinit loads --------------
+# vibeic-eda#172. Both Verilog-A sources and the PDK's own compile script are
+# already in the image; the base image simply never produced these two.
+RUN set -e; \
+    cd /foss/pdks/ihp-sg13g2/libs.tech/verilog-a; \
+    for M in cap_cmomi cap_cmomf; do \
+        openvaf-r -D__NGSPICE__ -o ../ngspice/osdi/$M.osdi $M/$M.va; \
+    done; \
+    python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
+    echo "OK 3/4 osdi: every OSDI object every shipped PDK loads now resolves"
+
+# --- 4/4  OpenROAD, this org's fork at cad013df9821 ---------------------------
+# Built from a clean checkout of exactly that sha with --config=release so the
+# binary states its own provenance. /foss/tools/bin/openroad is a symlink to this
+# path. openroad-librelane is a separate install and is deliberately untouched.
+COPY bin/openroad /foss/tools/openroad/bin/openroad
+RUN set -e; \
+    chmod 0755 /foss/tools/openroad/bin/openroad; \
+    V="$(/foss/tools/bin/openroad -version 2>&1 | tr -d '[:space:]')"; \
+    [ "$V" = "26Q3-2065-gcad013df98" ] \
+        || { echo "FAIL: openroad reports '$V', not the fork build 26Q3-2065-gcad013df98" >&2; exit 1; }; \
+    printf 'openroad cad013df982140fb5c78fd584fb1c7ae8a0d3c55\n' > /foss/tools/openroad/SOURCES; \
+    echo "OK 4/4 openroad: $V"
+
+# --- the volume is what it says it is ----------------------------------------
+# Runs after every step that touches the tracked ciel volume. An undeclared file
+# fails the build naming it; an entry with no step behind it fails it too.
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_local_mods.py verify \
+        --root /foss/pdks/ciel \
+        --baseline /vibeic/pdk/volume-as-delivered.sha256 \
+        --manifest /vibeic/pdk/local_mods.json \
+        --upstream-sha "${OPEN_PDKS_VOLUME_CONTENTS_SHA}" \
+        --pdk-symlink /foss/pdks/sky130A \
+        --pdk-symlink /foss/pdks/gf180mcuD \
+        --record /foss/pdks/LOCAL_MODIFICATIONS.json
+
+LABEL org.opencontainers.image.version="0.3.47"
+LABEL io.vibeic.derived.base="ghcr.io/vibeic/vibeic-eda@sha256:06537f7e8d3c17c6c9c60c20638e94faab0421533a55656ad1819f383c373aba"
+LABEL io.vibeic.derived.base.version="0.3.46"
+LABEL io.vibeic.derived.changes="1) gf180mcuD PL.8 density counts poly2 30/0 + poly2_dummy 30/4 (upstream gf180mcu_fd_pv 2404d27b583b); 2) gf180mcuD sealring_cells KLayout PCell library (gf180mcu_fd_pr e11a8c98dfc9) so the shipped sealring.py can draw a ring (vibeic-eda#170); 3) ihp-sg13g2 cap_cmomi.osdi + cap_cmomf.osdi compiled from the PDK's own Verilog-A with the image's openvaf-r (vibeic-eda#172); 4) openroad replaced with the vibeic fork at cad013df982140fb5c78fd584fb1c7ae8a0d3c55, reporting 26Q3-2065-gcad013df98"
+LABEL io.vibeic.derived.openroad.commit="cad013df982140fb5c78fd584fb1c7ae8a0d3c55"
+LABEL io.vibeic.derived.built.by="lane czimage47 on 8HD-4, docker build (no buildx on this host), never pushed to ghcr"
+
+USER 1000
