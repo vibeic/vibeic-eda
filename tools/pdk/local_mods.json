@@ -37,7 +37,7 @@
     },
     {
       "id": "gf180mcu-pl8-poly-density-counts-dummy",
-      "issue": "no tracker issue; docs/DEFECT_gf180mcu_pl8_poly_dummy_density.md \u2014 fixed UPSTREAM at globalfoundries-pdk-libs-gf180mcu_fd_pv 2404d27b583b (2026-07-04), which this prebuilt volume predates",
+      "issue": "no tracker issue; docs/DEFECT_gf180mcu_pl8_poly_dummy_density.md — fixed UPSTREAM at globalfoundries-pdk-libs-gf180mcu_fd_pv 2404d27b583b (2026-07-04), which this prebuilt volume predates",
       "what": "gf180mcuD KLayout deck: PL.8 (poly2 density) counted layer 30/0 alone while the same PDK's tech/scripts/fill_poly2.rb writes its dummy poly on 30/4, so a die meeting the 14% floor WITH the fill this PDK generated was reported as violating it. The metal rules in the same file already union metal_drawn + metal_dummy. A derived layer :poly2_result = :poly2 + :poly2_dummy is registered in generic_layers.rb and PL.8 reads it. :poly2 itself is NOT redefined: DPF.5 is poly2_dummy.separation(poly2, 5um) and device extraction is poly2.and(comp), so the union arrives under a new name whose only consumer is the density rule.",
       "step": "tools/pdk/pdk_gf180_poly2_density_patch.py --root /foss/pdks/gf180mcuD --expect 2",
       "scope_note": "PL.8 only. Upstream's own fix (2404d27b583b) instead RENAMES 30/0 to :poly2_drawn and gives the union the name :poly2, which also hands the union to every rule that still says bare poly2 -- geom.rb's off-grid check, guard_ring.rb and others -- across 28 files. Those verdict changes are NOT measured here, so they are left to advancing the PDK volume rather than hand-ported into a binary artefact. The anchors are exact whole lines and the step declares --expect 2, so on a volume that already carries the upstream fix this step FAILS the build instead of applying somewhere else.",
@@ -47,6 +47,19 @@
       ],
       "expect_modified": 2,
       "expect_added": 0,
+      "expect_removed": 0
+    },
+    {
+      "id": "gf180mcu-sealring-cells-library",
+      "issue": "vibeic-eda#170",
+      "what": "gf180mcuD klayout tech: the volume ships libs.tech/klayout/tech/scripts/sealring.py, whose first act is to put libs.tech/klayout/tech/pymacros on sys.path and do `from sealring_cells import gf180mcu_sealring` -- and that package is not in the volume, so the script prints \"Error: Couldn't load the seal ring library.\" and exits 0. No ring is drawn and the die reaches tapeout_precheck unsealed, which is what turned General.SealRing from NOT_DETERMINED into FAIL. This step installs the four-file package from the SAME upstream commit whose copy of scripts/sealring.py is byte-identical to the one the volume already carries (fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pr e11a8c98dfc9, sha256 84cfcb8e2d5cacb018af11856fe8df07f77f10a5b27a476247d5e2599f800ece); see tools/pdk/sealring_cells/PROVENANCE.md.",
+      "step": "tools/pdk/pdk_gf180_sealring_install.py --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4",
+      "scope_note": "gf180mcuD only, and ADDITIVE only: four .py files into a directory that does not exist in the delivered volume. Nothing upstream delivered is modified, hence expect_modified 0. The step refuses to run if the destination already exists, so on a volume that grows its own copy this FAILS the build rather than silently overwriting it. The two ihp families ALSO cannot generate a seal ring in this image, for an unrelated reason this entry deliberately does NOT sweep in: their scripts use a registered KLayout library (SG13_dev) which never registers because sg13g2_pycell_lib needs a 'cni' module absent from the image. Fixing that is a different change with a different blast radius; pdk_sealring_check.py reports it rather than hiding it.",
+      "paths": [
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/klayout/tech/pymacros/sealring_cells/*.py"
+      ],
+      "expect_modified": 0,
+      "expect_added": 4,
       "expect_removed": 0
     }
   ]

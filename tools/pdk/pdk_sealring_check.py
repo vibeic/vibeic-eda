@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Where a shipped PDK carries a seal-ring script, the library it imports must load.
+
+vibeic-eda#170.  The volume shipped `libs.tech/klayout/tech/scripts/sealring.py`
+without `libs.tech/klayout/tech/pymacros/sealring_cells/`.  The script catches
+its own ImportError and calls `sys.exit()` with a printed message and status 0 --
+so nothing downstream sees a failure, the ring is simply never drawn, and the die
+goes to tapeout_precheck unsealed.  A check has to look past the exit status.
+
+For every shipped PDK family that HAS such a script this asserts:
+
+  1. the package the script names really imports, from the directory the script
+     itself puts on sys.path -- the import target is read out of the script, so
+     renaming it upstream cannot leave this check passing on a stale name;
+  2. the library object it names is constructible, i.e. the PCell declaration
+     registers.  A directory of .py files that imports but cannot build the
+     library would satisfy (1) and still draw nothing.
+
+A family with no seal-ring script is reported as such and is not a failure --
+not every PDK carries one, and inventing a requirement for those would be a
+false red.
+
+TWO SHAPES, because the shipped PDKs really do use two.  An early draft of this
+check knew only the first and called the other two families FAIL for "imports no
+seal-ring package this check can name", which is a statement about the check and
+not about the PDK.  That is the false red this docstring exists to prevent.
+
+  package shape  (gf180mcuD)  the script does
+                              `from sealring_cells import gf180mcu_sealring`
+                              against a directory it puts on sys.path.
+  library shape  (ihp-*)      the script names a registered KLayout library and
+                              PCell (`LIB = 'SG13_dev'`, `PCELL = 'sealring'`)
+                              and is run as `klayout -n <tech> -zz -r ...`.
+                              Verified by asking KLayout, under that technology,
+                              whether the library registered and carries the PCell.
+
+If a script matches neither shape the verdict is NOT_MEASURED, never FAIL: "I do
+not know how to check this" and "this is broken" are different sentences.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+IMPORT_RE = re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\s+([A-Za-z_]\w*)", re.M)
+LIB_RE = re.compile(r"^\s*LIB\s*=\s*['\"]([^'\"]+)['\"]", re.M)
+PCELL_RE = re.compile(r"^\s*PCELL\s*=\s*['\"]([^'\"]+)['\"]", re.M)
+TECH_NAME_RE = re.compile(r"<name>([^<]+)</name>")
+
+PROBE = r"""
+import sys
+sys.path.insert(1, {pymacros!r})
+mod = __import__({pkg!r}, fromlist=[{obj!r}])
+lib = getattr(mod, {obj!r})
+inst = lib()
+print("OK", {pkg!r}, {obj!r}, type(inst).__name__)
+"""
+
+LIB_PROBE = r"""
+import pya
+lib = pya.Library.library_by_name({lib!r})
+if lib is None:
+    print("NOLIB")
+else:
+    decl = lib.layout().pcell_declaration({pcell!r})
+    print("OK" if decl is not None else "NOPCELL")
+"""
+
+
+def _consumer(pdk_dir: Path) -> Path:
+    return pdk_dir / "libs.tech" / "klayout" / "tech" / "scripts" / "sealring.py"
+
+
+def discover_pdks(pdk_root: Path) -> list[str]:
+    out = []
+    for child in sorted(pdk_root.iterdir()):
+        if child.name == "ciel" or child.name.startswith("."):
+            continue
+        if (child / "libs.tech").is_dir():
+            out.append(child.name)
+    return out
+
+
+def _tech_name(pdk_dir):
+    tech_dir = pdk_dir / "libs.tech" / "klayout" / "tech"
+    for lyt in sorted(tech_dir.glob("*.lyt")):
+        m = TECH_NAME_RE.search(lyt.read_text(encoding="utf-8", errors="replace"))
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _check_package_shape(pdk_dir, pkg, obj):
+    pymacros = pdk_dir / "libs.tech" / "klayout" / "tech" / "pymacros"
+    if not pymacros.is_dir():
+        return "FAIL", f"{pymacros} absent, but sealring.py puts it on sys.path"
+    code = PROBE.format(pymacros=str(pymacros), pkg=pkg, obj=obj)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout).strip().splitlines()
+        detail = tail[-1] if tail else f"exit {proc.returncode}"
+        return "FAIL", f"`from {pkg} import {obj}` does not resolve under {pymacros}: {detail}"
+    return "PASS", f"package shape: {proc.stdout.strip()}"
+
+
+def _check_library_shape(pdk_dir, lib, pcell):
+    tech = _tech_name(pdk_dir)
+    if tech is None:
+        return "NOT_MEASURED", (
+            f"script names library {lib!r}/PCell {pcell!r}, but no .lyt under "
+            f"{pdk_dir}/libs.tech/klayout/tech names a technology to load it with"
+        )
+    klayout = shutil.which("klayout")
+    if klayout is None:
+        return "NOT_MEASURED", (
+            f"script names library {lib!r}/PCell {pcell!r}; klayout is not on PATH, "
+            "so whether that library registers was not measured"
+        )
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+        fh.write(LIB_PROBE.format(lib=lib, pcell=pcell))
+        probe = fh.name
+    try:
+        proc = subprocess.run([klayout, "-n", tech, "-zz", "-r", probe],
+                              capture_output=True, text=True)
+    finally:
+        os.unlink(probe)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if "OK" in out.split():
+        return "PASS", f"library shape: {lib}/{pcell} registered under technology {tech}"
+    reason = ""
+    for line in out.splitlines():
+        if "ModuleNotFoundError" in line or "ERROR" in line:
+            reason = line.strip()
+            break
+    if "NOLIB" in out:
+        what = f"library {lib!r} did not register under technology {tech}"
+    elif "NOPCELL" in out:
+        what = f"library {lib!r} registered but carries no PCell {pcell!r}"
+    else:
+        what = f"probe produced no verdict under technology {tech} (exit {proc.returncode})"
+    return "FAIL", what + (f"; first error: {reason}" if reason else "")
+
+
+def check_pdk(pdk_root: Path, pdk: str) -> tuple[str, str]:
+    """Return (verdict, detail); verdict in {PASS, FAIL, N/A, NOT_MEASURED}."""
+    pdk_dir = (pdk_root / pdk).resolve()
+    script = _consumer(pdk_dir)
+    if not script.is_file():
+        return "N/A", "no libs.tech/klayout/tech/scripts/sealring.py"
+
+    text = script.read_text(encoding="utf-8", errors="replace")
+
+    targets = [(pkg, obj) for pkg, obj in IMPORT_RE.findall(text) if "seal" in pkg.lower()]
+    if targets:
+        pkg, obj = targets[0]
+        return _check_package_shape(pdk_dir, pkg, obj)
+
+    lib_m, pcell_m = LIB_RE.search(text), PCELL_RE.search(text)
+    if lib_m and pcell_m:
+        return _check_library_shape(pdk_dir, lib_m.group(1), pcell_m.group(1))
+
+    return "NOT_MEASURED", (
+        f"{script} matches neither the package shape (from <pkg> import <obj>) nor "
+        "the library shape (LIB=/PCELL=); this check does not know how to verify it"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--pdk-root", type=Path, default=Path("/foss/pdks"))
+    ap.add_argument("--pdk", action="append", dest="pdks", default=None)
+    ap.add_argument("--require", action="append", dest="require", default=None,
+                    help="PDK family that MUST have a working seal-ring library; "
+                         "N/A becomes a failure for these. Repeatable.")
+    args = ap.parse_args(argv)
+
+    if not args.pdk_root.is_dir():
+        print(f"[NOT CHECKED] sealring: no such PDK root {args.pdk_root}", file=sys.stderr)
+        return 2
+
+    pdks = args.pdks or discover_pdks(args.pdk_root)
+    if not pdks:
+        print(f"[NOT CHECKED] sealring: no PDK families under {args.pdk_root}", file=sys.stderr)
+        return 2
+
+    required = set(args.require or [])
+    failed = False
+    for pdk in pdks:
+        verdict, detail = check_pdk(args.pdk_root, pdk)
+        if verdict in ("N/A", "NOT_MEASURED") and pdk in required:
+            verdict, detail = "FAIL", f"required to carry a seal ring, but {detail}"
+        if verdict == "FAIL":
+            failed = True
+            print(f"[FAIL] sealring: {pdk}: {detail}", file=sys.stderr)
+        else:
+            print(f"[{verdict}] sealring: {pdk}: {detail}")
+
+    for pdk in sorted(required - set(pdks)):
+        failed = True
+        print(f"[FAIL] sealring: {pdk} was required but is not shipped", file=sys.stderr)
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
