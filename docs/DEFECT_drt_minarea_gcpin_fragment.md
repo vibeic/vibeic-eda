@@ -67,6 +67,7 @@
 > repair pass, so the geometry did not change after the last in-loop check.
 > Same geometry, two verdicts: in-loop 0, post-route 2.
 >
+> **[WITHDRAWN 2026-09-07 — wrong gate; see the correction below]**
 > `FlexGCWorker::Impl::initDesign` (FlexGC_init.cpp:202):
 >
 > ```cpp
@@ -75,6 +76,7 @@
 >   // init all dr objs from design          <- only full-design workers get this
 > ```
 >
+> **[WITHDRAWN 2026-09-07 — measured false; see the correction below]**
 > An in-loop worker is fed the routed shapes of the nets its DR worker is
 > currently modifying (`modifiedDRNets_`), not every routed net in the tile. A
 > net finished in an earlier iteration and not touched since is never re-paired
@@ -86,6 +88,87 @@
 > is a repair pass that acts on what it finds. That is router-side work, not a
 > GC fix, and it is what this dossier's title (`postroute_drv_repair`) was
 > pointing at all along.
+>
+> ## CORRECTION 2026-09-07 — the loop is NOT starved; the paragraph above names the wrong gate and a false mechanism
+>
+> Both claims under "Where the real gap is" were measured on the fork itself
+> (vibeic/OpenROAD #16, #17, #19 — all merged) and both are withdrawn.
+>
+> **1. The wrong gate.** `initDesign`'s `if (getDRWorker() || skipDR) { return; }`
+> is not what separates the two workers: on the routing path `init()` calls
+> `initDesign(design, /*skipDR=*/true)`, so that return is unconditional and
+> `getDRWorker()` is never consulted. The gate that differs is in
+> `FlexGCWorker::Impl::init()`:
+>
+> ```cpp
+>   initDesign(design, true);
+>   initDRWorker();
+>   if (getDRWorker() == nullptr) {
+>     initNetsFromDesign(design);      // whole-design worker only
+>   }
+> ```
+>
+> (`src/drt/src/gc/FlexGC_init.cpp` at `b7da589ba`. The `:202` above and the
+> `:973` an earlier lane quoted have both drifted; cite the function, not a line.)
+>
+> **2. The false mechanism.** The claim was that an in-loop worker checks its
+> tile against a partial picture of already-routed metal — a net finished in an
+> earlier iteration is never re-paired against the fixed pin beside it — so the
+> convergence count reaches 0 with violations standing. #16 counted exactly that
+> set: every routed object in an in-loop worker's extBox whose net the worker
+> does NOT own. **It is empty**, on every init of three designs:
+>
+> | design | in-loop GC worker inits | unowned routed objects in extBox |
+> |---|---|---|
+> | gcd_nangate45 | 89 | **0** |
+> | sha256 (26,040 instances, sky130A) | 511 | **0** |
+> | subservient (gf180mcuD) | 610 | **0** |
+>
+> `FlexDRWorker::initNetObjs()` builds the worker's drNet set from the same
+> `queryDRObj(getExtBox(), …)` that `initNetsFromDesign` would use, so every net
+> holding routed metal in the extBox is one the worker already owns, and
+> `initDRWorker()` loads its shapes. The asymmetry in the code is real; the hole
+> in the geometry is not. A build that DID load the "unseen" set produced
+> byte-identical DEFs and an unchanged DRT-0199 series, because there was
+> nothing to load.
+>
+> **What IS real, and where it is not.** The blindness stands. On subservient —
+> the stalling run's own `pnr.tcl`, 32 threads, bit-reproducible across four
+> runs on three binaries — `VERIFYSPLIT in_loop=0 whole_design_before_repairs=12`:
+> a whole-design GC pass over the geometry the loop published as clean, taken
+> BEFORE either repair pass commits metal, finds twelve NS-Metal markers (an
+> earlier lane read 14 on a different slice of the same design). All twelve are
+> the shape sections 3-4 and the 2026-08-31 correction describe — a fixed cell
+> Metal1 pin and a same-net via enclosure overlapping only at a corner, 80x110 or
+> 200x240 dbu against MINWIDTH 460. Four candidate mechanisms have since been
+> excluded by measurement, each with a control:
+>
+> * `endAddNets_merge()` making a neck at the worker boundary after that
+>   worker's GC ran — DEAD: 25,735 merges, `geometry_changed=0` (#17).
+> * the drcBox writeback filter in `FlexDRWorker::setMarkers()` — alive (it
+>   drops 257 / 284 / 76 / 32 / 4 markers per iteration) but not the cause:
+>   keeping the extBox set instead moved the route and left the count at
+>   exactly 12 (#17).
+> * the post-route repair passes — DEAD: the split is taken before them and no
+>   DRT-0700 fires on this design (#17).
+> * the `checkNDRs` asymmetry (`getDRWorker() || !AUTO_TAPER_NDR_NETS`: TRUE
+>   in-loop, FALSE whole-design) — DEAD: giving either pass the other's value
+>   leaves `in_loop=0 whole=12` and moves 0 of 6,040 nets (#19).
+>
+> Not yet explained: why an in-loop worker that holds the fixed pin from
+> `initDesign()` and the via from its own drNet does not report the junction its
+> whole-design sibling reports on identical geometry. Two facts for whoever
+> takes it (#17): the final in-loop `gcWorker_->main()` runs after
+> `resetTargetNet()`, so it is a full sweep and the worker is not skipping the
+> net; and `surgicalFixEnabled_` defaults false and `getDRCMarkers` never sets
+> it, so the non-fixed rect in all twelve is a real via, not invented patch metal.
+>
+> Found on the way, fixed on the fork (#18): `frMarker`'s copy constructor
+> dropped `victims_` and `aggressors_` while its copy-assignment kept them, so
+> every marker reaching the design, the DRC report and the GUI carried neither,
+> and `route_queue_update_from_marker`'s `movableAggressorNets` loop iterated an
+> always-empty container. Whether that changes which nets the loop rips up is a
+> behaviour change and is measured separately; it is not claimed to be the cause.
 >
 > Sections 1-4 and 6-9 below stand as measured. Section 5 does not.
 
@@ -334,10 +417,12 @@ from what the shipped 0.3.40 binary does on this design.
 
 ## 9. NOT_MEASURED — stated, never defaulted
 
-* **The exact set-op inside FlexGC** that leaves the pad fragment a separate
-  `gcPin`. The fork was not built and the checker was not stepped through. What
-  is measured is that the emitted marker corresponds to no polygon present in the
-  design, and is bit-exactly a corner of a via pad, eight times independently.
+* **Why the in-loop worker misses the junction.** The `gcPin` framing this
+  bullet first carried is void (2026-08-31 correction) and the fork HAS since
+  been built and instrumented (2026-09-07 correction): the worker holds every
+  routed object in its extBox (#16), merge is geometry-preserving, the drcBox
+  filter and the repair passes are not the cause (#17), and the `checkNDRs`
+  asymmetry is not the cause (#19). The reason itself is still not measured.
 * **Whether the sources quoted in section 5 are the sources that built either
   binary.** See section 8. The symbol signature and the `NS Metal` string in the
   binary corroborate them; nothing more is claimed.
