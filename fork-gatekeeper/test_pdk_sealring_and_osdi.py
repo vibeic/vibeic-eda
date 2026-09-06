@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -307,3 +308,40 @@ def test_every_new_pdk_program_runs_as_a_script():
         proc = subprocess.run([sys.executable, str(PDK_TOOLS / f"{name}.py"), "--help"],
                               capture_output=True, text=True)
         assert proc.returncode == 0, f"{name} --help failed: {proc.stderr}"
+
+
+# --------------------------------------------------------------------------
+# why the check the issue asked for was NOT the check that was written
+# --------------------------------------------------------------------------
+
+def test_importing_a_bare_sys_exit_script_is_not_a_usable_signal(tmp_path):
+    """vibeic-eda#170 asked for `python3 -c 'import sealring'`. That check cannot
+    fail.
+
+    The shipped script ends its except-branch with a bare `sys.exit()`, and
+    SystemExit with no argument is status 0. Measured in both images:
+
+        0.3.46   Error: Couldn't load the seal ring library.   rc=0
+        0.3.47   (silent)                                      rc=0
+
+    So the exit status is identical on a broken and a fixed image. This test
+    pins that property of the shape, so nobody 'simplifies' pdk_sealring_check
+    into running the script and trusting its status.
+    """
+    script = tmp_path / "sealring.py"
+    script.write_text(
+        "import sys\n"
+        "try:\n"
+        "    from sealring_cells import gf180mcu_sealring\n"
+        "except ImportError:\n"
+        "    print(\"Error: Couldn't load the seal ring library.\")\n"
+        "    sys.exit()\n")
+    proc = subprocess.run([sys.executable, "-c", "import sealring"],
+                          cwd=tmp_path, capture_output=True, text=True,
+                          env={**os.environ, "PYTHONPATH": str(tmp_path)})
+    assert proc.returncode == 0, "premise of the test is wrong"
+    assert "Couldn't load" in proc.stdout
+    # ... and the check this repo actually ships does NOT agree that all is well:
+    root = tmp_path / "pdks"
+    _pdk(root)
+    assert seal_mod.check_pdk(root, "gf180mcuD")[0] == "FAIL"

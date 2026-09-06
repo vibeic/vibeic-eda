@@ -36,6 +36,21 @@ not about the PDK.  That is the false red this docstring exists to prevent.
 
 If a script matches neither shape the verdict is NOT_MEASURED, never FAIL: "I do
 not know how to check this" and "this is broken" are different sentences.
+
+WHY THIS DOES NOT DO THE OBVIOUS THING.  vibeic-eda#170 asks for a check that
+`python3 -c 'import sealring'` resolves.  MEASURED, that check cannot fail:
+
+    0.3.46:  Error: Couldn't load the seal ring library.   rc=0
+    0.3.47:  (silent)                                      rc=0
+
+The shipped script's except-branch ends in a bare `sys.exit()`, and `SystemExit`
+with no argument is status 0.  So importing it exits 0 whether the library is
+there or not, and the only difference is a line on stdout.  Anything built on
+that exit status -- including the check the issue asked for -- is vacuous.
+
+That is why this check imports the PACKAGE directly and CONSTRUCTS the library
+object, rather than running the script and believing its status.  A missing
+package raises ModuleNotFoundError in the probe, which is a real non-zero.
 """
 
 from __future__ import annotations
