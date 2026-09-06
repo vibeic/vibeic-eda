@@ -37,6 +37,15 @@ not about the PDK.  That is the false red this docstring exists to prevent.
 If a script matches neither shape the verdict is NOT_MEASURED, never FAIL: "I do
 not know how to check this" and "this is broken" are different sentences.
 
+CORRECTED 2026-09-07 (vibeic-eda#173).  The library shape had two defects that
+made it call a WORKING ihp library FAIL: it asked `library_by_name(lib)` without
+the technology, which is None for a technology-bound library; and it ran
+`klayout -n <tech>` in the caller's environment, where only the default family
+is on KLAYOUT_PATH, so `-n sg13cmos5l` silently answered with sg13g2's state.
+Both are fixed in LIB_PROBE / _family_env below; the earlier "ihp FAIL" lines
+in 0.3.46/0.3.47 build logs were therefore overdetermined -- the runtime WAS
+missing (#173), and the probe could not have seen it present either way.
+
 WHY THIS DOES NOT DO THE OBVIOUS THING.  vibeic-eda#170 asks for a check that
 `python3 -c 'import sealring'` resolves.  MEASURED, that check cannot fail:
 
@@ -80,13 +89,30 @@ print("OK", {pkg!r}, {obj!r}, type(inst).__name__)
 
 LIB_PROBE = r"""
 import pya
-lib = pya.Library.library_by_name({lib!r})
+print("TECH", pya.Technology.has_technology({tech!r}))
+# A library registered FOR a technology is invisible to library_by_name(name)
+# alone; it must be asked for under that technology. Measured 2026-09-07 on
+# ihp-sg13g2 with the PyCell runtime installed: library_names() listed SG13_dev,
+# library_by_name("SG13_dev") was None, library_by_name("SG13_dev", "sg13g2")
+# carried the sealring PCell. Without the technology this probe called a
+# working library NOLIB.
+lib = pya.Library.library_by_name({lib!r}, {tech!r}) or pya.Library.library_by_name({lib!r})
 if lib is None:
     print("NOLIB")
 else:
     decl = lib.layout().pcell_declaration({pcell!r})
     print("OK" if decl is not None else "NOPCELL")
 """
+
+
+def _family_env(pdk_dir):
+    """`-n <tech>` resolves only if KLAYOUT_PATH carries the family. The image's
+    default environment carries ONE family; asked for another, KLayout falls
+    back silently and answers about the wrong one."""
+    kl = pdk_dir / "libs.tech" / "klayout"
+    env = dict(os.environ)
+    env["KLAYOUT_PATH"] = f"{kl}{os.pathsep}{kl / 'tech'}"
+    return env
 
 
 def _consumer(pdk_dir: Path) -> Path:
@@ -139,14 +165,19 @@ def _check_library_shape(pdk_dir, lib, pcell):
             "so whether that library registers was not measured"
         )
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
-        fh.write(LIB_PROBE.format(lib=lib, pcell=pcell))
+        fh.write(LIB_PROBE.format(lib=lib, pcell=pcell, tech=tech))
         probe = fh.name
     try:
         proc = subprocess.run([klayout, "-n", tech, "-zz", "-r", probe],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=_family_env(pdk_dir))
     finally:
         os.unlink(probe)
     out = (proc.stdout or "") + (proc.stderr or "")
+    if "TECH False" in out:
+        return "NOT_MEASURED", (
+            f"technology {tech!r} did not load from {pdk_dir}/libs.tech/klayout, so "
+            f"whether library {lib!r} registers was not measured"
+        )
     if "OK" in out.split():
         return "PASS", f"library shape: {lib}/{pcell} registered under technology {tech}"
     reason = ""
