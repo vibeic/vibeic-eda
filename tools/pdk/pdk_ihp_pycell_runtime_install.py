@@ -142,14 +142,28 @@ def install(pdk_root: Path, pdk: str, source: Path, expect: int) -> list[str]:
                 f"{dest_tree.readlink()} -- this family borrows the runtime; "
                 "install it in the family that owns the directory"
             )
+        src_files = sorted(p for p in src_tree.rglob("*")
+                           if p.is_file() and "__pycache__" not in p.parts)
         if dest_tree.exists() and any(dest_tree.iterdir()):
-            raise InstallError(
-                f"{dest_tree} is not empty -- the volume now ships its own copy. "
-                "Remove this step rather than overwriting what upstream delivered."
-            )
-        for f in sorted(p for p in src_tree.rglob("*") if p.is_file()):
-            if "__pycache__" in f.parts:
-                continue
+            # Our own copy, byte for byte, is not "the volume grew its own": a
+            # derived image built FROM a base that already ran this step
+            # reaches here with exactly these files. Anything else is refused.
+            dst_files = sorted(p for p in dest_tree.rglob("*")
+                               if p.is_file() and "__pycache__" not in p.parts)
+            same = ([p.relative_to(dest_tree) for p in dst_files]
+                    == [p.relative_to(src_tree) for p in src_files]
+                    and all(a.read_bytes() == b.read_bytes()
+                            for a, b in zip(src_files, dst_files)))
+            if not same:
+                raise InstallError(
+                    f"{dest_tree} is not empty and is not this runtime byte for "
+                    "byte -- the volume now ships its own copy. Remove this step "
+                    "rather than overwriting what upstream delivered."
+                )
+            for f in src_files:
+                plan.append((f, dest_tree / f.relative_to(src_tree)))
+            continue
+        for f in src_files:
             plan.append((f, dest_tree / f.relative_to(src_tree)))
 
     if len(plan) != expect:

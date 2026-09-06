@@ -143,6 +143,25 @@ def test_install_refuses_when_the_volume_already_has_the_runtime(tmp_path):
         install_mod.install(root, "ihp-sg13g2", RUNTIME, expect=EXPECT)
 
 
+def test_install_accepts_our_own_identical_runtime_already_present(tmp_path):
+    """A derived image built FROM a base that already ran this step carries
+    exactly these 37 files; identical bytes are ours, not the volume's."""
+    root = tmp_path / "pdks"
+    _pdk(root)
+    first = install_mod.install(root, "ihp-sg13g2", RUNTIME, expect=EXPECT)
+    again = install_mod.install(root, "ihp-sg13g2", RUNTIME, expect=EXPECT)
+    assert again == first and len(again) == EXPECT
+
+
+def test_install_refuses_a_runtime_that_differs(tmp_path):
+    root = tmp_path / "pdks"
+    pdk = _pdk(root)
+    install_mod.install(root, "ihp-sg13g2", RUNTIME, expect=EXPECT)
+    (pdk / "libs.tech/klayout/python/pypreprocessor/pypreprocessor/__init__.py").write_text("# theirs\n")
+    with pytest.raises(install_mod.InstallError, match="not this runtime byte for byte"):
+        install_mod.install(root, "ihp-sg13g2", RUNTIME, expect=EXPECT)
+
+
 def test_install_refuses_the_family_that_borrows_the_runtime(tmp_path):
     """ihp-sg13cmos5l's runtime dirs are symlinks into ihp-sg13g2.  Installing
     into the borrower would either fail or shadow the owner; refuse and say so."""
@@ -203,11 +222,18 @@ def test_install_cli_exit_codes(tmp_path):
                         capture_output=True, text=True)
     assert ok.returncode == 0, ok.stderr
     assert "[PASS]" in ok.stdout
+    # a second identical run is our own copy already present: PASS, not a refusal
     again = subprocess.run([sys.executable, prog, "--pdk-root", str(root), "--pdk", "ihp-sg13g2",
                             "--source", str(RUNTIME), "--expect", str(EXPECT)],
                            capture_output=True, text=True)
-    assert again.returncode == 1
-    assert "[FAIL]" in again.stderr
+    assert again.returncode == 0, again.stderr
+    # a volume that grew its OWN copy -- one byte different -- is refused
+    (root / "ihp-sg13g2/libs.tech/klayout/python/pycell4klayout-api/LICENSE").write_text("theirs\n")
+    theirs = subprocess.run([sys.executable, prog, "--pdk-root", str(root), "--pdk", "ihp-sg13g2",
+                             "--source", str(RUNTIME), "--expect", str(EXPECT)],
+                            capture_output=True, text=True)
+    assert theirs.returncode == 1
+    assert "[FAIL]" in theirs.stderr and "byte for byte" in theirs.stderr
 
 
 # --------------------------------------------------------------------------
