@@ -44,3 +44,8 @@ Dockerfile
 # same time even though it happens to match VERSION today, because it would fail
 # for the same reason on the next release and a latent version of this is worse.
 fork-gatekeeper/ORACLE_VERDICTS.*.json
+
+# tools/pdk/ihp_pycell_runtime/PROVENANCE.md names the image a digest was TAKEN IN
+# (vibeic-eda#173, measured in 0.3.46). A measurement keeps the version it was
+# measured against.
+tools/pdk/ihp_pycell_runtime/PROVENANCE.md
