@@ -341,7 +341,14 @@ if [ -f "${DIR}/daily_merge.py" ]; then
         > "${MERGE_OUT}" 2>&1
     merge_rc=$?
     head -1 "${MERGE_OUT}" | sed 's/^/[merge]   /' | tee -a "${LOG}"
-    grep -E "CONFLICT|NEEDS_HUMAN|FAILED|NO_UPSTREAM" "${MERGE_OUT}" \
+    # NOT a state-name grep. `merge_findings.sh` inverts on daily_merge's three
+    # CLEAN states, because the unclean set has grown to 23 and a fixed pattern
+    # names only 8 of them -- so fifteen ways a fork can go unpublished, every one
+    # of them a STALLED/UNMEASURABLE/UNKNOWN/REJECTED outcome, logged "1 need a
+    # human" and never said which fork. That is what the 2026-08-25, 2026-09-07
+    # and 2026-09-08 rounds left in tick.log, the only append-only channel a human
+    # reads.
+    "${DIR}/merge_findings.sh" "${MERGE_OUT}" \
         | sed 's/^/[merge]   /' | tee -a "${LOG}" || true
 else
     echo "MISSING: fork-gatekeeper/daily_merge.py — nothing was merged" > "${MERGE_OUT}"
