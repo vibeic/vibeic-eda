@@ -67,6 +67,17 @@ def pins(bake: str) -> Dict[str, str]:
         r'variable\s+"([A-Z0-9_]+)_REF"\s*\{\s*default\s*=\s*"([a-f0-9]{7,40})"', bake)}
 
 
+def _squash_carried(repo_dir: Path, pin: str, br: str) -> bool:
+    """Is the branch tip's TREE already on the pin's history? (squash merge)
+    Any inability to answer is False: unknown never hides a stranded commit."""
+    try:
+        from daily_0530 import _tree_carried
+    except ImportError:
+        return False
+    carried_by, _evidence = _tree_carried(("git", "-C", str(repo_dir)), pin, br)
+    return bool(carried_by)
+
+
 def stranded(repo_dir: Path, pin: str) -> List[dict]:
     """Our commits reachable from some local branch but NOT from the pin."""
     if not sh("git", "-C", str(repo_dir), "cat-file", "-t", pin):
@@ -101,6 +112,21 @@ def stranded(repo_dir: Path, pin: str) -> List[dict]:
         unique = {ln.split()[1] for ln in cherry.splitlines()
                   if ln.startswith("+") and len(ln.split()) > 1}
         if not unique:
+            continue
+        # TREE IDENTITY, for what patch equivalence cannot see: a SQUASH.
+        #
+        # A squash merge lands every byte of a branch under one commit whose
+        # patch is the sum of the branch's patches, so `git cherry` marks every
+        # branch commit `+`. Measured 2026-09-07 on OpenROAD, the first round
+        # after 0.3.47 shipped: 7 "stranded" commits, all on
+        # `postroute-drv-repair` (PR #14) and `vibeic/antenna-best-iteration`
+        # (PR #15), both squash-merged into master days earlier, both
+        # tree-identical to their squash commits, which the pin already
+        # contained. Reporting them sends someone to merge branches whose
+        # content already ships -- and the tick exited 6 every morning.
+        # daily_0530 learned the same fact the same day (_tree_carried); one
+        # probe, imported, so the two programs cannot disagree about it.
+        if _squash_carried(repo_dir, pin, br):
             continue
         log = sh("git", "-C", str(repo_dir), "log", "--no-merges",
                  "--format=%H%x1f%an%x1f%ad%x1f%s", "--date=short", f"{pin}..{br}")
