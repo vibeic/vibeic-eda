@@ -455,9 +455,13 @@ def test_next_noop_recovers_commit_failure_but_refuses_mixed_dirty_tree(
         if cmd[:2] == ["docker", "push"] and cmd[-1] == version_ref:
             registry_state["version"] = "d" * 64
             return 0, "pushed", ""
-        if cmd[:4] == ["docker", "buildx", "imagetools", "create"]:
+        # The :latest repair republishes the version's own manifest under
+        # :latest (pull + tag + push), so that both tags carry the SAME media
+        # type; `buildx imagetools create` wrapped it in an index whose digest
+        # can never equal the manifest's (vibeic-eda#194).
+        if cmd[:2] == ["docker", "push"] and cmd[-1].endswith(":latest"):
             registry_state["latest"] = registry_state["version"]
-            return 0, "copied", ""
+            return 0, "pushed latest", ""
         return 0, "ok", ""
 
     monkeypatch.setattr(R, "_sh", shell)
