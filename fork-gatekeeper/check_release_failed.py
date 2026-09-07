@@ -237,11 +237,32 @@ def _findings(spec: dict, path: Path) -> str:
     return "\n".join(lines).strip()
 
 
+def _repeat_verdict(spec: dict) -> str:
+    """Has this stage refused before, on the same subject?
+
+    FIRST, not last, in the detail — it is the triage decision itself, the same
+    reason `failure.retryable` is surfaced by name for a release failure. A stage
+    that refuses on the same fork every round will not clear on its own; a stage
+    that refuses on a different fork each round is an environment, not an
+    assertion. The brief this answers says those need opposite responses, and
+    three byte-identical alerts is what "nobody could tell" looks like.
+    """
+    try:
+        import check_refusal_repeats as repeats
+    except ImportError:
+        return ""
+    rc, text = repeats.report(_state_dir(), spec["stage"])
+    return text.rstrip()
+
+
 def _stage_detail(spec: dict) -> str:
     """Everything the stage that refused said, from its own two records."""
     root = _state_dir()
     parts: list[str] = []
     if spec.get("kind") == "pre":
+        repeat = _repeat_verdict(spec)
+        if repeat:
+            parts.append(repeat)
         blocked = _blocked_stages().rstrip()
         if blocked:
             parts.append(blocked)
@@ -342,11 +363,14 @@ def _report(tick_exit, tick_state: str, round_at: str, detail: str,
               "retained under `$GK_STATE_DIR/failed-rounds/`.\n"
             "- Not `failed-releases/`, and not the release record: neither exists "
             "for this failure class.\n"
-            "- Whether the same stage refused on the preceding rounds. A "
-            "pre-release stage that refuses on a fixed assertion an upstream "
-            "merge moved past fails at the moment of success and repeats every "
-            "round until the assertion is repaired — which is a different thing "
-            "from a transient, and the two need opposite responses.\n\n"
+            "- The repeat verdict at the top of this alert answers "
+            "transient-versus-generator from `$GK_STATE_DIR/failed-rounds/`; "
+            "`check_refusal_repeats.py --stage <name>` re-asks it directly. "
+            "REPEATING_SAME_SUBJECT means a fixed assertion is being outrun by "
+            "something that moves and will not clear on its own; "
+            "REPEATING_STAGE_ONLY means the environment, not the assertion; "
+            "UNDETERMINED means too few rounds are retained to say, which is "
+            "not the same as a transient.\n\n"
         )
     elif kind == "post":
         summary = (f"the {round_at[:10]} round published an image and then "
