@@ -51,12 +51,17 @@ def _mod():
     return m
 
 
-def _round(state, stamp, stages: dict, forks=()):
-    """One retained round in the archive, written the way the archiver leaves it."""
+def _round(state, stamp, stages: dict, forks=(), round_at=None):
+    """One retained round in the archive, written the way the archiver leaves it.
+
+    `round_at` defaults to `stamp`; pass it explicitly to put two runs on one day,
+    which is what a round that refuses twice before lunch actually leaves behind.
+    """
     d = state / R.ARCHIVE_DIRNAME / f"{stamp}.blocked"
     d.mkdir(parents=True)
     (d / R.BLOCKED_RECORD).write_text(
-        json.dumps(REC.record(stages, round_at=stamp)) + "\n", encoding="utf-8")
+        json.dumps(REC.record(stages, round_at=round_at or stamp)) + "\n",
+        encoding="utf-8")
     if forks:
         (d / R.MERGE_RECORD).write_text(json.dumps({
             "program": "daily_merge",
@@ -175,7 +180,7 @@ def test_a_round_with_no_per_fork_record_still_counts_as_a_round(tmp_path):
     v = R.verdict(R.history(tmp_path)[1], "daily_merge")
     assert v["rounds_with_this_stage"] == 2, v
     assert v["verdict"] == "REPEATING_STAGE_ONLY", v
-    assert "no round retained a per-fork record" in v["why"], v
+    assert "no day retained a per-fork record" in v["why"], v
 
 
 def test_a_malformed_retained_record_is_skipped_not_fatal(tmp_path):
@@ -258,3 +263,79 @@ def test_the_verdict_vocabulary_is_closed(tmp_path):
         assert v in src, f"{v} is not explained where the reader is sent"
     assert set(R.VERDICTS) == {"REPEATING_SAME_SUBJECT", "REPEATING_STAGE_ONLY",
                                "ONCE", "UNDETERMINED"}
+
+
+# --- the unit is a day, not a directory --------------------------------------
+
+def test_two_runs_on_one_morning_are_one_observation(tmp_path):
+    """THE FALSE CERTIFICATE THIS AVOIDS. The alarm's own rule is that "a round
+    that fails four times in a day does not open four PRs" — and the archive stamps
+    per second, so a morning that refused twice leaves two directories. Counting
+    those as two rounds would report ONE bad morning as REPEATING and send someone
+    hunting for an assertion that does not exist."""
+    _round(tmp_path, "2026-09-08T053001Z", {"merge_rc": 1},
+           forks=[("Trilinos", "POST_MERGE_CHECK_FAILED")],
+           round_at="2026-09-08T05:30:01+08:00")
+    _round(tmp_path, "2026-09-08T104500Z", {"merge_rc": 1},
+           forks=[("Trilinos", "POST_MERGE_CHECK_FAILED")],
+           round_at="2026-09-08T10:45:00+08:00")
+    v = R.verdict(R.history(tmp_path)[1], "daily_merge")
+    assert v["retained_rounds"] == 1, v
+    assert v["rounds_with_this_stage"] == 1, v
+    assert v["verdict"] == "UNDETERMINED", v
+
+
+def test_two_mornings_are_two_observations(tmp_path):
+    """CONTROL for the above: the day key must not collapse DIFFERENT days too. A
+    dedupe that over-reaches would turn a real generator into UNDETERMINED
+    forever, which is the failure in the other direction."""
+    for day in ("06", "07"):
+        _round(tmp_path, f"2026-09-{day}T053001Z", {"merge_rc": 1},
+               forks=[("Trilinos", "POST_MERGE_CHECK_FAILED")],
+               round_at=f"2026-09-{day}T05:30:01+08:00")
+    v = R.verdict(R.history(tmp_path)[1], "daily_merge")
+    assert v["retained_rounds"] == 2, v
+    assert v["verdict"] == "REPEATING_SAME_SUBJECT", v
+
+
+def test_a_days_runs_union_their_subjects(tmp_path):
+    """Two looks at one morning: a fork that refused in either of them refused
+    that day. Intersecting them instead would lose a generator whose second run of
+    the morning happened to get further."""
+    _round(tmp_path, "2026-09-07T053001Z", {"merge_rc": 1},
+           forks=[("Trilinos", "POST_MERGE_CHECK_FAILED")],
+           round_at="2026-09-07T05:30:01+08:00")
+    _round(tmp_path, "2026-09-08T053001Z", {"merge_rc": 1},
+           forks=[("OpenROAD", "FETCH_STALLED")],
+           round_at="2026-09-08T05:30:01+08:00")
+    _round(tmp_path, "2026-09-08T110000Z", {"merge_rc": 1},
+           forks=[("Trilinos", "POST_MERGE_CHECK_FAILED")],
+           round_at="2026-09-08T11:00:00+08:00")
+    v = R.verdict(R.history(tmp_path)[1], "daily_merge")
+    assert v["retained_rounds"] == 2, v
+    assert v["verdict"] == "REPEATING_SAME_SUBJECT", v
+    assert v["shared_subjects"] == ["Trilinos POST_MERGE_CHECK_FAILED"], v
+
+
+def test_the_day_key_is_the_one_the_alarm_brands_its_pr_with(tmp_path):
+    """They are different files. If the alarm ever keys a PR by something other
+    than `round_at[:10]`, "one PR per failing day" and "one observation per day"
+    would stop meaning the same day."""
+    src = (HERE / "check_publish_silence.py").read_text(encoding="utf-8")
+    assert 'date = (round_at or "undated")[:10]' in src, src[:0]
+    assert 'branch = f"{kind}-{date}"' in src
+    _round(tmp_path, "2026-09-08T053001Z", {"merge_rc": 1},
+           round_at="2026-09-08T05:30:01+08:00")
+    assert R.history(tmp_path)[1][0]["day"] == "2026-09-08"
+
+
+def test_a_round_with_no_round_at_falls_back_to_its_stamp(tmp_path):
+    """`AI_ROUND_AT` can be empty. Falling back to the archive directory's own
+    stamp keeps the day resolvable rather than lumping every such round under one
+    key — which would be the two-runs-one-day bug inverted."""
+    d = tmp_path / R.ARCHIVE_DIRNAME / "2026-09-08T053001Z.blocked"
+    d.mkdir(parents=True)
+    rec = REC.record({"merge_rc": 1})
+    rec["round_at"] = None
+    (d / R.BLOCKED_RECORD).write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    assert R.history(tmp_path)[1][0]["day"] == "2026-09-08"
