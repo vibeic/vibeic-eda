@@ -89,8 +89,8 @@ _MULTI_BINARY = {"lvs": ("magic", "netgen"),
 _NO_COMMAND = {"sv-elab": "vibeic-eda#24 — a second slang frontend in one "
                           "process double-frees at exit; the artefact is built "
                           "and pinned, the install is declined",
-               "ihp-open-pdk": "a PDK data directory (COPY'd straight to "
-                          "/foss/pdks/ihp-sg13g2), not a binary — probing it "
+               "ihp-open-pdk": "PDK data directories (COPY'd straight to "
+                          "/foss/pdks/, both IHP families), not a binary — probing it "
                           "with `command -v ihp-open-pdk` always prints NONE "
                           "regardless of whether the PDK is correctly staged, "
                           "the same category error `command -v ihp-sg13g2` "

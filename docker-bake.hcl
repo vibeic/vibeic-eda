@@ -49,7 +49,8 @@ variable "SV2V_RECIPE" { default = "3a8690" }
 variable "CIEL_REF"    { default = "714d1bbb626d41e3cecc0ea23e752775166fde6e" }
 variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "5e6d592e4002946a4616f798c357f0f3c06cf3b6" }
-variable "IHP_OPEN_PDK_RECIPE" { default = "e28a45" }
+variable "IHP_SG13CMOS5L_REF" { default = "607e18d4bd9214a52575c194b4181ef449f9252f" }
+variable "IHP_OPEN_PDK_RECIPE" { default = "44f770" }
 variable "OPENROAD_RECIPE" { default = "592d8d" }
 variable "YOSYS_RECIPE" { default = "a69cd6" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
@@ -131,11 +132,13 @@ target "ciel" {
   tags     = tool_tags("ciel", CIEL_REF, CIEL_RECIPE)
 }
 
+# Two repositories, one artefact (vibeic-eda#176): the tag carries BOTH refs,
+# the same shape as sat-solvers and lvs, so a cmos5l bump alone moves the tag.
 target "ihp-open-pdk" {
   context  = "tools/ihp-open-pdk"
   dockerfile = "Dockerfile"
-  args     = { IHP_OPEN_PDK_REF = IHP_OPEN_PDK_REF }
-  tags     = tool_tags("ihp-open-pdk", IHP_OPEN_PDK_REF, IHP_OPEN_PDK_RECIPE)
+  args     = { IHP_OPEN_PDK_REF = IHP_OPEN_PDK_REF, IHP_SG13CMOS5L_REF = IHP_SG13CMOS5L_REF }
+  tags     = ["${REGISTRY}/eda-tool-ihp-open-pdk:${short(IHP_OPEN_PDK_REF)}-${short(IHP_SG13CMOS5L_REF)}-${IHP_OPEN_PDK_RECIPE}"]
 }
 
 target "openroad" {
@@ -314,7 +317,7 @@ target "eda-local" {
   contexts = {
     "ghcr.io/vibeic/eda-tool-sv2v:${short(SV2V_REF)}-${SV2V_RECIPE}" = "target:sv2v"
     "ghcr.io/vibeic/eda-tool-ciel:${short(CIEL_REF)}-${CIEL_RECIPE}" = "target:ciel"
-    "ghcr.io/vibeic/eda-tool-ihp-open-pdk:${short(IHP_OPEN_PDK_REF)}-${IHP_OPEN_PDK_RECIPE}" = "target:ihp-open-pdk"
+    "ghcr.io/vibeic/eda-tool-ihp-open-pdk:${short(IHP_OPEN_PDK_REF)}-${short(IHP_SG13CMOS5L_REF)}-${IHP_OPEN_PDK_RECIPE}" = "target:ihp-open-pdk"
     "ghcr.io/vibeic/eda-tool-openroad:${short(OPENROAD_REF)}-${OPENROAD_RECIPE}"      = "target:openroad"
     "ghcr.io/vibeic/eda-tool-yosys:${short(YOSYS_REF)}-${YOSYS_RECIPE}"            = "target:yosys"
     "ghcr.io/vibeic/eda-tool-sat-solvers:${short(KISSAT_REF)}-${short(CADICAL_REF)}-${SAT_SOLVERS_RECIPE}" = "target:sat-solvers"

@@ -514,7 +514,7 @@
   "ihp-sg13cmos5l": {
    "desc_en": "IHP SG13 CMOS 5V",
    "desc_zh": "IHP SG13 CMOS 5V",
-   "upstream": "IHP-GmbH/IHP-Open-PDK"
+   "upstream": "IHP-GmbH/ihp-sg13cmos5l"
   },
   "asap7": {
    "desc_en": "ASAP7 7nm predictive PDK",

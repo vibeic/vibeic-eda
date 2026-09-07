@@ -129,6 +129,12 @@
       "upstream": "IHP-GmbH/IHP-Open-PDK"
     },
     {
+      "tool": "ihp-sg13cmos5l",
+      "branch": "main",
+      "role": "PDK data — /foss/pdks/ihp-sg13cmos5l; the second IHP family, pinned beside ihp-sg13g2 in the same artefact (vibeic-eda#176)",
+      "upstream": "IHP-GmbH/ihp-sg13cmos5l"
+    },
+    {
       "tool": "iverilog",
       "branch": "master",
       "role": "RTL simulation",

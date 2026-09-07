@@ -114,7 +114,8 @@ def test_against_the_real_root_dockerfile():
     assert "/foss/tools/openroad/bin/" in paths["openroad"]
     assert "/foss/tools/openroad/bin/sta" not in paths["openroad"]
     assert "/foss/tools/bin/" in paths["sat-solvers"]
-    assert paths["ihp-open-pdk"] == ["/foss/pdks/ihp-sg13g2"]
+    # both IHP families land from the one artefact with a directory COPY (vibeic-eda#176)
+    assert paths["ihp-open-pdk"] == ["/foss/pdks/"]
 
 
 def test_ihp_open_pdk_is_declared_no_command():

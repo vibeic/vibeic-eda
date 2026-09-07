@@ -47,7 +47,7 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:7d61e0a-2aba42
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:714d1bb-adea1b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-e28a45
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-607e18d-44f770
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
@@ -639,14 +639,18 @@ COPY --from=img-verilator /foss/tools/verilator /foss/tools/verilator
 RUN rm -rf /foss/tools/gtkwave /foss/tools/xschem /foss/tools/slang \
            /foss/tools/xyce \
            /foss/tools/bin/sv2v /usr/local/bin/ciel /opt/ciel \
-           /foss/pdks/ihp-sg13g2
+           /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l
 COPY --from=img-gtkwave /foss/tools/gtkwave /foss/tools/gtkwave
 COPY --from=img-xschem /foss/tools/xschem /foss/tools/xschem
 COPY --from=img-slang /foss/tools/slang /foss/tools/slang
 COPY --from=img-xyce /foss/tools/xyce /foss/tools/xyce
 COPY --from=img-sv2v /foss/tools/bin/sv2v /foss/tools/bin/sv2v
 COPY --from=img-ciel /opt/ciel /opt/ciel
-COPY --from=img-ihp-open-pdk /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13g2
+# Both IHP families from the one artefact (vibeic-eda#176): the base's own
+# ihp-sg13cmos5l was two months older than the sg13g2 we build and dangled into
+# it. The directory COPY lands both under /foss/pdks/ in one layer; the rm above
+# empties both first, so nothing of the base's copy survives underneath.
+COPY --from=img-ihp-open-pdk /foss/pdks/ /foss/pdks/
 
 # COMPILE THE VERILOG-A MODELS THE PDK'S OWN .spiceinit REQUIRES.
 #

@@ -1,6 +1,6 @@
 {
-  "_comment": "Every PDK the composed image ships, where it comes from, and where its version can be READ BACK OUT OF THE IMAGE. vibeic-eda#28. A PDK is not a lesser dependency here: open_pdks produces the libs.tech trees every DRC and LVS verdict is computed against, so a change there moves sign-off results the way a change in klayout's LEF/DEF importer does \u2014 which is exactly what #17 turned out to be. Nothing in this repository named these before; the versions were legible only inside the image, and only for some of them.",
-  "_status_field": "status describes what the IMAGE does: ours = we build/stage it ourselves; upstream = the base image's copy is what ships. `mirror` is a separate fact \u2014 vibeic-eda#30 mirrored the three PDK sources so the daily upstream check can watch them, and that does NOT by itself change which copy the image uses. Collapsing the two would make this file say the image builds a PDK it does not.",
+  "_comment": "Every PDK the composed image ships, where it comes from, and where its version can be READ BACK OUT OF THE IMAGE. vibeic-eda#28. A PDK is not a lesser dependency here: open_pdks produces the libs.tech trees every DRC and LVS verdict is computed against, so a change there moves sign-off results the way a change in klayout's LEF/DEF importer does — which is exactly what #17 turned out to be. Nothing in this repository named these before; the versions were legible only inside the image, and only for some of them.",
+  "_status_field": "status describes what the IMAGE does: ours = we build/stage it ourselves; upstream = the base image's copy is what ships. `mirror` is a separate fact — vibeic-eda#30 mirrored the three PDK sources so the daily upstream check can watch them, and that does NOT by itself change which copy the image uses. Collapsing the two would make this file say the image builds a PDK it does not.",
   "pdks": [
     {
       "name": "sky130A",
@@ -36,13 +36,13 @@
     },
     {
       "name": "ihp-sg13cmos5l",
-      "upstream": "IHP-GmbH/IHP-Open-PDK",
-      "status": "upstream",
-      "arrives": "pre-installed in the base image",
+      "upstream": "IHP-GmbH/ihp-sg13cmos5l",
+      "status": "ours",
+      "arrives": "staged by our Dockerfile (tools/ihp-open-pdk/) from the vibeic/ihp-sg13cmos5l mirror, pinned by IHP_SG13CMOS5L_REF beside ihp-sg13g2 -- moved off the base image by vibeic-eda#176 so the two families cannot drift apart (the base's copy was two months older and its PCell symlinks dangled into our sg13g2)",
       "version_file": "COMMIT",
       "version_pattern": "[0-9a-f]{40}",
       "read_by": "the sg13cmos5l flow",
-      "mirror": "vibeic/IHP-Open-PDK"
+      "mirror": "vibeic/ihp-sg13cmos5l"
     },
     {
       "name": "ciel",
