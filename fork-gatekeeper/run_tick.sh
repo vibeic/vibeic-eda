@@ -596,6 +596,12 @@ blocking_rc=0
 [ "${selftest_rc}" != "0" ] && blocking_rc=1
 
 RELEASE_OUT="${LOG_DIR}/daily-release.txt"
+# Cleared unconditionally, for the same reason every other stage clears its own
+# sidecar first: a record left from a previous round is indistinguishable from
+# one this round wrote, and the failure this file exists to make legible is
+# exactly a reader who cannot tell two states apart.
+BLOCKED_JSON="${LOG_DIR}/round-blocked.json"
+rm -f "${BLOCKED_JSON}"
 if [ "${blocking_rc}" != "0" ]; then
     # Do not leave yesterday's successful sidecar looking like evidence from a
     # release that was never authorized today.
@@ -603,6 +609,48 @@ if [ "${blocking_rc}" != "0" ]; then
     echo "BLOCKED: source guards, daily merge, vendored closure, or fork self-checks are not green; daily_release was not invoked" \
         > "${RELEASE_OUT}"
     log "[blocking] REFUSE daily_release — source guards, daily merge, vendored closure, and fork self-checks must all be green"
+    # RETAIN THE EVIDENCE OF THE STAGE THAT REFUSED. Every stage above writes to
+    # a FIXED path with `>`, so tomorrow's 05:30 destroys today's diagnosis. The
+    # release path learned this as vibeic-eda#96 and grew `failed-releases/`, but
+    # only for its own output and only on the branch where a build ran — so this
+    # branch, the one that stops the round BEFORE the build, kept nothing at all.
+    # Measured: 2026-08-25, 2026-09-07 and 2026-09-08 all exited 4 here, and all
+    # three alert PRs were byte-identical and unanswerable, because the record
+    # that held the answer was gone or hours from going.
+    # A RECORD THAT IS ABSENT AND A RECORD THAT SAYS "FAILED" ARE DIFFERENT
+    # STATES, and a reader who cannot tell them apart cannot tell a failed round
+    # from a round that never ran. `daily-release.json` is deleted just above, on
+    # purpose and correctly — but that leaves an ABSENCE, and on 2026-08-25,
+    # 2026-09-07 and 2026-09-08 that absence was the entire content of the alert.
+    #
+    # So say it positively, in a file of its own. A NEW name, not
+    # `daily-release.json`: every consumer of that file reads it as a release
+    # record, and a "release" record describing a release that never happened is
+    # the false certificate this repo keeps producing.
+    #
+    # It also records EVERY blocking stage. The tick's own status chain is
+    # first-wins (`&& [ "${rc}" = "0" ]`), so the exit code names one stage even
+    # when four refused.
+    if [ -f "${DIR}/record_blocked_round.py" ]; then
+        python3 "${DIR}/record_blocked_round.py" \
+            --round-at "${AI_ROUND_AT:-}" \
+            --guard-rc "${guard_rc}" --merge-rc "${merge_rc}" \
+            --vendored-rc "${vendored_rc}" --selftest-rc "${selftest_rc}" \
+            2>&1 | sed 's/^/[blocking]   /' | tee -a "${LOG}" || true
+    else
+        log "[blocking] record_blocked_round.py MISSING — this round's refusal is recorded only as the absence of a release record"
+    fi
+    if [ -f "${DIR}/archive_round_evidence.py" ]; then
+        python3 "${DIR}/archive_round_evidence.py" --label blocked \
+            round-blocked.json \
+            source-guards.txt \
+            daily-merge.txt daily-merge.json \
+            vendored-closure.txt vendored-closure.json \
+            fork-selftests.txt fork-selftests.json \
+            2>&1 | sed 's/^/[blocking]   /' | tee -a "${LOG}" || true
+    else
+        log "[blocking] archive_round_evidence.py MISSING — this round's stage evidence will be overwritten by the next round"
+    fi
     # This is not a daily_release failure: no release was attempted.  The
     # originating guard/selftest rc is folded into the final tick status below,
     # preserving the useful diagnosis instead of replacing it with rc=5.
