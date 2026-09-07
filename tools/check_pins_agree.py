@@ -53,7 +53,8 @@ TOOLS = {
     # pins are never compared while the summary counts agreement.
     "sv2v":        ["SV2V_REF"],
     "ciel":        ["CIEL_REF"],
-    "ihp-open-pdk": ["IHP_OPEN_PDK_REF"],
+    # vibeic-eda#176 — both IHP families, one artefact; tag order matches bake.
+    "ihp-open-pdk": ["IHP_OPEN_PDK_REF", "IHP_SG13CMOS5L_REF"],
     "yices2":      ["YICES2_REF"],
     "sv-elab":     ["SV_ELAB_REF"],
     "fault":       ["FAULT_REF"],

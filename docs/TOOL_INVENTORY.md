@@ -276,7 +276,7 @@ Measured: `ls /foss/pdks` in `ghcr.io/vibeic/vibeic-eda:0.2.31`.
 | `sky130A` | SkyWater 130nm, open sign-off | `RTimothyEdwards/open_pdks` | **no** | yes — spm cell 26/6/3 |
 | `gf180mcuD` | GlobalFoundries 180nm MCU | `RTimothyEdwards/open_pdks` | **no** | yes — spm cell |
 | `ihp-sg13g2` | IHP SG13G2 130nm BiCMOS | `IHP-GmbH/IHP-Open-PDK` | **no** | yes — spm cell 28/4/2 |
-| `ihp-sg13cmos5l` | IHP SG13 CMOS 5V | `IHP-GmbH/IHP-Open-PDK` | **no** | same repo |
+| `ihp-sg13cmos5l` | IHP SG13 CMOS 5V | `IHP-GmbH/ihp-sg13cmos5l` | **no** | its own repo, pinned beside sg13g2 (vibeic-eda#176) |
 | `asap7` | ASAP7 7nm predictive PDK | `The-OpenROAD-Project/asap7_pdk_r1p7` | **no** | yes — PnR |
 | `nangate45` | Nangate 45nm open cell library | `The-OpenROAD-Project/OpenROAD-flow-scripts` | **no** | yes — PnR |
 | `ciel` | PDK version manager | `fossi-foundation/ciel` | **no** | installer |

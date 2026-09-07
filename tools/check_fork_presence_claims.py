@@ -92,6 +92,7 @@ KNOWN_PATHS: Dict[str, Tuple[str, ...]] = {
     "OpenSTA": ("/foss/tools/bin/sta", "/foss/tools/openroad/bin/sta"),
     "ciel": ("/usr/local/bin/ciel",),
     "IHP-Open-PDK": ("/foss/pdks/ihp-sg13g2",),
+    "ihp-sg13cmos5l": ("/foss/pdks/ihp-sg13cmos5l",),
     "open_pdks": ("/foss/pdks/sky130A", "/foss/pdks/gf180mcuD"),
     "OpenROAD-flow-scripts": ("/orfs", "/foss/tools/OpenROAD-flow-scripts"),
     "ASAP7_for_KLayout": ("/foss/pdks/asap7", "/foss/tools/asap7"),

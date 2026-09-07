@@ -63,12 +63,12 @@ and fails on drift.
 
 | in this repository | count | reproduce (at the repo root) |
 |---|---|---|
-| upstream projects the fork-gatekeeper tracks | **37** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
-| `vibeic/*` sources the build clones | **34** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
+| upstream projects the fork-gatekeeper tracks | **38** | `python3 -c 'import json;print(len(json.load(open("fork-gatekeeper/FORKS.json"))["forks"]))'` |
+| `vibeic/*` sources the build clones | **35** | `grep -rhoE 'github\.com/vibeic/[A-Za-z0-9_.-]+' Dockerfile tools/*/Dockerfile \| sed 's/\.git$//' \| sort -u \| wc -l` |
 | per-tool build artefacts (`tools/<name>/`) | **19** | `ls tools/*/Dockerfile \| wc -l` |
 | `ARG *_REF` in the composing `Dockerfile` alone | **10** | `grep -c '^ARG .*_REF=' Dockerfile` |
-| source refs pinned across all Dockerfiles | **35** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
-| …of those, pinned to a full commit SHA | **35** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
+| source refs pinned across all Dockerfiles | **36** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=' Dockerfile tools/*/Dockerfile \| wc -l` |
+| …of those, pinned to a full commit SHA | **36** | `grep -rhoE '^ARG [A-Z0-9_]+_REF=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 | `ARG *_VOLUME_CONTENTS_SHA` — assertions, **not** pins | **1** | `grep -rhoE '^ARG [A-Z0-9_]+_VOLUME_CONTENTS_SHA=[0-9a-f]{40}' Dockerfile tools/*/Dockerfile \| wc -l` |
 
 <!-- /counts:local -->

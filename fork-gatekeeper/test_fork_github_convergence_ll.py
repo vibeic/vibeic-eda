@@ -513,11 +513,12 @@ def test_current_open_work_is_retained_with_exact_items(tmp_path, capsys):
     assert full["fork_github"]["items"] == [item]
     assert narrow["fork_github"]["items"] == [item]
     assert narrow["fork_github"]["round"]["run_id"] == "a" * 64
+    # the fleet plus vibeic-eda itself; derived from FORKS.json, never a literal
     assert narrow["fork_github"]["inventory"][
-        "required_repository_count"] == 38
+        "required_repository_count"] == len(REGISTERED_FORKS) + 1
     assert narrow["fork_github"]["delivery"]["status"] == "complete"
     assert narrow["fork_github"]["round_upstream"][
-        "required_fork_count"] == 37
+        "required_fork_count"] == len(REGISTERED_FORKS)
     assert narrow["fork_github"]["started_at"] >= ROUND_AT
     assert full["source_errors"] == []
 

@@ -210,7 +210,7 @@ def test_missing_declaration_never_guesses_a_descendant_or_ambiguous_tip(
 
 def test_every_registered_fork_has_one_valid_branch_declaration():
     entries = M._forks_json().get("forks", [])
-    assert len(entries) == 37
+    assert len(entries) == 38
     assert all(M._declared_branch(entry["tool"]) == entry.get("branch")
                for entry in entries)
 
