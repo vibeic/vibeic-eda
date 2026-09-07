@@ -23,8 +23,8 @@ directly. The vocabulary is the discriminator, not a count:
         The stage is not the subject — its environment is. A shared checkout, a
         registry, a network. Repairing an assertion here would be repairing the
         wrong thing.
-  ONCE                    the stage refused in exactly one retained round.
-  UNDETERMINED            fewer than two retained rounds carry a refusal, so no
+  ONCE                    the stage refused on exactly one retained DAY.
+  UNDETERMINED            fewer than two retained DAYS carry a refusal, so no
         comparison is possible. THIS IS NOT "no repeats". One observation cannot
         distinguish a transient from a generator, and reporting it as "transient"
         is the false clean this whole family of defects is made of.
@@ -76,7 +76,15 @@ def _read_round(d: Path) -> dict | None:
         # counts as a round the stage refused in. Dropping it would make a
         # generator look like a transient.
         pass
-    return {"dir": d.name, "round_at": blocked.get("round_at") or d.name,
+    round_at = blocked.get("round_at") or d.name
+    return {"dir": d.name, "round_at": round_at,
+            # THE UNIT IS A DAY, NOT A DIRECTORY. `check_publish_silence`'s
+            # escalation keys itself `f"{kind}-{round_at[:10]}"` precisely because
+            # "a round that fails four times in a day does not open four PRs" —
+            # and a verdict that counted four archive directories as four rounds
+            # would turn ONE bad morning into REPEATING, which is the false
+            # certificate this program exists to avoid producing.
+            "day": (str(round_at) or "undated")[:10] or "undated",
             "stages": stages, "subjects": subjects}
 
 
@@ -95,22 +103,39 @@ def history(state_dir: Path) -> tuple:
     return RC_OK, rounds
 
 
+def by_day(rounds: list) -> list:
+    """One entry per DAY, oldest first; a day's runs are one observation.
+
+    Subjects are UNIONED within a day: two runs on one morning are two looks at
+    the same morning, so a fork that refused in either of them refused that day.
+    """
+    days: dict = {}
+    for r in rounds:
+        d = days.setdefault(r["day"], {"day": r["day"], "stages": set(),
+                                       "subjects": set(), "runs": 0})
+        d["stages"] |= r["stages"]
+        d["subjects"] |= r["subjects"]
+        d["runs"] += 1
+    return [days[k] for k in sorted(days)]
+
+
 def verdict(rounds: list, stage: str) -> dict:
     """Is `stage`'s refusal a generator or an incident?"""
+    rounds = by_day(rounds)
     carrying = [r for r in rounds if stage in r["stages"]]
     out = {"stage": stage, "retained_rounds": len(rounds),
            "rounds_with_this_stage": len(carrying),
-           "round_ats": [r["round_at"] for r in carrying],
+           "round_ats": [r["day"] for r in carrying],
            "verdict": "UNDETERMINED", "shared_subjects": [], "why": ""}
     if len(carrying) < 2:
         out["verdict"] = "ONCE" if len(carrying) == 1 and len(rounds) >= 2 \
             else "UNDETERMINED"
         out["why"] = (
-            f"{len(carrying)} of {len(rounds)} retained round(s) carry a "
+            f"{len(carrying)} of {len(rounds)} retained day(s) carry a "
             f"{stage} refusal; at least two are needed to compare, so this is "
             f"not evidence of a transient"
             if out["verdict"] == "UNDETERMINED" else
-            f"{stage} refused in exactly one of {len(rounds)} retained rounds")
+            f"{stage} refused on exactly one of {len(rounds)} retained days")
         return out
 
     with_subjects = [r for r in carrying if r["subjects"]]
@@ -122,15 +147,15 @@ def verdict(rounds: list, stage: str) -> dict:
                                        for repo, state in shared)
         out["why"] = (
             f"{stage} refused on {len(carrying)} of {len(rounds)} retained "
-            f"rounds, on the SAME subject every time: "
+            f"days, on the SAME subject every time: "
             + ", ".join(out["shared_subjects"])
             + " — the moving-target signature; it will not clear on its own")
     else:
         out["verdict"] = "REPEATING_STAGE_ONLY"
         out["why"] = (
             f"{stage} refused on {len(carrying)} of {len(rounds)} retained "
-            f"rounds, on a DIFFERENT subject each time"
-            + (" (no round retained a per-fork record)"
+            f"days, on a DIFFERENT subject each time"
+            + (" (no day retained a per-fork record)"
                if not with_subjects else "")
             + " — the stage is not the subject, its environment is; repairing an "
               "assertion here would repair the wrong thing")
@@ -147,7 +172,7 @@ def report(state_dir: Path, stage: str) -> tuple:
     v = verdict(rounds, stage)
     lines = [f"[{v['verdict']}] {v['why']}"]
     if v["round_ats"]:
-        lines.append("  rounds: " + ", ".join(str(x)[:19] for x in v["round_ats"]))
+        lines.append("  days: " + ", ".join(str(x) for x in v["round_ats"]))
     return rc, "\n".join(lines)
 
 
