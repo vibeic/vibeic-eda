@@ -72,7 +72,7 @@ composition works; it says nothing about what a release would contain.
 |---|---|---|
 | `check_fork_only.py` | every source and artefact is `vibeic/` | the base image's own ~35 tools, which we do not fork |
 | `check_pins_agree.py` | the three places a pin is written say the same thing | whether that commit exists |
-| `check_dockerfile_layer_budget.py` | pinned base layers + final-stage filesystem instructions stay ≤110 | the actual built image; `check_image_depth.py` measures that before push |
+| `check_dockerfile_layer_budget.py` | the root composition's predicted depth stays ≤110, **and** the derived chain that ships (base release's measured depth + this generation's filesystem instructions) stays inside the 125-layer pull limit with a generation of reserve | the bytes of a candidate; `check_image_depth.py` measures those, in the release path and now in `build_derived.sh` |
 | `check_image_provenance.py` | the **built image** contains the pinned commits | tools the base supplies |
 | `check_doc_counts.py` | every count in `README.md` still reproduces from the repo | whether the *sentence* around the number means what it says |
 | `release.yml` smoke test | the tools run | *whose build* they came from |
@@ -100,6 +100,30 @@ build" row returned the correct 15 by counting `.../ngspice` and `.../ngspice.gi
 as two repositories — a right answer from a broken measurement, which is the
 failure this whole directory keeps finding. Review the command in a diff, not
 just the colour of the run.
+
+`check_dockerfile_layer_budget.py` graded only the root `Dockerfile` until
+vibe-ic#2079. That prediction is exact for the root lineage — 0.3.6, 0.3.41 and
+0.3.49 each measure 109 RootFS layers, which is what `base 57 + final-stage 52`
+says — and it described no image the fleet pulled. Since 0.3.47 the shipped image
+is a derived chain built FROM the previous release's digest: 0.3.47 measures 116
+layers and 0.3.48 measures 118, against Docker's 125-layer pull graph. The gate
+kept reporting `109/110, 1 layer free` at both depths, so the nine extra layers
+and the last three generations of headroom were outside every gate's model, and
+`build_derived.sh` — the only path that builds that lineage — ran no depth check
+at all, because `check_image_depth.py` is wired into the release-composition path
+a derived build exists to avoid.
+
+Both lineages are now graded, and for the derived chain the ceiling is the pull
+limit itself with **one generation** held in reserve: below that the verdict names
+the remedy, which is a squash back into a root build rather than a smaller
+generation. The base depth a generation stands on cannot be read from source, so
+it is declared in `image_layer_budget.json` keyed to the digest it was measured
+from — a generation move without a fresh measurement is refused, exactly as a
+root base move is — and where the bytes are present the declaration is re-measured
+against them. The DIGEST is resolved, never a tag: measured 2026-09-07, the fleet
+registry serves a 109-layer root composition and the 118-layer derived image under
+the same `0.3.48` version label, so a tag does not identify which one a number
+came from.
 
 ## Where the checks actually run
 

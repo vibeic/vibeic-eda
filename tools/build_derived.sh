@@ -49,6 +49,16 @@ mkdir -p "$CTX/bin"
 cp "$OPENROAD_BIN" "$CTX/bin/openroad"
 chmod 0755 "$CTX/bin/openroad"
 
+# A DERIVED GENERATION MUST BE COSTED BEFORE IT IS BUILT, NOT AFTER IT FAILS TO
+# PULL. 0.3.47 is 116 layers and this build adds two more, against Docker's
+# 125-layer pull graph. The cheap gate predicts that from the base's declared
+# measured depth plus this file's own filesystem instructions and refuses -- with
+# the word SQUASH -- once the headroom no longer fits another generation
+# (vibe-ic#2079). Nothing measured this lineage before: `check_image_depth.py`
+# runs in the release-composition path, which is exactly the path a derived build
+# exists to avoid.
+python3 "$REPO_DIR/tools/check_dockerfile_layer_budget.py"
+
 echo "context:   $CTX"
 echo "base:      $BASE_IMAGE"
 echo "openroad:  $OPENROAD_BIN"
@@ -61,6 +71,13 @@ docker build -f "$REPO_DIR/Dockerfile.derived" \
 
 echo
 echo "built $TAG"
+
+# THE MEASURED BACKSTOP, on the bytes this build actually produced. No
+# `--compact`: flattening a derived generation would silently answer the depth
+# question by discarding the lineage this build exists to extend. If this refuses,
+# the answer is a squash back into a root composition, taken deliberately.
+python3 "$REPO_DIR/tools/check_image_depth.py" "$TAG"
+
 docker image inspect "$TAG" \
   --format 'id={{.Id}}
 version={{index .Config.Labels "org.opencontainers.image.version"}}
