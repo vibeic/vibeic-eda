@@ -1242,6 +1242,109 @@ def _pr_norecord(upstream, owner, reason, *, rc=None):
     return row
 
 
+def _is_http_404(result):
+    """gh prints `gh: Not Found (HTTP 404)` and the API body's `"status": "404"`."""
+    text = f"{result.stdout or ''}\n{result.stderr or ''}"
+    return "(HTTP 404)" in text or '"status": "404"' in text or '"status":"404"' in text
+
+
+_UPSTREAM_PRS_GRAPHQL = (
+    "query($owner:String!,$name:String!,$endCursor:String){"
+    " repository(owner:$owner,name:$name){ nameWithOwner"
+    "  pullRequests(states:OPEN, first:100, after:$endCursor){"
+    "   pageInfo{ hasNextPage endCursor }"
+    "   nodes{ number url title isDraft updatedAt headRefName baseRefName"
+    "          state headRepositoryOwner{ login } } } } }")
+
+
+def _upstream_pull_request_evidence_graphql(upstream, owner):
+    """The REST question, asked of GraphQL: every OPEN PR on `upstream`, then
+    the ones whose head repository is ours.  Returns the same envelope as
+    `_parse_upstream_pr_pages`, with `via: "graphql"` so the record says how it
+    was measured, or None when GraphQL could not answer completely -- the
+    caller then records NORECORD with the REST reason.  Never a zero from an
+    incomplete or malformed page: the same rules the REST parser applies."""
+    try:
+        gh_owner, gh_name = upstream.split("/", 1)
+    except ValueError:
+        return None
+    result = sh("gh", "api", "graphql", "--paginate", "--slurp",
+                "-f", f"owner={gh_owner}", "-f", f"name={gh_name}",
+                "-f", f"query={_UPSTREAM_PRS_GRAPHQL}",
+                timeout=GITHUB_API_TIMEOUT_S)
+    if result.returncode != 0:
+        return None
+    try:
+        pages = json.loads(result.stdout or "")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(pages, list) or not pages:
+        return None
+    items, seen = [], set()
+    for page_i, page in enumerate(pages):
+        repo = (((page or {}).get("data") or {}).get("repository")
+                if isinstance(page, dict) else None)
+        if not isinstance(repo, dict):
+            return None                      # repository did not resolve
+        name = repo.get("nameWithOwner")
+        if not isinstance(name, str) or name.lower() != upstream.lower():
+            return None
+        prs = repo.get("pullRequests")
+        if not isinstance(prs, dict):
+            return None
+        info, nodes = prs.get("pageInfo"), prs.get("nodes")
+        if not isinstance(info, dict) or not isinstance(nodes, list):
+            return None
+        if len(nodes) > 100:
+            return None
+        last = page_i == len(pages) - 1
+        if info.get("hasNextPage") is not False and last:
+            return None                      # pagination did not finish
+        if not last and (len(nodes) != 100 or info.get("hasNextPage") is not True):
+            return None                      # a non-final page must be full
+        for node in nodes:
+            if not isinstance(node, dict):
+                return None
+            number = node.get("number")
+            url, title = node.get("url"), node.get("title")
+            draft, updated = node.get("isDraft"), node.get("updatedAt")
+            head_ref, base_ref = node.get("headRefName"), node.get("baseRefName")
+            login = ((node.get("headRepositoryOwner") or {}).get("login")
+                     if isinstance(node.get("headRepositoryOwner"), dict) else None)
+            if type(number) is not int or number <= 0 or number in seen:
+                return None
+            seen.add(number)
+            if (not isinstance(url, str) or not url or not isinstance(title, str)
+                    or node.get("state") != "OPEN" or type(draft) is not bool
+                    or not isinstance(updated, str) or not updated
+                    or not isinstance(head_ref, str) or not head_ref
+                    or not isinstance(base_ref, str) or not base_ref):
+                return None
+            try:
+                stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if stamp.tzinfo is None:
+                return None
+            # A deleted head repository has no owner; that PR cannot be ours.
+            if not isinstance(login, str) or login.lower() != owner.lower():
+                continue
+            items.append({
+                "number": number, "url": url, "title": title,
+                "head_ref": head_ref, "base_ref": base_ref,
+                "draft": draft, "updated_at": updated,
+            })
+    return {
+        "outcome": "complete",
+        "upstream_repository": upstream,
+        "fork_owner": owner,
+        "open_count": len(items),
+        "items": items,
+        "via": "graphql",
+        "rest_status": 404,
+    }
+
+
 def _parse_upstream_pr_pages(raw, upstream, owner):
     """Validate and flatten ``gh api --paginate --slurp`` evidence.
 
@@ -1364,6 +1467,22 @@ def _upstream_pull_request_evidence(g):
     result = sh("gh", "api", endpoint, "--paginate", "--slurp",
                 timeout=GITHUB_API_TIMEOUT_S)
     if result.returncode != 0:
+        # A REST 404 on /pulls for a repository that otherwise resolves is not
+        # "no pull requests" and it is not "the repository is gone" either.
+        # Measured 2026-09-07 on IHP-GmbH/ihp-sg13cmos5l (the new cmos5l pin):
+        # `repos/.../pulls` -> 404 for state=open, state=all and a single PR
+        # number, while `repos/...` , `/commits`, `/issues` and GraphQL all
+        # answer, and GraphQL reports 0 open PRs.  Sibling repos of the same
+        # org answer REST normally.  Left as-is the fork was NORECORD every
+        # round: prune skipped, needs_human, and the page gate held open on a
+        # fork that has nothing pending.  So a 404 -- and only a 404 -- is
+        # answered by the SAME question put to GraphQL, which is a measurement
+        # of the same thing and is parsed under the same fail-closed rules.
+        # Any other failure, and any GraphQL failure, stays NORECORD.
+        if _is_http_404(result):
+            evidence = _upstream_pull_request_evidence_graphql(upstream, owner)
+            if evidence is not None:
+                return evidence
         return _pr_norecord(
             upstream, owner,
             f"GitHub pagination failed: {_first_error_line(result)}",
