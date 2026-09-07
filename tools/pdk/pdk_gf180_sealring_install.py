@@ -63,13 +63,6 @@ def install(pdk_root: Path, pdk: str, source: Path, expect: int) -> list[str]:
     if not pymacros.is_dir():
         raise InstallError(f"{pymacros} is absent; sealring.py puts it on sys.path")
 
-    dest = pymacros / "sealring_cells"
-    if dest.exists():
-        raise InstallError(
-            f"{dest} already exists -- the volume now ships its own copy. "
-            "Remove this step rather than overwriting what upstream delivered."
-        )
-
     if not source.is_dir():
         raise InstallError(f"no such source directory: {source}")
     names = sorted(p.name for p in source.glob("*.py"))
@@ -78,6 +71,25 @@ def install(pdk_root: Path, pdk: str, source: Path, expect: int) -> list[str]:
     if len(names) != expect:
         raise InstallError(
             f"expected {expect} .py files in {source}, found {len(names)}: {names}"
+        )
+
+    dest = pymacros / "sealring_cells"
+    if dest.exists():
+        # Our own copy, byte for byte, is not "the volume grew its own": a
+        # derived image built FROM a base that already ran this step (the
+        # 2026-09-07 lineage, 0.3.47 -> 0.3.48) reaches here with exactly the
+        # files it would install. Anything else -- a file more, fewer, or
+        # different -- is still refused, unread and unoverwritten.
+        present = sorted(p.name for p in dest.glob("*")) if dest.is_dir() else None
+        same = (present == names and all(
+            (dest / n).is_file() and (dest / n).read_bytes() == (source / n).read_bytes()
+            for n in names))
+        if same:
+            return names
+        raise InstallError(
+            f"{dest} already exists and is not this package byte for byte -- "
+            "the volume now ships its own copy. Remove this step rather than "
+            "overwriting what upstream delivered."
         )
 
     dest.mkdir()

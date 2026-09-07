@@ -108,6 +108,29 @@ def test_install_refuses_when_the_volume_already_has_the_package(tmp_path):
         install_mod.install(root, "gf180mcuD", _source(tmp_path), expect=4)
 
 
+def test_install_accepts_our_own_identical_copy_already_present(tmp_path):
+    """A derived image built FROM a base that already ran this step carries
+    exactly these files; refusing it would make the two lineages unable to
+    share a base. Identical bytes are ours; anything else is still refused."""
+    root = tmp_path / "pdks"
+    _pdk(root)
+    src = _source(tmp_path)
+    first = install_mod.install(root, "gf180mcuD", src, expect=4)
+    again = install_mod.install(root, "gf180mcuD", src, expect=4)
+    assert again == first
+
+
+def test_install_refuses_a_copy_that_differs_by_one_byte(tmp_path):
+    root = tmp_path / "pdks"
+    _pdk(root)
+    src = _source(tmp_path)
+    install_mod.install(root, "gf180mcuD", src, expect=4)
+    dest = root / "gf180mcuD/libs.tech/klayout/tech/pymacros/sealring_cells"
+    (dest / "m0.py").write_text("# changed by the volume\n")
+    with pytest.raises(install_mod.InstallError, match="not this package byte for byte"):
+        install_mod.install(root, "gf180mcuD", src, expect=4)
+
+
 def test_install_refuses_when_nothing_would_import_it(tmp_path):
     """No consumer script -> installing the library leaves dead code behind."""
     root = tmp_path / "pdks"

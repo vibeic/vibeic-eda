@@ -755,7 +755,11 @@ RUN set -e; \
 # build.
 #
 # MEASURED on the base image this Dockerfile pins: 13324 files, 1.8 GB, 0.5 s.
-COPY tools/pdk/pdk_local_mods.py tools/pdk/pdk_gf180_poly2_density_patch.py /vibeic/pdk/
+# The whole directory: the manifest's steps live here (density, seal-ring cells,
+# the ihp PyCell runtime, the OSDI reference check) and each RUN below names the
+# file it runs. One COPY layer, whatever the directory holds -- the layer budget
+# (tools/check_dockerfile_layer_budget.py) has one layer to spare, not four.
+COPY tools/pdk/ /vibeic/pdk/
 RUN set -e; \
     python3 /vibeic/pdk/pdk_local_mods.py baseline \
         --root /foss/pdks/ciel \
@@ -902,7 +906,12 @@ RUN set -e; \
         || { echo "FAIL: :poly2_result was not registered" >&2; exit 1; }; \
     grep -q 'extract_single_layer_from_design.call(:poly2, 30, 0)' $D/generic_layers.rb \
         || { echo "FAIL: :poly2 itself was redefined; DPF.5 would measure a layer against itself" >&2; exit 1; }; \
-    echo "gf180mcuD: PL.8 counts poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"
+    echo "gf180mcuD: PL.8 counts poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"; \
+    python3 /vibeic/pdk/pdk_gf180_sealring_install.py \
+        --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4; \
+    python3 /vibeic/pdk/pdk_sealring_check.py --pdk gf180mcuD --require gf180mcuD; \
+    find /foss/pdks/ciel /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
+    echo "gf180mcuD: sealring_cells installed, the library the PDK's own sealring.py imports (vibeic-eda#170)"
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future
 # recipe change that stops producing a file cannot silently leave the base's
@@ -1641,7 +1650,9 @@ RUN set -e; \
 # same shape as the ALIGN Viewer defect 130 lines up: a step verified in an
 # identity no user has. Restoring USER 1000 on the next line is what keeps this
 # step from changing the identity the image ships with.
-COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
+# (local_mods.json arrived with `COPY tools/pdk/` above; a second COPY of the
+#  same file was one layer, and the layer budget's last spare went to the PDK
+#  corrections RUN below.)
 
 # --- the tool manifest must name the tools THIS image ships ---
 #
@@ -1667,6 +1678,35 @@ COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
 # writes that had all failed with EACCES, so it now reads the file back.
 COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv /vibeic/
 USER root
+# The three PDK corrections that until 2026-09-07 lived only in Dockerfile.derived
+# -- the lane shortcut that builds FROM a published digest. This file is what
+# the round publishes; a manifest entry (seal-ring cells, above) declared for a
+# step this file never ran is exactly what `verify` below refuses:
+#   COUNT gf180mcu-sealring-cells-library: declares expect_added=4, measured 0.
+# The ihp steps are outside the ciel digest root and are gated by their own
+# counts and checks (vibeic-eda#172, #173). ihp-sg13cmos5l is reported, not
+# gated (#176). Placed ABOVE the verify RUN, never below it: everything here is
+# inside the window `verify` measures. One layer -- the last one the budget had.
+RUN set -e; \
+    python3 /vibeic/pdk/pdk_ihp_pycell_runtime_install.py \
+        --pdk ihp-sg13g2 --source /vibeic/pdk/ihp_pycell_runtime --expect 37; \
+    python3 /vibeic/pdk/pdk_pycell_lib_check.py --pdk ihp-sg13g2 --require ihp-sg13g2; \
+    echo "--- advisory: every shipped family, not gating ---"; \
+    python3 /vibeic/pdk/pdk_pycell_lib_check.py || true; \
+    python3 /vibeic/pdk/pdk_sealring_check.py \
+        --pdk gf180mcuD --pdk ihp-sg13g2 --require gf180mcuD --require ihp-sg13g2; \
+    python3 /vibeic/pdk/pdk_sealring_check.py || true; \
+    cd /foss/pdks/ihp-sg13g2/libs.tech/verilog-a; \
+    for M in cap_cmomi cap_cmomf; do \
+        openvaf-r -D__NGSPICE__ -o ../ngspice/osdi/$M.osdi $M/$M.va; \
+        head -c4 ../ngspice/osdi/$M.osdi | grep -q ELF || { echo "FAIL: $M.osdi is not an ELF shared object" >&2; exit 1; }; \
+    done; \
+    cd /; \
+    python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
+    find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
+    echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
+# verify stays the LAST RUN in the file (test_verify_is_the_last_RUN_in_the_file):
+# the step above is its own layer so the reconciliation window ends here.
 RUN set -e; \
     bash /vibeic/refresh_versions_manifest.sh /vibeic/tool_version_probes.tsv; \
     python3 /vibeic/pdk/pdk_local_mods.py verify \
