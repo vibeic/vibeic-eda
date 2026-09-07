@@ -370,3 +370,58 @@ def test_the_refusal_branch_records_the_refusal_positively():
     blocked = tick.split('if [ "${blocking_rc}" != "0" ]; then', 1)[1]
     blocked = blocked.split("\nelif ", 1)[0]
     assert "record_blocked_round.py" in blocked, blocked[:600]
+
+
+# --- the quoted evidence is the finding, not the whole file -------------------
+
+def test_the_quoted_output_is_the_finding_not_a_wall_of_clean_rows(tmp_path,
+                                                                   monkeypatch):
+    """Measured on a real 38-fork `daily-merge.txt`: quoting the head printed 37
+    ALREADY_CURRENT rows above the one row that mattered. An alert nobody reads
+    to the end is the same defect as an alert that says nothing."""
+    state = tmp_path / "wall"
+    state.mkdir()
+    rows = ["daily_merge: 38 fork(s), 0 merged, 1 need a human"]
+    rows += [f"  fork{i:<10} ALREADY_CURRENT        level with upstream/master"
+             for i in range(37)]
+    rows.append("  Trilinos       UPSTREAM_DEFAULT_UNMEASURABLE  live upstream "
+                "HEAD did not resolve to exactly one branch")
+    (state / "daily-merge.txt").write_text("\n".join(rows) + "\n",
+                                           encoding="utf-8")
+    monkeypatch.setenv("GK_STATE_DIR", str(state))
+    _, _, body = _raise(_mod(), monkeypatch, "--tick-exit", "4")
+    quoted = body.split("## What daily_merge said")[1].split("```")[1]
+    assert "UPSTREAM_DEFAULT_UNMEASURABLE" in quoted, quoted
+    assert "ALREADY_CURRENT" not in quoted, quoted
+
+
+def test_the_alert_and_the_log_agree_on_what_a_finding_is():
+    """The rule lives in `merge_findings.sh` and the alert delegates to it. They
+    are different files and a rename on one side alone is how the log and the
+    alert start disagreeing about which forks refused."""
+    m = _mod()
+    awk = (HERE / "merge_findings.sh").read_text(encoding="utf-8")
+    for state in m._MERGE_CLEAN:
+        assert f'"{state}"' in awk, (
+            f"{state} is clean to check_release_failed and not to "
+            f"merge_findings.sh")
+    named = set(re.findall(r'\$2 != "([A-Z_]+)"', awk))
+    assert named == set(m._MERGE_CLEAN), (named, m._MERGE_CLEAN)
+
+
+def test_the_filter_the_stage_names_is_the_one_that_exists():
+    """A `findings` script that is missing or not executable silently degrades to
+    quoting the head — which is correct behaviour and must not be the state we
+    ship in."""
+    import os as _os
+    stages = getattr(_mod(), "_STAGES", {})
+    assert stages, "check_release_failed names no stage for any exit code"
+    named = [(c, sp) for c, sp in stages.items() if sp.get("findings")]
+    assert named, ("no stage names a findings filter, so every alert quotes the "
+                   "head of a stage's output")
+    for code, spec in stages.items():
+        if not spec.get("findings"):
+            continue
+        script = HERE / spec["findings"]
+        assert script.is_file(), (code, script)
+        assert _os.access(script, _os.X_OK), (code, script)
