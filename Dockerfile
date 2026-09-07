@@ -1680,7 +1680,11 @@ RUN set -e; \
 # BLOCKS the build if any tool cannot be probed or written: "not known to be
 # correct" is not a pass. The script's own first draft reported success for four
 # writes that had all failed with EACCES, so it now reads the file back.
-COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv /vibeic/
+# generate_container_user.sh rides along on this COPY, and is installed over the
+# base image's copy by the RUN below rather than by a COPY straight to
+# /dockerstartup/scripts/. A second COPY is one layer and the root composition
+# has one left (109/110); this is the same fold local_mods.json makes above.
+COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv tools/generate_container_user.sh /vibeic/
 USER root
 # The three PDK corrections that until 2026-09-07 lived only in Dockerfile.derived
 # -- the lane shortcut that builds FROM a published digest. This file is what
@@ -1691,7 +1695,26 @@ USER root
 # counts and checks (vibeic-eda#172, #173). ihp-sg13cmos5l is reported, not
 # gated (#176). Placed ABOVE the verify RUN, never below it: everything here is
 # inside the window `verify` measures. One layer -- the last one the budget had.
+#
+# The entrypoint's user setup is installed HERE, at the top of this RUN, for the
+# layer budget and for nothing else -- it has no relation to the PDK work below
+# it. The base image writes /tmp/passwd with `install`, which unlinks the
+# destination before recreating it (strace: unlinkat, then openat O_CREAT|O_EXCL),
+# so a concurrent reader finds no file and a concurrent writer fails EEXIST into
+# the entrypoint's own `exit 1` (vibeic-eda#179). The replacement renames a temp
+# file into place and publishes /tmp/.vibeic-user-ready afterwards. It is
+# ASSERTED here, not merely copied: the in-place write must be gone from the file
+# the image actually ships, which a COPY on its own cannot say.
 RUN set -e; \
+    install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
+        /dockerstartup/scripts/generate_container_user.sh; \
+    bash -n /dockerstartup/scripts/generate_container_user.sh; \
+    grep -q 'mv -f -- "$_temp" "$_destination"' \
+        /dockerstartup/scripts/generate_container_user.sh; \
+    if grep -qE '^[^#]*install -m 0644' /dockerstartup/scripts/generate_container_user.sh; then \
+        echo "FAIL: the entrypoint user setup still writes /tmp/passwd in place" >&2; exit 1; \
+    fi; \
+    echo "entrypoint user setup: vibeic copy installed (atomic rename + readiness sentinel)"; \
     python3 /vibeic/pdk/pdk_ihp_pycell_runtime_install.py \
         --pdk ihp-sg13g2 --source /vibeic/pdk/ihp_pycell_runtime --expect 37; \
     python3 /vibeic/pdk/pdk_pycell_lib_check.py --pdk ihp-sg13g2 --require ihp-sg13g2; \
