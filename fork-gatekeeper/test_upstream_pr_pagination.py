@@ -542,3 +542,95 @@ def test_every_repository_row_retains_the_structured_evidence(
     assert saved["_round"]["schema_version"] == 1
     assert len(saved["_round"]["run_id"]) == 32
     assert saved["_round"]["finished_at"] >= saved["_round"]["started_at"]
+
+
+# --------------------------------------------------------------------------
+# A REST 404 on /pulls is answered by GraphQL, never by zero (vibeic-eda#176 follow-up)
+# --------------------------------------------------------------------------
+
+_REST_404 = ('{"message":"Not Found","documentation_url":"https://docs.github.com/rest/pulls/pulls#list-pull-requests","status":"404"}'
+             'gh: Not Found (HTTP 404)')
+
+
+def _gql_page(nodes, has_next=False, cursor=None, name="upstream/tool"):
+    return {"data": {"repository": {"nameWithOwner": name, "pullRequests": {
+        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor}, "nodes": nodes}}}}
+
+
+def _gql_node(number, owner="somebody", ref=None):
+    return {"number": number, "url": f"https://github.com/upstream/tool/pull/{number}",
+            "title": f"change {number}", "isDraft": False, "updatedAt": "2026-09-07T03:04:05Z",
+            "headRefName": ref or f"work-{number}", "baseRefName": "main", "state": "OPEN",
+            "headRepositoryOwner": {"login": owner}}
+
+
+def _rest_404_then_graphql(monkeypatch, gql_stdout, gql_rc=0):
+    seen = []
+    def run(*args, **kwargs):
+        seen.append(args)
+        if "graphql" in args:
+            return subprocess.CompletedProcess(args, gql_rc, gql_stdout, "")
+        return subprocess.CompletedProcess(args, 1, "", _REST_404)
+    monkeypatch.setattr(D, "sh", run)
+    return seen
+
+
+def test_a_rest_404_is_answered_by_graphql_not_by_zero(monkeypatch):
+    """THE REGRESSION. IHP-GmbH/ihp-sg13cmos5l: REST /pulls 404s for every
+    query shape while the repository, its commits and GraphQL all answer.
+    Recorded as NORECORD the fork was pruned-nothing + needs_human every
+    round and the page gate never converged."""
+    _github_remotes(monkeypatch)
+    seen = _rest_404_then_graphql(monkeypatch, json.dumps([_gql_page([])]))
+    ev = D._upstream_pull_request_evidence(G)
+    assert ev["outcome"] == "complete" and ev["open_count"] == 0 and ev["items"] == []
+    assert ev["via"] == "graphql" and ev["rest_status"] == 404
+    assert any("graphql" in a for a in seen), "GraphQL was never asked"
+    assert D._branches_serving_an_open_upstream_pr(G, ev) == set()
+
+
+def test_graphql_keeps_only_our_open_prs_with_the_same_fields(monkeypatch):
+    _github_remotes(monkeypatch)
+    _rest_404_then_graphql(monkeypatch, json.dumps([_gql_page(
+        [_gql_node(7, owner="vibeic", ref="vibeic/fix"), _gql_node(8, owner="someone-else")])]))
+    ev = D._upstream_pull_request_evidence(G)
+    assert ev["open_count"] == 1
+    assert ev["items"] == [{"number": 7, "url": "https://github.com/upstream/tool/pull/7",
+                            "title": "change 7", "head_ref": "vibeic/fix", "base_ref": "main",
+                            "draft": False, "updated_at": "2026-09-07T03:04:05Z"}]
+    assert D._branches_serving_an_open_upstream_pr(G, ev) == {"vibeic/fix"}
+
+
+@pytest.mark.parametrize("gql_stdout,gql_rc", [
+    ("", 1),                                                        # transport failure
+    ("not json", 0),                                                # malformed
+    (json.dumps([]), 0),                                            # no page at all
+    (json.dumps([_gql_page([], has_next=True, cursor="x")]), 0),   # pagination did not finish
+    (json.dumps([_gql_page([_gql_node(1)] * 3, has_next=True, cursor="x"), _gql_page([])]), 0),  # partial non-final page
+    (json.dumps([{"data": {"repository": None}}]), 0),             # repository did not resolve
+    (json.dumps([_gql_page([], name="other/repo")]), 0),           # answered about another repo
+])
+def test_an_incomplete_graphql_answer_is_still_norecord(monkeypatch, gql_stdout, gql_rc):
+    """THE BIDIRECTIONAL CONTROL: the fallback must not soften the guard into
+    'REST failed, so zero'. Every incomplete GraphQL shape keeps NORECORD with
+    the REST reason, and prunes nothing."""
+    _github_remotes(monkeypatch)
+    _rest_404_then_graphql(monkeypatch, gql_stdout, gql_rc)
+    ev = D._upstream_pull_request_evidence(G)
+    assert ev["outcome"] == "norecord" and ev["open_count"] is None
+    assert "HTTP 404" in ev["reason"]
+    assert D._branches_serving_an_open_upstream_pr(G, ev) is None
+
+
+def test_a_rest_failure_that_is_not_404_never_asks_graphql(monkeypatch):
+    """A 5xx, a timeout, a rate limit: those are not the measured quirk, and
+    asking a second API on their behalf would widen a narrow exception."""
+    _github_remotes(monkeypatch)
+    seen = []
+    def run(*args, **kwargs):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "gh: Internal Server Error (HTTP 500)")
+    monkeypatch.setattr(D, "sh", run)
+    ev = D._upstream_pull_request_evidence(G)
+    assert ev["outcome"] == "norecord"
+    assert not any("graphql" in a for a in seen)
