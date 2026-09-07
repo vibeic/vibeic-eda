@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +82,12 @@ _STAGES = {
     3: {"stage": "source guards", "txt": "source-guards.txt", "json": None,
         "kind": "pre", "rc_var": "guard_rc"},
     4: {"stage": "daily_merge", "txt": "daily-merge.txt",
-        "json": "daily-merge.json", "kind": "pre", "rc_var": "merge_rc"},
+        "json": "daily-merge.json", "kind": "pre", "rc_var": "merge_rc",
+        # ONE implementation of "which rows are findings", shared with the
+        # `[merge]` block of run_tick.sh. Quoting the head of daily-merge.txt
+        # instead prints 37 ALREADY_CURRENT rows above the one that matters,
+        # which is the wall-nobody-reads failure this alarm is supposed to avoid.
+        "findings": "merge_findings.sh"},
     5: {"stage": "daily_release", "txt": "daily-release.txt",
         "json": "daily-release.json", "kind": "release",
         "rc_var": "release_rc"},
@@ -200,6 +206,37 @@ def _blocked_stages() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _findings(spec: dict, path: Path) -> str:
+    """The stage's own output, reduced to the rows that ARE the finding.
+
+    Delegated to the stage's filter script rather than reimplemented here: the
+    rule ("every row whose state is not one of daily_merge's three clean ones")
+    lives in exactly one place, so a rename cannot leave the log and the alert
+    disagreeing about what counts as a finding.
+    `test_the_alert_and_the_log_agree_on_what_a_finding_is` holds them together.
+    """
+    script = _HERE / str(spec.get("findings") or "")
+    if not spec.get("findings") or not os.access(script, os.X_OK):
+        return _quote_txt(path)
+    try:
+        out = subprocess.run([str(script), str(path)], capture_output=True,
+                             text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        return f"({script.name} could not be run: {exc})\n" + _quote_txt(path)
+    if out.returncode != 0:
+        return (f"({script.name} exited {out.returncode})\n"
+                + _quote_txt(path))
+    lines = out.stdout.splitlines()
+    if not lines:
+        return (f"({path.name} names no row outside daily_merge's clean states — "
+                f"the record and the exit code disagree)")
+    if len(lines) > _TXT_LINES:
+        lines = lines[:_TXT_LINES] + [
+            f"… {len(out.stdout.splitlines()) - _TXT_LINES} more finding line(s) "
+            f"in {path.name}"]
+    return "\n".join(lines).strip()
+
+
 def _stage_detail(spec: dict) -> str:
     """Everything the stage that refused said, from its own two records."""
     root = _state_dir()
@@ -219,7 +256,8 @@ def _stage_detail(spec: dict) -> str:
         elif why:
             parts.append(f"(the {spec['stage']} record could not be read — {why})")
     parts = [p for p in parts if p]
-    parts.append(f"--- {spec['txt']} ---\n{_quote_txt(root / spec['txt'])}")
+    parts.append(f"--- {spec['txt']} ---\n"
+                 f"{_findings(spec, root / spec['txt'])}")
     return "\n".join(parts) + "\n"
 
 
