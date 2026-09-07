@@ -1788,10 +1788,40 @@ def repair_latest_publication(
         return False, evidence
 
     def registry_copy(source: str, target: str) -> Tuple[int, str, str]:
-        return _sh([
-            "docker", "buildx", "imagetools", "create",
-            "--tag", target, source,
-        ], progress=True, stall_grace=PUSH_STALL_GRACE_S)
+        """Republish `source`'s bytes under `target`, PRESERVING THE MEDIA TYPE.
+
+        `docker buildx imagetools create --tag target source` was the obvious
+        way to do this registry-side, and it cannot work here: given a single
+        image manifest it always writes an OCI **index** wrapping it. The
+        immutable version tag is a plain `application/vnd.oci.image.manifest.v1+json`,
+        an index digest never equals the manifest digest it wraps, and
+        `verify_remote_release_publication` compares identities -- so the
+        repair republished the right BYTES under the right name and then
+        reported `latest_manifest_mismatch` about its own work, on that round
+        and on every round after it.
+
+        Measured 2026-09-07 while recovering 0.3.50 (vibeic-eda#194):
+
+            :latest   index    4074074cb0d8dd99...  -> manifests: [5e2b472f8c6be44e...]
+            :0.3.50   manifest 5e2b472f8c6be44e...
+            repair -> False, category latest_manifest_mismatch, repair_attempted true
+
+        pull + tag + push is what the RELEASE path itself does when it moves
+        :latest after a build, so both paths now produce one shape and the
+        verifier can be believed. The explicit pull is what the registry-side
+        copy was reaching for: it does not depend on a daemon cache surviving
+        from the release that first pushed the image.
+        """
+        rc, out, err = _sh(["docker", "pull", source],
+                           progress=True, stall_grace=PUSH_STALL_GRACE_S)
+        if rc != 0:
+            return rc, out, err
+        rc, out2, err2 = _sh(["docker", "tag", source, target])
+        if rc != 0:
+            return rc, out + out2, err + err2
+        rc, out3, err3 = _sh(["docker", "push", target],
+                             progress=True, stall_grace=PUSH_STALL_GRACE_S)
+        return rc, out + out2 + out3, err + err2 + err3
 
     evidence["repair_attempted"] = True
     rc, out, err = (publish or registry_copy)(version_ref, latest_ref)
@@ -2652,6 +2682,16 @@ def _main_under_release_lock(argv=None) -> int:
     ap.add_argument("--json", default=None)
     ap.add_argument("--smoke-only", default=None, metavar="IMAGE",
                     help="run the tool smoke against an existing image and stop")
+    ap.add_argument("--repair-latest", default=None, metavar="VERSION",
+                    help="make :latest name the already-published VERSION "
+                         "manifest, through the same authorization the release "
+                         "path uses. For the state a raced record push leaves "
+                         "behind (vibeic-eda#194): :latest stale -> "
+                         "test_release_record_pins_ahead RED -> semantic pytest "
+                         "RED -> run_tick NOT CHECKED -> daily_release never "
+                         "runs -> the noop arm that repairs :latest never runs. "
+                         "Refuses unless VERSION is the recorded version and "
+                         "authorize_latest_repair agrees.")
     ap.add_argument("--record-release", default=None, metavar="VERSION",
                     help="write RELEASED.json for a version published OUTSIDE "
                          "this program (vibeic-eda#51), through the same writer "
@@ -2685,6 +2725,66 @@ def _main_under_release_lock(argv=None) -> int:
     # a prior day's success masquerading as this run's answer.
     if a.json:
         _atomic_json(a.json, result)
+
+    if a.repair_latest:
+        result["mode"] = "repair-latest"
+        rec, rec_err = released_record(root), None
+        recorded = rec.get("version") if isinstance(rec, dict) else None
+        if recorded != a.repair_latest:
+            print(f"[REFUSED] --repair-latest {a.repair_latest} but "
+                  f"RELEASED.json records {recorded!r}. :latest may only be "
+                  f"pointed at the version this tree's record authorises.",
+                  file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "repair-latest", "category": "version_mismatch",
+                "retryable": False,
+                "summary": f"RELEASED.json records {recorded!r}, "
+                           f"not {a.repair_latest!r}",
+            })
+        try:
+            auth_ok, auth = authorize_latest_repair(root, a.repair_latest)
+        except ReleaseMeasurementUnknown as exc:
+            return _finish_unmeasured(result, a.json, exc)
+        result["latest_authority"] = auth
+        if not auth_ok:
+            print(f"[REFUSED] {auth.get('summary', 'release authority changed')}",
+                  file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "repair-latest", "category": "release_authority_changed",
+                "retryable": True,
+                "summary": auth.get("summary", "release authority changed"),
+            })
+        if a.dry_run:
+            try:
+                _ok, ev = repair_latest_publication(
+                    a.repair_latest,
+                    expected_identity=rec.get("manifest_identity"),
+                    repair=False)
+            except ReleaseMeasurementUnknown as exc:
+                return _finish_unmeasured(result, a.json, exc)
+            result["remote_publication"] = ev
+            print(f"[DRY RUN] :latest would be repaired to {a.repair_latest}; "
+                  f"nothing was pushed ({ev.get('category') or 'already correct'})")
+            return _finish(result, a.json, RC_OK, "dry_run")
+        try:
+            ok, ev = repair_latest_publication(
+                a.repair_latest,
+                expected_identity=rec.get("manifest_identity"))
+        except ReleaseMeasurementUnknown as exc:
+            return _finish_unmeasured(result, a.json, exc)
+        result["remote_publication"] = ev
+        if not ok:
+            print(f"[FAIL] :latest was not repaired: "
+                  f"{ev.get('summary') or ev.get('category')}", file=sys.stderr)
+            return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
+                "stage": "repair-latest",
+                "category": ev.get("category", "latest_repair_failed"),
+                "retryable": bool(ev.get("retryable", True)),
+                "summary": ev.get("summary", ":latest was not repaired"),
+            })
+        print(f":latest now identifies {a.repair_latest} "
+              f"({str(ev.get('frozen_identity'))[:12]}…)")
+        return _finish(result, a.json, RC_OK, "repaired")
 
     if a.record_release:
         result["mode"] = "record-release"
