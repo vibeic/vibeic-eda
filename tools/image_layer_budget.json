@@ -1,5 +1,12 @@
 {
   "base_image": "hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a",
   "base_layers": 57,
-  "max_total_layers": 110
+  "max_total_layers": 110,
+  "_derived_comment": "The chain that actually ships. Dockerfile.derived builds FROM a previous release's digest, so this generation's depth is that release's measured depth plus its own filesystem instructions -- a fact no source file states, which is why it is declared here and keyed to the digest it was measured from. base_layers is `docker image inspect <repo>@<base_digest> --format '{{len .RootFS.Layers}}'`; pull_limit is the 125-layer ceiling of Docker's pull graph, the same one check_image_depth.py defaults to. Move base_digest and this count moves with it or the gate refuses.",
+  "derived": {
+    "base_digest": "sha256:8da785a8d3275884ad0d0ee0fb10f7e90d8b7bf11a08d38e9559b0764112480f",
+    "base_version": "0.3.47",
+    "base_layers": 116,
+    "pull_limit": 125
+  }
 }

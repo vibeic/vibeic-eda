@@ -72,6 +72,17 @@ most 53 more, keeping the source prediction at or below 110. A base digest move
 must update its measured count in `tools/image_layer_budget.json`; another
 `RUN`, `COPY`, or `ADD` that spends the remaining reserve fails the fast gate.
 
+The same program grades the **derived chain**, which is what the fleet actually
+pulls. `Dockerfile.derived` builds FROM the previous release's digest, so its
+depth is that release's measured depth plus this generation's own filesystem
+instructions: 116 + 2 = 118 for 0.3.48, against the 125-layer pull limit. Here the
+ceiling is the limit itself and the reserve is ONE GENERATION — when the headroom
+no longer fits another generation the gate says SQUASH by name, because a smaller
+generation only postpones the same wall. `tools/build_derived.sh` runs this
+prediction before the build and `tools/check_image_depth.py` on the bytes after
+it; before vibe-ic#2079 that path ran neither, and the root prediction reported
+`109/110` no matter how deep the chain got.
+
 After composition, the release path
 runs `tools/check_image_depth.py --compact`: a candidate above 125 filesystem
 layers is flattened automatically, its runtime configuration is restored and
@@ -94,8 +105,11 @@ run locally, and push successfully while every fresh `docker pull` fails.
 2. `python3 tools/check_fork_only.py` — the source must be a `vibeic/` fork
    (owner rule, 2026-07-29). A genuinely un-forkable source goes in
    `tools/PENDING_FORKS.json` with an expiry, never a bare exception.
-3. `python3 tools/check_dockerfile_layer_budget.py` — keep the predicted image
-   at or below the 110-layer working budget.
+3. `python3 tools/check_dockerfile_layer_budget.py` — keep the root composition's
+   predicted depth at or below the 110-layer working budget, and the derived chain
+   that ships inside the 125-layer pull limit with a generation of reserve. A
+   derived generation whose base moved must carry that base's freshly measured
+   depth in `tools/image_layer_budget.json` in the same change.
 4. `./sync_image_version.py --bump patch` (or `--set X.Y.Z`).
 5. `git commit -am "X.Y.Z — <what changed>"`.
 6. Build + `./release.sh X.Y.Z` (or push tag `vX.Y.Z`).

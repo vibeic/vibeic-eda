@@ -218,7 +218,7 @@ pins live in three places by design:
 
   ```bash
   python3 tools/check_pins_agree.py    # 18 pin(s) across 8 tool(s) agree in all three places
-  python3 tools/check_dockerfile_layer_budget.py  # predicted image depth stays within 110
+  python3 tools/check_dockerfile_layer_budget.py  # root composition within 110; the derived chain that ships within the 125-layer pull limit, with its headroom in generations
   ```
 
   Eight artefacts, ten sources — `sat-solvers` is kissat + cadical and `lvs` is
