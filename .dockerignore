@@ -20,3 +20,9 @@ tools/*
 # a build.
 !tools/refresh_versions_manifest.sh
 !tools/tool_version_probes.tsv
+# THIRD EXCEPTION: the entrypoint's user setup (vibeic-eda#179). The base image's
+# copy writes /tmp/passwd with `install`, which unlinks the destination before
+# recreating it; ours renames a temp file into place and publishes a readiness
+# sentinel. It has to come from the context for the same reason tools/pdk does --
+# it replaces a file in THIS image, so no `git clone` can supply it.
+!tools/generate_container_user.sh
