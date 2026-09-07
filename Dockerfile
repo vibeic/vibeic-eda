@@ -1650,7 +1650,9 @@ RUN set -e; \
 # same shape as the ALIGN Viewer defect 130 lines up: a step verified in an
 # identity no user has. Restoring USER 1000 on the next line is what keeps this
 # step from changing the identity the image ships with.
-COPY tools/pdk/local_mods.json /vibeic/pdk/local_mods.json
+# (local_mods.json arrived with `COPY tools/pdk/` above; a second COPY of the
+#  same file was one layer, and the layer budget's last spare went to the PDK
+#  corrections RUN below.)
 
 # --- the tool manifest must name the tools THIS image ships ---
 #
