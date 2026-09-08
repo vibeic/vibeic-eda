@@ -163,11 +163,18 @@ LIVE_HEAD_TIMEOUT_S = 120
 #: actually produce (`_sh` returns rc=127 with "TimeoutExpired: ..." for its own
 #: deadline; git prints these for a refused/reset/unreachable transport).
 _TRANSPORT_FAILURE_RE = re.compile(
+    # git
     r"TimeoutExpired|Connection (?:timed out|reset|refused)|"
     r"Could not resolve host|Temporary failure in name resolution|"
     r"unable to access|The remote end hung up|early EOF|"
     r"gnutls_handshake\(\) failed|SSL_ERROR_SYSCALL|Operation timed out|"
-    r"HTTP/2 stream .* was not closed cleanly|RPC failed",
+    r"HTTP/2 stream .* was not closed cleanly|RPC failed|"
+    # gh / HTTP: a 5xx or a rate limit is the SERVER declining to answer, which
+    # is the same class as the network declining to carry the question.  A 4xx
+    # is an answer (not found, no permission) and is deliberately absent.
+    r"error connecting to|context deadline exceeded|EOF\b|"
+    r"HTTP 50[0-9]|HTTP 429|rate limit|server error|"
+    r"i/o timeout|TLS handshake timeout|no such host",
     re.I)
 
 
@@ -184,6 +191,33 @@ def _is_transport_failure(rc: int, out: str, err: str) -> bool:
     if rc == watchdog.RC_STALLED:
         return True
     return bool(_TRANSPORT_FAILURE_RE.search(f"{out}\n{err}"))
+
+
+def _probe_with_transport_retry(args: List[str], *, timeout: int,
+                                attempts: int = LIVE_HEAD_ATTEMPTS):
+    """Run a LIVE PROBE, re-asking it only when the transport failed.
+
+    Every caller here asks a remote a question whose answer decides whether a
+    fork was measured at all, and an unmeasured fork refuses the whole release
+    (`daily_merge` NEEDS HUMAN -> the blocking gate REFUSES `daily_release`).
+    A transport failure is not an answer, so it is re-asked; anything the remote
+    actually said stands on the first reply.  Same command, same deadline, same
+    parsing every attempt; every failure is kept in the diagnostic so a real
+    outage refuses with all of them visible rather than only the last.
+    """
+    attempts_log = []
+    rc, out, err = 1, "", ""
+    for i in range(attempts):
+        rc, out, err = _sh(args, timeout=timeout)
+        if rc == 0:
+            return rc, out, err
+        attempts_log.append(f"attempt {i + 1}/{attempts} rc={rc}: "
+                            + " ".join((err or out).split())[:160])
+        if not _is_transport_failure(rc, out, err):
+            break
+        if i + 1 < attempts:
+            time.sleep(LIVE_HEAD_RETRY_SLEEP_S)
+    return rc, out, err + ("\n" if err else "") + "; ".join(attempts_log)
 
 
 def _live_head_with_transport_retry(src: Path):
@@ -203,26 +237,16 @@ def _live_head_with_transport_retry(src: Path):
     attempt is returned in the diagnostic so a real outage still refuses -- with
     all three failures visible, not just the last.
     """
-    attempts = []
-    for i in range(LIVE_HEAD_ATTEMPTS):
-        rc, out, err = _sh([
-            "git", "-C", str(src), "ls-remote", "--symref", "upstream", "HEAD",
-        ], timeout=LIVE_HEAD_TIMEOUT_S)
-        if rc == 0:
-            return rc, out, err
-        attempts.append(f"attempt {i + 1}/{LIVE_HEAD_ATTEMPTS} rc={rc}: "
-                        + " ".join((err or out).split())[:160])
-        if not _is_transport_failure(rc, out, err):
-            break
-        if i + 1 < LIVE_HEAD_ATTEMPTS:
-            time.sleep(LIVE_HEAD_RETRY_SLEEP_S)
-    return rc, out, err + ("\n" if err else "") + "; ".join(attempts)
+    return _probe_with_transport_retry(
+        ["git", "-C", str(src), "ls-remote", "--symref", "upstream", "HEAD"],
+        timeout=LIVE_HEAD_TIMEOUT_S)
 
 
 def _upstream_url(repo: str) -> str:
     """Upstream of a vibeic fork, asked of GitHub rather than hard-coded."""
-    rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}",
-                      "--jq", ".parent.full_name // empty"], timeout=120)
+    rc, out, _ = _probe_with_transport_retry(
+        ["gh", "api", f"repos/vibeic/{repo}",
+         "--jq", ".parent.full_name // empty"], timeout=120)
     slug = out.strip() if rc == 0 else ""
     # `gh api` prints the ERROR BODY to stdout on failure, and `--jq` leaves it
     # there when the document has no such field. Without the rc check a missing
@@ -610,9 +634,10 @@ def branch_at_pin(repo: str, pin: str) -> BranchLookup:
     """
     # --paginate + per_page is load-bearing. The unpaginated endpoint returns
     # the first 30 branches, which previously made real build lines disappear.
-    rc, out, err = _sh(["gh", "api", "--paginate",
-                        f"repos/vibeic/{repo}/branches?per_page=100",
-                        "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
+    rc, out, err = _probe_with_transport_retry(
+        ["gh", "api", "--paginate",
+         f"repos/vibeic/{repo}/branches?per_page=100",
+         "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
     if rc != 0:
         return BranchLookup(
             BRANCH_UNKNOWN, detail=_branch_lookup_error(repo, rc, out, err), rc=rc,
@@ -671,7 +696,8 @@ def branch_at_pin(repo: str, pin: str) -> BranchLookup:
 
     endpoint = (f"repos/vibeic/{repo}/compare/"
                 f"{quote(pin, safe='')}...{quote(declared, safe='')}")
-    crc, cout, cerr = _sh(["gh", "api", endpoint], timeout=120)
+    crc, cout, cerr = _probe_with_transport_retry(
+        ["gh", "api", endpoint], timeout=120)
     if crc != 0:
         diagnostic = " ".join((cerr or cout).split())
         return BranchLookup(
