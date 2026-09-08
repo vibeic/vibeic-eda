@@ -122,3 +122,58 @@ def test_the_caller_still_reports_unmeasurable_when_the_retries_fail(monkeypatch
         lambda _s: (127, "", "attempt 1/3 rc=127: " + TIMEOUT_ERR))
     rc, out, err = M._live_head_with_transport_retry(src)
     assert rc != 0 and "attempt 1/3" in err
+
+
+# --------------------------------------------------------------------------
+# The same rule at EVERY live probe, not only the one that failed today
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("err", [
+    "error connecting to api.github.com",
+    "Post \"https://api.github.com/graphql\": context deadline exceeded",
+    "HTTP 502: Bad gateway",
+    "HTTP 503: Service unavailable",
+    "HTTP 429: API rate limit exceeded",
+    "dial tcp: i/o timeout",
+    "net/http: TLS handshake timeout",
+    "dial tcp: lookup api.github.com: no such host",
+])
+def test_gh_transport_shapes_are_retried(monkeypatch, err):
+    """The three `gh api` probes decide whether a fork was measured at all, so
+    a 5xx / rate limit / dial failure has the same cost as today's git timeout:
+    one unmeasured fork refuses the whole release."""
+    (rc, _o, _e), calls = _probe(monkeypatch, [(1, "", err), (0, GOOD, "")])
+    assert rc == 0 and len(calls) == 2, (err, calls)
+
+
+@pytest.mark.parametrize("err", [
+    "HTTP 404: Not Found",
+    "HTTP 403: Resource not accessible by integration",
+    "remote: Repository not found.",
+])
+def test_an_http_answer_is_not_retried(monkeypatch, err):
+    """THE CONTROL for the widened classifier: a 4xx IS an answer (it does not
+    exist / you may not see it) and repeats identically. Only the server or the
+    network declining to answer earns a retry."""
+    (rc, _o, _e), calls = _probe(monkeypatch, [(1, "", err)])
+    assert rc == 1 and len(calls) == 1, (err, calls)
+
+
+def test_every_live_probe_goes_through_the_retry(monkeypatch):
+    """A probe added later that calls `_sh` directly would carry the old
+    fragility silently. Assert the four live probes are routed."""
+    import re as _re
+    src = Path(M.__file__).read_text()
+    live = [
+        ('ls-remote", "--symref", "upstream", "HEAD"', "live upstream HEAD"),
+        ('"--jq", ".parent.full_name // empty"', "upstream slug"),
+        ("branches?per_page=100", "fork branch list"),
+        ("gh\", \"api\", endpoint", "pin...branch compare"),
+    ]
+    for needle, what in live:
+        i = src.find(needle.replace("\\", ""))
+        assert i > 0, f"{what}: probe not found; this test is stale"
+        window = src[max(0, i - 400):i]
+        assert "_probe_with_transport_retry" in window or "_live_head_with_transport_retry" in window, (
+            f"{what} still calls _sh directly: a transient failure there makes a "
+            "fork unmeasured and refuses the whole release")
