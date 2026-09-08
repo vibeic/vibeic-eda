@@ -92,6 +92,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import quote
@@ -148,6 +149,74 @@ MIRROR_UPSTREAMS = {
     "asap7sc7p5t_28": "The-OpenROAD-Project/asap7sc7p5t_28",
     "OpenROAD-flow-scripts": "The-OpenROAD-Project/OpenROAD-flow-scripts",
 }
+
+
+#: How many times a TRANSPORT failure on the live-HEAD probe is re-asked, and
+#: how long to wait between attempts.  Small on purpose: this is a blip filter,
+#: not a way to sit on an outage.
+LIVE_HEAD_ATTEMPTS = 3
+LIVE_HEAD_RETRY_SLEEP_S = 5.0
+LIVE_HEAD_TIMEOUT_S = 120
+
+#: A transport failure says NOTHING about the remote's answer, so re-asking is
+#: the same measurement, not a softer one.  Matched on the shapes `_sh` and git
+#: actually produce (`_sh` returns rc=127 with "TimeoutExpired: ..." for its own
+#: deadline; git prints these for a refused/reset/unreachable transport).
+_TRANSPORT_FAILURE_RE = re.compile(
+    r"TimeoutExpired|Connection (?:timed out|reset|refused)|"
+    r"Could not resolve host|Temporary failure in name resolution|"
+    r"unable to access|The remote end hung up|early EOF|"
+    r"gnutls_handshake\(\) failed|SSL_ERROR_SYSCALL|Operation timed out|"
+    r"HTTP/2 stream .* was not closed cleanly|RPC failed",
+    re.I)
+
+
+def _is_transport_failure(rc: int, out: str, err: str) -> bool:
+    """Did the question fail to REACH the remote, as opposed to being answered?
+
+    Only a non-zero rc can be a transport failure.  An rc of 0 means git spoke
+    to the remote and printed what it got; if that output is ambiguous or
+    malformed, that is a finding ABOUT THE REMOTE and re-asking it would be
+    asking a different question until it gives a nicer answer.
+    """
+    if rc == 0:
+        return False
+    if rc == watchdog.RC_STALLED:
+        return True
+    return bool(_TRANSPORT_FAILURE_RE.search(f"{out}\n{err}"))
+
+
+def _live_head_with_transport_retry(src: Path):
+    """`ls-remote --symref upstream HEAD`, re-asked when the TRANSPORT failed.
+
+    vibeic-eda: on 2026-09-08 the 05:30 round reported
+    `yosys UPSTREAM_DEFAULT_UNMEASURABLE ... (rc=127: TimeoutExpired: ...
+    timed out after 120 seconds)`.  One fork unmeasured makes daily_merge
+    NEEDS HUMAN, which makes the blocking gate REFUSE daily_release, so a
+    single network blip cost the whole day's release.  The same command,
+    retried by hand four times minutes later, answered in 0.7 s every time.
+
+    Refusing on an unmeasured fork is CORRECT and is not what changed.  What
+    changed is that a failure to reach the remote is now re-asked before it is
+    called a measurement: the retry runs only for transport failures, keeps the
+    same command, the same 120 s deadline and the same parsing, and every
+    attempt is returned in the diagnostic so a real outage still refuses -- with
+    all three failures visible, not just the last.
+    """
+    attempts = []
+    for i in range(LIVE_HEAD_ATTEMPTS):
+        rc, out, err = _sh([
+            "git", "-C", str(src), "ls-remote", "--symref", "upstream", "HEAD",
+        ], timeout=LIVE_HEAD_TIMEOUT_S)
+        if rc == 0:
+            return rc, out, err
+        attempts.append(f"attempt {i + 1}/{LIVE_HEAD_ATTEMPTS} rc={rc}: "
+                        + " ".join((err or out).split())[:160])
+        if not _is_transport_failure(rc, out, err):
+            break
+        if i + 1 < LIVE_HEAD_ATTEMPTS:
+            time.sleep(LIVE_HEAD_RETRY_SLEEP_S)
+    return rc, out, err + ("\n" if err else "") + "; ".join(attempts)
 
 
 def _upstream_url(repo: str) -> str:
@@ -754,9 +823,7 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         # cached symbolic ref: Trilinos changed its default from master to
         # develop while that cache continued to resolve cleanly, making this
         # entry point report zero commits as the live branch moved ahead.
-        rc, out, err = _sh([
-            "git", "-C", str(src), "ls-remote", "--symref", "upstream", "HEAD",
-        ], timeout=120)
+        rc, out, err = _live_head_with_transport_retry(src)
         symrefs = []
         head_oids = []
         if rc == 0:
