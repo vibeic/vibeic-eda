@@ -400,15 +400,50 @@ def _update_host(forks_root: Path, registry: Dict[str, dict], host: str,
             child_clone = _clone_path(forks_root, edge["repo"])
             url_rc, child_url, _ = _git(child_clone, "remote", "get-url", "origin")
             materialise_args = []
+            edge_url = str(edge.get("url") or "")
+            # THE TWO -c OPTIONS BELOW CAN FIGHT EACH OTHER. MEASURED
+            # 2026-09-09, and it cost a round.
+            #
+            # `submodule.<name>.url` is set to the child clone's origin, and
+            # `url.<that>.insteadOf=<edge url>` is a PREFIX rule. When the
+            # edge URL is a prefix of the child origin -- the ordinary `.git`
+            # suffix case -- the rule matches the URL this function itself
+            # just set, replaces that prefix with the whole child origin, and
+            # produces the child origin with the suffix twice.
+            #
+            # `vibeic/yosys` vendors `sv-elab`, and the two disagree by
+            # exactly that suffix:
+            #     .gitmodules           https://github.com/vibeic/sv-elab
+            #     child clone origin    https://github.com/vibeic/sv-elab.git
+            # so materialisation cloned
+            #     https://github.com/vibeic/sv-elab.git.git
+            #     remote: Repository not found.
+            # The closure went UNMEASURED, `run_tick` returned 6, `build_page`
+            # was skipped, and the public page missed a day.
+            #
+            # `child_url.startswith(edge_url)` is exactly the colliding case,
+            # and it is also exactly the case that needs no rule: a
+            # suffix-extended URL names the same remote, which the
+            # `submodule.<name>.url` set already points at directly. A real
+            # mirror (a local path, another host) is not a prefix extension,
+            # so it still gets its rule.
+            #
+            # ONLY the insteadOf is dropped. The per-submodule url answers a
+            # different failure -- a worktree inheriting a local path from the
+            # shared .git/config, which cost three rounds on 2026-09-05 --
+            # and gating it here would trade one round-losing bug for the
+            # other.
+            self_applying = bool(edge_url) and child_url.strip().startswith(edge_url)
             if (url_rc == 0 and child_url.strip()
-                    and not str(edge.get("url") or "").startswith(("./", "../"))):
+                    and not edge_url.startswith(("./", "../"))):
                 # The already-fetched child clone names the exact remote whose
                 # branch tip was verified above.  Reuse that URL for candidate
                 # materialisation; in production it is normally identical,
                 # while hermetic/local mirrors need an explicit insteadOf.
-                materialise_args.extend([
-                    "-c", f"url.{child_url.strip()}.insteadOf={edge['url']}",
-                ])
+                if not self_applying:
+                    materialise_args.extend([
+                        "-c", f"url.{child_url.strip()}.insteadOf={edge_url}",
+                    ])
                 # ...AND NAME IT DIRECTLY. MEASURED 2026-09-05: three rounds
                 # refused to publish on
                 #     fatal: transport 'file' not allowed
