@@ -30,14 +30,14 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:3e8275e-ebebfd
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:2f9dc18-82841b
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:5fe38a0-276174
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:f179779-9b67a7
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:ca88abc-88ae14d-df39a9
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:c741009-e65740
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:57969a3-e51125
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f630ebc-8610ce
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7213852-d7e7a2
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:626fae5-55a115
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:3d81371-69c0d1
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:7d61e0a-2aba42
@@ -85,10 +85,10 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-607e18d-44f770
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-ceb9b5
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-315c0e
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:728b7ee-554bf9
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:207bd12-964de7
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:ab2a114-d3c666
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
@@ -217,7 +217,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=0bcfb41764ea2aa89b2872ff24a0ab5986e748bf  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=31e744df6a12ae09760820dc977d2b2488c9b0fe  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
