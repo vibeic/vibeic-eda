@@ -30,17 +30,17 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:7a4818f-ab3f44
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:cabd292-6bae34
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:be20e2e-54669e
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:5fbda52-cbc3b9
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:ca88abc-88ae14d-df39a9
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:57969a3-e51125
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:c2b178f-fcd397
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f630ebc-8610ce
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:788720c-0d4486
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:02f1a69-60139f
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:5860a54-830a7e
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:7d61e0a-2aba42
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:7fa3e4f-962be9
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:c5d18cc-6fc998
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-607e18d-44f770
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-315c0e
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-1687fa
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:728b7ee-554bf9
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:ab2a114-d3c666
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=64cb32abe177b3f7981c3dde631e3db6a450768d  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=e2c855126cdc34fab90994d90654cf408c7330c3  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
@@ -217,7 +217,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=ef0868d47dc6068191f447021b1a4809a0200285  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=5e8b1450d19263f797a27c4f371b9dd19f32a3aa  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
@@ -359,7 +359,7 @@ RUN mkdir -p /vibeic/provenance \
 #   does not install examples/, and the sky130 PDK lives entirely in the second fork.
 # ---------------------------------------------------------------------------
 FROM alpine/git AS align-src
-ARG ALIGN_PUBLIC_REF=e392ae4789eb49193a4865244d8cc31dbe1744b7  # pinned; branch master — vibeic fork is 0 commits ahead / 0 behind upstream ALIGN-analoglayout/ALIGN-public (align/__init__.py declares __version__ 0.9.8); forked so ALIGN is patchable in-tree, and BUILT FROM SOURCE below rather than pip-installed from PyPI
+ARG ALIGN_PUBLIC_REF=50fe01a207d8a0f8f76943d167734d77722738c5  # pinned; branch master — vibeic fork is 0 commits ahead / 0 behind upstream ALIGN-analoglayout/ALIGN-public (align/__init__.py declares __version__ 0.9.8); forked so ALIGN is patchable in-tree, and BUILT FROM SOURCE below rather than pip-installed from PyPI
 ARG ALIGN_PDK_SKY130_REF=427b3b94242fdcf8009e418f6bbe14286fc71334  # pinned; branch main — carries TWO fixes of ours, both of which the build gate below runs the guards for: fix(mos) honour netlist channel length L instead of drawing every gate at 150nm (db6d7f1, guarded by tests/test_channel_length.py) and fix(mos) honour netlist width W instead of quantising it to a 210nm fin pitch (427b3b9, THIS pin, guarded by tests/test_drawn_width.py). Both files ship their own negative control.
 RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public     && git -C /align/ALIGN-public     checkout ${ALIGN_PUBLIC_REF} \
  && git clone https://github.com/vibeic/ALIGN-pdk-sky130.git /align/ALIGN-pdk-sky130 && git -C /align/ALIGN-pdk-sky130 checkout ${ALIGN_PDK_SKY130_REF} \
