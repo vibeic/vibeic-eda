@@ -291,6 +291,14 @@ _EXTENDED_RETRY_CATEGORIES = {
     "dns", "network_timeout", "network_reset", "service_unavailable",
 }
 
+# Registry presence is a release-authority input, so an UNKNOWN answer must
+# still fail closed.  A single TLS handshake timeout, however, is not evidence
+# that an immutable artefact is absent.  Re-ask the same tag a bounded number
+# of times before returning UNKNOWN; this mirrors the compose retry policy but
+# never turns an unmeasured answer into an absence or a successful publication.
+MANIFEST_TRANSIENT_ATTEMPTS = 3
+MANIFEST_RETRY_DELAYS = (2, 10)
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1536,34 +1544,57 @@ def _probe_local_image(ref: str) -> PresenceMeasurement:
     ))
 
 
-def _probe_remote_manifest(ref: str) -> PresenceMeasurement:
-    """Measure a registry tag; only an explicit manifest absence is ABSENT."""
-    rc, out, err = _sh(["docker", "manifest", "inspect", ref], timeout=180)
-    detail = (err or out).strip()
-    if rc == 0:
-        identity = None
-        try:
-            # The tag name is not part of a Docker manifest.  Canonicalising the
-            # returned object therefore gives the same identity for two tags
-            # pointing at the same image, without trusting a local tag/cache.
-            manifest = _strict_json_loads(out)
-            canonical = json.dumps(
-                manifest, sort_keys=True, separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-            identity = hashlib.sha256(canonical).hexdigest()
-        except (TypeError, ValueError):
-            # Presence is still known, but callers asking WHICH manifest must
-            # retain this as an unmeasured identity rather than guessing.
-            pass
-        return PresenceMeasurement(
-            Presence.PRESENT, ref, "registry", detail, identity,
-        )
-    if _REMOTE_ABSENCE.search(detail):
-        return PresenceMeasurement(Presence.ABSENT, ref, "registry", detail)
-    return PresenceMeasurement(Presence.UNKNOWN, ref, "registry", detail or (
-        f"docker manifest inspect exited {rc} without an explicit not-found answer"
-    ))
+def _probe_remote_manifest(ref: str, *,
+                           sleep: Optional[Callable[[float], None]] = None,
+                           ) -> PresenceMeasurement:
+    """Measure a registry tag; only an explicit manifest absence is ABSENT.
+
+    Transient transport failures are retried before the final UNKNOWN verdict.
+    The retry does not change the meaning of an answer: only an explicit
+    not-found reply becomes ABSENT, and exhausted retries remain UNKNOWN.
+    """
+    sleeper = sleep or time.sleep
+    for attempt in range(1, MANIFEST_TRANSIENT_ATTEMPTS + 1):
+        rc, out, err = _sh(["docker", "manifest", "inspect", ref], timeout=180)
+        detail = (err or out).strip()
+        if rc == 0:
+            identity = None
+            try:
+                # The tag name is not part of a Docker manifest.  Canonicalising the
+                # returned object therefore gives the same identity for two tags
+                # pointing at the same image, without trusting a local tag/cache.
+                manifest = _strict_json_loads(out)
+                canonical = json.dumps(
+                    manifest, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                identity = hashlib.sha256(canonical).hexdigest()
+            except (TypeError, ValueError):
+                # Presence is still known, but callers asking WHICH manifest must
+                # retain this as an unmeasured identity rather than guessing.
+                pass
+            return PresenceMeasurement(
+                Presence.PRESENT, ref, "registry", detail, identity,
+            )
+        if _REMOTE_ABSENCE.search(detail):
+            return PresenceMeasurement(Presence.ABSENT, ref, "registry", detail)
+
+        category = transient_failure_category(detail)
+        if (category not in _EXTENDED_RETRY_CATEGORIES
+                or attempt >= MANIFEST_TRANSIENT_ATTEMPTS):
+            return PresenceMeasurement(
+                Presence.UNKNOWN, ref, "registry", detail or (
+                    "docker manifest inspect exited "
+                    f"{rc} without an explicit not-found answer"
+                ))
+        delay = MANIFEST_RETRY_DELAYS[min(
+            attempt - 1, len(MANIFEST_RETRY_DELAYS) - 1)]
+        print(f"  registry manifest probe {attempt}/{MANIFEST_TRANSIENT_ATTEMPTS} "
+              f"for {ref} failed ({category}); retrying in {delay}s",
+              flush=True)
+        sleeper(delay)
+
+    raise AssertionError("manifest retry loop exhausted without a terminal answer")
 
 
 RELEASE_IMAGE = "ghcr.io/vibeic/vibeic-eda"

@@ -190,6 +190,7 @@ def test_registry_timeout_is_not_artefact_absence(tmp_path, monkeypatch):
     import pytest
 
     root = _tree(tmp_path)
+    monkeypatch.setattr(R.time, "sleep", lambda _seconds: None)
 
     def answer(cmd, **_kwargs):
         if cmd[1:3] == ["image", "inspect"]:
@@ -206,6 +207,42 @@ def test_registry_timeout_is_not_artefact_absence(tmp_path, monkeypatch):
 
     assert raised.value.category == "registry_artefact_state_unmeasurable"
     assert "OPERATIONAL_TIMEOUT" in raised.value.detail
+
+
+def test_registry_tls_timeout_is_retried_before_artefact_is_unmeasured(
+        tmp_path, monkeypatch):
+    """A one-off GHCR handshake failure must not abort an otherwise ready run."""
+    root = _tree(tmp_path)
+    calls = []
+    sleeps = []
+
+    def answer(cmd, **_kwargs):
+        if cmd[1:3] == ["image", "inspect"]:
+            return 1, "", "Error response from daemon: No such image"
+        if cmd[1:3] == ["manifest", "inspect"]:
+            calls.append(cmd)
+            if len(calls) == 1:
+                return 1, "", "Get registry: TLS handshake timeout"
+            return 0, '{"schemaVersion": 2}', ""
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(R, "_sh", answer)
+    missing = R.missing_artefacts(
+        root, {"YOSYS_REF": "a" * 40}, {"yosys": ["YOSYS_REF"]},
+    )
+
+    assert missing == {}
+    assert len(calls) == 2
+    # Call the probe directly with an injected sleeper to assert the retry
+    # schedule without making the test wait for a real registry backoff.
+    calls.clear()
+    measured = R._probe_remote_manifest(
+        R.artefact_tag(root, "yosys", ["YOSYS_REF"],
+                       {"YOSYS_REF": "a" * 40}),
+        sleep=sleeps.append,
+    )
+    assert measured.state is R.Presence.PRESENT
+    assert sleeps == [R.MANIFEST_RETRY_DELAYS[0]]
 
 
 def test_only_explicit_manifest_not_found_is_a_missing_artefact(

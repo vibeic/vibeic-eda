@@ -490,9 +490,12 @@ def test_a_remote_that_cannot_be_asked_is_recorded_as_unconfirmed(fleet, monkeyp
 def test_an_unconventional_upstream_default_branch_is_measured(fleet):
     """The remote HEAD, not a main/master name list, defines its mainline."""
     other = fleet["tmp"] / "trunk-only"
-    other.mkdir()
-    _run("git", "init", "-q", "-b", "trunk", str(other))
-    _commit(other, "a")
+    # A branch rename must preserve the upstream's history.  A fresh unrelated
+    # repository is a different safety case: step1 must refuse to merge it,
+    # rather than call it "already current".
+    _run("git", "clone", "-q", str(fleet["up"]), str(other))
+    _run("git", "checkout", "-q", "-b", "trunk", cwd=str(other))
+    _run("git", "branch", "-D", "master", cwd=str(other))
     _run("git", "-C", str(fleet["clone"]), "remote", "set-url", "upstream", str(other))
     _run("git", "-C", str(fleet["clone"]), "update-ref", "-d",
          "refs/remotes/upstream/master")
