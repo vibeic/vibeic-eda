@@ -108,7 +108,7 @@
 FROM ubuntu:24.04 AS trilinos
 
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=c0217c5224b5a62d0157e31fc61189a518d4de68  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
+ARG TRILINOS_REF=071f7f7c702958b2be0405c75843f02649195910  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git cmake gfortran ca-certificates \
@@ -196,7 +196,7 @@ FROM ubuntu:24.04 AS build
 ARG XYCE_REPO=https://github.com/vibeic/Xyce.git
 ARG XYCE_REF=1fab4581ab6f2410eabf42543daf17242c27ab9f
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=c0217c5224b5a62d0157e31fc61189a518d4de68  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
+ARG TRILINOS_REF=071f7f7c702958b2be0405c75843f02649195910  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
 # one-at-a-time discovery:
 #   libfl-dev  FlexLexer.h — the flex C++ header ships separately from the flex
 #              binary, and Xyce's ReactionNetwork includes it.
