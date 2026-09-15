@@ -44,10 +44,49 @@ ARG OPENROAD_REF=7c923a413a88a5d2e2c926319310269785061d16  # pinned; branch mast
 # dead since upstream made Bazel the default, where Build.sh collects
 # cmakeOptions and never uses them. It read as "we build Release" and meant
 # nothing.
+# THE ONE ARCHIVE THIS HOST CANNOT FETCH. `MODULE.bazel` carries
+# `bazel_dep(name = "tcl_lang", version = "9.0.2.bcr.2")`, and the BCR record
+# for it names exactly one source:
+#
+#     https://downloads.sourceforge.net/project/tcl/Tcl/9.0.2/tcl9.0.2-src.tar.gz
+#
+# MEASURED 2026-09-15: SourceForge returns HTTP 403 to this host for
+# EVERYTHING -- that file, an unrelated libpng tarball, the tcl project page
+# and sourceforge.net itself -- over IPv4 and IPv6, from the host and from
+# both docker networks, with curl, wget and python, with and without a
+# browser User-Agent. The body is a challenge page, so it is an egress-IP
+# block, not a dead link and not a flaky mirror. Every `*.dl.sourceforge.net`
+# mirror 301s straight back to the blocked redirector.
+#
+# The build did not fail for a reason in the code: bazel could not fetch, so
+# `//:openroad` failed analysis, the release refused to tag a version, and the
+# public page stopped publishing.
+#
+# `--distdir` is bazel's own answer: a directory of pre-fetched archives it
+# consults by basename before reaching the network, still checking the
+# integrity the registry recorded. So the archive is fetched here, from a
+# source that answers, and verified against the BCR hash before bazel runs --
+# a wrong or truncated file fails THIS layer with a clear message instead of
+# failing the build 25 minutes later inside bazel.
+#
+# Software Heritage is first because it is content-addressed and permanent:
+# the URL names the sha256, so it cannot silently serve different bytes.
+# SourceForge stays as the second source, unchanged, so the day the block
+# lifts this keeps working with no edit.
+ARG TCL_SRC_SHA256=e074c6a8d9ba2cddf914ba97b6677a552d7a52a3ca102924389a05ccb249b520
+RUN mkdir -p /distdir \
+ && for u in \
+      "https://archive.softwareheritage.org/api/1/content/sha256:${TCL_SRC_SHA256}/raw/" \
+      "https://downloads.sourceforge.net/project/tcl/Tcl/9.0.2/tcl9.0.2-src.tar.gz" ; do \
+      curl -fsSL --retry 2 --retry-delay 5 -m 600 \
+           -o /distdir/tcl9.0.2-src.tar.gz "$u" && break ; \
+    done \
+ && echo "${TCL_SRC_SHA256}  /distdir/tcl9.0.2-src.tar.gz" | sha256sum -c -
+
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
- && printf 'build --stamp\n' > /root/.bazelrc \
+ && printf 'build --stamp\nbuild --distdir=/distdir\n' > /root/.bazelrc \
  && ./etc/Build.sh -threads=$(nproc) \
       -prefix=/vibeic-openroad
 
