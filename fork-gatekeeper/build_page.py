@@ -805,9 +805,16 @@ PIN_NOTES = {
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
-.fork-stale{background:#3a1d1d;border:1px solid #7a3030;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
+/* HIDDEN ON THE PUBLIC PAGE. These three are the pipeline's own running
+   commentary -- what is stale, what lagged a release, and the tracking-gap
+   list -- written for whoever is on the gatekeeper rota, not for a reader
+   of vibeic.ai. The KPI cards between them stay: they say where the forks
+   ARE, which is the page's subject. Hidden rather than deleted because the
+   blocks are still built and still asserted by the page tests; the state is
+   measured exactly as before, it is simply not the public page's subject. */
+.fork-stale{display:none;background:#3a1d1d;border:1px solid #7a3030;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
 .fork-stale b{color:#fff}
-.fork-release{background:#3a1d1d;border:1px solid #a74747;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
+.fork-release{display:none;background:#3a1d1d;border:1px solid #a74747;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
 .fork-release b{color:#fff}.fork-release code{color:#fff;background:#241414;padding:.1rem .3rem;border-radius:4px}
 .fork-kpi.is-stale{border-color:#7a3030;background:#221316}
 .fork-kpi.is-stale .n{color:#ff9d9d}
@@ -827,7 +834,7 @@ STYLE = """<style>
 .pilln.zero{color:var(--text-muted,#6b7684);background:transparent;border:1px solid var(--border,#232a33)}
 .pilln.behind{color:#fff;background:#c07d1e}
 .pilln.ahead{color:#fff;background:#2f8f6b}
-.fork-gap{margin:1.2rem 0 2rem;padding:1rem 1.2rem;border-left:3px solid #c07d1e;background:rgba(192,125,30,.07);border-radius:0 6px 6px 0}
+.fork-gap{display:none;margin:1.2rem 0 2rem;padding:1rem 1.2rem;border-left:3px solid #c07d1e;background:rgba(192,125,30,.07);border-radius:0 6px 6px 0}
 .fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
 .fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
 .fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
