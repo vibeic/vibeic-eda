@@ -51,22 +51,22 @@ variable "CIEL_RECIPE" { default = "adea1b" }
 variable "IHP_OPEN_PDK_REF"    { default = "5e6d592e4002946a4616f798c357f0f3c06cf3b6" }
 variable "IHP_SG13CMOS5L_REF" { default = "607e18d4bd9214a52575c194b4181ef449f9252f" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "44f770" }
-variable "OPENROAD_RECIPE" { default = "486b9c" }
-variable "YOSYS_RECIPE" { default = "ea01a7" }
+variable "OPENROAD_RECIPE" { default = "94748f" }
+variable "YOSYS_RECIPE" { default = "fdfdb0" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "df39a9" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
 variable "IVERILOG_RECIPE" { default = "a0264e" }
 variable "KLAYOUT_RECIPE" { default = "8610ce" }
-variable "VERILATOR_RECIPE" { default = "d2ae62" }
+variable "VERILATOR_RECIPE" { default = "9cb6e1" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
-variable "XSCHEM_RECIPE" { default = "0a629e" }
-variable "SLANG_RECIPE" { default = "87a254" }
-variable "XYCE_RECIPE" { default = "8106b9" }
+variable "XSCHEM_RECIPE" { default = "fb4749" }
+variable "SLANG_RECIPE" { default = "ae9a48" }
+variable "XYCE_RECIPE" { default = "ee3bb5" }
 variable "YICES2_RECIPE" { default = "554bf9" }
 variable "FAULT_RECIPE" { default = "9a9a54" }
-variable "SV_ELAB_RECIPE" { default = "d3c666" }
+variable "SV_ELAB_RECIPE" { default = "a6c5ef" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -74,8 +74,8 @@ variable "SV_ELAB_RECIPE" { default = "d3c666" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "e5c16d08857dc2ddcaa14b395bfc333029e28fd9" }
-variable "YOSYS_REF"       { default = "08cdadedcc6fd8ee649e98775314ff08cecc1b0c" }
+variable "OPENROAD_REF"    { default = "73e3271a109aad0ac8a44d7fa57604c09e606327" }
+variable "YOSYS_REF"       { default = "bf6fb9fb4814822fc72fe87fd499cc1210c10e57" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
@@ -90,14 +90,14 @@ variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
 variable "IVERILOG_REF"    { default = "238ca13e57cc1dd97d20de94595edbd04261aaa4" }
 variable "KLAYOUT_REF"     { default = "f630ebcd9288cec7bd1d2763a1ae3d02efe20378" }
-variable "VERILATOR_REF"   { default = "d926a07d681b8bfe6e2e6a248965e2bca07d4a4a" }
+variable "VERILATOR_REF"   { default = "40937b98d4b546410726c23f40480a2546ae3aef" }
 variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
-variable "XSCHEM_REF" { default = "62e5c68b758f43a7a34508d49c061aac24b2b359" }
+variable "XSCHEM_REF" { default = "6faeada0a2783d449a20ac3e85dbbff377ab98da" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "2677b681d26fc7815ad21e186bb51f9205f64b44" }
+variable "SLANG_REF" { default = "e8734864ae9d98c435dd5077c12fd600b823c3f0" }
 variable "XYCE_REF" { default = "1fab4581ab6f2410eabf42543daf17242c27ab9f" }
 variable "YICES2_REF" { default = "728b7eebd5d3b8303022775204cf46030f05244f" }
-variable "SV_ELAB_REF" { default = "ab2a11484e55baee44c6487a84f110fa27935876" }
+variable "SV_ELAB_REF" { default = "9c86c6c89abfda6a2405aaf9c0b5d9083ebc0e7f" }
 
 function "short" {
   params = [ref]
