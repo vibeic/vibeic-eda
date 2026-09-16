@@ -37,9 +37,9 @@ ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:ca88abc-88ae14d-df39a9
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:238ca13-a0264e
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f630ebc-8610ce
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:40937b9-9cb6e1
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:cb3961f-a9d437
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:6faeada-fb4749
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:23862e3-4375bc
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:e873486-ae9a48
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-607e18d-44f770
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-ee3bb5
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:1fab458-9021fb
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:728b7ee-554bf9
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:9c86c6c-a6c5ef

@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.61",
-  "pins_fingerprint": "2bd2d713c85f",
+  "version": "0.3.62",
+  "pins_fingerprint": "c59d3dccd262",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -13,7 +13,7 @@
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
     "OpenROAD": "73e3271a109aad0ac8a44d7fa57604c09e606327",
     "OpenROAD-flow-scripts": "aabf2a397059704f68ddafe7e2c8bd1a0e7c65f5",
-    "Trilinos": "580457482f717599654a7196a0294ed8e5b26019",
+    "Trilinos": "a4f572b0c8947c71d7a76d07ea4980eed53d023a",
     "Xyce": "1fab4581ab6f2410eabf42543daf17242c27ab9f",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "0bda38790a6b08af5ae9ae5c0d38cc771576efc4",
@@ -34,13 +34,13 @@
     "slang": "e8734864ae9d98c435dd5077c12fd600b823c3f0",
     "sv-elab": "9c86c6c89abfda6a2405aaf9c0b5d9083ebc0e7f",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
-    "verilator": "40937b98d4b546410726c23f40480a2546ae3aef",
-    "xschem": "6faeada0a2783d449a20ac3e85dbbff377ab98da",
+    "verilator": "cb3961fdc7f0ca321880d5411e2107895a068d33",
+    "xschem": "23862e371a279d1d70b0e6896293d9e792b60ae9",
     "yices2": "728b7eebd5d3b8303022775204cf46030f05244f",
     "yosys": "bf6fb9fb4814822fc72fe87fd499cc1210c10e57"
   },
   "recipes": {
-    "recipe:__compose__": "f5bf06",
+    "recipe:__compose__": "94441a",
     "recipe:ciel": "adea1b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "9a9a54",
@@ -55,11 +55,11 @@
     "recipe:slang": "ae9a48",
     "recipe:sv-elab": "a6c5ef",
     "recipe:sv2v": "3a8690",
-    "recipe:verilator": "9cb6e1",
-    "recipe:xschem": "fb4749",
-    "recipe:xyce": "ee3bb5",
+    "recipe:verilator": "a9d437",
+    "recipe:xschem": "4375bc",
+    "recipe:xyce": "9021fb",
     "recipe:yices2": "554bf9",
     "recipe:yosys": "fdfdb0"
   },
-  "manifest_identity": "fe7750af81262a36749b3644067b37b196d5930c92b11c8837011e86756355b1"
+  "manifest_identity": "14499410c852c10f6e994fd2dc0d2ff799b3f866a501cf105e114599dfc41ceb"
 }
