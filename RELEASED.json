@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.63",
-  "pins_fingerprint": "17583a670b05",
+  "version": "0.3.64",
+  "pins_fingerprint": "4f2f1a9635f6",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -11,9 +11,9 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "5e6d592e4002946a4616f798c357f0f3c06cf3b6",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "3ec599083d2cc2b79ffe2ba6989538301503647b",
-    "OpenROAD-flow-scripts": "fbc8fa48d2f0864d1cfd0536bada7893a3f27b9c",
-    "Trilinos": "a4f572b0c8947c71d7a76d07ea4980eed53d023a",
+    "OpenROAD": "7452c18250da074eeb280039885896ecb4f67088",
+    "OpenROAD-flow-scripts": "3000fc79719200e185dc5a3f89ded288db13192e",
+    "Trilinos": "20ee99a7258575255543da40064b32f0e59393da",
     "Xyce": "1fab4581ab6f2410eabf42543daf17242c27ab9f",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "0bda38790a6b08af5ae9ae5c0d38cc771576efc4",
@@ -34,13 +34,13 @@
     "slang": "e8734864ae9d98c435dd5077c12fd600b823c3f0",
     "sv-elab": "9c86c6c89abfda6a2405aaf9c0b5d9083ebc0e7f",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
-    "verilator": "4b33ed74e8054d4bd9f980c8b7a192cc46947579",
-    "xschem": "7ce58b649c81f29e181a228c9f430a683ee0663a",
+    "verilator": "77af0b47a3b547755d83673685e704bb2ca79954",
+    "xschem": "54b633b08aa6d8c05ea05e1beb11dae6f19f8fbd",
     "yices2": "728b7eebd5d3b8303022775204cf46030f05244f",
-    "yosys": "9e1c428e6f086a0dd9f6ae2169c1d1ca009c32e4"
+    "yosys": "dad78ffe957dd86d9fad73d8af8883630a41fb30"
   },
   "recipes": {
-    "recipe:__compose__": "c03ec8",
+    "recipe:__compose__": "fa25d3",
     "recipe:ciel": "adea1b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "9a9a54",
@@ -50,16 +50,16 @@
     "recipe:klayout": "8610ce",
     "recipe:lvs": "df39a9",
     "recipe:ngspice": "1aaa99",
-    "recipe:openroad": "669136",
+    "recipe:openroad": "8fdb95",
     "recipe:sat-solvers": "755999",
     "recipe:slang": "ae9a48",
     "recipe:sv-elab": "a6c5ef",
     "recipe:sv2v": "3a8690",
-    "recipe:verilator": "7f214d",
-    "recipe:xschem": "306638",
-    "recipe:xyce": "9021fb",
+    "recipe:verilator": "e574fb",
+    "recipe:xschem": "fa9a57",
+    "recipe:xyce": "8ed9f5",
     "recipe:yices2": "554bf9",
-    "recipe:yosys": "4ef439"
+    "recipe:yosys": "999f20"
   },
-  "manifest_identity": "bd87580e8de4d36ab136e668b4415ca5930cc2cdd2ddc188cebb55bd3594c8b9"
+  "manifest_identity": "d2631bf539d67393613dbda9d6741f5f27ae8834cefeff68d4b1c32862bdf23f"
 }
