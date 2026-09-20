@@ -26,7 +26,7 @@ ARG IVERILOG_REPO=https://github.com/vibeic/iverilog.git
 # bind-against-completed-scope, SDF INCREMENT/COND/scale/mtm and INSTANCE *
 # wildcard honouring, ->> non-blocking event trigger, comp-unit package ordering,
 # and the 2026-08-04 convergence to upstream 591d2c247 (0 behind).
-ARG IVERILOG_REF=71250dc4a109b59405deff40a2cdd1f7f1e979e1
+ARG IVERILOG_REF=f4924d80016564ace0ba26b88f3e36153e58d05c
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf gperf flex bison ca-certificates \
       zlib1g zlib1g-dev libbz2-dev \
