@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -151,6 +152,10 @@ def main(argv=None) -> int:
         if not p.is_file():
             print(f"NOT_MEASURED: {p} does not exist", file=sys.stderr)
             return 2
+    if shutil.which("klayout") is None:
+        print("NOT_MEASURED: no `klayout` on PATH; the deck cannot be run",
+              file=sys.stderr)
+        return 2
     try:
         import pya  # noqa: F401  (the klayout python module in the image)
     except ImportError as exc:

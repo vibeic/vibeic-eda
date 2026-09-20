@@ -223,3 +223,17 @@ def test_each_input_the_check_needs_is_named_when_it_is_absent(tmp_path, missing
     assert check_mod.main(["--root", str(root)]) == 2
     err = capsys.readouterr().err
     assert "NOT_MEASURED" in err and Path(missing).name in err
+
+
+def test_a_missing_klayout_is_NOT_MEASURED_not_a_clean_run(tmp_path, capsys, monkeypatch):
+    """The check runs the deck. Where it cannot, it must say so: a tool it could
+    not start is not a DRC result."""
+    root = tmp_path / "gf180mcuD"
+    for rel in (check_mod.DECK, check_mod.IO_GDS):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("")
+    monkeypatch.setattr(check_mod.shutil, "which", lambda _name: None)
+    assert check_mod.main(["--root", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "NOT_MEASURED" in err and "klayout" in err
