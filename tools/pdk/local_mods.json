@@ -61,6 +61,19 @@
       "expect_modified": 0,
       "expect_added": 4,
       "expect_removed": 0
+    },
+    {
+      "id": "gf180mcu-cup-io-pad-masters-are-not-design-metal",
+      "issue": "vibeic-eda#214",
+      "what": "gf180mcuD KLayout deck: CUP.2/CUP.3 (minimum width / space of the metal line used for bond pads) took the WHOLE layout's metal as their subject, so the foundry IO library's own qualified bond-pad metal -- 0.3um slots on a 2um pitch inside each cell's own Pad (37/0) opening -- was reported against itself. Every pad-bearing gf180mcu_fd_io master, checked ALONE exactly as the PDK ships it, reported 87 CUP.3; a die inherits 87 per bond pad (measured 38 pads -> 3306 flat / 7 masters -> 609 deep) with the design's fill, PDN, pad ring and seal ring contributing 0. rule_decks/cup.rb now extracts its subject with those masters, and everything under them, left unvisited (CUP_IO_PAD_MASTER_CELLS = 'gf180mcu_fd_io__*', applied to a RecursiveShapeIterator over the deck's own layout -- NOT a second DRC source, which is a second deep shape store and kills every connectivity rule in the deck under decks=all). The Pad and GUARD_RING_MK layers are NOT filtered, so design metal reaching into a foundry cell's bond-pad opening -- the literal circuit-under-pad -- is still the subject and is still checked.",
+      "step": "tools/pdk/pdk_gf180_cup_io_pad_patch.py --root /foss/pdks/gf180mcuD --expect 2",
+      "scope_note": "CUP.2/CUP.3 only, and by CELL MASTER because no marker exists: every marker layer the IO library carries (lvs_io 119/5, esd_mk 24/5, latchup_mk 137/5, ...) lies above y=68.7um in gf180mcu_fd_io__bi_t while its Pad opening is y=2..62um, so nothing the PDK draws marks that metal. The deck's only existing escape, not_interacting(guard_ring_mk), is the guard-ring STRUCTURE marker: stamping 167/5 over one bond pad was measured to remove 87 CUP.3 and add 762 GR.1/GR.2/GR.4. NOT fixed upstream -- globalfoundries-pdk-libs-gf180mcu_fd_pv at 035e6d1f ships cup.rb byte-identical to the volume's copy (md5 6a4e724731d04b657f9a96e73e45256b), so unlike the PL.8 entry above, advancing the PDK volume would NOT bring a fix. Both directions are run through the deck itself at build time by tools/pdk/pdk_gf180_cup_check.py, which returns rc=1 on the deck as shipped. The anchors are exact whole lines and the step declares --expect 2, so on a deck that has moved this FAILS the build instead of applying somewhere else.",
+      "paths": [
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/klayout/tech/drc/rule_decks/cup.rb"
+      ],
+      "expect_modified": 1,
+      "expect_added": 0,
+      "expect_removed": 0
     }
   ]
 }

@@ -911,6 +911,17 @@ RUN set -e; \
     grep -q 'extract_single_layer_from_design.call(:poly2, 30, 0)' $D/generic_layers.rb \
         || { echo "FAIL: :poly2 itself was redefined; DPF.5 would measure a layer against itself" >&2; exit 1; }; \
     echo "gf180mcuD: PL.8 counts poly2 30/0 + poly2_dummy 30/4, the fill this PDK's own fill_poly2.rb writes"; \
+    python3 /vibeic/pdk/pdk_gf180_cup_io_pad_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 2; \
+    grep -q "CUP_IO_PAD_MASTER_CELLS = 'gf180mcu_fd_io__\*'" $D/rule_decks/cup.rb \
+        || { echo "FAIL: the CUP IO pad master filter was not declared" >&2; exit 1; }; \
+    grep -q 'shapes.unselect_cells(CUP_IO_PAD_MASTER_CELLS)' $D/rule_decks/cup.rb \
+        || { echo "FAIL: CUP.2/CUP.3 still read the whole layout's metal" >&2; exit 1; }; \
+    grep -q 'cup3_l1 = metal_drawn.interacting(pad).not_interacting(guard_ring_mk).notch(1.um).interacting(pad)' $D/rule_decks/cup.rb \
+        || { echo "FAIL: the CUP.3 rule expression itself was changed; only its SUBJECT may be" >&2; exit 1; }; \
+    grep -q 'cup2_l1 = metal_drawn.interacting(pad).not_interacting(guard_ring_mk).width(1.um).interacting(pad)' $D/rule_decks/cup.rb \
+        || { echo "FAIL: the CUP.2 rule expression itself was changed; only its SUBJECT may be" >&2; exit 1; }; \
+    echo "gf180mcuD: CUP.2/CUP.3 read the metal the DESIGN draws; the IO library's own slotted bond-pad metal is not the design's drawing (vibeic-eda#214)"; \
     python3 /vibeic/pdk/pdk_gf180_sealring_install.py \
         --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4; \
     python3 /vibeic/pdk/pdk_sealring_check.py --pdk gf180mcuD --require gf180mcuD; \
@@ -1705,6 +1716,14 @@ USER root
 # file into place and publishes /tmp/.vibeic-user-ready afterwards. It is
 # ASSERTED here, not merely copied: the in-place write must be gone from the file
 # the image actually ships, which a COPY on its own cannot say.
+#
+# The gf180mcuD CUP correction (vibeic-eda#214) is asserted here too, and here
+# rather than in its own patch layer because klayout only arrives in this stage
+# long after that layer. pdk_gf180_cup_check.py runs the DECK, both directions:
+# every shipped pad-bearing gf180mcu_fd_io master alone must be silent, and three
+# design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
+# opening -- must still be reported. It returns rc=1 against the deck as shipped,
+# so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
 RUN set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
@@ -1723,6 +1742,7 @@ RUN set -e; \
     python3 /vibeic/pdk/pdk_sealring_check.py \
         --pdk gf180mcuD --pdk ihp-sg13g2 --require gf180mcuD --require ihp-sg13g2; \
     python3 /vibeic/pdk/pdk_sealring_check.py || true; \
+    python3 /vibeic/pdk/pdk_gf180_cup_check.py --root /foss/pdks/gf180mcuD; \
     cd /foss/pdks/ihp-sg13g2/libs.tech/verilog-a; \
     for M in cap_cmomi cap_cmomf; do \
         openvaf-r -D__NGSPICE__ -o ../ngspice/osdi/$M.osdi $M/$M.va; \
