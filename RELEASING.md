@@ -36,10 +36,54 @@ pull pointer anywhere in the repo (the drift net).
 ## Build + publish
 
 ```bash
-docker buildx bake tools --push    # artefacts for any pin that moved; skips the rest
-docker buildx bake eda             # compose the image from those artefacts
-./release.sh $(./sync_image_version.py --print)      # tag + push GHCR (+ Docker Hub)
+python3 fork-gatekeeper/daily_release.py --eda-root .
 ```
+
+**That one command is the whole transaction, and it is the only publisher.**
+`./release.sh` is RETIRED — it refuses with exit 2 and has since #137
+(2026-08-18), because publishing a version tag and `latest` without atomically
+publishing `RELEASED.json` created a second release authority. Do not reach for
+it; it will stop you, which is the point.
+
+`daily_release.py` moves every pin to its fork's tip, builds only the artefacts
+that do not exist yet, composes the image (tagged with the version it selected,
+so `:latest` is never moved onto an unsmoked candidate), runs
+`tools/check_image_depth.py --compact` and the runtime smoke, refuses unless the
+registry says the version tag is absent, pushes it, freezes the remote manifest
+identity, writes `VERSION` and `RELEASED.json`, commits and pushes that record —
+and only then moves `latest`. It chooses the version itself, above both the
+`VERSION` file and every tag that already exists, so do not bump the file first
+on this path.
+
+Useful subcommands:
+
+```bash
+--dry-run                 # what would move, what would be built, whether a release is needed
+--record-release X.Y.Z    # write RELEASED.json for an image published OUTSIDE this program
+--repair-latest X.Y.Z     # point `latest` at an already-published version
+--smoke-only IMAGE        # run the tool smoke against an existing image and stop
+```
+
+The two bake commands it drives are still the right ones to run by hand when you
+are iterating rather than releasing:
+
+```bash
+docker buildx bake tools --push    # build and push tool artefacts
+docker buildx bake eda             # compose the image from those artefacts
+```
+
+but note what the first one actually does. **The skip is not in bake.** Bake
+builds every target in the group it is given; the cheapness of a one-pin release
+comes from the CALLER asking the registry first. `.github/workflows/release.yml`
+does it with `bake --print tools` and a per-target existence check, and
+`daily_release.py` does it with `missing_artefacts()`. Run the bare `tools`
+group with `--push` when every pin is already published and you rebuild all 19
+and overwrite tags that earlier releases pin — a rebuild that is not
+bit-identical silently changes what those releases resolve to.
+
+`docker buildx bake eda` on its own is likewise not how a release is composed:
+it tags `:${TAG}` (default `dev`) and `:latest`, and stamps the image
+`version=dev`. The release path always passes `TAG=` and `--set eda.tags=`.
 
 A plain `docker build .` still works, but **only once the artefacts it pins are
 published** — it copies them in, it does not build them. If a pin names an image
@@ -88,9 +132,68 @@ runs `tools/check_image_depth.py --compact`: a candidate above 125 filesystem
 layers is flattened automatically, its runtime configuration is restored and
 compared field-for-field for the supported Docker runtime contract, and its
 depth is measured again. The resulting candidate must then pass the runtime
-smoke and provenance check; only afterward does `release.sh` push the version
-and `latest` tags. This order is load-bearing: an over-depth image can build,
-run locally, and push successfully while every fresh `docker pull` fails.
+smoke; only afterward does `daily_release.py` push the version tag — and
+`latest` moves later still, after the record has reached `main`. This order is
+load-bearing: an over-depth image can build, run locally, and push successfully
+while every fresh `docker pull` fails.
+
+`tools/check_image_provenance.py` is NOT part of that publish path. It is wired
+into `.github/workflows/release.yml`,
+which has never run, and into `fork-gatekeeper/run_tick.sh`, which runs it the
+morning AFTER a release. Run it by hand against the candidate if you want the
+answer before you push — it is the only check that reads what the image actually
+CONTAINS rather than what the source files say.
+
+## Publishing by hand
+
+Sometimes the transaction cannot run whole — the actor is not allowed to push
+`main`, or the round is a composition-only release someone wants to gate
+themselves. The hand path is the SAME steps in the SAME order, and it records
+itself through the same writer, so it does not become a second release
+authority. This is the sequence, and it was last walked for `0.3.69`:
+
+```bash
+./sync_image_version.py --bump patch                  # VERSION + every live pointer
+python3 tools/check_pins_agree.py                     # rc 0
+python3 tools/check_fork_only.py                      # rc 0
+tools/prepush-gates.sh --full                         # all 8 gates, incl. "pinned images exist"
+
+TAG=X.Y.Z docker buildx bake --builder vibeic-builder -f docker-bake.hcl \
+    --load --progress plain --set eda.tags=ghcr.io/vibeic/vibeic-eda:X.Y.Z eda
+
+python3 tools/check_image_depth.py --compact ghcr.io/vibeic/vibeic-eda:X.Y.Z
+python3 fork-gatekeeper/daily_release.py --smoke-only ghcr.io/vibeic/vibeic-eda:X.Y.Z
+python3 tools/check_image_provenance.py ghcr.io/vibeic/vibeic-eda:X.Y.Z
+docker manifest inspect ghcr.io/vibeic/vibeic-eda:X.Y.Z   # MUST be absent before you push
+docker push ghcr.io/vibeic/vibeic-eda:X.Y.Z
+
+python3 fork-gatekeeper/daily_release.py --record-release X.Y.Z   # the ONE writer
+git commit -am "release: record X.Y.Z as published"
+```
+
+`TAG=` and `--set eda.tags=` are both load bearing: the first is what the
+`org.opencontainers.image.version` label resolves from, the second is what keeps
+the compose off `:latest`.
+
+**`latest` is not part of this sequence and cannot be.**
+`authorize_latest_repair()` re-reads `origin/<branch>`'s `RELEASED.json` and
+`VERSION` bytes, compares them with the checkout, and requires the record commit
+to be on that branch — so `latest` cannot move until the record has landed. Land
+the record, then:
+
+```bash
+python3 fork-gatekeeper/daily_release.py --repair-latest X.Y.Z
+```
+
+Nothing invokes that automatically. Until it is run,
+`fork-gatekeeper/check_release_recorded.py` reports the release as INCOMPLETE,
+and it is right to.
+
+One gap to know about rather than paper over: `--record-release` cannot write
+`manifest_identity`, so a hand-published record carries one binding fewer than a
+`daily_release` one. Every reader tolerates its absence — `check_release_recorded`
+and `repair_latest_publication` both skip that comparison when it is `None` — but
+do not hand-write the field to make the record look complete.
 
 ## Checklist
 
@@ -110,7 +213,15 @@ run locally, and push successfully while every fresh `docker pull` fails.
    that ships inside the 125-layer pull limit with a generation of reserve. A
    derived generation whose base moved must carry that base's freshly measured
    depth in `tools/image_layer_budget.json` in the same change.
-4. `./sync_image_version.py --bump patch` (or `--set X.Y.Z`).
-5. `git commit -am "X.Y.Z — <what changed>"`.
-6. Build + `./release.sh X.Y.Z` (or push tag `vX.Y.Z`).
-7. `git tag vX.Y.Z && git push --tags` (if you didn't tag-trigger).
+4. `python3 fork-gatekeeper/daily_release.py --eda-root .` — it selects the
+   version, builds, gates, publishes, writes `VERSION` and `RELEASED.json`,
+   commits that record and moves `latest`. There is no separate bump, commit or
+   publish step on this path: it does all three. Bump `VERSION` by hand only on
+   the hand-publish path above, where `--record-release` refuses unless `VERSION`
+   already names the version you published.
+
+A git tag is NOT part of either path. `daily_release.py` creates none, and the
+remote carries exactly one — `v0.2.26`, from before this program existed. The
+release identity is `RELEASED.json` plus the immutable registry tag, not a git
+tag; tag `vX.Y.Z` yourself only if you specifically want to trigger
+`.github/workflows/release.yml`.
