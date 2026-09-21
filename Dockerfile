@@ -1159,6 +1159,37 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       -e /opt/vibeic-forks/cocotb \
       -e /opt/vibeic-forks/cocotb-coverage \
       -e /opt/vibeic-forks/pyuvm \
+ # THE SUITES THAT RUN IN THIS IMAGE ASK FOR TIME BOUNDS AND DO NOT GET THEM.
+ # `pytest-timeout` is absent here, so pytest treats every
+ # `@pytest.mark.timeout(...)` as an UNKNOWN MARK: it warns once and runs the
+ # test with NO BOUND AT ALL. The request is not refused, it is ignored, and a
+ # wedged test then hangs the WHOLE session instead of failing one case.
+ #
+ # MEASURED IN 0.3.67, one test asking for a 1 s bound and sleeping 5 s:
+ #     without pytest-timeout   1 passed, 1 warning in 5.00s
+ #     with    pytest-timeout   1 failed in 1.01s
+ #                              Failed: Timeout (>1.0s) from pytest-timeout
+ # The bound did not merely go unenforced -- the run came back GREEN.
+ #
+ # In the vibe-ic suite alone that is 49 markers across 22 files, 25 of them
+ # naming a real bound (up to 2700 s), all inert (vibe-ic#2441). An explicit
+ # `--timeout=` is at least loud -- pytest exits 4, "unrecognized arguments" --
+ # but a marker is silent, which is the half that costs sessions.
+ #
+ # `pytest-xdist` comes with it because the same suites' `-n` is refused the
+ # same way, and because a 4.8-hour serial census on a 32-core host is the
+ # other cost of its absence.
+ #
+ # NOTE FOR THE RELEASE THAT SHIPS THIS: those 25 bounds become REAL for the
+ # first time. A test that has been quietly overrunning its own declared bound
+ # will start failing -- that is the bound working, not a regression this
+ # introduces, but it should land deliberately rather than inside an unrelated
+ # upgrade.
+ #
+ # Folded into this RUN, not given its own: the tree is at 109 of the
+ # 110-layer budget `tools/check_dockerfile_layer_budget.py` enforces.
+      pytest-timeout \
+      pytest-xdist \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
  && chmod -R a+rX /opt/vibeic-forks \
  # A STRAY TOP-LEVEL `tests` PACKAGE SHADOWS EVERY CONSUMER THAT HAS ONE.
