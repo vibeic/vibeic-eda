@@ -1161,6 +1161,33 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       -e /opt/vibeic-forks/pyuvm \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
  && chmod -R a+rX /opt/vibeic-forks \
+ # A STRAY TOP-LEVEL `tests` PACKAGE SHADOWS EVERY CONSUMER THAT HAS ONE.
+ # `pyverilog 1.3.0` (from the base image, dated Jun 22) installs
+ # `tests/__init__.py` -- an EMPTY file -- straight into dist-packages, the
+ # classic `packages=find_packages()` leak. It is not pyverilog's to own: it
+ # claims the bare name `tests` for the whole interpreter.
+ #
+ # MEASURED, and this is not hypothetical: the vibe-ic suite ran
+ # `from tests import _tcl_walk` and got
+ #   ImportError: cannot import name '_tcl_walk' from 'tests'
+ #   (/usr/local/lib/python3.12/dist-packages/tests/__init__.py)
+ # on three tests, because THIS file answered to the name first. The consumer
+ # has since spelled its import differently (vibe-ic#2434), but any project
+ # mounting a `tests/` tree into this image inherits the same trap, and
+ # shipping an empty package under so generic a name is the defect.
+ #
+ # SAFE, MEASURED IN THE 0.3.67 IMAGE: pyverilog imports nothing from `tests`
+ # (grep over its own tree finds no `import tests`), and with the directory
+ # removed `import pyverilog` still succeeds at 1.3.0 while
+ # `importlib.util.find_spec("tests")` becomes None.
+ #
+ # FOLDED INTO THIS RUN, not given its own: the tree is at 109 of the 110-layer
+ # budget `tools/check_dockerfile_layer_budget.py` enforces, and a one-line
+ # removal is exactly the reflex that budget exists to stop.
+ # The glob covers the interpreter minor version so a base move cannot silently
+ # reinstate it.
+ && rm -rf /usr/local/lib/python3*/dist-packages/tests \
+           /usr/lib/python3/dist-packages/tests \
  && if ! getent passwd 1000 >/dev/null 2>&1; then \
         useradd --uid 1000 --gid 0 --home-dir /headless --shell /bin/bash \
                 --no-create-home --no-user-group designer; \
