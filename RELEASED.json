@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.68",
-  "pins_fingerprint": "57b556633110",
+  "version": "0.3.69",
+  "pins_fingerprint": "59743271c71b",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -40,7 +40,7 @@
     "yosys": "9a438df22d356d339481cf9277025ada1eb81b89"
   },
   "recipes": {
-    "recipe:__compose__": "ccfacb",
+    "recipe:__compose__": "3bf1c9",
     "recipe:ciel": "1b916b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "9a9a54",
@@ -60,6 +60,5 @@
     "recipe:xyce": "b9aa4c",
     "recipe:yices2": "0a2e39",
     "recipe:yosys": "4ba129"
-  },
-  "manifest_identity": "2654919e4018cad6f3fb8ed82e1ae564c4bf8dc689a9884126435083c23453d2"
+  }
 }
