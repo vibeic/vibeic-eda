@@ -76,9 +76,30 @@ def _git(repo: Path, *args: str, timeout: Optional[int] = None,
     return r.returncode, (r.stdout or r.stderr).strip()
 
 
+#: Root-level files the round reads as FACT, not as documentation. They are in
+#: this venue for the same reason the programs are: the round executes AGAINST
+#: them, so a stale copy makes it act on superseded truth.
+#:
+#: MEASURED 2026-09-22. The venue was programs-only, and the PASS line claimed
+#: "none of them touching what this round executes" — a claim wider than
+#: anything it had looked at. That morning the checkout sat 5 commits behind,
+#: two of which moved `RELEASED.json` from 0.3.69 to 0.3.71. This check printed
+#: PASS; `check_release_recorded.py` then read the stale 0.3.69 record, compared
+#: it against a registry already publishing 0.3.71, and reported
+#: "publication is INCOMPLETE: :latest does not identify the recorded manifest".
+#: Three tests went red on it and the whole tick stopped at
+#: "run_tick NOT CHECKED — semantic pytest RED", pointing at a registry problem
+#: that did not exist: `:latest` and `:0.3.71` agreed exactly. The publication
+#: was complete; the CHECKOUT was behind, and this is the check whose job that
+#: was. `run_0530.sh` already carries the branch that says so — CHECKOUT_NOTE,
+#: "fix the checkout before reading the test as a defect" — and it stayed dark
+#: because this returned 0.
+_FACT_FILES = ("RELEASED.json", "FORKS.json")
+
+
 def changed_programs(repo: Path, ref: str, subdir: str) -> Optional[List[str]]:
     rc, out = _git(repo, "diff", "--name-only", f"HEAD..{ref}", "--",
-                   f"{subdir}/*.py", f"{subdir}/*.sh")
+                   f"{subdir}/*.py", f"{subdir}/*.sh", *_FACT_FILES)
     if rc != 0:
         return None
     return [x for x in out.splitlines() if x.strip()]
@@ -114,12 +135,18 @@ def main(argv=None) -> int:
     _, behind = _git(a.repo, "rev-list", "--count", f"HEAD..{a.ref}")
     if not changed:
         print(f"check_round_code_is_current: PASS — every program under {a.subdir}/ "
-              f"matches {a.ref} ({behind or '?'} commit(s) behind overall, none of "
-              f"them touching what this round executes)")
+              f"and every fact file it reads ({', '.join(_FACT_FILES)}) matches "
+              f"{a.ref} ({behind or '?'} commit(s) behind overall, none of them "
+              f"touching what this round executes or executes against)")
         return 0
 
+    facts = [f for f in changed if f in _FACT_FILES]
+    progs = [f for f in changed if f not in _FACT_FILES]
+    what = " and ".join(
+        p for p in (f"{len(progs)} program(s)" if progs else "",
+                    f"{len(facts)} fact file(s)" if facts else "") if p)
     print(f"check_round_code_is_current: FAIL — this round would execute superseded "
-          f"code. {len(changed)} program(s) differ from {a.ref} "
+          f"code or act on superseded facts. {what} differ from {a.ref} "
           f"({behind or '?'} commit(s) behind):")
     for f in changed:
         print(f"    {f}")
