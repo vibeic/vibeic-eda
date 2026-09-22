@@ -30,12 +30,12 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:a319a1d-7a00d3
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:906e846-67531f
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:eea59ac-1231dc
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:f4924d8-d1de67
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ae13c8b-e33ba1
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f630ebc-8610ce
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:2cfcec3-23152d
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
@@ -143,11 +143,11 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=355c62d53cd0eec76a12c4e733cfd665e5cb3135  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=dd47322d2e4509e12a42f98696ba920137e5a18f  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=957b5b4a2ca932e30b05ceb852c1728501631e76  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
-ARG PYUVM_REF=c84b2c8c3b94e9ac9c457c72f380f9f7f7d08004  # master tip. Advanced from
+ARG PYUVM_REF=b319dd5fa020443b359dfa818791e6333591e660  # master tip. Advanced from
 #   ca55221 in this change: `git cherry ca55221 16b8ec0` says the new tip carries 2
 #   patches the pin lacks and the pin carries 0 the tip lacks, so this is a strict
 #   gain (9 files, +984/-65). The two are upstream's custom-frontdoor support
