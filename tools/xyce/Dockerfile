@@ -108,7 +108,7 @@
 FROM ubuntu:24.04 AS trilinos
 
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=702e2a30079377636fe417fad33ae72c8c73a4d8  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
+ARG TRILINOS_REF=8bc5a0d34e8859186a0db6fba488179dc3eaf66e  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git cmake gfortran ca-certificates \
@@ -194,9 +194,9 @@ RUN mkdir -p /tmp/xyce \
 FROM ubuntu:24.04 AS build
 
 ARG XYCE_REPO=https://github.com/vibeic/Xyce.git
-ARG XYCE_REF=1fab4581ab6f2410eabf42543daf17242c27ab9f
+ARG XYCE_REF=f091c8b81bdd922a8060a83ef32fa635b0f33923
 ARG TRILINOS_REPO=https://github.com/vibeic/Trilinos.git
-ARG TRILINOS_REF=702e2a30079377636fe417fad33ae72c8c73a4d8  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
+ARG TRILINOS_REF=8bc5a0d34e8859186a0db6fba488179dc3eaf66e  # branch vibeic/xyce-trilinos-17.2-epetra-restored -- Trilinos 17.2.0-dev (upstream master 763aa751877) with the SEVEN packages Xyce requires restored: Epetra, EpetraExt, AztecOO, Amesos, Ifpack, Isorropia, Triutils. Stock 17.x does NOT build Xyce; only this branch does. Previous pin: cf47480689f (branch vibeic/xyce-trilinos-16.2.1), which stays untouched as the fallback.
 # one-at-a-time discovery:
 #   libfl-dev  FlexLexer.h — the flex C++ header ships separately from the flex
 #              binary, and Xyce's ReactionNetwork includes it.
