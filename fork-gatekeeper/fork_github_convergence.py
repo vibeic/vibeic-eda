@@ -148,6 +148,67 @@ ALARM_BRANCH_PREFIXES = ("publish-silence-", "release-failed-")
 def _is_alarm(item: dict) -> bool:
     return (item.get("repository") == VIBEIC_EDA_REPOSITORY
             and str(item.get("head_ref") or "").startswith(ALARM_BRANCH_PREFIXES))
+
+
+#: AN ISSUE WE FILED UPSTREAM IS A REPORT ALREADY DELIVERED, NOT A DEBT.
+#:
+#: Same shape as the alarm above, different trigger, measured 2026-09-22.
+#: `The-OpenROAD-Project/OpenROAD#11471` — a bug THIS fleet filed upstream at
+#: 2026-09-22 05:40 +08:00, inside that morning's own 05:30 round.
+#:
+#: BE PRECISE ABOUT WHAT IT ACTUALLY COST, because the looser version of this
+#: story is false and a comment nobody can reproduce is worth less than none.
+#: Four rounds ran that day and the page published on none of them, but the
+#: first three were skipped for their OWN reasons — semantic pytest RED at
+#: 05:53, AI release authorization NORECORD at 13:38, release rc=5 at 15:19 —
+#: and #223 was opened six seconds after the 13:38 skip, so this issue did not
+#: cause that alarm and landing this does not clear it. At 13:29 the open set
+#: was two items, not one (#11471 plus vibeic/vibeic-eda PR #222).
+#:
+#: The round that matters is the LAST one. At 17:38 the tick reached exit 0 and
+#: released 0.3.72; everything else was finally green, and #11471 was then the
+#: only item left holding this program non-zero, which skipped `build_page` (see
+#: run_0530.sh: "current-round GitHub delivery is open or NORECORD") and left
+#: `eda-forks.html` on its 2026-09-21 07:06 +08:00 publish. That is the whole
+#: argument: not what it has already cost, but that from here it holds EVERY
+#: future round, for as long as somebody else's queue takes.
+#:
+#: WHAT IT COSTS, measured the same day on that repository: 94 open issues; of
+#: its last 100 closed, time-to-close median 6.8 d, p75 17.5 d, p90 54.9 d, max
+#: 130.6 d, only 18% inside a day. #11471 had 0 comments — not yet triaged.
+#: Counting it hands the publication date of OUR public page to SOMEONE ELSE'S
+#: queue, for a delivery we already made the moment we pressed submit. Nothing
+#: on our side remains to be done, so there is nothing for convergence to wait
+#: on.
+#:
+#: AN UPSTREAM PULL REQUEST IS THE OPPOSITE AND STILL COUNTS. It carries
+#: `head_owner`/`head_ref` — a branch we pushed and must keep alive — and this
+#: program already measures it TWICE, once via `viewer_upstream` and again per
+#: fork via `round.<tool>.upstream_pull_requests`. On 2026-07-31 an unguarded
+#: `step4_prune` closed our only upstream PR (steveicarus/iverilog#1455) by
+#: deleting its head branch; that is work this fleet can still lose, so it is
+#: in flight and it gates. The cut is therefore on `type`, NEVER on the
+#: `upstream` scope, which would take the PRs with it.
+#:
+#: Matched on type AND scope, the narrowest handle: `scopes` already carries
+#: the semantics every other count in this record keys on, `upstream` is
+#: disjoint from `registered_fork`/`vibeic_eda`/`fork_delivery` (no `vibeic/*`
+#: repository is an upstream), and `author` is no discriminator at all —
+#: `viewer.issues` returns only the viewer's own. Replayed over the 62 distinct
+#: items these rounds have ever produced, it excludes exactly one: #11471.
+#:
+#: This branch had never executed before. 110 archived rounds, 897 issues
+#: authored by this actor, exactly one of them in an upstream repository — the
+#: one above. The four earlier rounds that ever carried an upstream item
+#: (2026-08-17/18) carried iverilog#1455, a PR.
+#:
+#: Excluded items are still REPORTED — see `upstream_issue_items` — so this
+#: hides nothing, exactly as `alarm_items` does for a notice.
+def _is_upstream_issue(item: dict) -> bool:
+    return (item.get("type") == "issue"
+            and "upstream" in (item.get("scopes") or []))
+
+
 DELIVERY_REPOSITORY = "vibeic/vibe-ic"
 DELIVERY_PR_HEAD_PATTERNS = {
     "anchor": re.compile(r"^eda-anchor-(\d+\.\d+\.\d+)$"),
@@ -1413,7 +1474,9 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
 
     all_items = acc.items()
     alarm_items = [i for i in all_items if _is_alarm(i)]
-    items = [i for i in all_items if not _is_alarm(i)]
+    owed = [i for i in all_items if not _is_alarm(i)]
+    upstream_issue_items = [i for i in owed if _is_upstream_issue(i)]
+    items = [i for i in owed if not _is_upstream_issue(i)]
     issue_count = sum(item["type"] == "issue" for item in items)
     pr_count = sum(item["type"] == "pull_request" for item in items)
     counts = {
@@ -1432,6 +1495,9 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         # blind spot: the next reader sees "0 open" and cannot tell whether
         # nothing was open or something was quietly dropped.
         "alarm_items_excluded": len(alarm_items),
+        # Same rule, second kind: an upstream issue we filed is a report we
+        # already delivered, so it is counted HERE and not in `items`.
+        "upstream_issue_items_excluded": len(upstream_issue_items),
     }
     # The excluded notices themselves, so a reader can see WHICH ones.
     alarm_record = alarm_items
@@ -1456,6 +1522,7 @@ def collect(forks_json: Path, round_json: Path, *, round_at: str,
         "status": status,
         "counts": counts,
         "alarm_items": alarm_record,
+        "upstream_issue_items": upstream_issue_items,
         "items": items,
         "source_errors": errors,
     }
@@ -1527,12 +1594,20 @@ def main(argv: Sequence[str] | None = None, *, runner: Runner | None = None,
     # part of. A reader who sees "converged — 0 open" must be able to tell that
     # from "converged, and one notice was set aside".
     excluded = record["counts"].get("alarm_items_excluded", 0)
+    # Likewise for the upstream reports: NAMED with their repository, because
+    # "1 upstream issue" on a fleet of 38 upstreams tells a reader nothing.
+    upstream_excluded = record["counts"].get(
+        "upstream_issue_items_excluded", 0)
     print(f"fork_github_convergence: {record['status']} — "
           f"{record['counts']['items']} open item(s), "
           f"{len(record['source_errors'])} source error(s)"
           + (f"; {excluded} publish-silence alarm(s) NOT counted as open work "
              f"({', '.join('#' + str(i['number']) for i in record['alarm_items'])})"
-             if excluded else ""))
+             if excluded else "")
+          + (f"; {upstream_excluded} upstream issue(s) NOT counted as "
+             f"open work ("
+             f"{', '.join(i['repository'] + '#' + str(i['number']) for i in record['upstream_issue_items'])})"
+             if upstream_excluded else ""))
     return rc
 
 

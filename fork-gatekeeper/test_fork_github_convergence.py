@@ -466,6 +466,13 @@ def test_unrelated_vibe_ic_backlog_does_not_gate_fork_convergence(tmp_path):
 
 
 def test_viewer_upstream_inventory_is_preserved_and_filters_unrelated(tmp_path):
+    """PRESERVED and FILTERED — both halves, unchanged in subject.
+
+    What moved on 2026-09-22 is only WHICH list preserves the issue: an issue
+    we filed upstream is a report already delivered, so it is retained in
+    `upstream_issue_items` instead of `items`. The upstream PR still gates, and
+    `someone/unrelated` must still appear in neither list.
+    """
     pages = _base_pages()
     pages[("viewer_upstream.issues", None, None, None)] = _viewer("issues", [
         _issue("up/alpha", 20), _issue("someone/unrelated", 21),
@@ -475,12 +482,39 @@ def test_viewer_upstream_inventory_is_preserved_and_filters_unrelated(tmp_path):
                          _pr("someone/unrelated", 23)])
     record, rc, _ = _collect(tmp_path, pages=pages)
 
+    # The upstream PULL REQUEST is still owed work, so the round is still open.
     assert rc == 1
     assert {(item["repository"], item["number"])
-            for item in record["items"]} == {("up/alpha", 20), ("up/beta", 22)}
+            for item in record["items"]} == {("up/beta", 22)}
+    assert {(item["repository"], item["number"])
+            for item in record["upstream_issue_items"]} == {("up/alpha", 20)}
+    retained = record["items"] + record["upstream_issue_items"]
+    assert {(item["repository"], item["number"]) for item in retained} == {
+        ("up/alpha", 20), ("up/beta", 22)}, "the inventory must stay whole"
+    assert not any(item["repository"] == "someone/unrelated"
+                   for item in retained), "unrelated repositories are filtered"
     assert record["upstream_actor"]["issues"] == {
         "outcome": "complete", "seen_count": 2, "matched_count": 1}
-    assert record["counts"]["upstream_items"] == 2
+    assert record["counts"]["upstream_items"] == 1
+    assert record["counts"]["upstream_issue_items_excluded"] == 1
+
+
+def test_an_upstream_issue_alone_does_not_hold_the_round_open(tmp_path):
+    """The other half of the split, and the whole point of it: with the PR
+    removed, the same fixture converges. Before 2026-09-22 this exact shape was
+    rc 1 — which is how OpenROAD#11471 skipped `build_page` for four rounds."""
+    pages = _base_pages()
+    pages[("viewer_upstream.issues", None, None, None)] = _viewer("issues", [
+        _issue("up/alpha", 20), _issue("someone/unrelated", 21),
+    ])
+    record, rc, _ = _collect(tmp_path, pages=pages)
+
+    assert rc == 0 and record["status"] == "converged"
+    assert record["items"] == []
+    assert [(item["repository"], item["number"])
+            for item in record["upstream_issue_items"]] == [("up/alpha", 20)]
+    assert record["counts"]["upstream_issue_items_excluded"] == 1
+    assert record["counts"]["upstream_items"] == 0
 
 
 def test_viewer_is_fully_paginated_even_when_first_page_is_all_filtered(
@@ -495,7 +529,13 @@ def test_viewer_is_fully_paginated_even_when_first_page_is_all_filtered(
 
     record, rc, runner = _collect(tmp_path, pages=pages)
 
-    assert rc == 1
+    # The single match is an upstream ISSUE, reported rather than owed since
+    # 2026-09-22, so the rc is 0 and the retained row is in
+    # `upstream_issue_items`. This test's subject is unchanged: page two WAS
+    # fetched and its match DID survive the filter.
+    assert rc == 0
+    assert [(item["repository"], item["number"])
+            for item in record["upstream_issue_items"]] == [("up/alpha", 101)]
     assert record["upstream_actor"]["issues"] == {
         "outcome": "complete", "seen_count": 101, "matched_count": 1}
     assert ("viewer_upstream.issues", "viewer-page-2", None, None) in [
