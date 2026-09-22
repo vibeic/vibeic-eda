@@ -37,10 +37,10 @@ ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ae13c8b-e33ba1
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:f630ebc-8610ce
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:2cfcec3-23152d
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:2a22a00-b067a3
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ddc7344-c494c4
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:f5a93a8-080585
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:31a2960-ba75dc
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
