@@ -415,6 +415,8 @@ def _fork_github_record(*, status="converged", started_at=None) -> dict:
             "vibeic_eda_items": 0, "fork_delivery_items": 0,
             # See the producer: alarms leave `items` and are counted here.
             "alarm_items_excluded": 0,
+            # And so do issues we filed in upstream repositories.
+            "upstream_issue_items_excluded": 0,
             "by_source": {
                 "exact_repository_issues": 0,
                 "exact_repository_pull_requests": 0,

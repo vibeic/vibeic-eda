@@ -1628,9 +1628,21 @@ def _validate_github_v2_sources(record: dict, items: list[dict],
         #
         # Counted over items + alarms, so the check keeps its whole force:
         # anything vanishing for any OTHER reason still fails here.
+        #
+        # 2026-09-22 — and over the upstream issues too, for the SAME reason.
+        # The producer now also splits out issues we filed in upstream repos (a
+        # report already delivered is not a debt; see fork_github_convergence).
+        # That bucket is `viewer_upstream_issues` by construction, so leaving it
+        # out here would make every such round fail as "viewer_upstream_issues
+        # retained item count contradicts source evidence" — which is precisely
+        # how the alarm split announced itself the round after it shipped. Both
+        # excluded populations are added back, so the reconciliation still sees
+        # every item the sources produced.
         items = list(items) + [
             a for a in (record.get("alarm_items") or [])
-            if isinstance(a, dict)]
+            if isinstance(a, dict)] + [
+            u for u in (record.get("upstream_issue_items") or [])
+            if isinstance(u, dict)]
         item_source_counts = {
             "exact_repository_issues": sum(
                 item.get("type") == "issue"
@@ -1840,7 +1852,13 @@ def _validate_fork_github(record: dict, path: Path, round_at: str,
             # not a debt (see fork_github_convergence). The EXACT set is the
             # point of this check — a producer that grows a key must say so
             # here, which is what caught this one.
-            "alarm_items_excluded"}:
+            "alarm_items_excluded",
+            # Issues we filed in UPSTREAM repositories, split out for the same
+            # reason: the delivery happened when we pressed submit, and what
+            # remains is a third party's decision on their timeline. Upstream
+            # PULL REQUESTS are NOT in this bucket and still gate — they carry a
+            # branch we own. Added 2026-09-22 with the producer.
+            "upstream_issue_items_excluded"}:
         counts_valid = False
         errors.append("counts does not have the exact schema-v2 key set")
     items = record.get("items")

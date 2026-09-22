@@ -143,6 +143,9 @@ def _recount(record: dict) -> None:
         # debt) and the LL validates the EXACT key set, so a stub without this
         # key models a shape the producer cannot emit.
         "alarm_items_excluded": 0,
+        # Same, for issues we filed upstream: a report already delivered is not
+        # a debt either.
+        "upstream_issue_items_excluded": 0,
     }
 
 
