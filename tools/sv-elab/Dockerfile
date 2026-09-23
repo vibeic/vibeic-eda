@@ -31,7 +31,7 @@ FROM ${IMG_YOSYS} AS yosys-artefact
 FROM ubuntu:24.04 AS build
 
 ARG SV_ELAB_REPO=https://github.com/vibeic/sv-elab.git
-ARG SV_ELAB_REF=9c86c6c89abfda6a2405aaf9c0b5d9083ebc0e7f
+ARG SV_ELAB_REF=f9d4bad208c8c0f3b355d00eb05f82956693d4ce
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git cmake ninja-build pkg-config ca-certificates \

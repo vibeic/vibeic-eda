@@ -38,7 +38,7 @@ ARG VERILATOR_REPO=https://github.com/vibeic/verilator.git
 # artefact with a --threads 2 verilate that emits non-empty output and a
 # coverage run that writes a non-empty coverage file -- not with the version
 # string and not with a --help flag count.
-ARG VERILATOR_REF=aac6d7bb0a38dce4e47de16fb9c60594ef5d7609  # pinned; vibeic/verilator master tip, published as origin/master 2026-08-01; fully current with upstream
+ARG VERILATOR_REF=e02fc0b7c9daff79edb10784818cd4ac0674534e  # pinned; vibeic/verilator master tip, published as origin/master 2026-08-01; fully current with upstream
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git autoconf flex bison ca-certificates help2man perl python3 \
       libfl2 libfl-dev zlib1g zlib1g-dev \
