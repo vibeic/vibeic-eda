@@ -1,0 +1,7 @@
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-python" ]; then
+        LD_LIBRARY_PATH="/opt/or-tools/lib:${LD_LIBRARY_PATH:-}" exec /foss/tools/openroad/bin/openroad-python "$@"
+    fi
+done
+exec /foss/tools/openroad/bin/openroad "$@"
