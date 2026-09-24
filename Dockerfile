@@ -1809,6 +1809,12 @@ RUN set -e; \
     done; \
     cd /; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
+    git clone --filter=blob:none https://github.com/vibeic/librelane.git /tmp/vibeic-librelane; \
+    cd /tmp/vibeic-librelane; \
+    git checkout abbddfa517dae8b45c68685f8761e215c3a425fa; \
+    git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
+        | patch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    cd /; rm -rf /tmp/vibeic-librelane; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
 # verify stays the LAST RUN in the file (test_verify_is_the_last_RUN_in_the_file):
