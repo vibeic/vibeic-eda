@@ -1,6 +1,6 @@
 #!/bin/sh
 for arg in "$@"; do
-    if [ "$arg" = "-python" ]; then
+    if [ "$arg" = "-python" ] || [ "$arg" = "/usr/local/lib/python3.12/dist-packages/librelane/scripts/openroad/repair_design.tcl" ]; then
         LD_LIBRARY_PATH="/opt/or-tools/lib:${LD_LIBRARY_PATH:-}" exec /foss/tools/openroad/bin/openroad-python "$@"
     fi
 done
