@@ -1813,7 +1813,7 @@ RUN set -e; \
     git clone --filter=blob:none https://github.com/vibeic/librelane.git /tmp/vibeic-librelane; \
     cd /tmp/vibeic-librelane; \
     git checkout abbddfa517dae8b45c68685f8761e215c3a425fa; \
-    git show --format= 69bbd51 -- librelane/scripts/openroad/common/io.tcl \
+    git show --format= 69bbd515e668a6dff21a671ef7116bc20a1fa0bb -- librelane/scripts/openroad/common/io.tcl \
         | patch -p1 -d /usr/local/lib/python3.12/dist-packages; \
     git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
         | patch -p1 -d /usr/local/lib/python3.12/dist-packages; \
