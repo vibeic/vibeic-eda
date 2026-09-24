@@ -31,7 +31,7 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:f3c1be1-1c1792
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:dcfc631-2a18d2
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:dcfc631-7d5d01
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
@@ -566,6 +566,7 @@ RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
 RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
+COPY --from=img-yosys /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys
 
 # Put eqy/mcy back on top of OUR yosys, and DELETE the last dangling link rather
 # than repointing it.
