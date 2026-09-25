@@ -51,7 +51,7 @@ variable "CIEL_RECIPE" { default = "1b916b" }
 variable "IHP_OPEN_PDK_REF"    { default = "5e6d592e4002946a4616f798c357f0f3c06cf3b6" }
 variable "IHP_SG13CMOS5L_REF" { default = "597570eec556a473d1eedb22c055545d4522f442" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "e219c5" }
-variable "OPENROAD_RECIPE" { default = "84964b" }
+variable "OPENROAD_RECIPE" { default = "05c150" }
 variable "YOSYS_RECIPE" { default = "baa757" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
@@ -59,7 +59,7 @@ variable "LVS_RECIPE" { default = "6caaa5" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
 variable "IVERILOG_RECIPE" { default = "f3f142" }
 variable "KLAYOUT_RECIPE" { default = "dfa11d" }
-variable "VERILATOR_RECIPE" { default = "cc3cf5" }
+variable "VERILATOR_RECIPE" { default = "dcde11" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
 variable "XSCHEM_RECIPE" { default = "32ce7f" }
 variable "SLANG_RECIPE" { default = "9bac02" }
@@ -74,7 +74,7 @@ variable "SV_ELAB_RECIPE" { default = "afb070" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "2390bc4f0d4e66aa35deca2c37603cf1c7385b44" }
+variable "OPENROAD_REF"    { default = "c73a322d300c6e774d9d7572718dd3b16e01386c" }
 variable "YOSYS_REF"       { default = "4d572059c92f12b2b049649bfacf6f19ad67dab4" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -90,7 +90,7 @@ variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
 variable "IVERILOG_REF"    { default = "07454266bc5e06b5b7787603a1ea1cfc232aea88" }
 variable "KLAYOUT_REF"     { default = "c95a37413853626c77313a0764e6ddf3da3f7570" }
-variable "VERILATOR_REF"   { default = "385952df10a941c592ce0692fb9e274baafe88ca" }
+variable "VERILATOR_REF"   { default = "04a37f1cec8298d65ee443091b51002f98fdf9e7" }
 variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
 variable "XSCHEM_REF" { default = "c33ad2243d06c711b6379827516201555ab2e583" }
 variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
