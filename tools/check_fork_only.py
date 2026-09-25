@@ -54,6 +54,28 @@ OURS_GIT = re.compile(r"https://github\.com/vibeic(?:/|$|\b)", re.I)
 #: Any github.com URL that is not ours. Non-github sources (a project's own
 #: gitlab, a tarball) are reported separately rather than silently allowed —
 #: "not github" is not the same as "ours".
+#: A COMPILER TOOLCHAIN delivered as an archive by URL, not as a FROM image.
+#:
+#: The owner stated the scope of this rule when `swift` joined ALLOWED_BASE on
+#: 2026-07-31: "the rule above governs the tools we build, not the toolchain
+#: that builds them". ALLOWED_BASE can only express a toolchain that arrives as
+#: a base IMAGE; this is the same exemption for one that arrives as a TARBALL.
+#:
+#: Added 2026-09-25 for tools/openroad. Upstream OpenROAD builds with
+#: hermetic-llvm (BCR module "llvm" 0.8.18, a dev dependency of the root
+#: module), which fetches this archive from hermeticbuild/llvm-redist. That
+#: dependency already existed -- bazel pulls it through the registry, where this
+#: file never looks. The Dockerfile now PREFETCHES it into --distdir because the
+#: site's link to GitHub's release CDN is too slow for bazel's single signed URL
+#: to survive; writing the URL down is what made an existing source visible, not
+#: what added one. The archive is sha256-verified against the value BCR records.
+#:
+#: Deliberately narrow: exactly the llvm-redist release-asset shape. A git clone
+#: of anything under hermeticbuild/, or any other release asset, still fails --
+#: a TOOL we ship must still come from a vibeic fork.
+TOOLCHAIN_ARCHIVE = re.compile(
+    r"^https://github\.com/hermeticbuild/llvm-redist/releases/download/"
+    r"llvmorg-[0-9][0-9.]*-r[0-9]+/llvm-project-[0-9][0-9.]*\.src\.tar\.zst$", re.I)
 GIT_URL = re.compile(r"https://[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-/]+?(?:\.git)?(?=[\s\"']|$)")
 COPY_FROM = re.compile(r"^\s*COPY\s+--from=([^\s]+)", re.I | re.M)
 ARG_LINE = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.I | re.M)
@@ -191,12 +213,13 @@ def expand(ref: str, args: dict) -> str | None:
     return None if "$" in out else out
 
 
-def check(path: Path, PENDING: dict) -> Tuple[List[str], int, List[str]]:
+def check(path: Path, PENDING: dict) -> Tuple[List[str], int, List[str], List[str]]:
     raw = path.read_text(errors="replace")
     text = strip_comments(raw)
     known = stages(text)
     problems: List[str] = []
     deferred: List[str] = []
+    toolchain: List[str] = []
     examined = 0
 
     args = {m.group(1): m.group(2).strip("\"'")
@@ -254,6 +277,9 @@ def check(path: Path, PENDING: dict) -> Tuple[List[str], int, List[str]]:
             continue
         line = text[:m.start()].count("\n") + 1
         examined += 1
+        if TOOLCHAIN_ARCHIVE.match(url):
+            toolchain.append(f"{path}:{line}: {url}")
+            continue
         if not OURS_GIT.match(url):
             p_entry = PENDING.get(slug_of(url))
             if p_entry and not p_entry["expired"]:
@@ -298,7 +324,7 @@ def check(path: Path, PENDING: dict) -> Tuple[List[str], int, List[str]]:
                 f"    a default pointing upstream is what a build with no "
                 f"--build-arg will use, so the default is the real source.{extra}")
 
-    return problems, examined, deferred
+    return problems, examined, deferred, toolchain
 
 
 def main(argv=None) -> int:
@@ -318,12 +344,13 @@ def main(argv=None) -> int:
         return 2
 
     PENDING = pending()
-    all_problems, all_deferred, total = [], [], 0
+    all_problems, all_deferred, all_toolchain, total = [], [], [], 0
     for f in files:
-        problems, examined, deferred = check(f, PENDING)
+        problems, examined, deferred, toolchain = check(f, PENDING)
         total += examined
         all_problems += problems
         all_deferred += deferred
+        all_toolchain += toolchain
 
     if total == 0:
         print("check_fork_only: examined %d file(s) and found no source or "
@@ -350,9 +377,20 @@ def main(argv=None) -> int:
         for d in all_deferred:
             print("  " + d)
         print("  Each fails this check once its expiry passes.")
+    if all_toolchain:
+        # Named, not folded into "ours": these are NOT our sources. They are
+        # exempt because the rule governs the tools we build, not the
+        # toolchain that builds them -- and a count that called them ours
+        # would be a false line in this program's own output.
+        print("check_fork_only: %d compiler-toolchain archive(s), not ours, "
+              "exempt by the rule's scope (TOOLCHAIN_ARCHIVE):" % len(all_toolchain))
+        for t in all_toolchain:
+            print("  " + t)
     print("check_fork_only: %d reference(s) across %d file(s), %d ours, "
-          "%d pending" % (total, len(files), total - len(all_deferred),
-                          len(all_deferred)))
+          "%d pending, %d toolchain" % (
+              total, len(files),
+              total - len(all_deferred) - len(all_toolchain),
+              len(all_deferred), len(all_toolchain)))
     return 0
 
 

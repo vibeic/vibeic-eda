@@ -83,6 +83,45 @@ RUN mkdir -p /distdir \
     done \
  && echo "${TCL_SRC_SHA256}  /distdir/tcl9.0.2-src.tar.gz" | sha256sum -c -
 
+# The same failure, a larger archive, and a different cause: measured 2026-09-25.
+#
+# Upstream moved the build onto hermetic-llvm (BCR module "llvm" 0.8.18, a dev
+# dependency of the root module), so a cold build now fetches
+# llvm-project-22.1.8.src.tar.zst -- 171,128,113 bytes -- from GitHub release
+# assets. The 05:30 round died on it 4065 s into the openroad build step:
+#
+#     WARNING: Download from .../llvm-project-22.1.8.src.tar.zst failed:
+#         class java.io.IOException GET returned 618 jwt:expired
+#     invalid registered toolchain '@llvm//toolchain:all'
+#
+# Not a flake. This site reaches GitHub's release CDN at 41-191 KB/s, measured
+# from four hosts (8HD-d 41-136, 8HD-7 58, 8HD-3 119, 8HD-4 191), so the archive
+# takes 15-70 minutes. A release download is a redirect to a SIGNED URL that
+# expires within minutes; any retry or resume that reuses it gets `618
+# jwt:expired`. Bazel has one URL and no mirror, so one expiry kills the round.
+#
+# The fix is to never hold a signed URL long: each attempt below requests the
+# github.com URL afresh -- a new redirect, a new signature -- and resumes from
+# the bytes already on disk (`-C -`), bounded to 240 s so it finishes well
+# inside a signature's life. Measured on this host: 5 attempts, 1178 s, and the
+# result hashes to exactly what hermetic-llvm 0.8.18's llvm_versions.json
+# records, below. Software Heritage does not carry this archive (404), so the
+# tcl block's content-addressed first source has no equivalent here.
+#
+# `llvm_project_archive` calls `rctx.download(..., sha256, ...)`, so bazel's
+# --distdir finds this by basename and still verifies it. If upstream moves to
+# another LLVM, this file simply stops matching and bazel fetches the new one
+# itself -- the prefetch is an accelerator and cannot pin the wrong compiler.
+# This layer sits before the clone so it is cached across OPENROAD_REF moves.
+ARG LLVM_SRC_SHA256=0a120cd02aa4319887b938ed98f34907563e9b4bcdd4a2aed23a1a05dd5a8157
+RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
+ && u=https://github.com/hermeticbuild/llvm-redist/releases/download/llvmorg-22.1.8-r1/llvm-project-22.1.8.src.tar.zst \
+ && for i in $(seq 1 60); do \
+      echo "${LLVM_SRC_SHA256}  $f" | sha256sum -c - >/dev/null 2>&1 && break ; \
+      curl -fsSL -C - --max-time 240 -o "$f" "$u" || true ; \
+    done \
+ && echo "${LLVM_SRC_SHA256}  $f" | sha256sum -c -
+
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
