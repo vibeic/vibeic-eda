@@ -18,16 +18,19 @@
 # `tools/check_fork_only.py` fails the build on anything else.
 
 FROM openroad/ubuntu24.04-dev:latest AS build
-# Pinned to the F-A2 commit (tapcell -bound_to_placement) shipped in vibeic-eda:0.2.7,
-# a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
-# HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
-ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_REF=ae138e2ea9a97693d68c16819440c0e90b1afdaa  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66. -- advanced 2026-08-05 to f396ce8ee, our own `drt: verify the routed design`: the pin sat one commit behind the fork tip, so the DRC verifyRoute gate was built but never shipped (fork_gap_report Q2 release_lag=1). -- advanced 2026-09-22 to `drt: detailed_route -nets`, a route that re-lays ONLY the named nets and holds every other net's dbWire byte-identical, and `repair_antennas -reroute` now using it. Without it a one-diode antenna repair on a 655-net design lost 93 other nets' wire entirely, shrank 55, and ended in DRT-0206, so the flow could only roll the repair back and ship the violations. -- advanced 2026-09-22 to `rcx: extraction must not change the routing it measures`: Ext::extract() opens with odb::orderWires(), which rewrites every non-supply net's dbWire through tmg_conn::analyzeNet(); that rewrite is not geometry-preserving and turned a DRC-clean detailed route into 599 whole-design violations (547 Short, 45 Metal Spacing, 7 NS Metal) with nothing reporting it, so the flow shipped the damaged route and a downstream gate refused 450 log lines later holding a bare count. The raw wire stream is now saved before the ordering and replayed after it; the SPEF is byte-identical either side. Also: a scoped route now measures its byte-identical claim on odb (DRT-0709) and reports a whole-design entry-vs-exit delta instead of comparing a design-wide count with a tile-local one (DRT-0711/0712), and repair_antennas -reroute can pass -output_drc to the scoped route it runs.
-# `build --stamp` in the USER rc, because `etc/Build.sh` builds its bazel
+# OPENROAD_REPO / OPENROAD_REF are declared just above the clone, not here. An
+# ARG changes the cache key of EVERY later RUN in the stage, whether or not the
+# RUN reads it -- so declared here, each daily pin move re-ran the tcl and llvm
+# prefetches below. See the note beside the clone.
+# `build --stamp` in the USER rc, because `etc/Build.sh` used to build its bazel
 # argument list from a closed set (`--jobs`, `--config=opt` from -lto,
-# `--//:platform=`) with no pass-through, so `--config=release` cannot be handed
-# to it. Bazel reads ~/.bazelrc automatically and this stage runs as root; the
-# workspace `.bazelrc` already supplies
+# `--//:platform=`) with no pass-through, so `--config=release` could not be
+# handed to it. Upstream f8c0deee560 (2026-09-10) made Build.sh pass
+# `--config=release` itself, which sets `--stamp`; the user-rc line written in
+# the clone RUN is redundant from that commit on and still stamps a pin that
+# predates it. Bazel reads
+# ~/.bazelrc automatically and this stage runs as root; the workspace
+# `.bazelrc` already supplies
 # `--workspace_status_command=tools/workspace_status.sh`, so `--stamp` is the
 # only missing half. Without it the binary reports `bazel-nostamp` — upstream's
 # documented placeholder for a dev build — and cannot say which commit it is
@@ -112,7 +115,10 @@ RUN mkdir -p /distdir \
 # --distdir finds this by basename and still verifies it. If upstream moves to
 # another LLVM, this file simply stops matching and bazel fetches the new one
 # itself -- the prefetch is an accelerator and cannot pin the wrong compiler.
-# This layer sits before the clone so it is cached across OPENROAD_REF moves.
+# This layer is cached across OPENROAD_REF moves because that ARG is declared
+# only after it, right above the clone. (vibeic-eda#232 said this layer was cached
+# because it sat before the clone; that was false while the ARG was declared at
+# the top of the stage -- see the note beside the clone.)
 ARG LLVM_SRC_SHA256=0a120cd02aa4319887b938ed98f34907563e9b4bcdd4a2aed23a1a05dd5a8157
 RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
  && u=https://github.com/hermeticbuild/llvm-redist/releases/download/llvmorg-22.1.8-r1/llvm-project-22.1.8.src.tar.zst \
@@ -122,6 +128,22 @@ RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
     done \
  && echo "${LLVM_SRC_SHA256}  $f" | sha256sum -c -
 
+# ---- why OPENROAD_REPO / OPENROAD_REF are declared HERE -----------------------
+#
+# An ARG changes the cache key of every later RUN in its stage, whether or not
+# the RUN reads it. Declared at the top of the stage, as they were until this
+# note, each daily pin move re-ran the tcl and llvm prefetches above although
+# neither reads the pin. Measured in the 2026-09-25 release: the llvm prefetch
+# step took 2364.1 s re-fetching a 171 MB archive that had not changed, ahead
+# of a 3265.6 s bazel step. With the ARGs declared here, a build at
+# f3c1be109b followed by one at ae138e2ea9 on the same builder reported the
+# llvm prefetch as CACHED; those layers are now keyed only on what they fetch.
+#
+# Pinned to the F-A2 commit (tapcell -bound_to_placement) shipped in vibeic-eda:0.2.7,
+# a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
+# HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
+ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
+ARG OPENROAD_REF=ae138e2ea9a97693d68c16819440c0e90b1afdaa  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66. -- advanced 2026-08-05 to f396ce8ee, our own `drt: verify the routed design`: the pin sat one commit behind the fork tip, so the DRC verifyRoute gate was built but never shipped (fork_gap_report Q2 release_lag=1). -- advanced 2026-09-22 to `drt: detailed_route -nets`, a route that re-lays ONLY the named nets and holds every other net's dbWire byte-identical, and `repair_antennas -reroute` now using it. Without it a one-diode antenna repair on a 655-net design lost 93 other nets' wire entirely, shrank 55, and ended in DRT-0206, so the flow could only roll the repair back and ship the violations. -- advanced 2026-09-22 to `rcx: extraction must not change the routing it measures`: Ext::extract() opens with odb::orderWires(), which rewrites every non-supply net's dbWire through tmg_conn::analyzeNet(); that rewrite is not geometry-preserving and turned a DRC-clean detailed route into 599 whole-design violations (547 Short, 45 Metal Spacing, 7 NS Metal) with nothing reporting it, so the flow shipped the damaged route and a downstream gate refused 450 log lines later holding a bare count. The raw wire stream is now saved before the ordering and replayed after it; the SPEF is byte-identical either side. Also: a scoped route now measures its byte-identical claim on odb (DRT-0709) and reports a whole-design entry-vs-exit delta instead of comparing a design-wide count with a tile-local one (DRT-0711/0712), and repair_antennas -reroute can pass -output_drc to the scoped route it runs.
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
