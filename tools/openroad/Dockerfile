@@ -144,16 +144,18 @@ RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
 # Bazel 9 keeps extracted repositories (the repo contents cache) inside the
 # repository cache too, so a hit skips the extraction as well as the download.
 #
-# ONE REPOSITORY STILL DOWNLOADS EVERY BUILD: @icu++http_archive+icu_dat, the
-# 76.1 source tarball that the GUI platform (Build.sh passes --//:platform=gui)
-# pulls in through qt-bazel -> icu. OpenROAD's MODULE.bazel pins icu
-# 76.1.bcr.3 via single_version_override, and that version declares the
-# http_archive with no sha256/integrity, so no cache can serve it. With this
-# seed in place it was 463.7 s of a 469 s analysis and 709.4 s of a 715 s one
-# (bazel --profile, two runs); the rest of the analysis was hits. BCR's icu
-# 76.1.bcr.4 adds exactly that integrity. The fix belongs in OpenROAD's pin,
-# not here -- a download without a checksum cannot be seeded or rewritten to a
-# local file (bazel's URL rewriter keeps only http/https targets).
+# icu_dat, and why the seed is 1914a260bf. With the first seed (ae138e2ea9),
+# one repository still downloaded every build: @icu++http_archive+icu_dat, the
+# 27.4 MB icu 76.1 source tarball that the GUI platform (Build.sh passes
+# --//:platform=gui) pulls in through qt-bazel -> icu. OpenROAD pinned icu
+# 76.1.bcr.3, which declares that http_archive with no sha256/integrity, so no
+# cache can serve it: 463.7 s of a 469 s analysis and 709.4 s of a 715 s one
+# (bazel --profile). vibeic/OpenROAD#27 (1914a260bf) moves the pin to BCR's
+# 76.1.bcr.4, which adds the integrity and is otherwise the same module. With
+# the pin and this seed both at 1914a260bf the clone step took 801.3 s, its
+# analysis 9.2 s. A pin that predates 1914a260bf still fetches icu_dat once
+# per build -- the seed holds the file, but bcr.3 gives bazel no checksum to
+# find it by.
 #
 # The seed is fetched in its own layer, keyed only on OPENROAD_REPO and
 # OPENROAD_FETCH_SEED, so it is built once and then CACHED across pin moves.
@@ -178,7 +180,7 @@ RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
 # Not named *_REF on purpose: every pin reader in this repo matches
 # `ARG <NAME>_REF=`, and this is not a pin -- it changes no shipped byte.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_FETCH_SEED=ae138e2ea9a97693d68c16819440c0e90b1afdaa
+ARG OPENROAD_FETCH_SEED=1914a260bfb10cc55942d6b837d7fd44912d9f0a
 RUN git clone "${OPENROAD_REPO}" /seed \
  && cd /seed && git checkout ${OPENROAD_FETCH_SEED} \
  && git submodule update --init --recursive --depth 1 \
