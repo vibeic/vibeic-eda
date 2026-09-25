@@ -18,10 +18,11 @@
 # `tools/check_fork_only.py` fails the build on anything else.
 
 FROM openroad/ubuntu24.04-dev:latest AS build
-# OPENROAD_REPO / OPENROAD_REF are declared just above the clone, not here. An
-# ARG changes the cache key of EVERY later RUN in the stage, whether or not the
-# RUN reads it -- so declared here, each daily pin move re-ran the tcl and llvm
-# prefetches below. See the note beside the clone.
+# OPENROAD_REF is declared just above the clone, and OPENROAD_REPO just above
+# the repository-cache seed, not here. An ARG changes the cache key of EVERY
+# later RUN in the stage, whether or not the RUN reads it -- so declared here,
+# each daily pin move re-ran the tcl and llvm prefetches below. See the notes
+# beside the seed and the clone.
 # `build --stamp` in the USER rc, because `etc/Build.sh` used to build its bazel
 # argument list from a closed set (`--jobs`, `--config=opt` from -lto,
 # `--//:platform=`) with no pass-through, so `--config=release` could not be
@@ -128,26 +129,86 @@ RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
     done \
  && echo "${LLVM_SRC_SHA256}  $f" | sha256sum -c -
 
-# ---- why OPENROAD_REPO / OPENROAD_REF are declared HERE -----------------------
+# ---- the bazel repository cache, seeded once instead of fetched every day ----
+#
+# MEASURED 2026-09-25 on vibeic-builder. Most of the bazel step was not
+# compiling: bazel's analysis phase spent 1413-2579 s (three builds) fetching
+# external repositories -- python, rust, go and kotlin toolchains, a 508 MB ORFS
+# archive -- one at a time over a 160-400 KB/s link, because upstream's
+# `.bazelrc` puts --repository_cache under ~/.cache, inside the layer, so every
+# build started it empty. The same analysis (`--nobuild //:openroad`, default
+# platform, i.e. without the Qt GUI) took:
+#     empty repository cache                          1595 s   (5.5 GB fetched)
+#     cache from ae138e2ea9, building ae138e2ea9         8 s
+#     cache from ae138e2ea9, building f3c1be109b         9 s   (+1.7 KB)
+# Bazel 9 keeps extracted repositories (the repo contents cache) inside the
+# repository cache too, so a hit skips the extraction as well as the download.
+#
+# ONE REPOSITORY STILL DOWNLOADS EVERY BUILD: @icu++http_archive+icu_dat, the
+# 76.1 source tarball that the GUI platform (Build.sh passes --//:platform=gui)
+# pulls in through qt-bazel -> icu. OpenROAD's MODULE.bazel pins icu
+# 76.1.bcr.3 via single_version_override, and that version declares the
+# http_archive with no sha256/integrity, so no cache can serve it. With this
+# seed in place it was 463.7 s of a 469 s analysis and 709.4 s of a 715 s one
+# (bazel --profile, two runs); the rest of the analysis was hits. BCR's icu
+# 76.1.bcr.4 adds exactly that integrity. The fix belongs in OpenROAD's pin,
+# not here -- a download without a checksum cannot be seeded or rewritten to a
+# local file (bazel's URL rewriter keeps only http/https targets).
+#
+# The seed is fetched in its own layer, keyed only on OPENROAD_REPO and
+# OPENROAD_FETCH_SEED, so it is built once and then CACHED across pin moves.
+# The clone below points --repository_cache at it; what the seed lacks is
+# fetched as before and lands in that day's layer.
+#
+# A layer, not a `--mount=type=cache`: vibeic-builder's GC policy caps
+# exec.cachemount records at 488 MiB and 48 h, and a 3.47 GB cache mount made
+# for a bazel --disk_cache trial was gone within hours. Layers fall under the
+# 1440 h / 93 GiB rules.
+#
+# Correctness does not depend on the seed. The download cache is content-
+# addressed: it serves a file only for the sha256/integrity the repository rule
+# declares, and a download that declares none is fetched every time. An
+# extracted repository is reused only when its predeclared-inputs hash (the
+# transitive .bzl digest plus the repo's attributes) matches and its recorded
+# inputs are still current (bazel 9.1.1 LocalRepoContentsCache). So a seed
+# older than the pin only means more fetching, never a different dependency.
+# Move
+# OPENROAD_FETCH_SEED forward when the clone step's analysis phase (the
+# "Analyzed target //:openroad" line) grows long again; nothing else reads it.
+# Not named *_REF on purpose: every pin reader in this repo matches
+# `ARG <NAME>_REF=`, and this is not a pin -- it changes no shipped byte.
+ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
+ARG OPENROAD_FETCH_SEED=ae138e2ea9a97693d68c16819440c0e90b1afdaa
+RUN git clone "${OPENROAD_REPO}" /seed \
+ && cd /seed && git checkout ${OPENROAD_FETCH_SEED} \
+ && git submodule update --init --recursive --depth 1 \
+ && BZL="$(command -v bazelisk || command -v bazel)" \
+ && "$BZL" build --config=release --//:platform=gui --distdir=/distdir \
+      --repository_cache=/bazel-repo-cache --nobuild //:openroad //:install \
+ && "$BZL" build --stamp --distdir=/distdir \
+      --repository_cache=/bazel-repo-cache --nobuild //src/sta:opensta \
+ && "$BZL" shutdown \
+ && cd / && rm -rf /seed /root/.cache/bazel \
+ && echo "repository cache seeded at ${OPENROAD_FETCH_SEED}: $(du -sb /bazel-repo-cache | cut -f1) bytes"
+
+# ---- why OPENROAD_REF is declared HERE ----------------------------------------
 #
 # An ARG changes the cache key of every later RUN in its stage, whether or not
-# the RUN reads it. Declared at the top of the stage, as they were until this
-# note, each daily pin move re-ran the tcl and llvm prefetches above although
-# neither reads the pin. Measured in the 2026-09-25 release: the llvm prefetch
-# step took 2364.1 s re-fetching a 171 MB archive that had not changed, ahead
-# of a 3265.6 s bazel step. With the ARGs declared here, a build at
-# f3c1be109b followed by one at ae138e2ea9 on the same builder reported the
-# llvm prefetch as CACHED; those layers are now keyed only on what they fetch.
+# the RUN reads it. Declared at the top of the stage, as it was until
+# vibeic-eda#233, each daily pin move re-ran the tcl and llvm prefetches above
+# although neither reads the pin. Measured in the 2026-09-25 release: the llvm
+# prefetch step took 2364.1 s re-fetching a 171 MB archive that had not
+# changed, ahead of a 3265.6 s bazel step. Declared here, the prefetches and
+# the repository-cache seed are keyed only on what they fetch.
 #
 # Pinned to the F-A2 commit (tapcell -bound_to_placement) shipped in vibeic-eda:0.2.7,
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
-ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
 ARG OPENROAD_REF=ae138e2ea9a97693d68c16819440c0e90b1afdaa  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66. -- advanced 2026-08-05 to f396ce8ee, our own `drt: verify the routed design`: the pin sat one commit behind the fork tip, so the DRC verifyRoute gate was built but never shipped (fork_gap_report Q2 release_lag=1). -- advanced 2026-09-22 to `drt: detailed_route -nets`, a route that re-lays ONLY the named nets and holds every other net's dbWire byte-identical, and `repair_antennas -reroute` now using it. Without it a one-diode antenna repair on a 655-net design lost 93 other nets' wire entirely, shrank 55, and ended in DRT-0206, so the flow could only roll the repair back and ship the violations. -- advanced 2026-09-22 to `rcx: extraction must not change the routing it measures`: Ext::extract() opens with odb::orderWires(), which rewrites every non-supply net's dbWire through tmg_conn::analyzeNet(); that rewrite is not geometry-preserving and turned a DRC-clean detailed route into 599 whole-design violations (547 Short, 45 Metal Spacing, 7 NS Metal) with nothing reporting it, so the flow shipped the damaged route and a downstream gate refused 450 log lines later holding a bare count. The raw wire stream is now saved before the ordering and replayed after it; the SPEF is byte-identical either side. Also: a scoped route now measures its byte-identical claim on odb (DRT-0709) and reports a whole-design entry-vs-exit delta instead of comparing a design-wide count with a tile-local one (DRT-0711/0712), and repair_antennas -reroute can pass -output_drc to the scoped route it runs.
 RUN git clone "${OPENROAD_REPO}" /src \
  && cd /src && git checkout ${OPENROAD_REF} \
  && git submodule update --init --recursive --depth 1 \
- && printf 'build --stamp\nbuild --distdir=/distdir\n' > /root/.bazelrc \
+ && printf 'build --stamp\nbuild --distdir=/distdir\nbuild --repository_cache=/bazel-repo-cache\n' > /root/.bazelrc \
  && ./etc/Build.sh -threads=$(nproc) \
       -prefix=/vibeic-openroad
 
