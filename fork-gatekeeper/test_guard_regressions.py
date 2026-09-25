@@ -51,6 +51,48 @@ def test_allowed_base_accepts_digests_without_widening(ref, allowed, why):
     assert bool(m.ALLOWED_BASE.match(ref)) is allowed, why
 
 
+@pytest.mark.parametrize("url, allowed, why", [
+    ("https://github.com/hermeticbuild/llvm-redist/releases/download/"
+     "llvmorg-22.1.8-r1/llvm-project-22.1.8.src.tar.zst", True,
+     "the archive hermetic-llvm 0.8.18 fetches -- a compiler toolchain"),
+    ("https://github.com/hermeticbuild/llvm-redist/releases/download/"
+     "llvmorg-23.0.1-r2/llvm-project-23.0.1.src.tar.zst", True,
+     "the same shape at a later LLVM, so an upstream bump does not need an edit here"),
+    ("https://github.com/hermeticbuild/llvm-redist.git", False,
+     "a git clone is a SOURCE, not a toolchain archive"),
+    ("https://github.com/hermeticbuild/hermetic-llvm/releases/download/"
+     "v0.8.18/hermetic-llvm-v0.8.18.tar.gz", False,
+     "another hermeticbuild repo is not admitted by the org name"),
+    ("https://github.com/hermeticbuild/llvm-redist/releases/download/"
+     "llvmorg-22.1.8-r1/clang-22.1.8-linux.tar.zst", False,
+     "another asset from the same release is not the source archive"),
+    ("https://github.com/someoneelse/llvm-redist/releases/download/"
+     "llvmorg-22.1.8-r1/llvm-project-22.1.8.src.tar.zst", False,
+     "the right filename from the wrong owner"),
+    ("https://github.com/The-OpenROAD-Project/OpenROAD.git", False,
+     "a TOOL we ship still has to come from a vibeic fork"),
+])
+def test_toolchain_archive_admits_only_the_llvm_redist_shape(url, allowed, why):
+    m = _load(_ROOT / "tools" / "check_fork_only.py", "cfo")
+    assert bool(m.TOOLCHAIN_ARCHIVE.match(url)) is allowed, why
+
+
+def test_a_toolchain_archive_is_never_counted_as_ours(tmp_path):
+    """The summary must not call a hermeticbuild URL ours. `ours` used to be
+    `total - pending`, so an exempt toolchain URL landed in it silently."""
+    m = _load(_ROOT / "tools" / "check_fork_only.py", "cfo")
+    df = tmp_path / "Dockerfile"
+    df.write_text(
+        "FROM ubuntu AS b\n"
+        "RUN curl -o /distdir/x https://github.com/hermeticbuild/llvm-redist/"
+        "releases/download/llvmorg-22.1.8-r1/llvm-project-22.1.8.src.tar.zst\n")
+    problems, examined, deferred, toolchain = m.check(df, {})
+    assert problems == []
+    assert len(toolchain) == 1 and "llvm-redist" in toolchain[0]
+    assert examined - len(deferred) - len(toolchain) == 0, \
+        "the toolchain URL must not be left in the 'ours' count"
+
+
 def test_inventory_resolves_the_repo_root_from_its_own_location():
     """The NameError was `ROOT` in a module that defines `DIR`.
 
