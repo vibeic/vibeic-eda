@@ -209,10 +209,31 @@ def test_missing_declaration_never_guesses_a_descendant_or_ambiguous_tip(
 
 
 def test_every_registered_fork_has_one_valid_branch_declaration():
+    # How many forks there are is README's claim, checked by
+    # tools/check_doc_counts.py against this same file; a literal here only
+    # fails when a fork is added, which is not a defect.
     entries = M._forks_json().get("forks", [])
-    assert len(entries) == 38
+    assert entries
     assert all(M._declared_branch(entry["tool"]) == entry.get("branch")
                for entry in entries)
+
+
+def test_every_pinned_fork_is_registered():
+    """A fork the build pins must have a FORKS.json entry, or the round cannot merge it.
+
+    #236 pinned LIBRELANE_REF without one. Its pin was the tip of two
+    branches, so `branch_at_pin` could not choose and daily_merge reported
+    `librelane BRANCH_LOOKUP_UNKNOWN` -- NEEDS HUMAN, run_tick exit 4, and the
+    2026-09-26 00:44 round released nothing. The suite was green on that tree:
+    nothing compared what the Dockerfiles pin with what FORKS.json declares.
+    """
+    pinned = M.build_branches(HERE.parent)
+    registered = {entry["tool"] for entry in M._forks_json().get("forks", [])}
+    assert pinned, "build_branches found no pins -- the check measured nothing"
+    missing = sorted(set(pinned) - registered)
+    assert not missing, (
+        f"pinned by the build but not in FORKS.json: {missing} -- add an entry "
+        "with its branch and upstream, or daily_merge cannot merge it")
 
 
 def test_unknown_is_a_named_json_row_and_blocks_the_round(tmp_path, monkeypatch):

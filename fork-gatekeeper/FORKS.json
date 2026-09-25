@@ -208,6 +208,12 @@
       ]
     },
     {
+      "tool": "librelane",
+      "branch": "main",
+      "role": "RTL-to-GDS flow driver. The image keeps the base image's pip-installed LibreLane and installs, from this fork at LIBRELANE_REF, two io.tcl diffs (69bbd515, abbddfa5, applied by sha) and two whole files (librelane/steps/netgen.py, librelane/scripts/odbpy/io_place.py) so it runs on our OpenROAD 26Q3. Created by push, not by forking, so GitHub records no parent; the upstream is declared here.",
+      "upstream": "librelane/librelane"
+    },
+    {
       "tool": "LinAlgebra",
       "branch": "master",
       "upstream": "ediloren/LinAlgebra",
