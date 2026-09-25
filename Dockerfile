@@ -30,8 +30,8 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ae138e2-f50cc3
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:bfd33f5-6779d9
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ae138e2-d6ca40
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:bfd33f5-23a3f7
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
@@ -1796,6 +1796,16 @@ USER root
 # design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
+#
+# EVERY LIBRELANE CHANGE IS CHECKED AFTERWARDS, because a `git show | patch` line
+# cannot fail on its own. /bin/sh here is dash, which has no pipefail, so only
+# patch's status counts, and GNU patch exits 0 on EMPTY input (measured). If git
+# show fails (a mistyped sha), the pipe applies nothing and the build goes on.
+# So each io.tcl diff's effect is grepped for, the installed io_place.py must
+# carry the unit helper and no longer scale getArea() by dbu^2 (26Q1's um^2
+# assumption, 10^6 too large on our 26Q3 odb), and each installed file must be
+# byte-identical to the fork's. `if ...; then exit 1; fi`, not `! grep`, because
+# set -e does not act on a `!` pipeline.
 RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelane,ro \
     set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
@@ -1830,6 +1840,21 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
         | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
     install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
     install -m 0644 librelane/scripts/odbpy/io_place.py /usr/local/lib/python3.12/dist-packages/librelane/scripts/odbpy/io_place.py; \
+    LLN=/usr/local/lib/python3.12/dist-packages/librelane; \
+    grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
+    grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: the abbddfa5 io.tcl diff did not apply" >&2; exit 1; }; \
+    cmp librelane/steps/netgen.py $LLN/steps/netgen.py; \
+    cmp librelane/scripts/odbpy/io_place.py $LLN/scripts/odbpy/io_place.py; \
+    n=$(grep -c 'area_in_dbu_squared(._LAYER) / ._WIDTH' $LLN/scripts/odbpy/io_place.py || true); \
+    if [ "$n" != 2 ]; then \
+        echo "FAIL: io_place.py has $n of 2 area_in_dbu_squared call sites" >&2; exit 1; \
+    fi; \
+    if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
+        echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
+    fi; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"

@@ -2,7 +2,7 @@
 for arg in "$@"; do
     case "$arg" in
         -python|*/librelane/scripts/openroad/*)
-            LD_LIBRARY_PATH="/opt/or-tools/lib:${LD_LIBRARY_PATH:-}" exec /foss/tools/openroad/bin/openroad-python "$@"
+            LD_LIBRARY_PATH="/opt/or-tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec /foss/tools/openroad/bin/openroad-python "$@"
             ;;
     esac
 done

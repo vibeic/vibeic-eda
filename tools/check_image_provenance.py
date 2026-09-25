@@ -45,7 +45,9 @@ ROOT = Path(__file__).resolve().parent.parent
 #: and installed or copied straight into the runtime, so they have no per-tool
 #: artefact directory. The stage-8 verification toolchain comes from `tb-src`;
 #: `asap7-lvs` is the ASAP7 golden CDL / hspice models / KLayout tech from
-#: `asap7-lvs-src` (vibeic-eda#104). Named explicitly rather than inferred from
+#: `asap7-lvs-src` (vibeic-eda#104). `librelane` is the vibeic/librelane commit
+#: whose diffs and files the runtime stage installs over the base image's
+#: LibreLane; its record is written by `librelane-src`. Named explicitly rather than inferred from
 #: "does `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name
 #: would fall through to the root Dockerfile, find no such ARG, and compare the
 #: image against the empty string.
