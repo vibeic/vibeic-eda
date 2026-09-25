@@ -1,11 +1,11 @@
-# release failed on the 2026-09-26 round (run_tick exit 4)
+# release failed on the 2026-09-26 round (run_tick exit 6)
 
-`run_tick` exited **4** (state `ran`) on the 2026-09-26T00:44:05+08:00 round, so no image was published and `build_page` was skipped.
+`run_tick` exited **6** (state `ran`) on the 2026-09-26T01:30:32+08:00 round, so no image was published and `build_page` was skipped.
 
 ## What the release said
 
 ```
-(the release record could not be read — /home/reyerchu/.cache/eda-fork-gatekeeper/daily-release.json does not exist)
+(no detail captured)
 ```
 
 ## Why this is a PR and not a page banner
