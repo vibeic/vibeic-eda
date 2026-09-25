@@ -479,6 +479,15 @@ RUN unset PYTHONPATH \
 # used ${BASE_IMAGE} and `RUN mkdir -p /vibeic/provenance`, which FAILED —
 # that base runs as uid 1000 and cannot write `/`. COPY creates its own
 # destination directories, so the mkdir was never needed.
+FROM ${BASE_IMAGE} AS librelane-src
+USER root
+ARG LIBRELANE_REF=ff5de7c8d0efa27b09e91819675cc692b4ab5d34
+RUN set -e; \
+    git clone https://github.com/vibeic/librelane.git /src; \
+    cd /src; git checkout ${LIBRELANE_REF}; \
+    mkdir -p /vibeic/provenance; \
+    printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json
+
 FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
 COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
@@ -495,6 +504,7 @@ COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
+COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
 # The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
 # a source stage in this file — but the record it carries is the same shape and
 # is read by the same checker (vibeic-eda#117 finding 5).
@@ -567,7 +577,6 @@ RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/n
            /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys-*.dist-info
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
-COPY --from=img-yosys /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys
 
 # Put eqy/mcy back on top of OUR yosys, and DELETE the last dangling link rather
 # than repointing it.
@@ -1007,7 +1016,9 @@ COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftool
 COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
-RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
+RUN --mount=type=bind,from=img-yosys,source=/usr/local/lib/python3.12/dist-packages/pyosys,target=/tmp/vibeic-pyosys,ro \
+    cp -a /tmp/vibeic-pyosys /usr/local/lib/python3.12/dist-packages/pyosys \
+ && for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
  && ln -sf /foss/tools/ngspice/bin/ngspice /foss/tools/bin/ngspice 2>/dev/null || true \
  && ln -sf /foss/tools/magic/bin/magic /foss/tools/bin/magic 2>/dev/null || true \
  && ln -sf /foss/tools/netgen/bin/netgen /foss/tools/bin/netgen 2>/dev/null || true \
@@ -1785,8 +1796,8 @@ USER root
 # design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
-ARG LIBRELANE_REF=3de87d1ee6942f19059af522cb296c422505f4a5
-RUN set -e; \
+RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelane,ro \
+    set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
     bash -n /dockerstartup/scripts/generate_container_user.sh; \
@@ -1812,17 +1823,14 @@ RUN set -e; \
     done; \
     cd /; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
-    git clone --filter=blob:none https://github.com/vibeic/librelane.git /tmp/vibeic-librelane; \
     cd /tmp/vibeic-librelane; \
-    git checkout ${LIBRELANE_REF}; \
     git show --format= 69bbd515e668a6dff21a671ef7116bc20a1fa0bb -- librelane/scripts/openroad/common/io.tcl \
         | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
     git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
         | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
     install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
-    cd /; mkdir -p /vibeic/provenance; \
-    printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json; \
-    rm -rf /tmp/vibeic-librelane; \
+    install -m 0644 librelane/scripts/odbpy/io_place.py /usr/local/lib/python3.12/dist-packages/librelane/scripts/odbpy/io_place.py; \
+    cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
 # verify stays the LAST RUN in the file (test_verify_is_the_last_RUN_in_the_file):
