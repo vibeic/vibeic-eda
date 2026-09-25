@@ -1785,7 +1785,7 @@ USER root
 # design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
-ARG LIBRELANE_REF=abbddfa517dae8b45c68685f8761e215c3a425fa
+ARG LIBRELANE_REF=3de87d1ee6942f19059af522cb296c422505f4a5
 RUN set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
@@ -1819,6 +1819,7 @@ RUN set -e; \
         | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
     git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
         | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
     cd /; mkdir -p /vibeic/provenance; \
     printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json; \
     rm -rf /tmp/vibeic-librelane; \
