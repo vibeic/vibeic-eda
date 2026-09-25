@@ -243,6 +243,27 @@ RUN cd /src \
       /vibeic-openroad/bin/sta \
  && /vibeic-openroad/bin/sta -version
 
+# LibreLane drives ODB Python steps with openroad -python. Keep the shipped Bazel
+# Tcl binary unchanged and build a same-commit Python binary separately.
+# ENABLE_TESTS stays ON because this fork has test CMakeLists that depend on
+# build_and_test even when only the openroad target is compiled.
+RUN cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_GUI=OFF -DBUILD_PYTHON=ON -DENABLE_TESTS=ON \
+ && cmake --build /src/build-python --target openroad -j"$(nproc)" \
+ && install -D /src/build-python/bin/openroad /vibeic-openroad/bin/openroad-python
+# The dispatcher's sha256 is written HERE because this artefact's tag only
+# sees this file. The recipe half of the tag is sha256(tools/openroad/Dockerfile)
+# (daily_release.recipe_hash), and openroad-dispatch is a build-context file, so
+# an edit to it alone keeps the old tag. The release only builds tags the
+# registry does not have, so an image already pushed under that tag is reused
+# and the edited dispatcher never ships. With the digest here, a dispatcher
+# edit must also edit this line, which moves the tag. An edit that skips this
+# line fails the build instead of shipping the old file under the old name.
+# fork-gatekeeper/test_openroad_dispatch.py checks the same pairing before a build.
+COPY openroad-dispatch /vibeic-openroad/bin/openroad-dispatch
+RUN echo "baaa25918609c83f60b64140f7ce0ca1fb17d3f51264355ea25af7200b577f40  /vibeic-openroad/bin/openroad-dispatch" \
+      | sha256sum -c -
+
 # ---------------------------------------------------------------------------
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
@@ -276,4 +297,6 @@ COPY --from=build /vibeic-openroad/bin/openroad /foss/tools/openroad/bin/openroa
 # Same path the base image uses, so the composing image's COPY overwrites the
 # stale upstream binary rather than landing beside it (vibeic-eda#8).
 COPY --from=build /vibeic-openroad/bin/sta /foss/tools/openroad/bin/sta
+COPY --from=build /vibeic-openroad/bin/openroad-python /foss/tools/openroad/bin/openroad-python
+COPY --from=build /vibeic-openroad/bin/openroad-dispatch /foss/tools/openroad/bin/openroad-dispatch
 COPY --from=build /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json

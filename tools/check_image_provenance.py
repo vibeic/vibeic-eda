@@ -45,11 +45,13 @@ ROOT = Path(__file__).resolve().parent.parent
 #: and installed or copied straight into the runtime, so they have no per-tool
 #: artefact directory. The stage-8 verification toolchain comes from `tb-src`;
 #: `asap7-lvs` is the ASAP7 golden CDL / hspice models / KLayout tech from
-#: `asap7-lvs-src` (vibeic-eda#104). Named explicitly rather than inferred from
+#: `asap7-lvs-src` (vibeic-eda#104). `librelane` is the vibeic/librelane commit
+#: whose diffs and files the runtime stage installs over the base image's
+#: LibreLane; its record is written by `librelane-src`. Named explicitly rather than inferred from
 #: "does `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name
 #: would fall through to the root Dockerfile, find no such ARG, and compare the
 #: image against the empty string.
-ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs"}
+ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs", "librelane"}
 
 #: tool -> the ARG that its provenance must report, in `pin_file(tool)`.
 #: Multi-source artefacts report the first; the second is checked via the tag.
@@ -64,7 +66,7 @@ PRIMARY = {
     "fastercap": "FASTERCAP_REF",
     "cocotb": "COCOTB_REF", "cocotb-coverage": "COCOTB_COVERAGE_REF",
     "pyuvm": "PYUVM_REF", "sby": "SBY_REF",
-    "asap7-lvs": "ASAP7SC_REF",
+    "asap7-lvs": "ASAP7SC_REF", "librelane": "LIBRELANE_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
 

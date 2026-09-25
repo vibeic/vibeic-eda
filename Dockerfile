@@ -30,8 +30,8 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ae138e2-f50cc3
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:bfd33f5-6779d9
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ae138e2-d6ca40
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:bfd33f5-23a3f7
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
@@ -479,6 +479,15 @@ RUN unset PYTHONPATH \
 # used ${BASE_IMAGE} and `RUN mkdir -p /vibeic/provenance`, which FAILED —
 # that base runs as uid 1000 and cannot write `/`. COPY creates its own
 # destination directories, so the mkdir was never needed.
+FROM ${BASE_IMAGE} AS librelane-src
+USER root
+ARG LIBRELANE_REF=ff5de7c8d0efa27b09e91819675cc692b4ab5d34
+RUN set -e; \
+    git clone https://github.com/vibeic/librelane.git /src; \
+    cd /src; git checkout ${LIBRELANE_REF}; \
+    mkdir -p /vibeic/provenance; \
+    printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json
+
 FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
 COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
@@ -495,6 +504,7 @@ COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
+COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
 # The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
 # a source stage in this file — but the record it carries is the same shape and
 # is read by the same checker (vibeic-eda#117 finding 5).
@@ -519,7 +529,7 @@ LABEL org.opencontainers.image.source="https://github.com/vibeic"
 USER root
 # --- vibeic/OpenROAD (native 24.04 build → RUNPATH /opt/or-tools, no lib bundling) ---
 COPY --from=img-openroad /opt/or-tools /opt/or-tools
-COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/
+COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/openroad-python /foss/tools/openroad/bin/openroad-dispatch /foss/tools/openroad/bin/
 # The standalone `sta`, which the artefact now carries (vibeic-eda#8). Without
 # this line the base image's own copy survives at the same path — it answers
 # every smoke-test command, so the omission was invisible, and it had 0 of the
@@ -563,7 +573,8 @@ RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
 # of /foss/tools/yosys/bin first, under a comment saying "they are not ours to
 # rebuild" — vibeic-eda#13 was those four going missing. They are ours now, and
 # the copy is gone rather than left as a no-op.
-RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
+RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog \
+           /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys-*.dist-info
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
 
@@ -1005,7 +1016,9 @@ COPY --from=img-fastercap /foss/tools/rftoolkit/bin/FasterCap /foss/tools/rftool
 COPY --from=img-fastercap /foss/tools/fastercap /foss/tools/fastercap
 
 # Re-point the /foss/tools/bin symlinks the base created to our installs.
-RUN for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
+RUN --mount=type=bind,from=img-yosys,source=/usr/local/lib/python3.12/dist-packages/pyosys,target=/tmp/vibeic-pyosys,ro \
+    cp -a /tmp/vibeic-pyosys /usr/local/lib/python3.12/dist-packages/pyosys \
+ && for t in yosys yosys-abc; do ln -sf /foss/tools/yosys/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
  && ln -sf /foss/tools/ngspice/bin/ngspice /foss/tools/bin/ngspice 2>/dev/null || true \
  && ln -sf /foss/tools/magic/bin/magic /foss/tools/bin/magic 2>/dev/null || true \
  && ln -sf /foss/tools/netgen/bin/netgen /foss/tools/bin/netgen 2>/dev/null || true \
@@ -1500,6 +1513,7 @@ ENV ALIGN_HOME=/foss/tools/align \
 # Reproduced identically on 0.2.41 and 0.2.43, so it is long-standing rather
 # than new. It survived because the build's self-test runs as root, where the
 # permission does not apply — the tool was verified in an identity no user has.
+ENV _LLN_OVERRIDE_OPENROAD=/foss/tools/openroad/bin/openroad-dispatch
 # restore the base's non-root runtime user
 USER 1000
 
@@ -1782,7 +1796,18 @@ USER root
 # design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
-RUN set -e; \
+#
+# EVERY LIBRELANE CHANGE IS CHECKED AFTERWARDS, because a `git show | patch` line
+# cannot fail on its own. /bin/sh here is dash, which has no pipefail, so only
+# patch's status counts, and GNU patch exits 0 on EMPTY input (measured). If git
+# show fails (a mistyped sha), the pipe applies nothing and the build goes on.
+# So each io.tcl diff's effect is grepped for, the installed io_place.py must
+# carry the unit helper and no longer scale getArea() by dbu^2 (26Q1's um^2
+# assumption, 10^6 too large on our 26Q3 odb), and each installed file must be
+# byte-identical to the fork's. `if ...; then exit 1; fi`, not `! grep`, because
+# set -e does not act on a `!` pipeline.
+RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelane,ro \
+    set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
     bash -n /dockerstartup/scripts/generate_container_user.sh; \
@@ -1808,6 +1833,29 @@ RUN set -e; \
     done; \
     cd /; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
+    cd /tmp/vibeic-librelane; \
+    git show --format= 69bbd515e668a6dff21a671ef7116bc20a1fa0bb -- librelane/scripts/openroad/common/io.tcl \
+        | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
+        | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
+    install -m 0644 librelane/scripts/odbpy/io_place.py /usr/local/lib/python3.12/dist-packages/librelane/scripts/odbpy/io_place.py; \
+    LLN=/usr/local/lib/python3.12/dist-packages/librelane; \
+    grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
+    grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: the abbddfa5 io.tcl diff did not apply" >&2; exit 1; }; \
+    cmp librelane/steps/netgen.py $LLN/steps/netgen.py; \
+    cmp librelane/scripts/odbpy/io_place.py $LLN/scripts/odbpy/io_place.py; \
+    n=$(grep -c 'area_in_dbu_squared(._LAYER) / ._WIDTH' $LLN/scripts/odbpy/io_place.py || true); \
+    if [ "$n" != 2 ]; then \
+        echo "FAIL: io_place.py has $n of 2 area_in_dbu_squared call sites" >&2; exit 1; \
+    fi; \
+    if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
+        echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
+    fi; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py"; \
+    cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
 # verify stays the LAST RUN in the file (test_verify_is_the_last_RUN_in_the_file):
