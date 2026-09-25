@@ -45,12 +45,18 @@ ARG YOSYS_REPO=https://github.com/vibeic/yosys.git
 ARG YOSYS_REF=bfd33f5fc8181a4356e1802589d45a1097821f01
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake git bison flex gawk pkg-config \
-      libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
+      libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 python3-dev python3-venv \
       libboost-system-dev libboost-python-dev libboost-filesystem-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/pyosys-build-env \
+ && /opt/pyosys-build-env/bin/pip install --no-cache-dir "pybind11>3,<4" "cxxheaderparser>=1.4"
+ENV VIRTUAL_ENV=/opt/pyosys-build-env
+ENV PATH="/opt/pyosys-build-env/bin:${PATH}"
 RUN git clone "${YOSYS_REPO}" /yosys \
  && cd /yosys && git checkout ${YOSYS_REF} && git submodule update --init --recursive \
  && cmake -S /yosys -B /yosys/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/foss/tools/yosys \
+      -DYOSYS_WITH_PYTHON=ON -DYOSYS_INSTALL_PYTHON=ON \
+      -DYOSYS_INSTALL_PYTHON_SITEDIR=/usr/local/lib/python3.12/dist-packages \
  && cmake --build /yosys/build -j"$(nproc)" \
  && cmake --install /yosys/build
 
@@ -78,4 +84,5 @@ RUN mkdir -p /vibeic/provenance \
 # ---------------------------------------------------------------------------
 FROM scratch
 COPY --from=build /foss/tools/yosys /foss/tools/yosys
+COPY --from=build /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys
 COPY --from=build /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json

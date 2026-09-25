@@ -243,6 +243,16 @@ RUN cd /src \
       /vibeic-openroad/bin/sta \
  && /vibeic-openroad/bin/sta -version
 
+# LibreLane drives ODB Python steps with openroad -python. Keep the shipped Bazel
+# Tcl binary unchanged and build a same-commit Python binary separately.
+# ENABLE_TESTS stays ON because this fork has test CMakeLists that depend on
+# build_and_test even when only the openroad target is compiled.
+RUN cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_GUI=OFF -DBUILD_PYTHON=ON -DENABLE_TESTS=ON \
+ && cmake --build /src/build-python --target openroad -j"$(nproc)" \
+ && install -D /src/build-python/bin/openroad /vibeic-openroad/bin/openroad-python
+COPY openroad-dispatch /vibeic-openroad/bin/openroad-dispatch
+
 # ---------------------------------------------------------------------------
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
@@ -276,4 +286,6 @@ COPY --from=build /vibeic-openroad/bin/openroad /foss/tools/openroad/bin/openroa
 # Same path the base image uses, so the composing image's COPY overwrites the
 # stale upstream binary rather than landing beside it (vibeic-eda#8).
 COPY --from=build /vibeic-openroad/bin/sta /foss/tools/openroad/bin/sta
+COPY --from=build /vibeic-openroad/bin/openroad-python /foss/tools/openroad/bin/openroad-python
+COPY --from=build /vibeic-openroad/bin/openroad-dispatch /foss/tools/openroad/bin/openroad-dispatch
 COPY --from=build /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
