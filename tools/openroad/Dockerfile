@@ -22,7 +22,7 @@ FROM openroad/ubuntu24.04-dev:latest AS build
 # a fast-forward over the F-A1 repair_antennas -reroute commit (0.2.6).
 # HEAD of branch vibeic/post-route-detailed-routing-repair as of 2026-07-09.
 ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
-ARG OPENROAD_REF=f3c1be109b2263b8b392a50551848f5cf2eaccab  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66. -- advanced 2026-08-05 to f396ce8ee, our own `drt: verify the routed design`: the pin sat one commit behind the fork tip, so the DRC verifyRoute gate was built but never shipped (fork_gap_report Q2 release_lag=1). -- advanced 2026-09-22 to `drt: detailed_route -nets`, a route that re-lays ONLY the named nets and holds every other net's dbWire byte-identical, and `repair_antennas -reroute` now using it. Without it a one-diode antenna repair on a 655-net design lost 93 other nets' wire entirely, shrank 55, and ended in DRT-0206, so the flow could only roll the repair back and ship the violations. -- advanced 2026-09-22 to `rcx: extraction must not change the routing it measures`: Ext::extract() opens with odb::orderWires(), which rewrites every non-supply net's dbWire through tmg_conn::analyzeNet(); that rewrite is not geometry-preserving and turned a DRC-clean detailed route into 599 whole-design violations (547 Short, 45 Metal Spacing, 7 NS Metal) with nothing reporting it, so the flow shipped the damaged route and a downstream gate refused 450 log lines later holding a bare count. The raw wire stream is now saved before the ordering and replayed after it; the SPEF is byte-identical either side. Also: a scoped route now measures its byte-identical claim on odb (DRT-0709) and reports a whole-design entry-vs-exit delta instead of comparing a design-wide count with a tile-local one (DRT-0711/0712), and repair_antennas -reroute can pass -output_drc to the scoped route it runs.
+ARG OPENROAD_REF=18b4767bb16bfc4116f88a93287f010aa1d419d0  # pinned; branch master (0.2.22 consolidation: route DR6 + place FP2 + pdn PD2/PD4 + timing/fill/cts/dpl-leak; src/sta=1e21c3f superset fetched from vibeic/OpenSTA fork; commit-msg NDA-purged 2026-07-19) -- moved off vibeic/grt-310-collision 2026-08-03: master had absorbed it (git cherry empty) and carried the GRT message-id fix that branch lacks, without which the tool does not build. See vibeic-eda#66. -- advanced 2026-08-05 to f396ce8ee, our own `drt: verify the routed design`: the pin sat one commit behind the fork tip, so the DRC verifyRoute gate was built but never shipped (fork_gap_report Q2 release_lag=1). -- advanced 2026-09-22 to `drt: detailed_route -nets`, a route that re-lays ONLY the named nets and holds every other net's dbWire byte-identical, and `repair_antennas -reroute` now using it. Without it a one-diode antenna repair on a 655-net design lost 93 other nets' wire entirely, shrank 55, and ended in DRT-0206, so the flow could only roll the repair back and ship the violations. -- advanced 2026-09-22 to `rcx: extraction must not change the routing it measures`: Ext::extract() opens with odb::orderWires(), which rewrites every non-supply net's dbWire through tmg_conn::analyzeNet(); that rewrite is not geometry-preserving and turned a DRC-clean detailed route into 599 whole-design violations (547 Short, 45 Metal Spacing, 7 NS Metal) with nothing reporting it, so the flow shipped the damaged route and a downstream gate refused 450 log lines later holding a bare count. The raw wire stream is now saved before the ordering and replayed after it; the SPEF is byte-identical either side. Also: a scoped route now measures its byte-identical claim on odb (DRT-0709) and reports a whole-design entry-vs-exit delta instead of comparing a design-wide count with a tile-local one (DRT-0711/0712), and repair_antennas -reroute can pass -output_drc to the scoped route it runs.
 # `build --stamp` in the USER rc, because `etc/Build.sh` builds its bazel
 # argument list from a closed set (`--jobs`, `--config=opt` from -lto,
 # `--//:platform=`) with no pass-through, so `--config=release` cannot be handed
@@ -119,6 +119,16 @@ RUN cd /src \
       /vibeic-openroad/bin/sta \
  && /vibeic-openroad/bin/sta -version
 
+# LibreLane drives ODB Python steps with openroad -python. Keep the shipped Bazel
+# Tcl binary unchanged and build a same-commit Python binary separately.
+# ENABLE_TESTS stays ON because this fork has test CMakeLists that depend on
+# build_and_test even when only the openroad target is compiled.
+RUN cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_GUI=OFF -DBUILD_PYTHON=ON -DENABLE_TESTS=ON \
+ && cmake --build /src/build-python --target openroad -j"$(nproc)" \
+ && install -D /src/build-python/bin/openroad /vibeic-openroad/bin/openroad-python
+COPY openroad-dispatch /vibeic-openroad/bin/openroad-dispatch
+
 # ---------------------------------------------------------------------------
 # Stage 2 — vibeic/yosys (tri-state fanin preservation + modern slang SV frontend)
 # ---------------------------------------------------------------------------
@@ -152,4 +162,6 @@ COPY --from=build /vibeic-openroad/bin/openroad /foss/tools/openroad/bin/openroa
 # Same path the base image uses, so the composing image's COPY overwrites the
 # stale upstream binary rather than landing beside it (vibeic-eda#8).
 COPY --from=build /vibeic-openroad/bin/sta /foss/tools/openroad/bin/sta
+COPY --from=build /vibeic-openroad/bin/openroad-python /foss/tools/openroad/bin/openroad-python
+COPY --from=build /vibeic-openroad/bin/openroad-dispatch /foss/tools/openroad/bin/openroad-dispatch
 COPY --from=build /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json

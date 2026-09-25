@@ -30,8 +30,8 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:f3c1be1-1c1792
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:dcfc631-2a18d2
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:18b4767-462a2b
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:dcfc631-7d5d01
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
@@ -519,7 +519,7 @@ LABEL org.opencontainers.image.source="https://github.com/vibeic"
 USER root
 # --- vibeic/OpenROAD (native 24.04 build → RUNPATH /opt/or-tools, no lib bundling) ---
 COPY --from=img-openroad /opt/or-tools /opt/or-tools
-COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/
+COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/bin/sta /foss/tools/openroad/bin/openroad-python /foss/tools/openroad/bin/openroad-dispatch /foss/tools/openroad/bin/
 # The standalone `sta`, which the artefact now carries (vibeic-eda#8). Without
 # this line the base image's own copy survives at the same path — it answers
 # every smoke-test command, so the omission was invisible, and it had 0 of the
@@ -563,9 +563,11 @@ RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
 # of /foss/tools/yosys/bin first, under a comment saying "they are not ours to
 # rebuild" — vibeic-eda#13 was those four going missing. They are ours now, and
 # the copy is gone rather than left as a no-op.
-RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog
+RUN rm -rf /foss/tools/yosys /foss/tools/ngspice /foss/tools/magic /foss/tools/netgen /foss/tools/iverilog \
+           /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys-*.dist-info
 # --- vibeic/yosys (replaces base yosys install; bin symlinked into /foss/tools/bin) ---
 COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
+COPY --from=img-yosys /usr/local/lib/python3.12/dist-packages/pyosys /usr/local/lib/python3.12/dist-packages/pyosys
 
 # Put eqy/mcy back on top of OUR yosys, and DELETE the last dangling link rather
 # than repointing it.
@@ -1500,6 +1502,7 @@ ENV ALIGN_HOME=/foss/tools/align \
 # Reproduced identically on 0.2.41 and 0.2.43, so it is long-standing rather
 # than new. It survived because the build's self-test runs as root, where the
 # permission does not apply — the tool was verified in an identity no user has.
+ENV _LLN_OVERRIDE_OPENROAD=/foss/tools/openroad/bin/openroad-dispatch
 # restore the base's non-root runtime user
 USER 1000
 
@@ -1782,6 +1785,7 @@ USER root
 # design-drawn violations at a bond pad -- one of them INSIDE a master's own Pad
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
+ARG LIBRELANE_REF=abbddfa517dae8b45c68685f8761e215c3a425fa
 RUN set -e; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
@@ -1808,6 +1812,16 @@ RUN set -e; \
     done; \
     cd /; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
+    git clone --filter=blob:none https://github.com/vibeic/librelane.git /tmp/vibeic-librelane; \
+    cd /tmp/vibeic-librelane; \
+    git checkout ${LIBRELANE_REF}; \
+    git show --format= 69bbd515e668a6dff21a671ef7116bc20a1fa0bb -- librelane/scripts/openroad/common/io.tcl \
+        | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    git show --format= abbddfa517dae8b45c68685f8761e215c3a425fa -- librelane/scripts/openroad/common/io.tcl \
+        | patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages; \
+    cd /; mkdir -p /vibeic/provenance; \
+    printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json; \
+    rm -rf /tmp/vibeic-librelane; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
 # verify stays the LAST RUN in the file (test_verify_is_the_last_RUN_in_the_file):
