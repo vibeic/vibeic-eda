@@ -1225,7 +1225,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  # 9-corner IHP .spice deck in 0.3.79). Folded into this RUN, not given its own,
  # for the same 110-layer budget as the lines below.
  && python3 -m pip install --break-system-packages --no-deps /opt/vibeic-forks/cace \
- && python3 -c "import cace.__version__ as v, sys; sys.exit(0 if tuple(map(int, v.__version__.split('.')[:2])) >= (2, 13) else 1)" \
+ && python3 -c "import importlib.metadata as m, sys; sys.exit(0 if tuple(map(int, m.version('cace').split('.')[:2])) >= (2, 13) else 1)" \
  && ! grep -q 'TODO: Implement substitution for spice templates' \
       "$(python3 -c 'import cace.parameter.parameter_ngspice as m; print(m.__file__)')" \
  && chmod -R a+rX /opt/vibeic-forks \
