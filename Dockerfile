@@ -486,12 +486,62 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=ca3cac6c76d6866af8ed08aada3f8c2b038eae41
+ARG LIBRELANE_REF=8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
     mkdir -p /vibeic/provenance; \
     printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json
+
+# spicebind (mixed-signal co-simulation: a VPI module that runs an ngspice
+# netlist in lock-step with an HDL instance) — FROM OUR FORK, vibeic/spicebind.
+# The base image ships an unforked build at /foss/tools/spicebind (upstream
+# a63974c) that SIGSEGVs at end of simulation whenever SPICE_NETLIST or
+# HDL_INSTANCE is missing, because it halts an ngspice it never initialised.
+# The fork fixes that (vibeic/spicebind#2, merged as eb15a67, carrying #1's
+# 11b0cb3): a missing setting now stops the run with exit status 1 and a
+# message naming it. SPICEBIND_REF must contain 11b0cb3 -- this stage refuses
+# a pin without it, and the runtime RUN checks the behaviour. Built here, in
+# its own stage, so the final stage spends no layer on it: the runtime RUN that
+# installs apt packages bind-mounts /out.
+# It links the distro libngspice (libngspice0-dev), as the base build does;
+# /foss/tools/ngspice ships no shared library.
+# /out also carries two smoke-test inputs that are never shipped: the fork's own
+# tests/test.cir (XSPICE delay models) and a plain-Verilog bench for it.
+FROM ${BASE_IMAGE} AS spicebind-build
+USER root
+ARG SPICEBIND_REF=eb15a67703c3829b98080d040cf582c9bd4c0bbc
+RUN set -e; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libngspice0-dev; \
+    git clone https://github.com/vibeic/spicebind.git /src; \
+    cd /src; git checkout ${SPICEBIND_REF}; \
+    git merge-base --is-ancestor 11b0cb3967c4f9ad380bec6773f92c2b661e0165 HEAD \
+        || { echo "FAIL: SPICEBIND_REF ${SPICEBIND_REF} lacks the missing-SPICE_NETLIST fix 11b0cb3 (vibeic/spicebind#2)" >&2; exit 1; }; \
+    cmake -S /src -B /src/build -G Ninja -DNGSPICE_ROOT=/usr -DCMAKE_BUILD_TYPE=Release; \
+    cmake --build /src/build -j8; \
+    mkdir -p /out/vpi /out/smoke /vibeic/provenance; \
+    install -m 0644 /src/spicebind/spicebind_vpi.vpi /src/spicebind/spicebind_vpi_debug.vpi /out/vpi/; \
+    echo "spicebind $(git rev-parse HEAD) (vibeic/spicebind)" > /out/vpi/SOURCES; \
+    sed 's/{VCC}/1.8/g' /src/tests/test.cir > /out/smoke/test.cir; \
+    printf '%s\n' '`timescale 1ns/1ps' \
+      'module test_cir(input real adc_in, output wire [7:0] adc_out, input wire [7:0] dac_in, output real dac_out, input wire pwmin, output wire pwmout);' \
+      'endmodule' \
+      'module tb();' \
+      '  real adc_in; real dac_out; wire [7:0] adc_out; reg [7:0] dac_in; reg pwm_in; wire pwm_out;' \
+      '  test_cir test_cir(.adc_in(adc_in), .adc_out(adc_out), .dac_in(dac_in), .dac_out(dac_out), .pwmin(pwm_in), .pwmout(pwm_out));' \
+      '  integer i;' \
+      '  initial begin' \
+      '    adc_in = 0.0; dac_in = 0; pwm_in = 0;' \
+      '    for (i = 0; i <= 8; i = i + 1) begin' \
+      '      #40 adc_in = i * 0.125; dac_in = i * 31;' \
+      '      #40 $display("SMOKE adc_in=%0.3f adc_out=%0d dac_out=%0.4f", adc_in, adc_out, dac_out);' \
+      '    end' \
+      '    $display("SMOKE_DONE"); $finish;' \
+      '  end' \
+      'endmodule' > /out/smoke/tb.sv; \
+    printf 'module tb; initial begin #10 $display("SMOKE_DONE"); $finish; end endmodule\n' > /out/smoke/bare.v; \
+    printf '{"tool":"spicebind","repo":"https://github.com/vibeic/spicebind.git","ref":"%s"}\n' "${SPICEBIND_REF}" > /vibeic/provenance/spicebind.json
 
 FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
@@ -510,6 +560,7 @@ COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
+COPY --from=spicebind-build /vibeic/provenance/spicebind.json /vibeic/provenance/spicebind.json
 # The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
 # a source stage in this file — but the record it carries is the same shape and
 # is read by the same checker (vibeic-eda#117 finding 5).
@@ -1175,12 +1226,40 @@ COPY --from=tb-src /tb /opt/vibeic-forks
 # It deliberately does NOT go in tools/verilator/Dockerfile: that image publishes
 # `FROM scratch` + /foss/tools/verilator only, so nothing apt installs there ever
 # reaches this runtime. See the note in that file.
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,from=spicebind-build,source=/out,target=/tmp/vibeic-spicebind,ro \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
       libxcb-cursor0 \
       libopenmpi-dev \
       liblz4-dev \
+      ngspice \
  && rm -rf /var/lib/apt/lists/* \
+ # SPICEBIND FROM vibeic/spicebind, over the base image's unforked build (see
+ # the spicebind-build stage). The distro `ngspice` package is here for the
+ # same library: spicebind drives the distro libngspice, which reads that
+ # package's spinit and XSPICE code models. Without them every netlist with an
+ # XSPICE model fails ("MIF-ERROR - unable to find definition of model") and vvp
+ # still exits 0 -- measured on 0.3.79 with the fork's own tests/test.cir: one
+ # MIF-ERROR and 0 of 10 bench lines; with the package: 0 errors, 10 of 10.
+ # /foss/tools/bin stays first on PATH, so `ngspice` is still ngspice-47.
+ && install -m 0644 /tmp/vibeic-spicebind/vpi/spicebind_vpi.vpi /tmp/vibeic-spicebind/vpi/spicebind_vpi_debug.vpi \
+      /tmp/vibeic-spicebind/vpi/SOURCES /foss/tools/spicebind/ \
+ && cmp /tmp/vibeic-spicebind/vpi/spicebind_vpi.vpi /foss/tools/spicebind/spicebind_vpi.vpi \
+ && test "$(readlink -f /foss/tools/bin/ngspice)" = /foss/tools/ngspice/bin/ngspice \
+ && sd=$(mktemp -d) \
+ && /foss/tools/iverilog/bin/iverilog -g2012 -o "$sd/tb.vvp" /tmp/vibeic-spicebind/smoke/tb.sv \
+ && (cd "$sd" && SPICE_NETLIST=/tmp/vibeic-spicebind/smoke/test.cir HDL_INSTANCE=tb.test_cir \
+      /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi tb.vvp > "$sd/out.txt" 2>&1) \
+ && if grep -q 'MIF-ERROR' "$sd/out.txt"; then echo "FAIL: spicebind cannot load XSPICE code models" >&2; cat "$sd/out.txt" >&2; exit 1; fi \
+ && test "$(grep -c '^SMOKE adc_in' "$sd/out.txt")" = 9 && grep -q '^SMOKE_DONE' "$sd/out.txt" \
+ && /foss/tools/iverilog/bin/iverilog -o "$sd/bare.vvp" /tmp/vibeic-spicebind/smoke/bare.v \
+ && rc=0 && { (cd "$sd" && env -u SPICE_NETLIST -u HDL_INSTANCE \
+      /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi bare.vvp > "$sd/env.txt" 2>&1) || rc=$?; } \
+ && if [ "$rc" != 1 ] || ! grep -q 'requires SPICE_NETLIST' "$sd/env.txt"; then \
+      echo "FAIL: spicebind without SPICE_NETLIST: rc=$rc (want 1 and the message naming it)" >&2; cat "$sd/env.txt" >&2; exit 1; \
+    fi \
+ && rm -rf "$sd" \
+ && echo "spicebind: $(cat /foss/tools/spicebind/SOURCES); XSPICE smoke 9/9 lines; no SPICE_NETLIST -> exit 1" \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
       -e /opt/vibeic-forks/cocotb-coverage \
@@ -1919,6 +1998,31 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
     install -m 0644 librelane/scripts/odbpy/io_place.py /usr/local/lib/python3.12/dist-packages/librelane/scripts/odbpy/io_place.py; \
     LLN=/usr/local/lib/python3.12/dist-packages/librelane; \
+    for c in bff469a84caeb291091bf39a8c914dd83de2f444 c810fdf85f9dadafbd9fce756380e5d0036e574d \
+             9539a672256fb464c5df205b39454cf0f1d2b70f 0bc5b9042fe84fc0f67552d36011c4fcd9fe7377 \
+             932c808072c3517de3c7b20cd3da0d9c7512c155 da8c4cf24e458bc5893b3c430c492f49e2c6d200 \
+             ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd; do \
+        git merge-base --is-ancestor $c HEAD \
+            || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
+        git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
+        test -s /tmp/ll-$c.diff || { echo "FAIL: librelane $c has an empty diff" >&2; exit 1; }; \
+        patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/ll-$c.diff; \
+        patch -s -R --dry-run -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/ll-$c.diff \
+            || { echo "FAIL: librelane $c did not apply (reverse check)" >&2; exit 1; }; \
+        rm -f /tmp/ll-$c.diff; \
+    done; \
+    grep -q 'inputs = \[DesignFormat.GDS, DesignFormat.DEF.mkOptional()\]' $LLN/steps/magic.py \
+        || { echo "FAIL: WriteLEF DEF-optional (8ec5ecd) is not installed" >&2; exit 1; }; \
+    grep -q 'cellname list exists $::env(DESIGN_NAME)' $LLN/scripts/magic/lef.tcl \
+        || { echo "FAIL: lef.tcl cell guard (8ec5ecd) is not installed" >&2; exit 1; }; \
+    grep -q 'set_cmd_units -time ns -capacitance pF' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: PnR SDC units (da8c4cf) are not installed" >&2; exit 1; }; \
+    if grep -nE 'est::check_corner_wire_cap[^s]|utl::metric_int[^e]' $LLN/scripts/openroad/common/io.tcl $LLN/scripts/openroad/sta/corner.tcl; then \
+        echo "FAIL: abbreviated OpenROAD command names remain (ddc1a09)" >&2; exit 1; \
+    fi; \
+    # -P: the cwd here is the fork checkout, which would otherwise shadow the
+    # installed package (an un-overlaid image passes this line from this cwd).
+    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -1932,7 +2036,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 8 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
