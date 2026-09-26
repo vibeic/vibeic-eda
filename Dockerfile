@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=ca3cac6c76d6866af8ed08aada3f8c2b038eae41
+ARG LIBRELANE_REF=8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -1919,6 +1919,29 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     install -m 0644 librelane/steps/netgen.py /usr/local/lib/python3.12/dist-packages/librelane/steps/netgen.py; \
     install -m 0644 librelane/scripts/odbpy/io_place.py /usr/local/lib/python3.12/dist-packages/librelane/scripts/odbpy/io_place.py; \
     LLN=/usr/local/lib/python3.12/dist-packages/librelane; \
+    for c in bff469a84caeb291091bf39a8c914dd83de2f444 c810fdf85f9dadafbd9fce756380e5d0036e574d \
+             9539a672256fb464c5df205b39454cf0f1d2b70f 0bc5b9042fe84fc0f67552d36011c4fcd9fe7377 \
+             932c808072c3517de3c7b20cd3da0d9c7512c155 da8c4cf24e458bc5893b3c430c492f49e2c6d200 \
+             ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd; do \
+        git merge-base --is-ancestor $c HEAD \
+            || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
+        git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
+        test -s /tmp/ll-$c.diff || { echo "FAIL: librelane $c has an empty diff" >&2; exit 1; }; \
+        patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/ll-$c.diff; \
+        patch -s -R --dry-run -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/ll-$c.diff \
+            || { echo "FAIL: librelane $c did not apply (reverse check)" >&2; exit 1; }; \
+        rm -f /tmp/ll-$c.diff; \
+    done; \
+    grep -q 'inputs = \[DesignFormat.GDS, DesignFormat.DEF.mkOptional()\]' $LLN/steps/magic.py \
+        || { echo "FAIL: WriteLEF DEF-optional (8ec5ecd) is not installed" >&2; exit 1; }; \
+    grep -q 'cellname list exists $::env(DESIGN_NAME)' $LLN/scripts/magic/lef.tcl \
+        || { echo "FAIL: lef.tcl cell guard (8ec5ecd) is not installed" >&2; exit 1; }; \
+    grep -q 'set_cmd_units -time ns -capacitance pF' $LLN/scripts/openroad/common/io.tcl \
+        || { echo "FAIL: PnR SDC units (da8c4cf) are not installed" >&2; exit 1; }; \
+    if grep -nE 'est::check_corner_wire_cap[^s]|utl::metric_int[^e]' $LLN/scripts/openroad/common/io.tcl $LLN/scripts/openroad/sta/corner.tcl; then \
+        echo "FAIL: abbreviated OpenROAD command names remain (ddc1a09)" >&2; exit 1; \
+    fi; \
+    python3 -c "from librelane.steps.magic import WriteLEF; import librelane.steps.gds_substance, librelane.steps.pyosys; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -1932,7 +1955,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 8 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
