@@ -538,6 +538,110 @@ RUN set -e; \
     if git merge-base --is-ancestor 11b0cb3967c4f9ad380bec6773f92c2b661e0165 HEAD; then touch /out/smoke/has_env_fix; fi; \
     printf '{"tool":"spicebind","repo":"https://github.com/vibeic/spicebind.git","ref":"%s"}\n' "${SPICEBIND_REF}" > /vibeic/provenance/spicebind.json
 
+# kepler-formal (the Naja project's logic-equivalence checker) is a BASE-IMAGE
+# binary at /foss/tools/kepler-formal. It cannot start: it NEEDs
+# libnaja_snl_pyloader.so and four other libnaja_*.so that sit in
+# /foss/tools/kepler-formal/lib, but the executable carries no RPATH/RUNPATH
+# (its libraries and its sibling naja_edit do). Measured on 0.3.79:
+# "error while loading shared libraries: libnaja_snl_pyloader.so".
+#
+# The fix is scoped to that one binary: its RUNPATH becomes $ORIGIN/../lib.
+# A global loader entry would also start it, but najaeda (the Python package)
+# ships libraries with the SAME sonames in its own directory, built from a
+# different Naja: the two sets are not interchangeable. Measured on 0.3.79:
+# preloading kepler-formal's libnaja_nl.so into `import najaeda` fails with an
+# undefined symbol in najaeda's libnaja_metrics.so. An ld.so.conf.d entry
+# happens not to reach najaeda today (its libraries carry DT_RPATH $ORIGIN,
+# which the loader tries first) and LD_LIBRARY_PATH would, but a per-binary
+# RUNPATH affects no other process at all. patchelf is needed only to write it,
+# so it is installed here and never reaches the image.
+#
+# The binary is the base image's (same BASE_IMAGE as the final stage), not a
+# build from source; the vibeic/kepler-formal fork exists, but building from it
+# is follow-up work, so it is not registered as a fork the image builds from.
+# /out/smoke: two structurally different sg13g2 netlists of the same function,
+# and a mutant of the second (one AND cell turned into an OR cell).
+FROM ${BASE_IMAGE} AS kepler-formal-runpath
+USER root
+RUN set -e; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patchelf; \
+    mkdir -p /out/bin /out/smoke; \
+    cp /foss/tools/kepler-formal/bin/kepler-formal /out/bin/kepler-formal; \
+    test -z "$(patchelf --print-rpath /out/bin/kepler-formal)"; \
+    patchelf --set-rpath '$ORIGIN/../lib' /out/bin/kepler-formal; \
+    readelf -d /out/bin/kepler-formal | grep -q 'RUNPATH.*\[\$ORIGIN/\.\./lib\]'; \
+    printf '%s\n' 'module top(a, b, c, y, z);' '  input a, b, c;' '  output y, z;' \
+      '  sg13g2_a21o_1 u0 (.A1(a), .A2(b), .B1(c), .X(y));' \
+      '  sg13g2_xor2_1 u1 (.A(a), .B(c), .X(z));' 'endmodule' > /out/smoke/gold.v; \
+    printf '%s\n' 'module top(a, b, c, y, z);' '  input a, b, c;' '  output y, z;' '  wire ab;' \
+      '  sg13g2_and2_1 u0 (.A(a), .B(b), .X(ab));' \
+      '  sg13g2_or2_1 u1 (.A(ab), .B(c), .X(y));' \
+      '  sg13g2_xor2_1 u2 (.A(a), .B(c), .X(z));' 'endmodule' > /out/smoke/gate.v; \
+    sed 's/sg13g2_and2_1/sg13g2_or2_1/' /out/smoke/gate.v > /out/smoke/bad.v; \
+    if cmp -s /out/smoke/gate.v /out/smoke/bad.v; then echo 'FAIL: the kepler-formal mutant is identical to gate'; exit 1; fi
+
+# EQY (equivalence checking with Yosys) — FROM OUR FORK, vibeic/eqy, built
+# against OUR Yosys. EQY is a Python script plus three Yosys plugins
+# (eqy_combine.so, eqy_partition.so, eqy_recode.so) that it loads with
+# `plugin -i`. Until this stage the image carried only the base image's v0.66
+# SCRIPT, rescued out of the base yosys prefix before that prefix is replaced
+# (see the rescue RUN in the final stage). Its plugins (base
+# share/yosys/plugins/eqy_*.so) were not rescued, and rescuing them would not
+# have helped: a Yosys plugin is built against one Yosys's headers and ABI,
+# theirs is the base's Yosys 0.66, and the v0.66 sources do not compile against
+# our 0.69. Measured on 0.3.79: every `eqy` run died in its combine step with
+# "Can't load module `/foss/tools/bin/eqy_combine.so'".
+#
+# The plugins must be compiled against the SAME Yosys the image ships, so this
+# stage bind-mounts the img-yosys artefact over the base image's own (older)
+# yosys prefix and builds with that artefact's yosys-config: headers, compiler
+# flags and YOSYS_VER all come from the Yosys that will load the plugins. The
+# base image supplies only the compiler, make and git. Building here rather
+# than in the final stage keeps the final stage's layer count unchanged: two
+# existing RUNs bind-mount /out (install, and the end-of-file EQY check).
+#
+# EQY_REF is the fork's v0.69 release commit (tag v0.69, on main), matching the
+# image's Yosys 0.69. `make install PREFIX=/out/eqy` lays out bin/eqy,
+# share/yosys/python3/eqy_job.py and share/yosys/plugins/*.so, which is the
+# layout the script searches first ("<script dir>/../share/yosys/plugins").
+# /out/smoke carries the inputs of the build-time EQY check; it is never shipped.
+# The smoke design's flops have DEFINED initial values on purpose. EQY's miter
+# treats an x on the gold side as don't-care, so with undefined initial values
+# the mutant below (one AND turned into an OR, behind a synchronous reset) is
+# "proved" equivalent: measured, DONE (PASS, rc=0) for the mutant. With defined
+# initial values the mutant fails its partition, DONE (FAIL, rc=2). The check
+# is only worth having if it can fail, so it is built on the variant that can.
+#
+# ORDER MATTERS: this stage follows kepler-formal-runpath, not spicebind-build.
+# fork-gatekeeper/discover_forks pairs each vibeic URL with the first
+# `checkout ${X_REF}` in the next 400 characters of comment-stripped text, and
+# directly after spicebind's provenance printf this stage's checkout paired
+# spicebind with EQY_REF (test_the_two_pairings_agree_with_the_structural_parser).
+FROM ${BASE_IMAGE} AS eqy-build
+USER root
+ARG EQY_REF=4a72eb94fc253062464afee4d0018359017bb846
+RUN --mount=type=bind,from=img-yosys,source=/foss/tools/yosys,target=/foss/tools/yosys \
+    set -e; \
+    git clone https://github.com/vibeic/eqy.git /src; \
+    cd /src; git checkout ${EQY_REF}; \
+    make -j8 YOSYS_CONFIG=/foss/tools/yosys/bin/yosys-config build; \
+    make YOSYS_CONFIG=/foss/tools/yosys/bin/yosys-config PREFIX=/out/eqy install; \
+    for so in eqy_combine eqy_partition eqy_recode; do test -s "/out/eqy/share/yosys/plugins/$so.so"; done; \
+    mkdir -p /out/smoke /vibeic/provenance; \
+    printf '%s\n' \
+      'module top(input clk, input rst, input a, input b, output reg q1 = 1'"'"'b0, output reg q2 = 1'"'"'b0);' \
+      '  always @(posedge clk)' \
+      '    if (rst) begin q1 <= 1'"'"'b0; q2 <= 1'"'"'b0; end' \
+      '    else begin q1 <= a & b; q2 <= q1 ^ a; end' \
+      'endmodule' > /out/smoke/gold.v; \
+    sed 's/a & b/a | b/' /out/smoke/gold.v > /out/smoke/bad.v; \
+    if cmp -s /out/smoke/gold.v /out/smoke/bad.v; then echo 'FAIL: the EQY mutant is identical to gold'; exit 1; fi; \
+    printf '%s\n' '[gold]' 'read_verilog gold.v' 'prep -top top' '' \
+      '[gate]' 'read_verilog gate.v' 'prep -top top' '' \
+      '[strategy sat]' 'use sat' 'depth 5' > /out/smoke/check.eqy; \
+    printf '{"tool":"eqy","repo":"https://github.com/vibeic/eqy.git","ref":"%s"}\n' "${EQY_REF}" > /vibeic/provenance/eqy.json
+
 FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
 COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
@@ -556,6 +660,7 @@ COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-el
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
 COPY --from=spicebind-build /vibeic/provenance/spicebind.json /vibeic/provenance/spicebind.json
+COPY --from=eqy-build /vibeic/provenance/eqy.json /vibeic/provenance/eqy.json
 # The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
 # a source stage in this file — but the record it carries is the same shape and
 # is read by the same checker (vibeic-eda#117 finding 5).
@@ -612,13 +717,17 @@ COPY --from=img-openroad /foss/tools/openroad/bin/openroad /foss/tools/openroad/
 # yosys's share/yosys/python3, which is the yosys it will actually drive.
 # mcy-dash and mcy-gui fail on --help in the BASE image too (`config.mcy not
 # found`), so they are carried without being claimed to work.
+#
+# eqy is NO LONGER rescued. The rescued v0.66 script came without its three
+# Yosys plugins and could not run a single check (see the eqy-build stage); eqy
+# is now built from vibeic/eqy against our Yosys and installed by the restore
+# RUN below.
 RUN mkdir -p /foss/rescue/bin /foss/rescue/share \
- && for t in eqy mcy mcy-dash mcy-gui; do \
+ && for t in mcy mcy-dash mcy-gui; do \
       [ -e "/foss/tools/yosys/bin/$t" ] && cp -a "/foss/tools/yosys/bin/$t" "/foss/rescue/bin/$t"; \
     done; \
     cp -a /foss/tools/yosys/share/mcy /foss/rescue/share/mcy \
- && cp -a /foss/tools/yosys/share/yosys/python3/eqy_job.py /foss/rescue/eqy_job.py \
- && test -x /foss/rescue/bin/eqy
+ && test -x /foss/rescue/bin/mcy
 
 # yices2 is now OUR build (tools/yices2), so nothing has to be rescued out of the
 # base's yosys prefix before it is deleted. The old step copied four binaries out
@@ -650,9 +759,23 @@ COPY --from=img-yosys /foss/tools/yosys /foss/tools/yosys
 # modules through PYTHONPATH, which the stock base sets only in a LOGIN shell,
 # and a Dockerfile RUN is not one. Checking here tested the tool under conditions
 # no user has.
-RUN cp -a /foss/rescue/bin/. /foss/tools/yosys/bin/ \
+#
+# EQY from the eqy-build stage lands in our yosys prefix: bin/eqy,
+# share/yosys/python3/eqy_job.py (on the image's PYTHONPATH) and
+# share/yosys/plugins/eqy_{combine,partition,recode}.so. The script finds its
+# plugins at "<dir of the script>/../share/yosys/plugins", where <dir> is the
+# path it was INVOKED by, not the resolved one (os.path.abspath, not realpath).
+# Through the old /foss/tools/bin/eqy SYMLINK that is /foss/tools/share/..., which
+# does not exist, and it falls back to /foss/tools/bin/eqy_*.so. So the link is
+# replaced by a two-line wrapper that execs the real script: every way of
+# calling eqy then resolves the plugins in our yosys prefix.
+RUN --mount=type=bind,from=eqy-build,source=/out/eqy,target=/tmp/vibeic-eqy,ro \
+    cp -a /foss/rescue/bin/. /foss/tools/yosys/bin/ \
  && cp -a /foss/rescue/share/mcy /foss/tools/yosys/share/mcy \
- && cp -a /foss/rescue/eqy_job.py /foss/tools/yosys/share/yosys/python3/eqy_job.py \
+ && cp -a /tmp/vibeic-eqy/. /foss/tools/yosys/ \
+ && rm -f /foss/tools/bin/eqy \
+ && printf '#!/bin/sh\nexec /foss/tools/yosys/bin/eqy "$@"\n' > /foss/tools/bin/eqy \
+ && chmod 0755 /foss/tools/bin/eqy \
  && rm -rf /foss/rescue \
  && rm -f /foss/tools/bin/sby
 # external CDCL SAT solvers for the fork yosys sat backend (vibe-ic#354)
@@ -1222,6 +1345,7 @@ COPY --from=tb-src /tb /opt/vibeic-forks
 # `FROM scratch` + /foss/tools/verilator only, so nothing apt installs there ever
 # reaches this runtime. See the note in that file.
 RUN --mount=type=bind,from=spicebind-build,source=/out,target=/tmp/vibeic-spicebind,ro \
+    --mount=type=bind,from=kepler-formal-runpath,source=/out,target=/tmp/vibeic-kepler,ro \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
       libxcb-cursor0 \
@@ -1256,6 +1380,26 @@ RUN --mount=type=bind,from=spicebind-build,source=/out,target=/tmp/vibeic-spiceb
     fi \
  && rm -rf "$sd" \
  && echo "spicebind: $(cat /foss/tools/spicebind/SOURCES); XSPICE smoke 9/9 lines" \
+ # KEPLER-FORMAL WITH A RUNPATH (see the kepler-formal-runpath stage). The
+ # patched copy replaces the base binary in place; nothing else changes. Then
+ # a real LEC, not --help: two structurally different sg13g2 netlists of one
+ # function must compare equal, and a one-cell mutant must not. kepler-formal
+ # exits 0 in BOTH cases (measured), so the verdict is read from its log line,
+ # never from the exit code; a binary that cannot start fails the grep and its
+ # loader error is printed. Last, najaeda must still load its OWN libnaja_*.so:
+ # every libnaja mapping of a process that imports it has to come from the
+ # najaeda package directory, none from /foss/tools/kepler-formal/lib.
+ && install -m 0755 /tmp/vibeic-kepler/bin/kepler-formal /foss/tools/kepler-formal/bin/kepler-formal \
+ && kd=$(mktemp -d) && kl=/foss/pdks/ihp-sg13g2/libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib \
+ && (cd "$kd" && /foss/tools/bin/kepler-formal -verilog /tmp/vibeic-kepler/smoke/gold.v /tmp/vibeic-kepler/smoke/gate.v "$kl" > "$kd/eq.txt" 2>&1 || true) \
+ && { grep -q 'No difference was found' "$kd/eq.txt" \
+      || { echo "FAIL: kepler-formal did not prove two equal netlists equal" >&2; cat "$kd/eq.txt" >&2; exit 1; }; } \
+ && (cd "$kd" && /foss/tools/bin/kepler-formal -verilog /tmp/vibeic-kepler/smoke/gold.v /tmp/vibeic-kepler/smoke/bad.v "$kl" > "$kd/ne.txt" 2>&1 || true) \
+ && { grep -q 'Difference was found' "$kd/ne.txt" && ! grep -q 'No difference' "$kd/ne.txt" \
+      || { echo "FAIL: kepler-formal did not find the difference in a mutated netlist" >&2; cat "$kd/ne.txt" >&2; exit 1; }; } \
+ && rm -rf "$kd" \
+ && python3 -c 'import os, najaeda, najaeda.naja; d = os.path.realpath(os.path.dirname(najaeda.__file__)); m = sorted({l.split()[-1] for l in open("/proc/self/maps") if "libnaja" in l}); assert m, "najaeda mapped no libnaja_*.so"; bad = [x for x in m if not os.path.realpath(x).startswith(d + "/")]; assert not bad, "najaeda loaded foreign libnaja: %s" % bad; print("najaeda loads its own %d libnaja_*.so" % len(m))' \
+ && echo "kepler-formal: RUNPATH \$ORIGIN/../lib; LEC equal=equal, mutant=different" \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
       -e /opt/vibeic-forks/cocotb-coverage \
@@ -1797,10 +1941,22 @@ RUN ["/bin/bash", "-lc", "/vibeic/tests/magic/test/run_all.sh && echo 'magic for
 # the `lib` prefix because IHP's README and the ihp-sg13cmos5l plugin symlinks
 # expect Xyce_Plugin_<module>.so. Those symlinks dangled until this step.
 # Measured cost in 0.3.79: psp103 40 s / 1.0 GB RSS, r3_cmc 6 s, mosvar < 5 s.
-RUN set -e; \
+RUN --mount=type=bind,from=eqy-build,source=/out/smoke,target=/tmp/vibeic-eqy-smoke,ro \
+    set -e; \
     /foss/tools/bin/eqy --help >/dev/null; \
     /foss/tools/bin/mcy --help >/dev/null; \
     echo "eqy and mcy run from /foss/tools/bin without a login shell"; \
+    e=$(mktemp -d); cp /tmp/vibeic-eqy-smoke/gold.v /tmp/vibeic-eqy-smoke/bad.v /tmp/vibeic-eqy-smoke/check.eqy "$e/"; cd "$e"; \
+    yosys -q -p 'read_verilog gold.v; synth -top top; write_verilog -noattr gate.v'; \
+    if ! eqy -f check.eqy > pass.txt 2>&1 || ! grep -q 'DONE (PASS' pass.txt; then \
+      echo "FAIL: eqy did not prove a synthesized netlist equivalent to its RTL"; tail -25 pass.txt; exit 1; \
+    fi; \
+    rm -rf check; yosys -q -p 'read_verilog bad.v; synth -top top; write_verilog -noattr gate.v'; \
+    if eqy -f check.eqy > fail.txt 2>&1 || ! grep -q 'DONE (FAIL' fail.txt || grep -q "Can't load module" fail.txt; then \
+      echo "FAIL: eqy did not refute a netlist synthesized from a mutated RTL"; tail -25 fail.txt; exit 1; \
+    fi; \
+    cd /; rm -rf "$e"; \
+    echo "eqy $(eqy --version): PASS on a synthesized netlist, FAIL on a mutated one"; \
     n=0; \
     for f in /foss/tools/bin/*; do \
       if [ -L "$f" ] && [ ! -e "$f" ]; then \
