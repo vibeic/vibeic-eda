@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=dcd090b25fe6fbca63fb936981fa1c968f703cb7
+ARG LIBRELANE_REF=d3417c3d6a9ce8dd30a478ab2d51e6b4a06560ef
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2180,7 +2180,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd \
              b33e6ea0731655cd260dfd895530b979fdf213b7 d75de515bc8a350033205cf5a5dacb2ac45d4a41 \
              9caaaae41ab1d5c1665cf4488d0cee8633257303 d2ddf514cc7ad2c459565faac78d251a9330bd14 \
-             114533ca3f1f2494ec37ce0ae34ce27960521c64 70d0e6f4da916e13f9d1faa198ce02f5dfd7638b; do \
+             114533ca3f1f2494ec37ce0ae34ce27960521c64 70d0e6f4da916e13f9d1faa198ce02f5dfd7638b \
+             9e698ed6c366e9d436c0d66905859278e1a6727a cd40c3be4235d6c66308db0076ac6cddf8538f5f; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2222,9 +2223,18 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -nE 'write_metric_num "power__[a-z_]*total"' $LLN/scripts/openroad/sta/corner.tcl; then \
         echo "FAIL: corner.tcl still writes an unscoped power metric (114533c)" >&2; exit 1; \
     fi; \
+    grep -qF 'lappend drt_args -or_seed $::env(DRT_OR_SEED)' $LLN/scripts/openroad/drt.tcl \
+        || { echo "FAIL: drt.tcl does not pass -or_seed from DRT_OR_SEED (9e698ed)" >&2; exit 1; }; \
+    grep -qF 'lappend drt_args -or_k $::env(DRT_OR_K)' $LLN/scripts/openroad/drt.tcl \
+        || { echo "FAIL: drt.tcl does not pass -or_k from DRT_OR_K (cd40c3b)" >&2; exit 1; }; \
+    if grep -nF -- '-or_seed 42' $LLN/scripts/openroad/drt.tcl; then \
+        echo "FAIL: drt.tcl still hard-codes -or_seed 42 (9e698ed)" >&2; exit 1; \
+    fi; \
+    grep -qF 'utl::metric_integer "route__drc_errors__run:$i"' $LLN/scripts/openroad/drt.tcl \
+        || { echo "FAIL: drt.tcl does not record route__drc_errors__run:<i> (9e698ed)" >&2; exit 1; }; \
     # -P: the cwd here is the fork checkout, which would otherwise shadow the
     # installed package (an un-overlaid image passes this line from this cwd).
-    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m; import importlib.util, inspect; from librelane.steps.klayout import SealRing; from librelane.common.metrics import Metric; import librelane.common.metrics.library; assert SealRing.METRIC == 'design__seal_ring__verified' and Metric.by_name[SealRing.METRIC].higher_is_better, SealRing.METRIC; assert 'self.verify_ring(' in inspect.getsource(SealRing.run); s = importlib.util.spec_from_file_location('verify_sealring', '$LLN/scripts/klayout/verify_sealring.py'); v = importlib.util.module_from_spec(s); s.loader.exec_module(v); assert callable(v.measure) and v.EDGE_TOLERANCE == 0.10, v; from librelane.common.metrics.metric import max_aggregator; from librelane.common import aggregate_metrics; assert all(Metric.by_name[n].aggregator is max_aggregator for n in ('power__total', 'power__internal__total', 'power__switching__total', 'power__leakage__total')); a = aggregate_metrics({'power__total__corner:nom_tt': 0.020, 'power__total__corner:max_ff': 0.026, 'power__total__corner:max_ss': 0.016}); assert a['power__total'] == 0.026, a"; \
+    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m; import importlib.util, inspect; from librelane.steps.klayout import SealRing; from librelane.common.metrics import Metric; import librelane.common.metrics.library; assert SealRing.METRIC == 'design__seal_ring__verified' and Metric.by_name[SealRing.METRIC].higher_is_better, SealRing.METRIC; assert 'self.verify_ring(' in inspect.getsource(SealRing.run); s = importlib.util.spec_from_file_location('verify_sealring', '$LLN/scripts/klayout/verify_sealring.py'); v = importlib.util.module_from_spec(s); s.loader.exec_module(v); assert callable(v.measure) and v.EDGE_TOLERANCE == 0.10, v; from librelane.common.metrics.metric import max_aggregator; from librelane.common import aggregate_metrics; assert all(Metric.by_name[n].aggregator is max_aggregator for n in ('power__total', 'power__internal__total', 'power__switching__total', 'power__leakage__total')); a = aggregate_metrics({'power__total__corner:nom_tt': 0.020, 'power__total__corner:max_ff': 0.026, 'power__total__corner:max_ss': 0.016}); assert a['power__total'] == 0.026, a; from decimal import Decimal; from librelane.steps.openroad import DetailedRouting; dv = {v.name: v for v in DetailedRouting.config_vars}; assert dv['DRT_OR_SEED'].type is int and dv['DRT_OR_SEED'].default == 42, dv.get('DRT_OR_SEED'); assert dv['DRT_OR_K'].type is Decimal and dv['DRT_OR_K'].default == 0, dv.get('DRT_OR_K'); rd = Metric.by_name['route__drc_errors']; assert {'iter', 'run'} <= set(rd.dont_aggregate), rd.dont_aggregate; r = {'route__drc_errors': 20, 'route__drc_errors__iter:0': 90, 'route__drc_errors__run:0': 7, 'route__drc_errors__run:1': 3, 'route__drc_errors__run:2': 20}; a = aggregate_metrics(r); assert a == r, a; assert aggregate_metrics({'route__drc_errors': 0, 'route__drc_errors__run:0': 5, 'route__drc_errors__run:1': 0})['route__drc_errors'] == 0"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -2238,7 +2248,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 13 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 16 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
