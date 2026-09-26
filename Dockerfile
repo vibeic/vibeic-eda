@@ -2016,7 +2016,9 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -nE 'est::check_corner_wire_cap[^s]|utl::metric_int[^e]' $LLN/scripts/openroad/common/io.tcl $LLN/scripts/openroad/sta/corner.tcl; then \
         echo "FAIL: abbreviated OpenROAD command names remain (ddc1a09)" >&2; exit 1; \
     fi; \
-    python3 -c "from librelane.steps.magic import WriteLEF; import librelane.steps.gds_substance, librelane.steps.pyosys; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs"; \
+    # -P: the cwd here is the fork checkout, which would otherwise shadow the
+    # installed package (an un-overlaid image passes this line from this cwd).
+    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
