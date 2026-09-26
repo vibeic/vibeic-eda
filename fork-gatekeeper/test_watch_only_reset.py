@@ -31,6 +31,16 @@ LL = _load("capture_release_ll")
 AI_GATE_TEST = _load("test_ai_release_authorization_gate")
 D0530 = _load("daily_0530")
 
+
+@pytest.fixture(autouse=True)
+def _the_staged_forks_root_is_the_whole_registered_fleet(monkeypatch):
+    """This file stages its own forks root; its registered fleet is exactly the
+    clones it staged.  Without this the round would read the production
+    FORKS.json and clone every fork it registers into the temporary root."""
+    monkeypatch.setattr(D0530, "registered_fleet", lambda path=None: (
+        {p.name: {"tool": p.name} for p in D0530.FORKS.iterdir()
+         if (p / ".git").is_dir()} if D0530.FORKS.is_dir() else {}, []))
+
 RUN_ID = "0123456789abcdef0123456789abcdef"
 
 

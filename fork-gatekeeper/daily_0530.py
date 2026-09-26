@@ -115,6 +115,97 @@ OURS = ("reyer", "vibeic")
 # valid-looking GitHub URL for some other owner is not evidence about our PRs.
 FORK_OWNER = "vibeic"
 
+# THE FLEET IS THE REGISTRY, NOT THE DIRECTORY LISTING.  The round used to walk
+# whatever clones happened to sit under FORKS, while the release authorizer
+# demands one row per FORKS.json entry.  cace, eqy and spicebind were registered
+# on 2026-09-26 (vibeic-eda #243/#244/#245) and nothing ever cloned them, so the
+# 2026-09-27 05:30 round walked 39 of 42 forks, exited on its conflicts, and the
+# authorizer found the gap 15 minutes later as "missing top-level row(s)".  A
+# registered fork with no checkout is now cloned at the START of the round, and
+# one that cannot be cloned gets an error row naming it -- never no row.
+FORKS_JSON = Path(__file__).resolve().with_name("FORKS.json")
+#: Where a missing registered fork is cloned from / its upstream lives.  Module
+#: attributes (not literals inside the function) so a test can point them at
+#: local bare repositories instead of GitHub.
+FORK_CLONE_URL = "https://github.com/" + FORK_OWNER + "/{tool}.git"
+UPSTREAM_CLONE_URL = "https://github.com/{slug}.git"
+
+
+def registered_fleet(path=None):
+    """Return ``(entries, errors)`` for every fork FORKS.json registers.
+
+    ``entries`` maps tool -> its registry row.  Any error means the fleet is
+    unknown and the round must not pretend it walked all of it.
+    """
+    path = Path(path or FORKS_JSON)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        return {}, [f"could not read the registered fleet {path}: "
+                    f"{type(exc).__name__}: {exc}"]
+    rows = raw.get("forks") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return {}, [f"registered fleet {path} has no forks list"]
+    entries, errors = {}, []
+    for pos, row in enumerate(rows):
+        tool = row.get("tool") if isinstance(row, dict) else None
+        if (not isinstance(tool, str) or not tool or tool != tool.strip()
+                or "/" in tool or tool.startswith(".")
+                or any(ch.isspace() for ch in tool)):
+            errors.append(f"registered fleet forks[{pos}].tool is malformed")
+            continue
+        if tool in entries:
+            errors.append(f"registered fleet has duplicate tool {tool}")
+            continue
+        entries[tool] = row
+    return entries, errors
+
+
+def provision_registered_checkouts(fleet, apply):
+    """Clone every registered fork that has no checkout under FORKS.
+
+    Returns ``{tool: reason}`` for each registered fork that still has no
+    usable checkout afterwards.  The caller turns each into an error row, so
+    an unclonable fork fails the round naming itself instead of vanishing from
+    the record.  Nothing that already exists at a fork's path is touched.
+    """
+    missing = {}
+    for tool, entry in sorted(fleet.items()):
+        d = FORKS / tool
+        if (d / ".git").is_dir():
+            continue
+        if d.exists() or d.is_symlink():
+            missing[tool] = (f"{d} exists but is not a git clone; left "
+                             "untouched")
+            continue
+        if not apply:
+            missing[tool] = (f"no local checkout at {d}; a dry run does not "
+                             "clone")
+            continue
+        slug = entry.get("upstream")
+        if not isinstance(slug, str) or slug.count("/") != 1 \
+                or any(ch.isspace() for ch in slug):
+            missing[tool] = ("no local checkout, and FORKS.json declares no "
+                             "usable upstream (owner/repo) to configure")
+            continue
+        print(f"  {tool:<20} registered in FORKS.json with no local checkout "
+              f"— cloning into {d}")
+        FORKS.mkdir(parents=True, exist_ok=True)
+        cp = sh("git", "clone", "--progress",
+                FORK_CLONE_URL.format(tool=tool), str(d), progress=True)
+        if cp.returncode != 0:
+            missing[tool] = (
+                ("clone STALLED" if cp.returncode == watchdog.RC_STALLED
+                 else f"clone failed (rc={cp.returncode})")
+                + f": {_first_error_line(cp)}")
+            continue
+        add = sh("git", "-C", str(d), "remote", "add", "upstream",
+                 UPSTREAM_CLONE_URL.format(slug=slug))
+        if add.returncode != 0:
+            missing[tool] = ("cloned, but the declared upstream remote could "
+                             f"not be added: {_first_error_line(add)}")
+    return missing
+
 
 #: `sh` never got an answer to a deliberately short request/probe, or could not
 #: be launched. DISTINCT from any exit code the tool itself chose, so a caller
@@ -2441,8 +2532,11 @@ def main_(argv=None) -> int:
     run_id = secrets.token_hex(16)
     pins = image_pins()
     report, needs_human = {}, False
-    registry = watch_only_reset.load_registry(
-        Path(__file__).resolve().with_name("FORKS.json"))
+    registry = watch_only_reset.load_registry(FORKS_JSON)
+    fleet, fleet_errors = registered_fleet(FORKS_JSON)
+    if fleet_errors:
+        registry = dict(registry)
+        registry["errors"] = list(registry.get("errors") or []) + fleet_errors
     reset_results = []
     seen_reset_tools = set()
     # A malformed opt-in registry must be found before any fork is changed.
@@ -2455,7 +2549,8 @@ def main_(argv=None) -> int:
         report["_ai_decisions"] = {
             "cases": 0, "invoked": False, "cleared": False,
             "verified": False,
-            "error": "watch-only reset registry is invalid; no fork was changed",
+            "error": ("FORKS.json (fleet or watch-only policy) is invalid; "
+                      "no fork was changed"),
         }
         report["_round"] = {
             "schema_version": 1, "run_id": run_id,
@@ -2467,11 +2562,17 @@ def main_(argv=None) -> int:
             _atomic_json(Path(args.json), report)
         round_record.write(report, gk_state.state_dir(), when=started_at)
         for error in registry["errors"]:
-            print(f"daily_0530: watch-only policy NORECORD: {error}",
+            print(f"daily_0530: FORKS.json NORECORD: {error}",
                   file=sys.stderr)
         return 2
+    # Every registered fork gets a checkout BEFORE the walk (or a named reason
+    # it could not), so the walk below covers the whole fleet.
+    unprovisioned = provision_registered_checkouts(fleet, args.apply)
+    for tool, why in sorted(unprovisioned.items()):
+        print(f"daily_0530: registered fork {tool} has no usable checkout: "
+              f"{why}", file=sys.stderr)
     for d in sorted(FORKS.iterdir()):
-        if not (d / ".git").is_dir():
+        if not (d / ".git").is_dir() or d.name in unprovisioned:
             continue
         policy = registry["policies"].get(d.name)
         if policy is not None:
@@ -2729,6 +2830,20 @@ def main_(argv=None) -> int:
             step4_prune(g, main, rep, False)
         needs_human |= rep.get("needs_human", False)
         report[d.name] = rep
+
+    # A REGISTERED FORK WITH NO ROW is how the 2026-09-27 round lost cace, eqy
+    # and spicebind: the release authorizer requires one row per FORKS.json
+    # entry, and "no row" reads as nothing at all until it refuses.  Every
+    # registered fork the walk did not reach gets a row that names why.
+    for tool in sorted(set(fleet) - set(report) - set(registry["policies"])):
+        why = unprovisioned.get(tool) or f"no git checkout at {FORKS / tool}"
+        report[tool] = {
+            "error": f"registered in FORKS.json but not walked: {why}",
+            "main": str(fleet[tool].get("branch") or ""), "conflicted": [],
+            "upstream_merge_outcome": "unmeasurable",
+            "needs_human": True, "pin": pins.get(tool.lower()),
+        }
+        needs_human = True
 
     for tool in sorted(set(registry["policies"]) - seen_reset_tools):
         policy = registry["policies"][tool]

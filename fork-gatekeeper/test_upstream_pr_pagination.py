@@ -14,6 +14,16 @@ sys.path.insert(0, str(HERE))
 import daily_0530 as D                                      # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _the_staged_forks_root_is_the_whole_registered_fleet(monkeypatch):
+    """This file stages its own forks root; its registered fleet is exactly the
+    clones it staged.  Without this the round would read the production
+    FORKS.json and clone every fork it registers into the temporary root."""
+    monkeypatch.setattr(D, "registered_fleet", lambda path=None: (
+        {p.name: {"tool": p.name} for p in D.FORKS.iterdir()
+         if (p / ".git").is_dir()} if D.FORKS.is_dir() else {}, []))
+
+
 G = ("git", "-C", "/work/fork")
 TIP_A = "a" * 40
 TIP_B = "b" * 40
