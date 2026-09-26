@@ -166,7 +166,7 @@ ARG PYUVM_REF=b319dd5fa020443b359dfa818791e6333591e660  # master tip. Advanced f
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
 ARG CACE_REPO=https://github.com/vibeic/cace.git
-ARG CACE_REF=9061129f6faa4d2459d5adc7f3dff2d15ddc939f  # branch vibeic/spice-template-substitution, vibeic/cace PR 1, not merged: fossi-foundation/cace main dedb5e0 = 2.13.0 plus .spice-template substitution and the netlist/schematic/NAME.spice fallback. Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
+ARG CACE_REF=9061129f6faa4d2459d5adc7f3dff2d15ddc939f  # branch vibeic/spice-template-substitution, vibeic/cace PR 1, not merged: fossi-foundation/cace main dedb5e0, version 2.13.0, plus .spice-template substitution and the netlist/schematic/NAME.spice fallback. Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
 ARG SBY_REF=2c2f04e96154995677fb604d697dc894ac680a69  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
