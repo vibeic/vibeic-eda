@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=551346c2ea2dd2c9055cdd33c36ac0fe450c92ac
+ARG LIBRELANE_REF=3ab19e52623360311d76c2091d7bffdacd414647
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2158,7 +2158,9 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              9539a672256fb464c5df205b39454cf0f1d2b70f 0bc5b9042fe84fc0f67552d36011c4fcd9fe7377 \
              932c808072c3517de3c7b20cd3da0d9c7512c155 da8c4cf24e458bc5893b3c430c492f49e2c6d200 \
              ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd \
-             b33e6ea0731655cd260dfd895530b979fdf213b7 d75de515bc8a350033205cf5a5dacb2ac45d4a41; do \
+             b33e6ea0731655cd260dfd895530b979fdf213b7 d75de515bc8a350033205cf5a5dacb2ac45d4a41 \
+             9caaaae41ab1d5c1665cf4488d0cee8633257303 d2ddf514cc7ad2c459565faac78d251a9330bd14 \
+             114533ca3f1f2494ec37ce0ae34ce27960521c64; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2185,9 +2187,24 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if [ "$n" != 2 ]; then \
         echo "FAIL: openroad.py has $n of 2 list-wrapped corner filters (LAYERS_RC, VIAS_R b33e6ea)" >&2; exit 1; \
     fi; \
+    test -f $LLN/scripts/klayout/verify_sealring.py \
+        || { echo "FAIL: scripts/klayout/verify_sealring.py (9caaaae, d2ddf51) is not installed" >&2; exit 1; }; \
+    grep -q '"verify_sealring.py"' $LLN/steps/klayout.py \
+        || { echo "FAIL: KLayout.SealRing does not call verify_sealring.py (9caaaae)" >&2; exit 1; }; \
+    grep -q '"design__seal_ring__verified"' $LLN/common/metrics/library.py \
+        || { echo "FAIL: design__seal_ring__verified is not declared in metrics/library.py (d2ddf51)" >&2; exit 1; }; \
+    python3 -P $LLN/scripts/klayout/verify_sealring.py --help > /dev/null \
+        || { echo "FAIL: verify_sealring.py does not run" >&2; exit 1; }; \
+    n=$(grep -c 'write_metric_num "power__[a-z_]*__corner:$corner_name"' $LLN/scripts/openroad/sta/corner.tcl || true); \
+    if [ "$n" != 4 ]; then \
+        echo "FAIL: corner.tcl writes $n of 4 power metrics per corner (114533c)" >&2; exit 1; \
+    fi; \
+    if grep -nE 'write_metric_num "power__[a-z_]*total"' $LLN/scripts/openroad/sta/corner.tcl; then \
+        echo "FAIL: corner.tcl still writes an unscoped power metric (114533c)" >&2; exit 1; \
+    fi; \
     # -P: the cwd here is the fork checkout, which would otherwise shadow the
     # installed package (an un-overlaid image passes this line from this cwd).
-    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m"; \
+    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m; import importlib.util, inspect; from librelane.steps.klayout import SealRing; from librelane.common.metrics import Metric; import librelane.common.metrics.library; assert SealRing.METRIC == 'design__seal_ring__verified' and Metric.by_name[SealRing.METRIC].higher_is_better, SealRing.METRIC; assert 'self.verify_ring(' in inspect.getsource(SealRing.run); s = importlib.util.spec_from_file_location('verify_sealring', '$LLN/scripts/klayout/verify_sealring.py'); v = importlib.util.module_from_spec(s); s.loader.exec_module(v); assert callable(v.measure) and v.EDGE_TOLERANCE == 0.10, v; from librelane.common.metrics.metric import max_aggregator; from librelane.common import aggregate_metrics; assert all(Metric.by_name[n].aggregator is max_aggregator for n in ('power__total', 'power__internal__total', 'power__switching__total', 'power__leakage__total')); a = aggregate_metrics({'power__total__corner:nom_tt': 0.020, 'power__total__corner:max_ff': 0.026, 'power__total__corner:max_ss': 0.016}); assert a['power__total'] == 0.026, a"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -2201,7 +2218,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 10 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 13 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
