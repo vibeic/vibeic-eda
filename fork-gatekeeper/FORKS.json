@@ -390,6 +390,12 @@
       "upstream": "MikePopoloski/slang"
     },
     {
+      "tool": "spicebind",
+      "branch": "main",
+      "role": "mixed-signal co-simulation: a VPI module that runs an ngspice netlist in lock-step with an HDL instance (Icarus/Verilator). The image builds it from this fork at SPICEBIND_REF, over the base image's unforked build, which crashed (SIGSEGV) whenever SPICE_NETLIST or HDL_INSTANCE was missing (vibeic/spicebind#1). Created by push, not by forking: the fork API returned 403, so GitHub records no parent; the upstream is declared here.",
+      "upstream": "themperek/spicebind"
+    },
+    {
       "tool": "sv-elab",
       "branch": "master",
       "role": "yosys SystemVerilog plugin (upstream renamed povik/yosys-slang -> povik/sv-elab); the SV frontend the 0.4x->0.66 roadmap makes default",

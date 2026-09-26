@@ -493,6 +493,51 @@ RUN set -e; \
     mkdir -p /vibeic/provenance; \
     printf '{"tool":"librelane","repo":"https://github.com/vibeic/librelane.git","ref":"%s"}\n' "${LIBRELANE_REF}" > /vibeic/provenance/librelane.json
 
+# spicebind (mixed-signal co-simulation: a VPI module that runs an ngspice
+# netlist in lock-step with an HDL instance) — FROM OUR FORK, vibeic/spicebind.
+# The base image ships an unforked build at /foss/tools/spicebind (upstream
+# a63974c) that SIGSEGVs at end of simulation whenever SPICE_NETLIST or
+# HDL_INSTANCE is missing, because it halts an ngspice it never initialised
+# (vibeic/spicebind#1). Built here, in its own stage, so the final stage spends
+# no layer on it: the runtime RUN that installs apt packages bind-mounts /out.
+# It links the distro libngspice (libngspice0-dev), as the base build does;
+# /foss/tools/ngspice ships no shared library.
+# /out also carries two smoke-test inputs that are never shipped: the fork's own
+# tests/test.cir (XSPICE delay models) and a plain-Verilog bench for it.
+FROM ${BASE_IMAGE} AS spicebind-build
+USER root
+ARG SPICEBIND_REF=668b9a6a1b474f7b5181b5caed915e8d0a1505bd
+RUN set -e; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libngspice0-dev; \
+    git clone https://github.com/vibeic/spicebind.git /src; \
+    cd /src; git checkout ${SPICEBIND_REF}; \
+    cmake -S /src -B /src/build -G Ninja -DNGSPICE_ROOT=/usr -DCMAKE_BUILD_TYPE=Release; \
+    cmake --build /src/build -j8; \
+    mkdir -p /out/vpi /out/smoke /vibeic/provenance; \
+    install -m 0644 /src/spicebind/spicebind_vpi.vpi /src/spicebind/spicebind_vpi_debug.vpi /out/vpi/; \
+    echo "spicebind $(git rev-parse HEAD) (vibeic/spicebind)" > /out/vpi/SOURCES; \
+    sed 's/{VCC}/1.8/g' /src/tests/test.cir > /out/smoke/test.cir; \
+    printf '%s\n' '`timescale 1ns/1ps' \
+      'module test_cir(input real adc_in, output wire [7:0] adc_out, input wire [7:0] dac_in, output real dac_out, input wire pwmin, output wire pwmout);' \
+      'endmodule' \
+      'module tb();' \
+      '  real adc_in; real dac_out; wire [7:0] adc_out; reg [7:0] dac_in; reg pwm_in; wire pwm_out;' \
+      '  test_cir test_cir(.adc_in(adc_in), .adc_out(adc_out), .dac_in(dac_in), .dac_out(dac_out), .pwmin(pwm_in), .pwmout(pwm_out));' \
+      '  integer i;' \
+      '  initial begin' \
+      '    adc_in = 0.0; dac_in = 0; pwm_in = 0;' \
+      '    for (i = 0; i <= 8; i = i + 1) begin' \
+      '      #40 adc_in = i * 0.125; dac_in = i * 31;' \
+      '      #40 $display("SMOKE adc_in=%0.3f adc_out=%0d dac_out=%0.4f", adc_in, adc_out, dac_out);' \
+      '    end' \
+      '    $display("SMOKE_DONE"); $finish;' \
+      '  end' \
+      'endmodule' > /out/smoke/tb.sv; \
+    printf 'module tb; initial begin #10 $display("SMOKE_DONE"); $finish; end endmodule\n' > /out/smoke/bare.v; \
+    if git merge-base --is-ancestor 11b0cb3967c4f9ad380bec6773f92c2b661e0165 HEAD; then touch /out/smoke/has_env_fix; fi; \
+    printf '{"tool":"spicebind","repo":"https://github.com/vibeic/spicebind.git","ref":"%s"}\n' "${SPICEBIND_REF}" > /vibeic/provenance/spicebind.json
+
 FROM scratch AS provenance
 COPY --from=img-openroad /vibeic/provenance/openroad.json /vibeic/provenance/openroad.json
 COPY --from=img-yosys /vibeic/provenance/yosys.json /vibeic/provenance/yosys.json
@@ -510,6 +555,7 @@ COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
 COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
+COPY --from=spicebind-build /vibeic/provenance/spicebind.json /vibeic/provenance/spicebind.json
 # The stage-8 verification toolchain. Not an `eda-tool-*` artefact — `tb-src` is
 # a source stage in this file — but the record it carries is the same shape and
 # is read by the same checker (vibeic-eda#117 finding 5).
@@ -1175,12 +1221,41 @@ COPY --from=tb-src /tb /opt/vibeic-forks
 # It deliberately does NOT go in tools/verilator/Dockerfile: that image publishes
 # `FROM scratch` + /foss/tools/verilator only, so nothing apt installs there ever
 # reaches this runtime. See the note in that file.
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,from=spicebind-build,source=/out,target=/tmp/vibeic-spicebind,ro \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3-dev \
       libxcb-cursor0 \
       libopenmpi-dev \
       liblz4-dev \
+      ngspice \
  && rm -rf /var/lib/apt/lists/* \
+ # SPICEBIND FROM vibeic/spicebind, over the base image's unforked build (see
+ # the spicebind-build stage). The distro `ngspice` package is here for the
+ # same library: spicebind drives the distro libngspice, which reads that
+ # package's spinit and XSPICE code models. Without them every netlist with an
+ # XSPICE model fails ("MIF-ERROR - unable to find definition of model") and vvp
+ # still exits 0 -- measured on 0.3.79 with the fork's own tests/test.cir: one
+ # MIF-ERROR and 0 of 10 bench lines; with the package: 0 errors, 10 of 10.
+ # /foss/tools/bin stays first on PATH, so `ngspice` is still ngspice-47.
+ && install -m 0644 /tmp/vibeic-spicebind/vpi/spicebind_vpi.vpi /tmp/vibeic-spicebind/vpi/spicebind_vpi_debug.vpi \
+      /tmp/vibeic-spicebind/vpi/SOURCES /foss/tools/spicebind/ \
+ && cmp /tmp/vibeic-spicebind/vpi/spicebind_vpi.vpi /foss/tools/spicebind/spicebind_vpi.vpi \
+ && test "$(readlink -f /foss/tools/bin/ngspice)" = /foss/tools/ngspice/bin/ngspice \
+ && sd=$(mktemp -d) \
+ && /foss/tools/iverilog/bin/iverilog -g2012 -o "$sd/tb.vvp" /tmp/vibeic-spicebind/smoke/tb.sv \
+ && (cd "$sd" && SPICE_NETLIST=/tmp/vibeic-spicebind/smoke/test.cir HDL_INSTANCE=tb.test_cir \
+      /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi tb.vvp > "$sd/out.txt" 2>&1) \
+ && if grep -q 'MIF-ERROR' "$sd/out.txt"; then echo "FAIL: spicebind cannot load XSPICE code models" >&2; cat "$sd/out.txt" >&2; exit 1; fi \
+ && test "$(grep -c '^SMOKE adc_in' "$sd/out.txt")" = 9 && grep -q '^SMOKE_DONE' "$sd/out.txt" \
+ && if [ -e /tmp/vibeic-spicebind/smoke/has_env_fix ]; then \
+      /foss/tools/iverilog/bin/iverilog -o "$sd/bare.vvp" /tmp/vibeic-spicebind/smoke/bare.v \
+      && rc=0 && (cd "$sd" && env -u SPICE_NETLIST -u HDL_INSTANCE \
+           /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi bare.vvp > "$sd/env.txt" 2>&1) || rc=$? \
+      && { [ "$rc" = 1 ] && grep -q SPICE_NETLIST "$sd/env.txt" \
+           || { echo "FAIL: spicebind without SPICE_NETLIST: rc=$rc (want 1 and a message naming it)" >&2; cat "$sd/env.txt" >&2; exit 1; }; }; \
+    fi \
+ && rm -rf "$sd" \
+ && echo "spicebind: $(cat /foss/tools/spicebind/SOURCES); XSPICE smoke 9/9 lines" \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
       -e /opt/vibeic-forks/cocotb-coverage \
