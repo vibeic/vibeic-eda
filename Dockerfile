@@ -497,21 +497,27 @@ RUN set -e; \
 # netlist in lock-step with an HDL instance) — FROM OUR FORK, vibeic/spicebind.
 # The base image ships an unforked build at /foss/tools/spicebind (upstream
 # a63974c) that SIGSEGVs at end of simulation whenever SPICE_NETLIST or
-# HDL_INSTANCE is missing, because it halts an ngspice it never initialised
-# (vibeic/spicebind#1). Built here, in its own stage, so the final stage spends
-# no layer on it: the runtime RUN that installs apt packages bind-mounts /out.
+# HDL_INSTANCE is missing, because it halts an ngspice it never initialised.
+# The fork fixes that (vibeic/spicebind#2, merged as eb15a67, carrying #1's
+# 11b0cb3): a missing setting now stops the run with exit status 1 and a
+# message naming it. SPICEBIND_REF must contain 11b0cb3 -- this stage refuses
+# a pin without it, and the runtime RUN checks the behaviour. Built here, in
+# its own stage, so the final stage spends no layer on it: the runtime RUN that
+# installs apt packages bind-mounts /out.
 # It links the distro libngspice (libngspice0-dev), as the base build does;
 # /foss/tools/ngspice ships no shared library.
 # /out also carries two smoke-test inputs that are never shipped: the fork's own
 # tests/test.cir (XSPICE delay models) and a plain-Verilog bench for it.
 FROM ${BASE_IMAGE} AS spicebind-build
 USER root
-ARG SPICEBIND_REF=668b9a6a1b474f7b5181b5caed915e8d0a1505bd
+ARG SPICEBIND_REF=eb15a67703c3829b98080d040cf582c9bd4c0bbc
 RUN set -e; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libngspice0-dev; \
     git clone https://github.com/vibeic/spicebind.git /src; \
     cd /src; git checkout ${SPICEBIND_REF}; \
+    git merge-base --is-ancestor 11b0cb3967c4f9ad380bec6773f92c2b661e0165 HEAD \
+        || { echo "FAIL: SPICEBIND_REF ${SPICEBIND_REF} lacks the missing-SPICE_NETLIST fix 11b0cb3 (vibeic/spicebind#2)" >&2; exit 1; }; \
     cmake -S /src -B /src/build -G Ninja -DNGSPICE_ROOT=/usr -DCMAKE_BUILD_TYPE=Release; \
     cmake --build /src/build -j8; \
     mkdir -p /out/vpi /out/smoke /vibeic/provenance; \
@@ -535,7 +541,6 @@ RUN set -e; \
       '  end' \
       'endmodule' > /out/smoke/tb.sv; \
     printf 'module tb; initial begin #10 $display("SMOKE_DONE"); $finish; end endmodule\n' > /out/smoke/bare.v; \
-    if git merge-base --is-ancestor 11b0cb3967c4f9ad380bec6773f92c2b661e0165 HEAD; then touch /out/smoke/has_env_fix; fi; \
     printf '{"tool":"spicebind","repo":"https://github.com/vibeic/spicebind.git","ref":"%s"}\n' "${SPICEBIND_REF}" > /vibeic/provenance/spicebind.json
 
 FROM scratch AS provenance
@@ -1247,15 +1252,14 @@ RUN --mount=type=bind,from=spicebind-build,source=/out,target=/tmp/vibeic-spiceb
       /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi tb.vvp > "$sd/out.txt" 2>&1) \
  && if grep -q 'MIF-ERROR' "$sd/out.txt"; then echo "FAIL: spicebind cannot load XSPICE code models" >&2; cat "$sd/out.txt" >&2; exit 1; fi \
  && test "$(grep -c '^SMOKE adc_in' "$sd/out.txt")" = 9 && grep -q '^SMOKE_DONE' "$sd/out.txt" \
- && if [ -e /tmp/vibeic-spicebind/smoke/has_env_fix ]; then \
-      /foss/tools/iverilog/bin/iverilog -o "$sd/bare.vvp" /tmp/vibeic-spicebind/smoke/bare.v \
-      && rc=0 && (cd "$sd" && env -u SPICE_NETLIST -u HDL_INSTANCE \
-           /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi bare.vvp > "$sd/env.txt" 2>&1) || rc=$? \
-      && { [ "$rc" = 1 ] && grep -q SPICE_NETLIST "$sd/env.txt" \
-           || { echo "FAIL: spicebind without SPICE_NETLIST: rc=$rc (want 1 and a message naming it)" >&2; cat "$sd/env.txt" >&2; exit 1; }; }; \
+ && /foss/tools/iverilog/bin/iverilog -o "$sd/bare.vvp" /tmp/vibeic-spicebind/smoke/bare.v \
+ && rc=0 && { (cd "$sd" && env -u SPICE_NETLIST -u HDL_INSTANCE \
+      /foss/tools/iverilog/bin/vvp -M /foss/tools/spicebind -m spicebind_vpi bare.vvp > "$sd/env.txt" 2>&1) || rc=$?; } \
+ && if [ "$rc" != 1 ] || ! grep -q 'requires SPICE_NETLIST' "$sd/env.txt"; then \
+      echo "FAIL: spicebind without SPICE_NETLIST: rc=$rc (want 1 and the message naming it)" >&2; cat "$sd/env.txt" >&2; exit 1; \
     fi \
  && rm -rf "$sd" \
- && echo "spicebind: $(cat /foss/tools/spicebind/SOURCES); XSPICE smoke 9/9 lines" \
+ && echo "spicebind: $(cat /foss/tools/spicebind/SOURCES); XSPICE smoke 9/9 lines; no SPICE_NETLIST -> exit 1" \
  && python3 -m pip install --break-system-packages \
       -e /opt/vibeic-forks/cocotb \
       -e /opt/vibeic-forks/cocotb-coverage \

@@ -392,7 +392,7 @@
     {
       "tool": "spicebind",
       "branch": "main",
-      "role": "mixed-signal co-simulation: a VPI module that runs an ngspice netlist in lock-step with an HDL instance (Icarus/Verilator). The image builds it from this fork at SPICEBIND_REF, over the base image's unforked build, which crashed (SIGSEGV) whenever SPICE_NETLIST or HDL_INSTANCE was missing (vibeic/spicebind#1). Created by push, not by forking: the fork API returned 403, so GitHub records no parent; the upstream is declared here.",
+      "role": "mixed-signal co-simulation: a VPI module that runs an ngspice netlist in lock-step with an HDL instance (Icarus/Verilator). The image builds it from this fork at SPICEBIND_REF, over the base image's unforked build, which crashed (SIGSEGV) whenever SPICE_NETLIST or HDL_INSTANCE was missing; the fork's fix (vibeic/spicebind#2, merged as eb15a67) stops such a run with exit status 1 and a message naming the setting, and the image build refuses a SPICEBIND_REF without it and checks that behaviour. Created by push, not by forking: the fork API returned 403, so GitHub records no parent; the upstream is declared here.",
       "upstream": "themperek/spicebind"
     },
     {
