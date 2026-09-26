@@ -454,6 +454,124 @@ XEOF
 
 
 # ── the probes ────────────────────────────────────────────────────────────────
+_CACE = r"""
+d=$(mktemp -d); cd "$d"; mkdir -p cace/templates netlist/schematic; cd cace
+export PDK_ROOT=/foss/pdks PDK=ihp-sg13g2
+cat > p.yaml <<'XEOF'
+name: p
+description: capability probe
+PDK: ihp-sg13g2
+cace_format: 5.2
+authorship: {designer: probe, creation_date: 2026-09-26, license: Apache 2.0}
+paths: {root: .., netlist: netlist, templates: cace/templates}
+pins:
+  vdd: {description: supply, type: power, direction: inout}
+  vss: {description: ground, type: ground, direction: inout}
+  dn: {description: drain, type: signal, direction: output}
+default_conditions:
+  corner: {description: corner, display: Corner, typical: mos_tt}
+  temperature: {description: temperature, display: Temp, unit: C, typical: 27}
+parameters:
+  dc:
+    description: drain voltage
+    display: Vd
+    spec:
+      vd: {display: Vd, unit: V, minimum: {value: 0}, maximum: {value: 1.2}}
+    tool:
+      ngspice: {template: dc.spice, format: ascii, suffix: .data, variables: [vd]}
+    conditions:
+      corner: {enumerate: [CORNERS]}
+XEOF
+cat > templates/dc.spice <<'XEOF'
+.lib cornerMOSlv.lib CACE{corner}
+.include CACE{DUT_path}
+v1 vdd 0 1.2
+xdut vdd 0 dn p
+.temp CACE{temperature}
+.control
+op
+let vd = v(dn)
+echo $&vd > CACE{simpath}/CACE{filename}_CACE{N}.data
+.endc
+.end
+XEOF
+cat > ../netlist/schematic/p.spice <<'XEOF'
+.subckt p vdd vss dn
+rd vdd dn 20k
+xm dn g vss vss sg13_lv_nmos w=1u l=0.13u
+vg g vss 0.6
+.ends p
+XEOF
+"""
+
+_COSIM = r"""
+d=$(mktemp -d); cd "$d"
+cat > t.v <<'XEOF'
+`timescale 1us/100ns
+module t(out);
+  output reg out;
+  initial begin out = 1'b1; $display("VLOG_COSIM_ALIVE"); end
+endmodule
+XEOF
+iverilog -o t t.v > c.log 2>&1 || { echo "RC=90"; cat c.log; exit 0; }
+cat > c.cir <<'XEOF'
+* d_cosim probe
+adut null [ q ] vlog
+.model vlog d_cosim simulation="ivlng" sim_args=[ "t" ]
+abr [ q ] [ a ] dac1
+.model dac1 dac_bridge(out_low=0 out_high=1.2)
+r1 a 0 1k
+.control
+tran 1u 20u
+meas tran vhigh find v(a) at=10u
+.endc
+.end
+XEOF
+"""
+
+
+def _xyce_agrees(out: str) -> Optional[str]:
+    vals = dict(re.findall(r"^(MOS_REL|NB_REL|RES_REL|MULT4)=([-\d.eE+]+)$",
+                           out, re.M))
+    if len(vals) != 4:
+        return f"no Xyce/ngspice comparison printed: {_first_err(out)}"
+    v = {k: float(x) for k, x in vals.items()}
+    if v["MOS_REL"] > 1e-2:
+        return f"MOS Id differs {100 * v['MOS_REL']:.2f}% from ngspice"
+    if v["NB_REL"] > 1e-2:
+        return f"diode-connected node differs {100 * v['NB_REL']:.2f}% from ngspice"
+    if v["RES_REL"] > 3e-2:
+        return f"rppd current differs {100 * v['RES_REL']:.2f}% from ngspice"
+    if abs(v["MULT4"] - 4) > 1e-2:
+        return f"m=4 carries {v['MULT4']:.3f}x the m=1 current, not 4x"
+    return None
+
+
+def _cace_orders(out: str) -> Optional[str]:
+    if _rc(out) != 0:
+        return f"cace rc={_rc(out)}: {_first_err(out)}"
+    if re.search(r"TODO: Implement|No netlist or schematic", out):
+        return f".spice template refused: {_first_err(out)}"
+    vd = dict(re.findall(r"^VD_(tt|ss|ff)=([-\d.eE+]+)\s*$", out, re.M))
+    if len(vd) != 3:
+        return f"not every corner produced a value: {vd}"
+    tt, ss, ff = (float(vd[k]) for k in ("tt", "ss", "ff"))
+    if not ss > tt > ff:
+        return f"corner not substituted: Vd ss={ss} tt={tt} ff={ff}"
+    return None
+
+
+def _cosim_ok(out: str) -> Optional[str]:
+    if _rc(out) != 0:
+        return f"ngspice d_cosim rc={_rc(out)}: {_first_err(out)}"
+    if not re.search(r"VLOG_COSIM_ALIVE", out):
+        return f"the Verilog side never ran: {_first_err(out)}"
+    m = re.search(r"^vhigh\s*=\s*([-\d.eE+]+)", out, re.M | re.I)
+    if not m or abs(float(m.group(1)) - 1.2) > 1e-3:
+        return f"dac_bridge output not 1.2 V: {m.group(1) if m else 'absent'}"
+    return None
+
+
 PROBES: List[Probe] = [
 
     # -- verilator: constrained randomize must OBEY the constraint ------------
@@ -605,6 +723,128 @@ ngspice -b s.sp > r.log 2>&1; echo "RC=$?"
 grep -viE "^Error opening osdi|couldn.t be loaded" r.log | tail -12
 ''',
         lambda out: _id_plausible(out, "sky130A"),
+    ),
+
+    # -- Xyce: the IHP ADMS plugins must make Xyce simulate IHP devices -------
+    # A REGULATED output is the wrong agreement metric: an LDO pins V(out) to
+    # its reference whatever the pass device does, so a broken PSP plugin or an
+    # ignored m= still "agrees". These are open-loop, device-sensitive values:
+    # Id of an nmos and a pmos at |Vgs| 0.6/1.2 V, a diode-connected bias node,
+    # and the ratio of an m=4 device to its m=1 twin. Measured in 0.3.79 with the
+    # plugins built as this image builds them: the MOS currents agree with
+    # ngspice+OSDI to < 1e-6 relative (same PSP103 Verilog-A, two compilers), the
+    # diode node to 0.24 %, and m=4/m=1 = 4 to 5e-7. The rppd (r3_cmc) value is
+    # NOT held to 1 %: it differs by 1.07 % between the two model trees
+    # (10307 vs 10417 ohm for w=0.5u l=20u), so it is only bounded at 3 %.
+    Probe(
+        "xyce/ihp-plugins-vs-ngspice",
+        r"""
+d=$(mktemp -d); cd "$d"
+export PDK_ROOT=/foss/pdks PDK=ihp-sg13g2
+T=/foss/pdks/ihp-sg13g2/libs.tech; PL=$T/xyce/plugins
+cp $T/ngspice/.spiceinit .
+body() {
+cat <<XEOF
+.lib $T/$1/models/cornerMOSlv.lib mos_tt
+.lib $T/$1/models/cornerRES.lib res_typ
+vdn dn 0 1.2
+vg g 0 1.2
+vgp gp 0 0
+vsp sp 0 1.2
+vd1 dn d1 0
+vd4 dn d4 0
+vp1 p1 0 0
+vbb bb 0 1.2
+xn1 d1 g 0 0 sg13_lv_nmos w=1u l=0.13u
+xn4 d4 g 0 0 sg13_lv_nmos w=1u l=0.13u m=4
+xp1 p1 gp sp sp sg13_lv_pmos w=1u l=0.13u
+xrb bb nb 0 rppd w=0.5u l=20u
+xnb nb nb 0 0 sg13_lv_nmos w=2u l=1u
+XEOF
+}
+{ echo "* x"; body xyce; printf '.options device temp=27\n.dc vg 0.6 1.2 0.6\n.print dc format=csv v(g) i(vd1) i(vd4) i(vp1) v(nb) i(vbb)\n.end\n'; } > x.cir
+{ echo "* n"; body ngspice; printf '.temp 27\n.control\ndc vg 0.6 1.2 0.6\nwrdata n.txt v(g) i(vd1) i(vd4) i(vp1) v(nb) i(vbb)\n.endc\n.end\n'; } > n.sp
+Xyce -plugin $PL/Xyce_Plugin_PSP103_VA.so,$PL/Xyce_Plugin_r3_cmc.so,$PL/Xyce_Plugin_mosvar.so x.cir > x.log 2>&1; echo "XRC=$?"
+ngspice -b n.sp > n.log 2>&1; echo "RC=$?"
+grep -m1 -iE "Unrecognized|error" x.log
+python3 - <<'XEOF'
+import csv
+r=list(csv.reader(open("x.cir.csv"))); x=[[float(c) for c in row] for row in r[1:] if row]
+n=[[float(v) for v in l.split()][1::2] for l in open("n.txt") if l.strip()]
+def rel(a,b): return abs(a-b)/abs(b)
+mos=max(rel(a[i],b[i]) for a,b in zip(x,n) for i in (1,2,3))
+print("MOS_REL=%.3e" % mos)
+print("NB_REL=%.3e" % max(rel(a[4],b[4]) for a,b in zip(x,n)))
+print("RES_REL=%.3e" % max(rel(a[5],b[5]) for a,b in zip(x,n)))
+print("MULT4=%.6f" % (x[-1][2]/x[-1][1]))
+XEOF
+""",
+        lambda out: (
+            f"rc={_rc(out, 'XRC')}/{_rc(out)}: {_first_err(out)}"
+            if _rc(out, "XRC") != 0 or _rc(out) != 0 else
+            _xyce_agrees(out)),
+        # CONTROL: the same Xyce binary on a deck with no Verilog-A device. Red
+        # here means Xyce itself, not the plugins or the IHP model cards.
+        r"""
+d=$(mktemp -d); cd "$d"
+printf '* div\nv1 a 0 1.2\nr1 a b 1k\nr2 b 0 1k\n.dc v1 1.2 1.2 0.1\n.print dc format=csv v(b)\n.end\n' > c.cir
+Xyce c.cir > c.log 2>&1; echo "RC=$?"
+echo "VB=$(tail -1 c.cir.csv | cut -d, -f2)"
+""",
+        lambda out: (None if _rc(out) == 0 and re.search(r"^VB=6\.0+e-01$", out, re.M)
+                     else f"Xyce divider: {_first_err(out)}"),
+    ),
+
+    # -- CACE: a plain-SPICE template must be substituted and simulated -------
+    # The base image's cace 2.9.0 and upstream 2.13.0 stop every .spice template
+    # at err("TODO: Implement substitution for spice templates!"). Three corners;
+    # the drain voltage of a resistor-loaded nmos must differ per corner and order
+    # ss > tt > ff, which a literal, unsubstituted template cannot produce.
+    Probe(
+        "cace/spice-template",
+        _CACE.replace("CORNERS", "mos_tt, mos_ss, mos_ff") + r"""
+python3 -m cace p.yaml -j 3 > r.log 2>&1; echo "RC=$?"
+grep -m1 -E "TODO: Implement|No netlist or schematic" r.log
+for c in tt ss ff; do
+  f=$(grep -l "corner: mos_$c" ../runs/*/parameters/dc/run_*/conditions.yaml | head -1)
+  echo "VD_$c=$(cat "$(dirname "$f")"/*.data 2>/dev/null)"
+done
+""",
+        _cace_orders,
+        # CONTROL: the same project run by hand through ngspice, i.e. everything
+        # except CACE's substitution. Red here means the deck or the PDK.
+        _CACE.replace("CORNERS", "mos_tt") + r"""
+sed -e "s#CACE{corner}#mos_tt#; s#CACE{DUT_path}#$PWD/../netlist/schematic/p.spice#; s#CACE{temperature}#27#; s#CACE{simpath}/CACE{filename}_CACE{N}.data#$PWD/ctl.data#" templates/dc.spice > ctl.sp
+cp /foss/pdks/ihp-sg13g2/libs.tech/ngspice/.spiceinit .
+ngspice -b ctl.sp > c.log 2>&1; echo "RC=$?"
+echo "VD_tt=$(cat ctl.data 2>/dev/null)"
+""",
+        _wants(r"^VD_tt=0\.\d+", "a hand-substituted drain voltage"),
+    ),
+
+    # -- ngspice d_cosim: the Icarus shim must load libvvp --------------------
+    # iverilog is built with --enable-libvvp so ngspice's d_cosim/ivlng can run a
+    # Verilog model inside a SPICE transient. The shim loads "libvvp" BY NAME when
+    # a deck gives no lib_args, so this runs with LD_LIBRARY_PATH REMOVED: only
+    # the image's ld.so.conf entry can satisfy it. Measured on 0.3.79 (no
+    # libvvp): rc 134, "Icarus shim failed to load VVP library". The value check
+    # is a dac_bridge'd Verilog output measured on the SPICE side.
+    Probe(
+        "ngspice/d-cosim-icarus",
+        _COSIM + r"""
+env -u LD_LIBRARY_PATH ngspice -b c.cir > r.log 2>&1; echo "RC=$?"
+grep -m1 -E "VLOG_COSIM_ALIVE" r.log
+grep -m1 -iE "^vhigh" r.log
+grep -m1 -iE "cannot open shared|failed to load" r.log
+""",
+        _cosim_ok,
+        # CONTROL: the same compiled program under plain vvp, same environment.
+        # vvp links libvvp.so.1 through its RUNPATH, not through ld.so.conf.
+        _COSIM + r"""
+env -u LD_LIBRARY_PATH vvp t > r.log 2>&1; echo "RC=$?"
+cat r.log | head -3
+""",
+        _wants(r"VLOG_COSIM_ALIVE", "the Verilog $display under vvp"),
     ),
 
     # -- sby: the engine line published examples actually use -----------------

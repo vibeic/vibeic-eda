@@ -35,6 +35,12 @@
       "upstream": "The-OpenROAD-Project/asap7sc7p5t_28"
     },
     {
+      "tool": "cace",
+      "branch": "main",
+      "role": "analog characterization (CACE): datasheet-driven corner/condition sweeps over ngspice. The image installs it from this fork at CACE_REF, replacing the base image's unforked 2.9.0, because upstream (2.13.0) stops every plain .spice template at a TODO; the fork's vibeic/spice-template-substitution branch carries the substitution and the netlist/schematic/<name>.spice fallback (vibeic/cace#1). Created by push, not by forking: the fork API returned 403, the same block PENDING_FORKS.json records for the earlier mirrors, so GitHub records no parent; the upstream is declared here.",
+      "upstream": "fossi-foundation/cace"
+    },
+    {
       "tool": "cadical",
       "branch": "master",
       "role": "SAT solver — the other smtbmc backend; shipped alongside kissat",

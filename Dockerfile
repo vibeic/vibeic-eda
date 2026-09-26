@@ -35,7 +35,7 @@ ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4d57205-baa757
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:0745426-f3f142
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:0745426-00ec8d
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:c95a374-dfa11d
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:04a37f1-dcde11
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
@@ -165,12 +165,15 @@ ARG PYUVM_REF=b319dd5fa020443b359dfa818791e6333591e660  # master tip. Advanced f
 #   patch is 57bdc4a "RAL: restore the back-door access tests that never reached
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
+ARG CACE_REPO=https://github.com/vibeic/cace.git
+ARG CACE_REF=9061129f6faa4d2459d5adc7f3dff2d15ddc939f  # branch vibeic/spice-template-substitution, vibeic/cace PR 1, not merged: fossi-foundation/cace main dedb5e0 = 2.13.0 plus .spice-template substitution and the netlist/schematic/NAME.spice fallback. Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
 ARG SBY_REF=2c2f04e96154995677fb604d697dc894ac680a69  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone ${COCOTB_COVERAGE_REPO}  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone ${PYUVM_REPO}            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
- && git clone ${SBY_REPO}              /tb/sby             && git -C /tb/sby             checkout ${SBY_REF}
+ && git clone ${SBY_REPO}              /tb/sby             && git -C /tb/sby             checkout ${SBY_REF} \
+ && git clone ${CACE_REPO}             /tb/cace            && git -C /tb/cace            checkout ${CACE_REF}
 
 # Record every pin this artefact was built from — the same
 # `{"tool","repo","ref"}` shape, and the same reasoning, as the fifteen
@@ -200,7 +203,9 @@ RUN mkdir -p /vibeic/provenance \
  && printf '{"tool":"pyuvm","repo":"%s","ref":"%s"}\n' \
       "${PYUVM_REPO}" "${PYUVM_REF}" > /vibeic/provenance/pyuvm.json \
  && printf '{"tool":"sby","repo":"%s","ref":"%s"}\n' \
-      "${SBY_REPO}" "${SBY_REF}" > /vibeic/provenance/sby.json
+      "${SBY_REPO}" "${SBY_REF}" > /vibeic/provenance/sby.json \
+ && printf '{"tool":"cace","repo":"%s","ref":"%s"}\n' \
+      "${CACE_REPO}" "${CACE_REF}" > /vibeic/provenance/cace.json
 
 # ---------------------------------------------------------------------------
 # Stage 9 — NanGate45 / FreePDK45 Open Cell Library (Si2, Apache-2.0).
@@ -512,6 +517,7 @@ COPY --from=tb-src /vibeic/provenance/cocotb.json /vibeic/provenance/cocotb.json
 COPY --from=tb-src /vibeic/provenance/cocotb-coverage.json /vibeic/provenance/cocotb-coverage.json
 COPY --from=tb-src /vibeic/provenance/pyuvm.json /vibeic/provenance/pyuvm.json
 COPY --from=tb-src /vibeic/provenance/sby.json /vibeic/provenance/sby.json
+COPY --from=tb-src /vibeic/provenance/cace.json /vibeic/provenance/cace.json
 # The ASAP7 golden-CDL / model / KLayout-tech trees. Also a source stage in this
 # file rather than an `eda-tool-*` artefact, and until vibeic-eda#104 the only
 # fork content in the image that recorded nothing at all.
@@ -1023,6 +1029,13 @@ RUN --mount=type=bind,from=img-yosys,source=/usr/local/lib/python3.12/dist-packa
  && ln -sf /foss/tools/magic/bin/magic /foss/tools/bin/magic 2>/dev/null || true \
  && ln -sf /foss/tools/netgen/bin/netgen /foss/tools/bin/netgen 2>/dev/null || true \
  && for t in iverilog vvp iverilog-vpi vvp; do ln -sf /foss/tools/iverilog/bin/$t /foss/tools/bin/$t 2>/dev/null || true; done \
+ # libvvp by NAME for ngspice d_cosim. The Icarus shim (ivlng.so) dlopen()s
+ # "libvvp" when a deck gives no explicit lib_args path, and the image's
+ # Config.Env has no LD_LIBRARY_PATH (only login shells set one). Measured with an
+ # --enable-libvvp iverilog and LD_LIBRARY_PATH unset: adc.cir still aborts rc 134
+ # without this entry, rc 0 with it. vvp's own RUNPATH does not help the shim.
+ && echo /foss/tools/iverilog/lib > /etc/ld.so.conf.d/vibeic-iverilog.conf && ldconfig \
+ && test -e /foss/tools/iverilog/lib/libvvp.so.1 \
  && for t in yices yices-sat yices-smt yices-smt2; do ln -sf /foss/tools/yices/bin/$t /foss/tools/bin/$t; done
 # fault (AUCOHL DFT toolchain) — OURS, not the base image's.
 #
@@ -1204,6 +1217,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       pytest-timeout \
       pytest-xdist \
  && make -C /opt/vibeic-forks/sby install PREFIX=/usr/local \
+ # CACE FROM vibeic/cace, over the base image's unforked 2.9.0. That 2.9.0
+ # stops any plain-SPICE template at err("TODO: Implement substitution for
+ # spice templates!"), and so does upstream 2.13.0; the fork carries the fix
+ # (vibeic/cace#1). --no-deps: every runtime dependency cace 2.13.0 imports is
+ # already in the base (measured: the --no-deps install imports and runs a
+ # 9-corner IHP .spice deck in 0.3.79). Folded into this RUN, not given its own,
+ # for the same 110-layer budget as the lines below.
+ && python3 -m pip install --break-system-packages --no-deps /opt/vibeic-forks/cace \
+ && python3 -c "import cace.__version__ as v, sys; sys.exit(0 if tuple(map(int, v.__version__.split('.')[:2])) >= (2, 13) else 1)" \
+ && ! grep -q 'TODO: Implement substitution for spice templates' \
+      "$(python3 -c 'import cace.parameter.parameter_ngspice as m; print(m.__file__)')" \
  && chmod -R a+rX /opt/vibeic-forks \
  # A STRAY TOP-LEVEL `tests` PACKAGE SHADOWS EVERY CONSUMER THAT HAS ONE.
  # `pyverilog 1.3.0` (from the base image, dated Jun 22) installs
@@ -1685,6 +1709,19 @@ RUN ["/bin/bash", "-lc", "/vibeic/tests/magic/test/run_all.sh && echo 'magic for
 # anyone invokes them, and in a NON-LOGIN shell, which is what `docker exec`
 # gives. The dangling-link scan still runs after every install. The Xyce probe
 # cleans its temporary output, so combining them changes no shipped bytes.
+#
+# THE IHP XYCE PLUGINS are built in the same layer, right after the probe proves
+# the builder works. IHP ships psp103 / r3_cmc / mosvar as Verilog-A and says to
+# run `Xyce -plugin .../libs.tech/xyce/plugins/Xyce_Plugin_PSP103_VA.so`, but the
+# .so files are build products it does not ship (IHP-Open-PDK#1133). Without them
+# Xyce rejects every IHP MOS card: measured on 0.3.79, "Unrecognized parameter D
+# for device YPSP103_VA". IHP's own adms-compile-va.sh is NOT used: it passes
+# relative .va paths, and the cmake buildxyceplugin.sh does `cd $DESTDIR` (:142)
+# before its `[ -f $input ]` check (:162), so it fails "Input file not found".
+# The builder names its output libXyce_Plugin_<module>.so; the installed names drop
+# the `lib` prefix because IHP's README and the ihp-sg13cmos5l plugin symlinks
+# expect Xyce_Plugin_<module>.so. Those symlinks dangled until this step.
+# Measured cost in 0.3.79: psp103 40 s / 1.0 GB RSS, r3_cmc 6 s, mosvar < 5 s.
 RUN set -e; \
     /foss/tools/bin/eqy --help >/dev/null; \
     /foss/tools/bin/mcy --help >/dev/null; \
@@ -1706,7 +1743,22 @@ RUN set -e; \
       echo "FAIL: buildxyceplugin produced no shared object"; \
       tail -25 build.log; exit 1; \
     fi; \
-    cd /; rm -rf "$d"
+    cd /; rm -rf "$d"; \
+    X=/foss/pdks/ihp-sg13g2/libs.tech; mkdir -p "$X/xyce/plugins"; \
+    for m in psp103:PSP103_VA r3_cmc:r3_cmc mosvar:mosvar; do \
+      src=${m%%:*}; name=${m#*:}; b=$(mktemp -d); \
+      cp -r "$X/verilog-a/$src/." "$b/"; \
+      ( cd "$b" && buildxyceplugin "$b/$src.va" "$b" ) > "$b/build.log" 2>&1 || true; \
+      so="$b/libXyce_Plugin_$name.so"; \
+      if [ ! -f "$so" ]; then echo "FAIL: no $so from $src.va"; tail -25 "$b/build.log"; exit 1; fi; \
+      head -c4 "$so" | grep -q ELF || { echo "FAIL: $so is not an ELF shared object"; exit 1; }; \
+      test "$(stat -c%s "$so")" -gt 50000 || { echo "FAIL: $so is implausibly small"; exit 1; }; \
+      install -m 0644 "$so" "$X/xyce/plugins/Xyce_Plugin_$name.so"; rm -rf "$b"; \
+    done; \
+    for l in /foss/pdks/ihp-sg13cmos5l/libs.tech/xyce/plugins/*.so; do \
+      [ -e "$l" ] || { echo "FAIL: $l still dangles"; exit 1; }; \
+    done; \
+    echo "ihp-sg13g2: Xyce plugins PSP103_VA, r3_cmc, mosvar built; cmos5l plugin links resolve"
 
 # LAST, and last on purpose: what does this image's PDK volume actually contain?
 #
