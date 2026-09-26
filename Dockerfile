@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd
+ARG LIBRELANE_REF=551346c2ea2dd2c9055cdd33c36ac0fe450c92ac
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2157,7 +2157,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     for c in bff469a84caeb291091bf39a8c914dd83de2f444 c810fdf85f9dadafbd9fce756380e5d0036e574d \
              9539a672256fb464c5df205b39454cf0f1d2b70f 0bc5b9042fe84fc0f67552d36011c4fcd9fe7377 \
              932c808072c3517de3c7b20cd3da0d9c7512c155 da8c4cf24e458bc5893b3c430c492f49e2c6d200 \
-             ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd; do \
+             ddc1a0920f51c3371ebb8df1d55bb3fbd6605a20 8ec5ecdf33f73d9ad363d3ba91d204043fa0b9cd \
+             b33e6ea0731655cd260dfd895530b979fdf213b7 d75de515bc8a350033205cf5a5dacb2ac45d4a41; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2176,9 +2177,17 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -nE 'est::check_corner_wire_cap[^s]|utl::metric_int[^e]' $LLN/scripts/openroad/common/io.tcl $LLN/scripts/openroad/sta/corner.tcl; then \
         echo "FAIL: abbreviated OpenROAD command names remain (ddc1a09)" >&2; exit 1; \
     fi; \
+    grep -q 'dict exists $vsrc_files $net' $LLN/scripts/openroad/irdrop.tcl \
+        || { echo "FAIL: irdrop.tcl every-net analysis (b33e6ea) is not installed" >&2; exit 1; }; \
+    grep -q 'info exists ::env(LIB_VOLTAGE)' $LLN/scripts/openroad/irdrop.tcl \
+        || { echo "FAIL: irdrop.tcl LIB_VOLTAGE guard (d75de51) is not installed" >&2; exit 1; }; \
+    n=$(grep -c 'Filter(\[corner_wildcard\])' $LLN/steps/openroad.py || true); \
+    if [ "$n" != 2 ]; then \
+        echo "FAIL: openroad.py has $n of 2 list-wrapped corner filters (LAYERS_RC, VIAS_R b33e6ea)" >&2; exit 1; \
+    fi; \
     # -P: the cwd here is the fork checkout, which would otherwise shadow the
     # installed package (an un-overlaid image passes this line from this cwd).
-    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs"; \
+    python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m"; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -2192,7 +2201,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 8 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 10 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance, FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
