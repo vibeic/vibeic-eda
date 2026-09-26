@@ -37,7 +37,7 @@
     {
       "tool": "cace",
       "branch": "main",
-      "role": "analog characterization (CACE): datasheet-driven corner/condition sweeps over ngspice. The image installs it from this fork at CACE_REF, replacing the base image's unforked 2.9.0, because upstream (2.13.0) stops every plain .spice template at a TODO; the fork's vibeic/spice-template-substitution branch carries the substitution and the netlist/schematic/<name>.spice fallback (vibeic/cace#1). Created by push, not by forking: the fork API returned 403, the same block PENDING_FORKS.json records for the earlier mirrors, so GitHub records no parent; the upstream is declared here.",
+      "role": "analog characterization (CACE): datasheet-driven corner/condition sweeps over ngspice. The image installs it from this fork at CACE_REF, replacing the base image's unforked 2.9.0, because upstream (2.13.0) stops every plain .spice template at a TODO; the fork's main carries the substitution and the netlist/schematic/<name>.spice fallback (vibeic/cace#1, merged as 9136e6d) and the rcx extracted-port fix (vibeic/cace#2, merged as 0479f0e, the CACE_REF pin). Created by push, not by forking: the fork API returned 403, the same block PENDING_FORKS.json records for the earlier mirrors, so GitHub records no parent; the upstream is declared here.",
       "upstream": "fossi-foundation/cace"
     },
     {

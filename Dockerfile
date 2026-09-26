@@ -166,7 +166,7 @@ ARG PYUVM_REF=b319dd5fa020443b359dfa818791e6333591e660  # master tip. Advanced f
 #   master" — 184 lines of tests/pytests/reg/test_uvm_reg_backdoor_access.py, whose
 #   own subject records that the file had gone missing once before.
 ARG CACE_REPO=https://github.com/vibeic/cace.git
-ARG CACE_REF=9061129f6faa4d2459d5adc7f3dff2d15ddc939f  # branch vibeic/spice-template-substitution, vibeic/cace PR 1, not merged: fossi-foundation/cace main dedb5e0, version 2.13.0, plus .spice-template substitution and the netlist/schematic/NAME.spice fallback. Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
+ARG CACE_REF=0479f0eedd5e72d952e0e8fc4f9a0f1b7004d791  # branch main, the merge of vibeic/cace PR 2 over PR 1 (merge 9136e6d): fossi-foundation/cace main dedb5e0, version 2.13.0, plus .spice-template substitution and the netlist/schematic/NAME.spice fallback (PR 1), plus the rcx fix that drops split substrate-net nodes from the extracted port list and refuses a netlist whose ports still differ from the schematic (PR 2). Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
 ARG SBY_REF=2c2f04e96154995677fb604d697dc894ac680a69  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
@@ -1224,6 +1224,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  # already in the base (measured: the --no-deps install imports and runs a
  # 9-corner IHP .spice deck in 0.3.79). Folded into this RUN, not given its own,
  # for the same 110-layer budget as the lines below.
+ # KNOWN `pip check` ENTRY, added by this install and accepted: cace 2.13.0
+ # requires ciel>=3.0.0 (have 2.5.1). pip prints it as "cace 2.13.0 has
+ # requirement ciel>=3.0.0, but you have ciel 2.5.1." The 2.5.1 is the base
+ # image's system-Python ciel, which nothing here upgrades; the `ciel` on PATH is
+ # our fork's 3.0.0 in its own venv (/opt/ciel, img-ciel), and the cace package
+ # imports no ciel module (at 0479f0e the name appears only in a comment and a
+ # ~/.ciel default path). Installing with deps would pull ciel 3 into the system
+ # Python to satisfy a declaration cace never exercises. Measured with
+ # `python3 -m pip check` on an image composed from this file: 9 entries against
+ # 8 on 0.3.79, and the ciel line is the only new one (cace's rich<15 entry was
+ # already there, declared by 2.9.0 with the same bound).
  && python3 -m pip install --break-system-packages --no-deps /opt/vibeic-forks/cace \
  && python3 -c "import importlib.metadata as m, sys; sys.exit(0 if tuple(map(int, m.version('cace').split('.')[:2])) >= (2, 13) else 1)" \
  && ! grep -q 'TODO: Implement substitution for spice templates' \
@@ -1710,18 +1721,14 @@ RUN ["/bin/bash", "-lc", "/vibeic/tests/magic/test/run_all.sh && echo 'magic for
 # gives. The dangling-link scan still runs after every install. The Xyce probe
 # cleans its temporary output, so combining them changes no shipped bytes.
 #
-# THE IHP XYCE PLUGINS are built in the same layer, right after the probe proves
-# the builder works. IHP ships psp103 / r3_cmc / mosvar as Verilog-A and says to
-# run `Xyce -plugin .../libs.tech/xyce/plugins/Xyce_Plugin_PSP103_VA.so`, but the
-# .so files are build products it does not ship (IHP-Open-PDK#1133). Without them
-# Xyce rejects every IHP MOS card: measured on 0.3.79, "Unrecognized parameter D
-# for device YPSP103_VA". IHP's own adms-compile-va.sh is NOT used: it passes
-# relative .va paths, and the cmake buildxyceplugin.sh does `cd $DESTDIR` (:142)
-# before its `[ -f $input ]` check (:162), so it fails "Input file not found".
-# The builder names its output libXyce_Plugin_<module>.so; the installed names drop
-# the `lib` prefix because IHP's README and the ihp-sg13cmos5l plugin symlinks
-# expect Xyce_Plugin_<module>.so. Those symlinks dangled until this step.
-# Measured cost in 0.3.79: psp103 40 s / 1.0 GB RSS, r3_cmc 6 s, mosvar < 5 s.
+# The IHP Xyce plugins this probe vouches for are NOT built here. They are
+# installed under /foss/pdks, which is root-owned, and this RUN is `USER 1000`:
+# placed here they failed `mkdir: cannot create directory
+# '/foss/pdks/ihp-sg13g2/libs.tech/xyce/plugins': Permission denied` and the
+# image did not build. They are built in the `USER root` PDK-corrections RUN
+# below, next to the cap_cmomi/cap_cmomf .osdi, after this probe has shown the
+# builder works. test_pdk_writes_run_as_root.py holds every /foss/pdks write
+# to a root RUN.
 RUN set -e; \
     /foss/tools/bin/eqy --help >/dev/null; \
     /foss/tools/bin/mcy --help >/dev/null; \
@@ -1743,22 +1750,7 @@ RUN set -e; \
       echo "FAIL: buildxyceplugin produced no shared object"; \
       tail -25 build.log; exit 1; \
     fi; \
-    cd /; rm -rf "$d"; \
-    X=/foss/pdks/ihp-sg13g2/libs.tech; mkdir -p "$X/xyce/plugins"; \
-    for m in psp103:PSP103_VA r3_cmc:r3_cmc mosvar:mosvar; do \
-      src=${m%%:*}; name=${m#*:}; b=$(mktemp -d); \
-      cp -r "$X/verilog-a/$src/." "$b/"; \
-      ( cd "$b" && buildxyceplugin "$b/$src.va" "$b" ) > "$b/build.log" 2>&1 || true; \
-      so="$b/libXyce_Plugin_$name.so"; \
-      if [ ! -f "$so" ]; then echo "FAIL: no $so from $src.va"; tail -25 "$b/build.log"; exit 1; fi; \
-      head -c4 "$so" | grep -q ELF || { echo "FAIL: $so is not an ELF shared object"; exit 1; }; \
-      test "$(stat -c%s "$so")" -gt 50000 || { echo "FAIL: $so is implausibly small"; exit 1; }; \
-      install -m 0644 "$so" "$X/xyce/plugins/Xyce_Plugin_$name.so"; rm -rf "$b"; \
-    done; \
-    for l in /foss/pdks/ihp-sg13cmos5l/libs.tech/xyce/plugins/*.so; do \
-      [ -e "$l" ] || { echo "FAIL: $l still dangles"; exit 1; }; \
-    done; \
-    echo "ihp-sg13g2: Xyce plugins PSP103_VA, r3_cmc, mosvar built; cmos5l plugin links resolve"
+    cd /; rm -rf "$d"
 
 # LAST, and last on purpose: what does this image's PDK volume actually contain?
 #
@@ -1849,6 +1841,25 @@ USER root
 # opening -- must still be reported. It returns rc=1 against the deck as shipped,
 # so it is a check that can fail. ~30 s of klayout, ten one-cell DRC runs.
 #
+# THE IHP XYCE PLUGINS are built here, next to the cap_cmomi/cap_cmomf .osdi,
+# because they are installed under /foss/pdks and only root can write there. The
+# PR that introduced them put them in the `USER 1000` delivery-check RUN above
+# and `bake eda` failed: `mkdir: cannot create directory
+# '/foss/pdks/ihp-sg13g2/libs.tech/xyce/plugins': Permission denied` (measured
+# as uid 1000 in 0.3.79). That RUN still proves the builder works first.
+# IHP ships psp103 / r3_cmc / mosvar as Verilog-A and says to run
+# `Xyce -plugin .../libs.tech/xyce/plugins/Xyce_Plugin_PSP103_VA.so`, but the .so
+# files are build products it does not ship (IHP-Open-PDK#1133). Without them
+# Xyce rejects every IHP MOS card: measured on 0.3.79, "Unrecognized parameter D
+# for device YPSP103_VA". IHP's own adms-compile-va.sh is NOT used: it passes
+# relative .va paths, and the cmake buildxyceplugin.sh does `cd $DESTDIR` (:142)
+# before its `[ -f $input ]` check (:162), so it fails "Input file not found".
+# The builder names its output libXyce_Plugin_<module>.so; the installed names
+# drop the `lib` prefix because IHP's README and the ihp-sg13cmos5l plugin
+# symlinks expect Xyce_Plugin_<module>.so. Those symlinks dangled until this
+# step. Measured cost in 0.3.79: psp103 40 s / 1.0 GB RSS, r3_cmc 6 s, mosvar
+# < 5 s. No new layer: this RUN already existed.
+#
 # EVERY LIBRELANE CHANGE IS CHECKED AFTERWARDS, because a `git show | patch` line
 # cannot fail on its own. /bin/sh here is dash, which has no pipefail, so only
 # patch's status counts, and GNU patch exits 0 on EMPTY input (measured). If git
@@ -1884,6 +1895,21 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
         head -c4 ../ngspice/osdi/$M.osdi | grep -q ELF || { echo "FAIL: $M.osdi is not an ELF shared object" >&2; exit 1; }; \
     done; \
     cd /; \
+    X=/foss/pdks/ihp-sg13g2/libs.tech; mkdir -p "$X/xyce/plugins"; \
+    for m in psp103:PSP103_VA r3_cmc:r3_cmc mosvar:mosvar; do \
+      src=${m%%:*}; name=${m#*:}; b=$(mktemp -d); \
+      cp -r "$X/verilog-a/$src/." "$b/"; \
+      ( cd "$b" && buildxyceplugin "$b/$src.va" "$b" ) > "$b/build.log" 2>&1 || true; \
+      so="$b/libXyce_Plugin_$name.so"; \
+      if [ ! -f "$so" ]; then echo "FAIL: no $so from $src.va" >&2; tail -25 "$b/build.log"; exit 1; fi; \
+      head -c4 "$so" | grep -q ELF || { echo "FAIL: $so is not an ELF shared object" >&2; exit 1; }; \
+      test "$(stat -c%s "$so")" -gt 50000 || { echo "FAIL: $so is implausibly small" >&2; exit 1; }; \
+      install -m 0644 "$so" "$X/xyce/plugins/Xyce_Plugin_$name.so"; rm -rf "$b"; \
+    done; \
+    for l in /foss/pdks/ihp-sg13cmos5l/libs.tech/xyce/plugins/*.so; do \
+      [ -e "$l" ] || { echo "FAIL: $l still dangles" >&2; exit 1; }; \
+    done; \
+    echo "ihp-sg13g2: Xyce plugins PSP103_VA, r3_cmc, mosvar built; cmos5l plugin links resolve"; \
     python3 /vibeic/pdk/pdk_osdi_refs_check.py; \
     cd /tmp/vibeic-librelane; \
     git show --format= 69bbd515e668a6dff21a671ef7116bc20a1fa0bb -- librelane/scripts/openroad/common/io.tcl \
