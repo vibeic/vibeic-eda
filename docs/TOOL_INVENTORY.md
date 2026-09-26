@@ -81,7 +81,7 @@ positives were removed.
 | `irsim` | Switch-level simulation (GUI) | iic-osic-tools base | no | no | unused; no fork required |
 | `iverilog` | Verilog simulator | iic-osic-tools base | yes `vibeic/iverilog` | yes | compliant |
 | `kactus2` | IP-XACT packaging (GUI) | iic-osic-tools base | no | no | unused; no fork required |
-| `kepler-formal` | Formal property verification | iic-osic-tools base | no | no | unused; no fork required |
+| `kepler-formal` | Logic equivalence checking (LEC) | iic-osic-tools base | no (mirror `vibeic/kepler-formal` exists; the image ships the base binary, not a fork build) | no | not used by the flow; the image gives the base binary a RUNPATH so it can load its libraries, and runs a real LEC at build time |
 | `klayout` | Layout / DRC engine | iic-osic-tools base | yes `vibeic/klayout` | yes | compliant |
 | `klayout-vibeic` | KLayout, our build with the native svrfdrc DRC engine | added by us | yes `vibeic/klayout` | yes | compliant |
 | `klayout_gdsfactory8` | KLayout + gdsfactory 8 | iic-osic-tools base | n/a (pip-installed) | yes | not a git clone; forking would not change what is installed |
@@ -108,7 +108,7 @@ positives were removed.
 | `sak` | Swiss-army script collection | iic-osic-tools base | — | no | not a tool directory |
 | `slang` | SystemVerilog front end | iic-osic-tools base | yes `vibeic/slang` | yes | compliant |
 | `slang-yosys-plugin` | slang front end for yosys | iic-osic-tools base | yes `vibeic/sv-elab` + **25 duplicates** | yes | compliant |
-| `spicebind` | SPICE bindings | iic-osic-tools base | no | no | unused; no fork required |
+| `spicebind` | SPICE/HDL co-simulation (VPI) | iic-osic-tools base | yes `vibeic/spicebind` | no | forked, not currently used; the image builds it from the fork, over the base build |
 | `spike` | RISC-V ISA simulator | iic-osic-tools base | no | no | unused; no fork required |
 | `surelog` | SystemVerilog parser | iic-osic-tools base | no | no | unused; no fork required |
 | `surfer` | Waveform viewer (GUI) | iic-osic-tools base | no | no | unused; no fork required |
@@ -142,6 +142,15 @@ positives were removed.
 The first six were stale — forked after the table was built. The last two were
 wrong when written.
 
+Updated 2026-09-26, when the image started building these (vibeic-eda#241 and
+#242; the rest of this table is still the 2026-07-29 measurement):
+
+| directory / tool | was | now | why |
+|---|---|---|---|
+| `spicebind` (Table A) | no | yes | `vibeic/spicebind`, built from the fork at `SPICEBIND_REF` |
+| `yosys_eqy` (Table B) | no | yes | `vibeic/eqy`, built from the fork at `EQY_REF`; it lives in the yosys prefix, so Table A has no row for it |
+| `kepler-formal` (A and B) | no, "unused; no fork required" | no, mirror exists | the image repairs and checks the base binary; building from the mirror is follow-up work. Its function was also mislabelled "formal property verification" |
+
 ### 25 forks of one repository
 
 `slang-yosys-plugin` resolves to `vibeic/sv-elab` **plus `sv-elab-1` through
@@ -165,7 +174,7 @@ be deleted — deleting a repository is irreversible, so that is the owner's cal
 
 - 58 directories: 55 tools, 3 non-tool
 - **19** tools used by the flow
-- **18** rows forked (45 fork repos, **21** distinct upstreams)
+- **19** rows forked (18 on 2026-07-29, + `spicebind`; the 45 fork repos / **21** distinct upstreams are that day's org measurement)
 - **used tools with no fork: 0**
 - pip-installed, outside the fork rule: 4
 
@@ -191,7 +200,7 @@ tools have metadata and no image directory, 7 have a directory and no metadata.
 | `irsim` | Switch-level simulation (GUI) | no | no | `rtimothyedwards/irsim.git` | GUI switch-level simulation. Timing is signed off by OpenSTA. |
 | `iverilog` | Verilog simulator | yes | `vibeic/iverilog` | `steveicarus/iverilog.git` | — |
 | `kactus2` | IP-XACT packaging (GUI) | no | no | `kactus2/kactus2dev.git` | IP-XACT GUI. Our IP contracts are the L-layer JSON. |
-| `kepler-formal` | Formal property verification | no | no | `keplertech/kepler-formal.git` | An alternative formal engine. Step 5 uses SymbiYosys, which we have forked. |
+| `kepler-formal` | Logic equivalence checking (LEC) | no | no (mirror `vibeic/kepler-formal`, not built from) | `keplertech/kepler-formal.git` | Not used by the flow: equivalence runs through yosys equiv. The image ships the base binary with a RUNPATH fix and checks a real LEC at build time. |
 | `klayout` | Layout / DRC engine | yes | `vibeic/klayout` | `KLayout/klayout.git` | — |
 | `libman` | Liberty management | no | no | `IHP-GmbH/LibMan.git` | Liberty management. We read the PDK liberty directly. |
 | `magic` | Layout editing + parasitic extraction | yes | `vibeic/magic` | `rtimothyedwards/magic.git` | — |
@@ -233,7 +242,7 @@ tools have metadata and no image directory, 7 have a directory and no metadata.
 | `xyce` | Parallel SPICE | yes | `vibeic/Xyce` | `Xyce/Xyce.git` | — |
 | `yices2` | SMT solver | yes | `vibeic/yices2` | `SRI-CSL/yices2.git` | — |
 | `yosys` | RTL synthesis | yes | `vibeic/yosys` | `YosysHQ/yosys.git` | — |
-| `yosys_eqy` | Equivalence checking (EQY) | no | no | `YosysHQ/eqy.git` | Equivalence checking. We use yosys equiv, which we do ship. |
+| `yosys_eqy` | Equivalence checking (EQY) | no | `vibeic/eqy` | `YosysHQ/eqy.git` | Not used by the flow: we use yosys equiv, which we do ship. The image builds EQY and its three Yosys plugins from `vibeic/eqy` against our Yosys, and checks PASS/FAIL at build time. |
 | `yosys_mcy` | Mutation coverage (MCY) | no | no | `YosysHQ/mcy.git` | Mutation coverage. Our mutation testing is the in-house gate_cli_mutation_probe. |
 | `yosys_sby` | Formal verification (SymbiYosys) | yes | `vibeic/sby` | `YosysHQ/sby.git` | — |
 
@@ -241,7 +250,7 @@ tools have metadata and no image directory, 7 have a directory and no metadata.
 
 - **57** upstream tools
 - we use **16**
-- we fork **16**
+- we fork **17** (16 on 2026-07-29, + `yosys_eqy`)
 - **used but not forked: 1 — `open_pdks`**
 
 `open_pdks` produces `/foss/pdks/sky130A` and `gf180mcuD` — verified in the image
@@ -252,7 +261,7 @@ LVS run reads its `libs.tech`. `vibeic/open_pdks` returns 404.
 `/foss/pdks`. Both tables are built per *tool*, so PDK data is outside the frame
 of each. That is what Table C is for.
 
-Forked but not currently used: `openroad-librelane`. Not waste — the rule says
+Forked but not currently used: `openroad-librelane` and `spicebind` (Table A), `yosys_eqy` (Table B). Not waste — the rule says
 fork what you use, not use what you fork, and the cost of forking early is paid
 once, whereas forking on the day it is needed meets the same 403 as now.
 
