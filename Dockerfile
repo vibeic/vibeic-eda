@@ -1116,8 +1116,20 @@ RUN set -e; \
     python3 /vibeic/pdk/pdk_gf180_sealring_install.py \
         --pdk gf180mcuD --source /vibeic/pdk/sealring_cells --expect 4; \
     python3 /vibeic/pdk/pdk_sealring_check.py --pdk gf180mcuD --require gf180mcuD; \
-    find /foss/pdks/ciel /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
-    echo "gf180mcuD: sealring_cells installed, the library the PDK's own sealring.py imports (vibeic-eda#170)"
+    echo "gf180mcuD: sealring_cells installed, the library the PDK's own sealring.py imports (vibeic-eda#170)"; \
+    python3 /vibeic/pdk/pdk_gf180_xyce_05v0_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 4; \
+    X=/foss/pdks/gf180mcuD/libs.tech/xyce; \
+    for f in $X/sm141064.xyce $X/sm141064.spice; do \
+        for d in nfet_05v0 pfet_05v0; do \
+            [ "$(grep -c "^\.subckt $d " $f)" = "1" ] \
+                || { echo "FAIL: $f does not define $d exactly once" >&2; exit 1; }; \
+        done; \
+    done; \
+    cmp -s $X/sm141064.xyce $X/sm141064.spice \
+        || { echo "FAIL: the two copies of the Xyce model file diverged" >&2; exit 1; }; \
+    echo "gf180mcuD: Xyce defines nfet_05v0/pfet_05v0, the devices every 5 V standard cell calls"; \
+    find /foss/pdks/ciel /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future
 # recipe change that stops producing a file cannot silently leave the base's
