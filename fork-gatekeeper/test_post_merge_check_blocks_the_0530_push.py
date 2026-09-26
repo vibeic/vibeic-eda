@@ -38,6 +38,16 @@ sys.modules["d0530_pmc"] = D
 _spec.loader.exec_module(D)
 
 
+@pytest.fixture(autouse=True)
+def _the_staged_forks_root_is_the_whole_registered_fleet(monkeypatch):
+    """This file stages its own forks root; its registered fleet is exactly the
+    clones it staged.  Without this the round would read the production
+    FORKS.json and clone every fork it registers into the temporary root."""
+    monkeypatch.setattr(D, "registered_fleet", lambda path=None: (
+        {p.name: {"tool": p.name} for p in D.FORKS.iterdir()
+         if (p / ".git").is_dir()} if D.FORKS.is_dir() else {}, []))
+
+
 def _git(repo, *a):
     p = subprocess.run(["git", "-C", str(repo), *a], capture_output=True,
                        text=True, timeout=60)
