@@ -94,6 +94,12 @@
       "upstream": "mciepluc/cocotb-coverage"
     },
     {
+      "tool": "eqy",
+      "branch": "main",
+      "role": "equivalence checking with Yosys (EQY): a script plus three Yosys plugins that partition a gold and a gate design and prove each partition. The image builds the plugins from this fork at EQY_REF against its own Yosys, replacing the base image's rescued v0.66 script, which shipped without its plugins and could not run. Created by push, not by forking: the fork API returned 403, so GitHub records no parent; the upstream is declared here.",
+      "upstream": "YosysHQ/eqy"
+    },
+    {
       "tool": "FasterCap",
       "branch": "master",
       "role": "3D/2D capacitance extraction field solver — fastercap_extract dispatches to it for parasitic extraction cross-checks. Mirrored 2026-07-31 (clone+push).",
