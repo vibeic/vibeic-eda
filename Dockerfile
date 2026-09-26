@@ -30,24 +30,24 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:c73a322-05c150
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:30a1edb-bcc2af
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4d57205-baa757
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:5ac76e1-88ae14d-6caaa5
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:0745426-00ec8d
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf82c3e-3381fb
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:c95a374-dfa11d
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:04a37f1-dcde11
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7505d83-29a18b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c33ad22-32ce7f
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:1c47572-9bac02
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:d3ee550-c19248
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:97a2b64-82801d
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-1b916b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-597570e-e219c5
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:8b8ca6d-4b5a58d-022aca
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
@@ -85,9 +85,9 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:5e6d592-597570e-e219c5
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:f091c8b-80be95
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:f091c8b-8baf0a
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:8a8af40-0a2e39
-ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:10613da-9a9a54
+ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-aa0773
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:f9d4bad-afb070
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
 
@@ -222,7 +222,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=2bf0c95e8bbfc87bf7002690c2f47006cf0a71a7  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=b74a7293ea57fc4154a08471bcf78042ed497e4e  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
@@ -625,7 +625,7 @@ RUN set -e; \
 # spicebind with EQY_REF (test_the_two_pairings_agree_with_the_structural_parser).
 FROM ${BASE_IMAGE} AS eqy-build
 USER root
-ARG EQY_REF=4a72eb94fc253062464afee4d0018359017bb846
+ARG EQY_REF=7a92d8441aa442dd1b5543458d6f1060a8f85dd1
 RUN --mount=type=bind,from=img-yosys,source=/foss/tools/yosys,target=/foss/tools/yosys \
     set -e; \
     git clone https://github.com/vibeic/eqy.git /src; \

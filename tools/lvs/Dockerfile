@@ -19,9 +19,9 @@
 
 FROM ubuntu:24.04 AS build
 ARG MAGIC_REPO=https://github.com/vibeic/magic.git
-ARG MAGIC_REF=5ac76e1a4fee175cce3c7695db55a7ca32e4da25  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
+ARG MAGIC_REF=dae41d0ff2e138b5b833c8d0961b6e59058e761a  # pinned; branch vibeic/integration is the LVS-fidelity line (gk-merge/2026-07-19) MERGED with vibeic/bridge-tech-multimetal, so the DEF/LVS robustness fixes the image already ran AND the 2026-07-18 batch (#46 foundry layer-map, #47/#37 grid snap, #28 SPEF, #48 NDR, #32 tech-from-LEF, #38) are both present. Neither line was dropped.
 ARG NETGEN_REPO=https://github.com/vibeic/netgen.git
-ARG NETGEN_REF=88ae14dfbe255ebc1be10877e76f253da272e53b  # pinned; branch vibeic/connectivity-match (netgen PR#1: plain-mode lvs finishes + stdout==report, resolves vibe-ic#191 tool layer; report byte-identical so #189 classifier/Step-31 unaffected)
+ARG NETGEN_REF=2a7fcc4fd579ac24b64c4d6fbc723b457f41420d  # pinned; branch vibeic/connectivity-match (netgen PR#1: plain-mode lvs finishes + stdout==report, resolves vibe-ic#191 tool layer; report byte-identical so #189 classifier/Step-31 unaffected)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git m4 tcl-dev tk-dev libx11-dev libcairo2-dev libncurses-dev ca-certificates \
  && rm -rf /var/lib/apt/lists/*

@@ -48,24 +48,24 @@ variable "SV2V_REF"    { default = "493a88f930802da68f592c192ec86991eaf95c49" }
 variable "SV2V_RECIPE" { default = "3a8690" }
 variable "CIEL_REF"    { default = "1d2526e67a062ac408166a51183222e281a7b9a3" }
 variable "CIEL_RECIPE" { default = "1b916b" }
-variable "IHP_OPEN_PDK_REF"    { default = "5e6d592e4002946a4616f798c357f0f3c06cf3b6" }
-variable "IHP_SG13CMOS5L_REF" { default = "597570eec556a473d1eedb22c055545d4522f442" }
-variable "IHP_OPEN_PDK_RECIPE" { default = "e219c5" }
-variable "OPENROAD_RECIPE" { default = "05c150" }
+variable "IHP_OPEN_PDK_REF"    { default = "8b8ca6ddd131a1133892ef262d5ba93c67d4fbf3" }
+variable "IHP_SG13CMOS5L_REF" { default = "4b5a58d19249e0cd8778885267d411519fc13120" }
+variable "IHP_OPEN_PDK_RECIPE" { default = "022aca" }
+variable "OPENROAD_RECIPE" { default = "bcc2af" }
 variable "YOSYS_RECIPE" { default = "baa757" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
-variable "LVS_RECIPE" { default = "6caaa5" }
+variable "LVS_RECIPE" { default = "a19510" }
 variable "FASTERCAP_RECIPE" { default = "b84994" }
-variable "IVERILOG_RECIPE" { default = "00ec8d" }
+variable "IVERILOG_RECIPE" { default = "3381fb" }
 variable "KLAYOUT_RECIPE" { default = "dfa11d" }
-variable "VERILATOR_RECIPE" { default = "dcde11" }
+variable "VERILATOR_RECIPE" { default = "29a18b" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
-variable "XSCHEM_RECIPE" { default = "32ce7f" }
-variable "SLANG_RECIPE" { default = "9bac02" }
-variable "XYCE_RECIPE" { default = "80be95" }
+variable "XSCHEM_RECIPE" { default = "c19248" }
+variable "SLANG_RECIPE" { default = "82801d" }
+variable "XYCE_RECIPE" { default = "8baf0a" }
 variable "YICES2_RECIPE" { default = "0a2e39" }
-variable "FAULT_RECIPE" { default = "9a9a54" }
+variable "FAULT_RECIPE" { default = "aa0773" }
 variable "SV_ELAB_RECIPE" { default = "afb070" }
 
 
@@ -74,13 +74,13 @@ variable "SV_ELAB_RECIPE" { default = "afb070" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "c73a322d300c6e774d9d7572718dd3b16e01386c" }
+variable "OPENROAD_REF"    { default = "30a1edbd65cc85cfb6ccdaa4de00708605c23f4f" }
 variable "YOSYS_REF"       { default = "4d572059c92f12b2b049649bfacf6f19ad67dab4" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
-variable "MAGIC_REF"       { default = "5ac76e1a4fee175cce3c7695db55a7ca32e4da25" }
-variable "NETGEN_REF"      { default = "88ae14dfbe255ebc1be10877e76f253da272e53b" }
+variable "MAGIC_REF"       { default = "dae41d0ff2e138b5b833c8d0961b6e59058e761a" }
+variable "NETGEN_REF"      { default = "2a7fcc4fd579ac24b64c4d6fbc723b457f41420d" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
 # FasterCap checkout cannot configure. All three refs appear in the tag below, so
@@ -88,13 +88,13 @@ variable "NETGEN_REF"      { default = "88ae14dfbe255ebc1be10877e76f253da272e53b
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "07454266bc5e06b5b7787603a1ea1cfc232aea88" }
+variable "IVERILOG_REF"    { default = "cf82c3ec5ac50424f97a187e13fe716311fecfc7" }
 variable "KLAYOUT_REF"     { default = "c95a37413853626c77313a0764e6ddf3da3f7570" }
-variable "VERILATOR_REF"   { default = "04a37f1cec8298d65ee443091b51002f98fdf9e7" }
+variable "VERILATOR_REF"   { default = "7505d83a3143399912f0e224e0e4798e0fa66b5c" }
 variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
-variable "XSCHEM_REF" { default = "c33ad2243d06c711b6379827516201555ab2e583" }
-variable "FAULT_REF" { default = "10613daaa7c488c2988d8dd5851e78fae456cc54" }
-variable "SLANG_REF" { default = "1c475726ff072666dcee5281368c526030f68d63" }
+variable "XSCHEM_REF" { default = "d3ee550fce536ad5a7a897c7c18602d4036b65ec" }
+variable "FAULT_REF" { default = "1e55e374c9086d4f861ee82ced45ab628e676c22" }
+variable "SLANG_REF" { default = "97a2b64cb23cf78d2f65eea729700c779207bb13" }
 variable "XYCE_REF" { default = "f091c8b81bdd922a8060a83ef32fa635b0f33923" }
 variable "YICES2_REF" { default = "8a8af407a3f6c74bdfe2058e75331de948499d07" }
 variable "SV_ELAB_REF" { default = "f9d4bad208c8c0f3b355d00eb05f82956693d4ce" }

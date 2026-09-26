@@ -15,7 +15,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG IHP_OPEN_PDK_REPO=https://github.com/vibeic/IHP-Open-PDK.git
-ARG IHP_OPEN_PDK_REF=5e6d592e4002946a4616f798c357f0f3c06cf3b6  # pinned; branch main — identical to IHP-GmbH/IHP-Open-PDK@main today
+ARG IHP_OPEN_PDK_REF=8b8ca6ddd131a1133892ef262d5ba93c67d4fbf3  # pinned; branch main — identical to IHP-GmbH/IHP-Open-PDK@main today
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -34,7 +34,7 @@ RUN git clone --filter=blob:none "${IHP_OPEN_PDK_REPO}" /src/ihp \
 # families are one PDK in two repositories; they are pinned together here so
 # they cannot drift apart again. Same repository rule: a vibeic mirror.
 ARG IHP_SG13CMOS5L_REPO=https://github.com/vibeic/ihp-sg13cmos5l.git
-ARG IHP_SG13CMOS5L_REF=597570eec556a473d1eedb22c055545d4522f442  # pinned; branch main — identical to IHP-GmbH/ihp-sg13cmos5l@main today
+ARG IHP_SG13CMOS5L_REF=4b5a58d19249e0cd8778885267d411519fc13120  # pinned; branch main — identical to IHP-GmbH/ihp-sg13cmos5l@main today
 RUN git clone --filter=blob:none "${IHP_SG13CMOS5L_REPO}" /src/ihp-sg13cmos5l \
  && git config --global --add safe.directory /src/ihp-sg13cmos5l \
  && cd /src/ihp-sg13cmos5l && git checkout ${IHP_SG13CMOS5L_REF} \
