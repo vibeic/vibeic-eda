@@ -1129,6 +1129,14 @@ RUN set -e; \
     cmp -s $X/sm141064.xyce $X/sm141064.spice \
         || { echo "FAIL: the two copies of the Xyce model file diverged" >&2; exit 1; }; \
     echo "gf180mcuD: Xyce defines nfet_05v0/pfet_05v0, the devices every 5 V standard cell calls"; \
+    python3 /vibeic/pdk/pdk_gf180_layers_rc_units_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 4; \
+    C=/foss/pdks/gf180mcuD/libs.tech/librelane/config.tcl; \
+    [ "$(grep -cE '^dict set ::env\(LAYERS_RC\) "\*" Metal[2-5] res (0\.385861|0\.206673|0\.168609|0\.0792778)$' $C)" = "4" ] \
+        || { echo "FAIL: LAYERS_RC Metal2-5 res are not the ohm/um values" >&2; exit 1; }; \
+    ! grep -qE '^dict set ::env\(LAYERS_RC\) "\*" Metal[2-5] res [0-9.]+E-0[45]$' $C \
+        || { echo "FAIL: a kohm/um LAYERS_RC res line is still there" >&2; exit 1; }; \
+    echo "gf180mcuD: LibreLane LAYERS_RC res in ohm/um, the unit of the default 1ohm Liberty (vibeic/open_pdks#2)"; \
     find /foss/pdks/ciel /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future

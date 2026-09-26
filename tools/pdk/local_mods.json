@@ -88,6 +88,19 @@
       "expect_modified": 2,
       "expect_added": 0,
       "expect_removed": 0
+    },
+    {
+      "id": "gf180mcu-librelane-layers-rc-ohm",
+      "issue": "vibeic/open_pdks#2 (supersedes #1; vibe-ic lane migf19, F19)",
+      "what": "gf180mcuD LibreLane config.tcl: the four LAYERS_RC Metal2-5 res values are the ORFS gf180 fit in kohm/um (Metal2 3.85861E-04), but OpenROAD's set_layer_rc reads res per micron in the resistance unit of the first Liberty it loads, and the default gf180mcu_fd_sc_mcu7t5v0 (and 9t5v0) Liberty declares pulling_resistance_unit 1ohm in every corner. MEASURED on 0.3.79 with LibreLane's set_rc sequence: report_layer_rc stores Metal2 at 3.86e-4 ohm/um against the tech LEF's RPERSQ 0.090 / WIDTH 0.28 = 0.321 ohm/um, so every wire-RC estimate (GRT-stage STA, resizer wire model, PSM per-layer R) used wire R ~1000x low. The step rewrites those four exact whole lines to the same fit x1000 (0.385861 / 0.206673 / 0.168609 / 0.0792778 ohm/um), the values of vibeic/open_pdks#2.",
+      "step": "tools/pdk/pdk_gf180_layers_rc_units_patch.py --root /foss/pdks/gf180mcuD --expect 4",
+      "scope_note": "Four res lines of one file; cap (pF/um) and VIAS_R (ohm per cut) already match a 1ohm Liberty and are untouched. The step refuses unless the default STD_CELL_LIBRARY's first Liberty of every CELL_LIBS corner declares 1ohm, and unless every other SCL installed under libs.ref that inherits the shared LAYERS_RC does too. The OSU gp9t3v3/gp12t3v3 configs (Liberty 1kohm) are in the volume but their libs.ref is not, so they cannot be loaded in this image and are deliberately NOT touched; vibeic/open_pdks#2 gives them their own kohm values. On a volume that already carries the ohm values the step refuses rather than multiplying twice.",
+      "paths": [
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/librelane/config.tcl"
+      ],
+      "expect_modified": 1,
+      "expect_added": 0,
+      "expect_removed": 0
     }
   ]
 }
