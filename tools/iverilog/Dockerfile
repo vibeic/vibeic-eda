@@ -34,10 +34,26 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN git clone "${IVERILOG_REPO}" /iverilog \
  && git config --global --add safe.directory /iverilog \
  && cd /iverilog && git checkout ${IVERILOG_REF} \
- && sh autoconf.sh && ./configure --prefix=/foss/tools/iverilog \
+ && sh autoconf.sh \
+ && ./configure --prefix=/foss/tools/iverilog --enable-libvvp \
+      LDFLAGS='-Wl,-rpath,/foss/tools/iverilog/lib' \
  && make -j"$(nproc)" && make install \
  && { grep -qE '^# *define HAVE_LIBZ' config.h \
-      || { echo "FATAL: iverilog configured WITHOUT zlib -> FST/LXT2 dumping is compiled out"; exit 1; }; }
+      || { echo "FATAL: iverilog configured WITHOUT zlib -> FST/LXT2 dumping is compiled out"; exit 1; }; } \
+ && { test -e /foss/tools/iverilog/lib/libvvp.so.1 \
+      && readelf -d /foss/tools/iverilog/bin/vvp | grep -q 'RUNPATH.*\[/foss/tools/iverilog/lib\]' \
+      || { echo "FATAL: iverilog built without libvvp/RUNPATH -> ngspice d_cosim (ivlng) cannot load"; exit 1; }; }
+# --enable-libvvp: ngspice's d_cosim Icarus shim (ivlng.so) loads the VVP engine
+# as a shared library, and configure.ac defaults `enable_libvvp=no`. The base
+# image's iverilog was built with it (libvvp.so -> .so.1 -> .so.1.14.0); this
+# recipe, which replaces it, was not, so /foss/tools/iverilog/lib held only an
+# orphan pkgconfig/libvvp.pc and every d_cosim deck aborted rc 134 with
+# "Icarus shim failed to load VVP library" (measured on 0.3.79 with ngspice's own
+# examples/xspice/icarus_verilog/adc.cir). The ngspice README says Icarus "must be
+# built with the --enable-libvvp option". With libvvp, vvp itself links
+# libvvp.so.1, so the rpath is what keeps plain `vvp` working in a shell with no
+# LD_LIBRARY_PATH. The guard turns a silent loss of either into a build failure,
+# the same way the HAVE_LIBZ guard does for FST.
 # ./configure silently drops FST/LXT/LXT2 when zlib is absent, and the build still
 # succeeds -- which is why this shipped. Measured on 0.2.63: `vvp a.vvp -fst` and
 # `-lxt2` both exit 1 with "FST support disabled since zlib not available".
