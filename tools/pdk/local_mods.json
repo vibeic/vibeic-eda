@@ -74,6 +74,20 @@
       "expect_modified": 1,
       "expect_added": 0,
       "expect_removed": 0
+    },
+    {
+      "id": "gf180mcu-xyce-defines-the-5v-cell-devices",
+      "issue": "vibe-ic F22 (step 30 SPICE/STA correlation, lane migf22)",
+      "what": "gf180mcuD Xyce models: every transistor of the 5 V standard-cell libraries is a call of nfet_05v0 / pfet_05v0 (gf180mcu_fd_sc_mcu7t5v0.spice: 2403 + 2405 calls). The ngspice tree of the same volume defines both in its fets_mm section as the statistical wrapper of the 6 V model with the 5 V defaults; the Xyce tree defines neither -- a .subckt census of the two trees differs by exactly these two names -- so no 5 V standard cell simulates in Xyce (Xyce 7.10 on 0.3.79: 'Subcircuit NFET_05V0 has not been defined for instance X_I_1'; vibe-ic step 30's Xyce arm refused LL_SPICE_DEVICE_UNMODELLED on 0.3.79). The step copies the Xyce tree's OWN nfet_06v0 / pfet_06v0 wrapper under the 05v0 name with the defaults the ngspice definition declares, inserted before it in the same .lib section, and refuses when the two wrappers' statistical parameters differ. MEASURED after the patch, spm register-to-register path at max_ss_125C_4v50 with layout-extracted cells: Xyce 10.023 ns vs ngspice 10.026 ns.",
+      "step": "tools/pdk/pdk_gf180_xyce_05v0_patch.py --root /foss/pdks/gf180mcuD --expect 4",
+      "scope_note": "gf180mcuD Xyce model tree only, ADDITIVE inside two existing files: two .subckt blocks each into sm141064.xyce and its byte-identical twin sm141064.spice. No existing line changes, the ngspice tree is untouched, and the step refuses if either name is already defined, so a volume that ships them FAILS the build rather than defining them twice.",
+      "paths": [
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/xyce/sm141064.xyce",
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/xyce/sm141064.spice"
+      ],
+      "expect_modified": 2,
+      "expect_added": 0,
+      "expect_removed": 0
     }
   ]
 }
