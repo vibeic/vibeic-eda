@@ -51,7 +51,7 @@ ROOT = Path(__file__).resolve().parent.parent
 #: "does `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name
 #: would fall through to the root Dockerfile, find no such ARG, and compare the
 #: image against the empty string.
-ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs", "librelane", "cace"}
+ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs", "librelane", "cace", "spicebind"}
 
 #: tool -> the ARG that its provenance must report, in `pin_file(tool)`.
 #: Multi-source artefacts report the first; the second is checked via the tag.
@@ -67,7 +67,7 @@ PRIMARY = {
     "cocotb": "COCOTB_REF", "cocotb-coverage": "COCOTB_COVERAGE_REF",
     "pyuvm": "PYUVM_REF", "sby": "SBY_REF",
     "asap7-lvs": "ASAP7SC_REF", "librelane": "LIBRELANE_REF",
-    "cace": "CACE_REF",
+    "cace": "CACE_REF", "spicebind": "SPICEBIND_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
 
