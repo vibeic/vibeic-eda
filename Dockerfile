@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=3adcd40b53ed2078000afd217b80893c9b3cd995
+ARG LIBRELANE_REF=bcb92f046a881cb94b59c548cc827986b02bef90
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2194,7 +2194,10 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              9e698ed6c366e9d436c0d66905859278e1a6727a cd40c3be4235d6c66308db0076ac6cddf8538f5f \
              5403aa820ddce328ce93d98df034579d0d22a7bd \
              42ca93aa10107df71689beaec134556c2ae7b276 081825b3914625ffc3c11a1c16664524e38b72de \
-             e0ea78d294e0f5d6951d9210a8c064fbea45f46a f60ce1473a64333f2c8757d7117dd3db63c36b84; do \
+             e0ea78d294e0f5d6951d9210a8c064fbea45f46a f60ce1473a64333f2c8757d7117dd3db63c36b84 \
+             2678800f927e5a21d9eaa91276204e44f0e6308f 2f324495ed8ae1fa8a590b5d9d54cad7d7a2284d \
+             de4b3fd864cd80dab715a3acd81e237e704462f4 ea9d54191cc27ca4e10e5d6931bdd31832e268e1 \
+             81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2257,8 +2260,36 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     python3 -P -c "import librelane, librelane.steps.gds_substance, librelane.steps.pyosys; from librelane.steps.magic import WriteLEF; assert librelane.__file__.startswith('$LLN/'), librelane.__file__; assert librelane.steps.gds_substance.__file__.startswith('$LLN/'), librelane.steps.gds_substance.__file__; assert {f.id: f.optional for f in WriteLEF.inputs} == {'gds': False, 'def': True}, WriteLEF.inputs; from librelane.steps.openroad import IRDropReport; r = ''.join('Worstcase voltage: %s V\\nAverage IR drop  : %s V\\nWorstcase IR drop: %s V\\n' % t for t in (('5.0', '1e-4', '8.69e-4'), ('0.0012', '2e-4', '1.19e-3'))); m = IRDropReport.metrics_from_report(r); assert (float(m['ir__drop__worst']), float(m['ir__voltage__worst']), m['ir__analysed_net__count']) == (1.19e-3, 5.0, 2), m; import importlib.util, inspect; from librelane.steps.klayout import SealRing; from librelane.common.metrics import Metric; import librelane.common.metrics.library; assert SealRing.METRIC == 'design__seal_ring__verified' and Metric.by_name[SealRing.METRIC].higher_is_better, SealRing.METRIC; assert 'self.verify_ring(' in inspect.getsource(SealRing.run); s = importlib.util.spec_from_file_location('verify_sealring', '$LLN/scripts/klayout/verify_sealring.py'); v = importlib.util.module_from_spec(s); s.loader.exec_module(v); assert callable(v.measure) and v.EDGE_TOLERANCE == 0.10, v; from librelane.common.metrics.metric import max_aggregator; from librelane.common import aggregate_metrics; assert all(Metric.by_name[n].aggregator is max_aggregator for n in ('power__total', 'power__internal__total', 'power__switching__total', 'power__leakage__total')); a = aggregate_metrics({'power__total__corner:nom_tt': 0.020, 'power__total__corner:max_ff': 0.026, 'power__total__corner:max_ss': 0.016}); assert a['power__total'] == 0.026, a; from decimal import Decimal; from librelane.steps.openroad import DetailedRouting; dv = {v.name: v for v in DetailedRouting.config_vars}; assert dv['DRT_OR_SEED'].type is int and dv['DRT_OR_SEED'].default == 42, dv.get('DRT_OR_SEED'); assert dv['DRT_OR_K'].type is Decimal and dv['DRT_OR_K'].default == 0, dv.get('DRT_OR_K'); rd = Metric.by_name['route__drc_errors']; assert {'iter', 'run'} <= set(rd.dont_aggregate), rd.dont_aggregate; r = {'route__drc_errors': 20, 'route__drc_errors__iter:0': 90, 'route__drc_errors__run:0': 7, 'route__drc_errors__run:1': 3, 'route__drc_errors__run:2': 20}; a = aggregate_metrics(r); assert a == r, a; assert aggregate_metrics({'route__drc_errors': 0, 'route__drc_errors__run:0': 5, 'route__drc_errors__run:1': 0})['route__drc_errors'] == 0"; \
     python3 -P -c "import os, tempfile, unittest; from pathlib import Path as P; from librelane.common import Path as LP; from librelane.state import DesignFormat as F, State; from librelane.steps.magic import MagicStep, StreamOut; from librelane.steps.step import StepError; d = tempfile.mkdtemp(); rec = lambda k: bytes([0, 4, k, 0]); P(d, 'x.def').write_text('COMPONENTS 2 ;\\n- u0 m + PLACED ( 0 0 ) N ;\\n- u1 m + FIXED ( 1 1 ) N ;\\nEND COMPONENTS\\n'); P(d, 'm.gds').write_bytes(rec(0) + rec(5) + rec(8) * 2 + rec(7) + rec(4)); P(d, 'h.gds').write_bytes(rec(0) + rec(5) + rec(8) + rec(7) + rec(4)); StreamOut.prepare_env = lambda self, env, state: env; st = object.__new__(StreamOut); st.config = {'DESIGN_NAME': 'x', 'MACROS': None, 'PRIMARY_GDSII_STREAMOUT_TOOL': 'magic'}; st.step_dir = d; MagicStep.run = lambda self, s, **k: ({F.MAG_GDS: LP(d + '/m.gds')}, {}); v, _ = st.run(State({F.DEF: LP(d + '/x.def')})); assert os.path.isfile(str(v[F.GDS])), v; MagicStep.run = lambda self, s, **k: ({F.MAG_GDS: LP(d + '/h.gds')}, {}); unittest.TestCase().assertRaisesRegex(StepError, '1 elements for 2 placed', st.run, State({F.DEF: LP(d + '/x.def')})); import shutil; shutil.rmtree(d); print('Magic.StreamOut substance check: runs on librelane Path views, refuses a hollow GDS')" \
         || { echo "FAIL: Magic.StreamOut cannot run its GDS substance check on librelane Path views (5403aa8)" >&2; exit 1; }; \
-    python3 -P -c "import inspect; from librelane.steps.klayout import LVS, SealRing, Filler; assert callable(getattr(LVS, 'run_runset', None)) and not hasattr(LVS, 'run_ihp_sg13g2'), 'LVS runner'; assert 'self.run_runset(' in inspect.getsource(LVS.run), 'LVS.run'; assert all(callable(getattr(k, 'run_ihp_sg13g2', None)) and not hasattr(k, 'run_runset') and 'self.run_ihp_sg13g2(' in inspect.getsource(k.run) for k in (SealRing, Filler)), 'SealRing/Filler'; assert any('gf180mcuD'.startswith(p) for p in LVS.UNVERIFIED_RUNSETS), LVS.UNVERIFIED_RUNSETS; print('KLayout.LVS: run_runset for a declared runset, gf180mcuD held; SealRing/Filler keep run_ihp_sg13g2')" \
-        || { echo "FAIL: KLayout.LVS run_runset / SealRing+Filler run_ihp_sg13g2 / UNVERIFIED_RUNSETS gf180mcuD (e0ea78d, f60ce14)" >&2; exit 1; }; \
+    python3 -P -c "import inspect; from librelane.steps.klayout import LVS, SealRing, Filler; assert callable(getattr(LVS, 'run_runset', None)) and not hasattr(LVS, 'run_ihp_sg13g2'), 'LVS runner'; assert 'self.run_runset(' in inspect.getsource(LVS.run), 'LVS.run'; assert all(callable(getattr(k, 'run_ihp_sg13g2', None)) and not hasattr(k, 'run_runset') and 'self.run_ihp_sg13g2(' in inspect.getsource(k.run) for k in (SealRing, Filler)), 'SealRing/Filler'; assert set(LVS.UNVERIFIED_RUNSETS) == {'gf180mcuA', 'gf180mcuB', 'gf180mcuC'}, LVS.UNVERIFIED_RUNSETS; print('KLayout.LVS: run_runset for a declared runset, gf180mcuD run, gf180mcuA/B/C held; SealRing/Filler keep run_ihp_sg13g2')" \
+        || { echo "FAIL: KLayout.LVS run_runset / SealRing+Filler run_ihp_sg13g2 (e0ea78d, f60ce14) / UNVERIFIED_RUNSETS is exactly gf180mcuA, gf180mcuB, gf180mcuC (ea9d541)" >&2; exit 1; }; \
+    python3 -P -c "import inspect; from librelane.common.metrics import Metric; import librelane.common.metrics.library; from librelane.steps.klayout import LVS; from librelane.steps.misc import ReportManufacturability; m = Metric.by_name.get('klayout__lvs_error__count'); assert m is not None and m.critical and not m.higher_is_better, m; assert LVS.METRIC == 'klayout__lvs_error__count', LVS.METRIC; assert 'NOT_MEASURED' in inspect.getsource(LVS.run), 'LVS.run skip message'; assert 'klayout__lvs_error__count' in str(vars(ReportManufacturability)), 'ReportManufacturability klayout_lvs engine'; print('KLayout.LVS: klayout__lvs_error__count declared; a skipped step leaves it NOT_MEASURED')" \
+        || { echo "FAIL: klayout__lvs_error__count is not declared / written only by KLayout.LVS / an engine of ReportManufacturability (81fb28d)" >&2; exit 1; }; \
+    python3 -P -c "import inspect; from librelane.steps.checker import MetricChecker, YosysUnmappedCells, missing_metric_variable; from librelane.steps.misc import NOT_MEASURED; assert missing_metric_variable.name == 'ERROR_ON_MISSING_METRIC' and missing_metric_variable.default is True, missing_metric_variable; assert callable(MetricChecker.metric_not_measured) and 'NOT_MEASURED' in inspect.getsource(MetricChecker.metric_not_measured); assert 'self.metric_not_measured()' in inspect.getsource(MetricChecker.run); assert missing_metric_variable in YosysUnmappedCells.config_vars; assert NOT_MEASURED == 'NOT_MEASURED'; print('checkers: an absent metric is NOT_MEASURED (ERROR_ON_MISSING_METRIC defaults to true)')" \
+        || { echo "FAIL: a checker's absent metric is not NOT_MEASURED / ERROR_ON_MISSING_METRIC is not declared (2678800)" >&2; exit 1; }; \
+    if grep -nE '^[^#]*utl[.]metric_?' $LLN/scripts/odbpy/*.py; then \
+        echo "FAIL: an odbpy script still reports a metric through utl.metric* (5f89863)" >&2; exit 1; \
+    fi; \
+    grep -q '^def metric_integer' $LLN/scripts/odbpy/reader.py \
+        || { echo "FAIL: odbpy reader.py has no metric_integer (%OL_METRIC channel, 5f89863)" >&2; exit 1; }; \
+    grep -qF 'line.rstrip("\r\n").split(" ", maxsplit=2)' $LLN/steps/step.py \
+        || { echo "FAIL: step.py does not keep a string metric's spaces (maxsplit=2, 5f89863)" >&2; exit 1; }; \
+    grep -q 'FILL_INSERTION_AREA' $LLN/steps/openroad.py \
+        || { echo "FAIL: FillInsertion declares no FILL_INSERTION_AREA (2f32449)" >&2; exit 1; }; \
+    for p in 'namespace eval fill_area' 'proc fill_area::plan_row' 'proc fill_area::narrow_joints' 'proc fill_area::create_blockages' 'fill_area::create_blockages \[ord::get_db_block\]'; do \
+        grep -q "$p" $LLN/scripts/openroad/fill.tcl \
+            || { echo "FAIL: fill.tcl has no per-row FILL_INSERTION_AREA planning: '$p' (de4b3fd)" >&2; exit 1; }; \
+    done; \
+    # The fork's own fill.tcl unit tests (mocked ODB, 28 cases incl. a randomized
+    # 200-row property check, ~0.1 s) run against the INSTALLED fill.tcl: the
+    # test finds the script at ../../librelane from its own directory. vibeic/
+    # librelane#25 is test-only (empty librelane/ diff) and is not in the list.
+    ft=$(mktemp -d); mkdir -p $ft/test/steps; ln -s $LLN $ft/librelane; \
+    cp test/steps/test_fill_insertion_area.tcl $ft/test/steps/; \
+    tclsh $ft/test/steps/test_fill_insertion_area.tcl > $ft/log 2>&1 || true; \
+    if ! grep -qE 'Total[[:space:]]+[0-9]+[[:space:]]+Passed[[:space:]]+[0-9]+[[:space:]]+Skipped[[:space:]]+0[[:space:]]+Failed[[:space:]]+0' $ft/log; then \
+        tail -30 $ft/log; echo "FAIL: the fork's fill.tcl unit tests do not pass on the installed fill.tcl (de4b3fd)" >&2; exit 1; \
+    fi; \
+    grep -E 'Total' $ft/log; rm -rf $ft; \
     grep -q 'write_timing_model -scene' $LLN/scripts/openroad/common/io.tcl \
         || { echo "FAIL: the 69bbd515 io.tcl diff did not apply" >&2; exit 1; }; \
     grep -q 'proc scene_name' $LLN/scripts/openroad/common/io.tcl \
@@ -2272,7 +2303,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 21 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcu held)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 27 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcuD run and gf180mcuA/B/C held, klayout__lvs_error__count NOT_MEASURED when skipped, checkers NOT_MEASURED on an absent metric, FILL_INSERTION_AREA planned per row, odbpy metrics on %OL_METRIC)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
