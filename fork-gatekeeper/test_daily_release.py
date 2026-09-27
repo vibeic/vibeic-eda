@@ -113,6 +113,23 @@ def test_smoke_natural_nonzero_is_a_real_tool_failure(monkeypatch):
     }]
 
 
+def test_librelane_smoke_runs_classic_through_magic_streamout():
+    """0.3.80 shipped a LibreLane that died in every Classic flow at
+    Magic.StreamOut while every import check was green. The smoke must RUN
+    the real Classic steps through that step and judge the streamed GDS."""
+    import shlex
+    cmd = R.SMOKE["librelane"]
+    subprocess.run(["bash", "-n", "-c", cmd], check=True)
+    argv = shlex.split(cmd.split(" && ", 1)[1])
+    assert argv[:3] == ["python3", "-P", "-c"]
+    code = argv[3]
+    compile(code, "<librelane-smoke>", "exec")
+    assert 'Flow.factory.get("Classic")' in code
+    assert 'C.Steps[:ids.index("Magic.StreamOut") + 1]' in code
+    assert 'pdk="sky130A"' in code
+    assert "st.get(DF.MAG_GDS)" in code and "os.path.getsize" in code
+
+
 def test_two_repos_in_one_dockerfile_are_both_found(tmp_path):
     """`tools/lvs` pins magic AND netgen; a first-match parse loses one."""
     root = _tree(tmp_path)
