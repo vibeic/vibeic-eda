@@ -36,7 +36,7 @@ ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf82c3e-3381fb
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:c95a374-dfa11d
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:12205af-e9aa6a
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7505d83-29a18b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:d3ee550-c19248
@@ -47,7 +47,7 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:97a2b64-82801d
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-1b916b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:8b8ca6d-4b5a58d-022aca
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-e4d34a5-d99399
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=af8ba3ace693e2211d4b24116afab74eefc1148a
+ARG LIBRELANE_REF=3adcd40b53ed2078000afd217b80893c9b3cd995
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \

@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.80",
-  "pins_fingerprint": "7ce569b640f8",
+  "version": "0.3.81",
+  "pins_fingerprint": "a139159bca93",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -9,7 +9,7 @@
     "FasterCap": "afca8f5e55bbc8e19555f65fc29962fb475c8ebb",
     "Fault": "1e55e374c9086d4f861ee82ced45ab628e676c22",
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
-    "IHP-Open-PDK": "8b8ca6ddd131a1133892ef262d5ba93c67d4fbf3",
+    "IHP-Open-PDK": "22d7eb44e3ae509d93c338bd634bbb29dc85351d",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
     "OpenROAD": "30a1edbd65cc85cfb6ccdaa4de00708605c23f4f",
     "OpenROAD-flow-scripts": "b74a7293ea57fc4154a08471bcf78042ed497e4e",
@@ -24,11 +24,11 @@
     "cocotb-coverage": "31d9182533f9c2898fccda6fd7f35b77998b7b7b",
     "eqy": "7a92d8441aa442dd1b5543458d6f1060a8f85dd1",
     "gtkwave": "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9",
-    "ihp-sg13cmos5l": "4b5a58d19249e0cd8778885267d411519fc13120",
+    "ihp-sg13cmos5l": "e4d34a546eca7fc7def75581ad341c4569801739",
     "iverilog": "cf82c3ec5ac50424f97a187e13fe716311fecfc7",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
-    "klayout": "c95a37413853626c77313a0764e6ddf3da3f7570",
-    "librelane": "d3417c3d6a9ce8dd30a478ab2d51e6b4a06560ef",
+    "klayout": "12205af4161a359d41affc0f1a66e8c80ca95b71",
+    "librelane": "3adcd40b53ed2078000afd217b80893c9b3cd995",
     "magic": "dae41d0ff2e138b5b833c8d0961b6e59058e761a",
     "netgen": "2a7fcc4fd579ac24b64c4d6fbc723b457f41420d",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
@@ -44,14 +44,14 @@
     "yosys": "4d572059c92f12b2b049649bfacf6f19ad67dab4"
   },
   "recipes": {
-    "recipe:__compose__": "a1830b",
+    "recipe:__compose__": "e94bef",
     "recipe:ciel": "1b916b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "aa0773",
     "recipe:gtkwave": "b2a1e2",
-    "recipe:ihp-open-pdk": "022aca",
+    "recipe:ihp-open-pdk": "d99399",
     "recipe:iverilog": "3381fb",
-    "recipe:klayout": "dfa11d",
+    "recipe:klayout": "e9aa6a",
     "recipe:lvs": "a19510",
     "recipe:ngspice": "1aaa99",
     "recipe:openroad": "bcc2af",
@@ -65,5 +65,5 @@
     "recipe:yices2": "0a2e39",
     "recipe:yosys": "baa757"
   },
-  "manifest_identity": "d9d6ecb53606d1a505a67c4e942964d50ed6da00eefb7f15ce05b690e825054c"
+  "manifest_identity": "adba55e4268fde51a16fa6ded91546548cf309fb1b425df7f0fc4f3f7943c075"
 }
