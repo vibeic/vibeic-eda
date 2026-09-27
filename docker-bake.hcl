@@ -51,7 +51,7 @@ variable "CIEL_RECIPE" { default = "1b916b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "05b92d" }
-variable "OPENROAD_RECIPE" { default = "d989e9" }
+variable "OPENROAD_RECIPE" { default = "597610" }
 variable "YOSYS_RECIPE" { default = "baa757" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
@@ -74,7 +74,7 @@ variable "SV_ELAB_RECIPE" { default = "afb070" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "dd02eba5b90497ab8d2f5b67a0427d6fe2fa1d2f" }
+variable "OPENROAD_REF"    { default = "da11f47e149ee2fdcd86118c008e755e0063b362" }
 variable "YOSYS_REF"       { default = "4d572059c92f12b2b049649bfacf6f19ad67dab4" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
