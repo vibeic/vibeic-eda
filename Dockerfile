@@ -1137,6 +1137,16 @@ RUN set -e; \
     ! grep -qE '^dict set ::env\(LAYERS_RC\) "\*" Metal[2-5] res [0-9.]+E-0[45]$' $C \
         || { echo "FAIL: a kohm/um LAYERS_RC res line is still there" >&2; exit 1; }; \
     echo "gf180mcuD: LibreLane LAYERS_RC res in ohm/um, the unit of the default 1ohm Liberty (vibeic/open_pdks#2)"; \
+    python3 /vibeic/pdk/pdk_gf180_lvs_diode_hier_patch.py \
+        --root /foss/pdks/gf180mcuD --expect 14; \
+    V=/foss/pdks/gf180mcuD/libs.tech/klayout/tech/lvs/rule_decks; \
+    ! grep -q "'P' => lvpwell_con" $V/diode_extraction.lvs \
+        || { echo "FAIL: a diode_mk junction diode still takes the whole lvpwell as a device input" >&2; exit 1; }; \
+    ! grep -qE "'N' => diode_pd2nw_[0-9a-z_]+_terminal_n," $V/diode_extraction.lvs \
+        || { echo "FAIL: a diode_mk junction diode still takes the whole nwell as a device input" >&2; exit 1; }; \
+    [ "$(grep -cE '^connect\(diode_(nd2ps_[0-9a-z_]+_terminal_n_pwell, lvpwell_con|pd2nw_[0-9a-z_]+_terminal_p_nwell, nwell_con)\)$' $V/diode_connections.lvs)" = "8" ] \
+        || { echo "FAIL: the 8 well-side junction footprints are not each connected to their well" >&2; exit 1; }; \
+    echo "gf180mcuD: LVS extracts the diode_mk junction diodes in the cell that draws them, so run_mode=deep matches"; \
     find /foss/pdks/ciel /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # The replacement must be TOTAL, not partial. Asserting it here means a future

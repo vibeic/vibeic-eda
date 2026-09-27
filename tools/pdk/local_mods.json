@@ -129,6 +129,24 @@
           "what": "#1, the same Metal2-5 res change, superseded by #2"
         }
       ]
+    },
+    {
+      "id": "gf180mcu-lvs-diode-junctions-extracted-in-their-cell",
+      "issue": "vibeic/librelane#22 (gf180mcu held in LVS.UNVERIFIED_RUNSETS with this measured reason)",
+      "what": "gf180mcuD KLayout LVS deck: the eight diode_mk junction diodes (diode_nd2ps_* / diode_pd2nw_*, 03v3/06v0, with and without _dn) took the WELL as one device input -- 'P' => lvpwell_con, or 'N' => nwell_mv.not(dnwell).interacting(ncomp) -- and a standard-cell row's well touches every abutting cell's well, so with the run_mode=deep the PDK's own LibreLane config declares the extractor placed each diode in the PARENT cell. MEASURED on spm (60 gf180mcu_fd_sc_mcu7t5v0__antenna): all 120 antenna diodes in spm, none in the antenna subcircuit, a clean design reported \"Netlists don't match\" (flat matched). The well-side input becomes the junction's own footprint on that well (diode_nd2ps_*_terminal_n.and(lvpwell_con), diode_pd2nw_*_terminal_p.and(diode_pd2nw_*_terminal_n)), connected to lvpwell_con / nwell_con, so the junction, the device class, A, P and the terminal nets are the ones the shipped deck extracts and only the cell changes. Measured after: deep extracts 2 diodes in the antenna cell and 0 in spm; clean matches, an instance removed from the schematic does not; flat verdicts and diodes unchanged.",
+      "step": "tools/pdk/pdk_gf180_lvs_diode_hier_patch.py --root /foss/pdks/gf180mcuD --expect 14",
+      "scope_note": "The eight diode_mk junction diodes only; nw2ps, pw2dw, dw2ps and sc_diode are not diode_mk junctions and are untouched, as is every derivation the shipped deck defines (the footprints are ADDED layers). The same pattern is how the ihp-sg13g2 deck extracts its antenna diodes (dantenna_p = antenna_d_mk.and(pwell)..., dpantenna_n = dpantenna_p.inside(nwell_drw)). NOT fixed upstream: globalfoundries-pdk-libs-gf180mcu_fd_pv at 0776f8d9 (2026-08-25) still extracts them with 'P' => lvpwell_con, and open_pdks copies klayout/lvs verbatim. The anchors are exact text, each required once, and the step declares --expect 14, so on a deck that has moved (e.g. upstream 417ae8e9, which merges the derivations into diode_extraction.lvs) this FAILS the build instead of applying somewhere else.",
+      "paths": [
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/klayout/tech/lvs/rule_decks/diode_derivations.lvs",
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/klayout/tech/lvs/rule_decks/diode_extraction.lvs",
+        "gf180mcu/versions/*/gf180mcuD/libs.tech/klayout/tech/lvs/rule_decks/diode_connections.lvs"
+      ],
+      "expect_modified": 3,
+      "expect_added": 0,
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#256",
+      "fork_commits": [],
+      "fork_note": "No fork commit corresponds: the deck is globalfoundries-pdk-libs-gf180mcu_fd_pv's, which this org does not fork, and vibeic/open_pdks only copies it (gf180mcu/Makefile.in, klayout-%). The correction exists in the image only through this recipe step."
     }
   ]
 }
