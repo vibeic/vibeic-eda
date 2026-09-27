@@ -609,6 +609,28 @@ def test_the_detail_searches_stderr_separately_from_stdout():
     assert "ANT 0000" not in detail, detail
 
 
+def test_a_marker_that_announces_a_list_keeps_the_list():
+    """klayout's check_suite_list.sh, 2026-09-27: the FAIL line ends in a colon
+    and the harness it means is on the NEXT, indented, line. The detail kept
+    only the FAIL line, so the round log and the tick's REFUSE named nothing."""
+    out = "\n".join([
+        "  harnesses in the tree: 30   named by run_all.sh: 30",
+        "FAIL: run_all.sh does not name these harnesses, so nothing would ever run them:",
+        "    metal-fill/tests/run_fill_max_window_test.sh",
+        "  Add them to the SUITES list in vibeic-tests/run_all.sh.",
+        "trailing advice that is not indented",
+    ])
+    detail = _dm()._salient(out, "")
+    assert "metal-fill/tests/run_fill_max_window_test.sh" in detail, detail
+    assert "trailing advice" not in detail, detail
+
+
+def test_a_marker_without_a_colon_does_not_swallow_its_neighbours():
+    out = "FAIL: one thing broke\n    unrelated indented noise"
+    detail = _dm()._salient(out, "")
+    assert "unrelated indented noise" not in detail, detail
+
+
 def test_an_unrecognised_failure_says_it_is_a_guess():
     detail = _dm()._salient("something went sideways\nand then stopped", "")
     assert detail.startswith("(no recognised marker"), detail
