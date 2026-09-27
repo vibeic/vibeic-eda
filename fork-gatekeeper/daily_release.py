@@ -2604,6 +2604,30 @@ SMOKE = {
     "cocotb":    "python3 -c 'import cocotb; print(cocotb.__version__)'",
     "pyuvm":     "python3 -c 'import pyuvm'",
     "sby":       "sby --help >/dev/null 2>&1 || command -v sby",
+    # LibreLane is only proven by running a flow. 0.3.80 shipped with every
+    # librelane import check green and died in EVERY Classic flow at
+    # Magic.StreamOut (AttributeError: 'Path' object has no attribute
+    # 'read_bytes' -- the fork's GDS substance check was handed librelane's own
+    # Path, not a pathlib.Path). The build-time check drives StreamOut.run with
+    # a stubbed Magic; this one runs the real Classic steps, spm x sky130A,
+    # through Magic.StreamOut (about 1.5 min) and asserts the streamed GDS.
+    "librelane": (
+        'cd "$(mktemp -d)" && python3 -P -c \''
+        'import os, shutil, librelane; '
+        'from librelane.flows import Flow, SequentialFlow; '
+        'from librelane.state import DesignFormat as DF; '
+        'C = Flow.factory.get("Classic"); ids = [s.id for s in C.Steps]; '
+        'Smoke = type("SmokeThroughMagicStreamOut", (SequentialFlow,), '
+        '{"Steps": C.Steps[:ids.index("Magic.StreamOut") + 1]}); '
+        'shutil.copytree(os.path.join(os.path.dirname(librelane.__file__), '
+        '"examples", "spm"), "spm"); '
+        'st = Smoke(os.path.abspath("spm/config.yaml"), '
+        'design_dir=os.path.abspath("spm"), pdk="sky130A", '
+        'pdk_root=os.environ.get("PDK_ROOT", "/foss/pdks")).start(tag="smoke"); '
+        'g = st.get(DF.MAG_GDS); '
+        'assert g is not None and os.path.getsize(str(g)) > 0, g; '
+        'print("librelane: spm x sky130A through Magic.StreamOut ->", g)\''
+    ),
 }
 
 
