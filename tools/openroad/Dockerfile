@@ -17,6 +17,75 @@
 # Source is `github.com/vibeic/*` and nothing else (owner rule 2026-07-29);
 # `tools/check_fork_only.py` fails the build on anything else.
 
+# Declared once, before the first stage, because two stages clone it: the
+# CMake compiler-cache seed and the build. The build stage imports it with a
+# bare `ARG OPENROAD_REPO` at the line where the default used to be; the
+# resolved value, and so the cache key of the bazel repository-cache seed layer
+# below, is unchanged (measured on a throwaway builder: a stage-local default
+# and a global one give the identical layer).
+ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
+
+# ---- the CMake compiler cache: a seed LAYER, not a cache mount --------------
+#
+# `openroad-python` is a second, CMake build of the same commit (see the RUN
+# near the end of the build stage), and every pin move compiled it from
+# nothing: 496.3 s in the 2026-09-27 06:25Z round for a move that changed two
+# files under src/.
+#
+# This stage compiles that same target once at OPENROAD_CCACHE_SEED with ccache
+# (4.9.1, shipped in the base image) as the compiler launcher, and keeps only
+# the ccache directory. The build stage bind-mounts it read-write; what the
+# build adds is discarded with the mount. It is keyed only on the base image
+# and OPENROAD_CCACHE_SEED, so it is CACHED across OPENROAD_REF moves, and as
+# its own stage it builds in parallel with the bazel steps.
+#
+# It is compiled at /src with the flags the build uses, because the compile
+# lines carry absolute paths and ccache hashes them.
+#
+# Not `--mount=type=cache`, for the reason the repository-cache seed below
+# gives: vibeic-builder's GC keeps exec.cachemount records to 488 MiB / 48 h.
+#
+# Correctness does not depend on the seed: ccache serves a result only for an
+# identical input, compiler (mtime and size) and options, and what it stores is
+# the compiler's own output. A seed older than the pin only means more
+# compiling.
+#
+# MEASURED 2026-09-27 on a throwaway builder, OpenROAD da11f47e14 with the seed
+# at the previous pin dd02eba5b9 (two files under src/):
+#                                        alone      beside klayout's build
+#     CMake step, no cache (before)    422.7 s      671.8 s
+#     CMake step, from the seed        149.0 s      186.0 s
+#         ccache: 2648 of 2653 units hit (99.8%); what remains is configure
+#         and the LTO link, whose code generation no compiler cache sees
+#     seed stage, one-time per OPENROAD_CCACHE_SEED   737.7 s incl. clone, 787 MB
+# The binary is NOT byte-identical to an uncached build as built, and neither
+# is a second uncached build: sources use __DATE__/__TIME__, and when the five
+# units that miss compile within the same second the linker merges their
+# equal time strings, which moves .rodata by 16 bytes (same 152492 symbols,
+# same sizes, 185 moved). With SOURCE_DATE_EPOCH fixing those macros for the
+# experiment, the cached and uncached openroad-python are byte-identical
+# (sha256 df45d029...). `openroad-python -version` and an odb import behave
+# the same either way.
+#
+# Move OPENROAD_CCACHE_SEED forward when the CMake step grows long
+# again (its `ccache --show-stats` says how many units missed); nothing else
+# reads it. Not named *_REF on purpose: every pin reader in this repo matches
+# `ARG <NAME>_REF=`, and this is not a pin -- it changes no shipped byte.
+FROM openroad/ubuntu24.04-dev:latest AS ccache-seed
+ARG OPENROAD_REPO
+ARG OPENROAD_CCACHE_SEED=da11f47e149ee2fdcd86118c008e755e0063b362
+RUN git clone "${OPENROAD_REPO}" /src \
+ && cd /src && git checkout ${OPENROAD_CCACHE_SEED} \
+ && git submodule update --init --recursive --depth 1 \
+ && export CCACHE_DIR=/ccache CCACHE_MAXSIZE=5G \
+ && cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_GUI=OFF -DBUILD_PYTHON=ON -DENABLE_TESTS=ON \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+ && cmake --build /src/build-python --target openroad -j"$(nproc)" \
+ && ccache --show-stats \
+ && cd / && rm -rf /src \
+ && echo "ccache seeded at ${OPENROAD_CCACHE_SEED}: $(du -sb /ccache | cut -f1) bytes"
+
 FROM openroad/ubuntu24.04-dev:latest AS build
 # OPENROAD_REF is declared just above the clone, and OPENROAD_REPO just above
 # the repository-cache seed, not here. An ARG changes the cache key of EVERY
@@ -179,7 +248,7 @@ RUN f=/distdir/llvm-project-22.1.8.src.tar.zst \
 # "Analyzed target //:openroad" line) grows long again; nothing else reads it.
 # Not named *_REF on purpose: every pin reader in this repo matches
 # `ARG <NAME>_REF=`, and this is not a pin -- it changes no shipped byte.
-ARG OPENROAD_REPO=https://github.com/vibeic/OpenROAD.git
+ARG OPENROAD_REPO
 ARG OPENROAD_FETCH_SEED=1914a260bfb10cc55942d6b837d7fd44912d9f0a
 RUN git clone "${OPENROAD_REPO}" /seed \
  && cd /seed && git checkout ${OPENROAD_FETCH_SEED} \
@@ -247,9 +316,18 @@ RUN cd /src \
 # Tcl binary unchanged and build a same-commit Python binary separately.
 # ENABLE_TESTS stays ON because this fork has test CMakeLists that depend on
 # build_and_test even when only the openroad target is compiled.
-RUN cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
+#
+# Compiled through ccache, seeded by the ccache-seed stage at the top of this
+# file. The launcher prefixes the compiler command and nothing else; the
+# objects are the compiler's own output, cached or not.
+RUN --mount=type=bind,from=ccache-seed,source=/ccache,target=/ccache,rw \
+    export CCACHE_DIR=/ccache CCACHE_MAXSIZE=5G \
+ && ccache --zero-stats \
+ && cmake -S /src -B /src/build-python -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_GUI=OFF -DBUILD_PYTHON=ON -DENABLE_TESTS=ON \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
  && cmake --build /src/build-python --target openroad -j"$(nproc)" \
+ && ccache --show-stats \
  && install -D /src/build-python/bin/openroad /vibeic-openroad/bin/openroad-python
 # The dispatcher's sha256 is written HERE because this artefact's tag only
 # sees this file. The recipe half of the tag is sha256(tools/openroad/Dockerfile)
