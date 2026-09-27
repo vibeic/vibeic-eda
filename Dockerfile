@@ -39,7 +39,7 @@ ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf82c3e-3381fb
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:80eddc1-ad5bcd
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7505d83-29a18b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:d3ee550-c19248
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:f43f95e-0cb417
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:97a2b64-82801d
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream

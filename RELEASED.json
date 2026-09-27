@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.82",
-  "pins_fingerprint": "b917125175fe",
+  "version": "0.3.83",
+  "pins_fingerprint": "09af7abc0773",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -28,7 +28,7 @@
     "iverilog": "cf82c3ec5ac50424f97a187e13fe716311fecfc7",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
     "klayout": "80eddc1533113248f87129520728e50983a58fb0",
-    "librelane": "bcb92f046a881cb94b59c548cc827986b02bef90",
+    "librelane": "9cf849541fb02082c5890cbbf2cab4d796a9f8f9",
     "magic": "dae41d0ff2e138b5b833c8d0961b6e59058e761a",
     "netgen": "2a7fcc4fd579ac24b64c4d6fbc723b457f41420d",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
@@ -39,12 +39,12 @@
     "sv-elab": "f9d4bad208c8c0f3b355d00eb05f82956693d4ce",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
     "verilator": "7505d83a3143399912f0e224e0e4798e0fa66b5c",
-    "xschem": "d3ee550fce536ad5a7a897c7c18602d4036b65ec",
+    "xschem": "f43f95ef865bc280c8c9944fdaedb74f4d803e7d",
     "yices2": "8a8af407a3f6c74bdfe2058e75331de948499d07",
     "yosys": "4d572059c92f12b2b049649bfacf6f19ad67dab4"
   },
   "recipes": {
-    "recipe:__compose__": "2ffdf3",
+    "recipe:__compose__": "231ffc",
     "recipe:ciel": "1b916b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "aa0773",
@@ -60,10 +60,10 @@
     "recipe:sv-elab": "afb070",
     "recipe:sv2v": "3a8690",
     "recipe:verilator": "29a18b",
-    "recipe:xschem": "c19248",
+    "recipe:xschem": "0cb417",
     "recipe:xyce": "8baf0a",
     "recipe:yices2": "0a2e39",
     "recipe:yosys": "baa757"
   },
-  "manifest_identity": "c67f385c3833b6c05b8d50123f5c56b395a57c56fb13d1b29695928eaae962cb"
+  "manifest_identity": "c228994bb8f2e54c371a9ea6ef24b2436397c2162c245fdaec8a8e148bacdf82"
 }
