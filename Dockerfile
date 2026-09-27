@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=bcb92f046a881cb94b59c548cc827986b02bef90
+ARG LIBRELANE_REF=9cf849541fb02082c5890cbbf2cab4d796a9f8f9
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2197,7 +2197,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              e0ea78d294e0f5d6951d9210a8c064fbea45f46a f60ce1473a64333f2c8757d7117dd3db63c36b84 \
              2678800f927e5a21d9eaa91276204e44f0e6308f 2f324495ed8ae1fa8a590b5d9d54cad7d7a2284d \
              de4b3fd864cd80dab715a3acd81e237e704462f4 ea9d54191cc27ca4e10e5d6931bdd31832e268e1 \
-             81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb; do \
+             81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb \
+             9f2f6815f2e9da427f753f44f2fd484de49209af; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2264,6 +2265,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
         || { echo "FAIL: KLayout.LVS run_runset / SealRing+Filler run_ihp_sg13g2 (e0ea78d, f60ce14) / UNVERIFIED_RUNSETS is exactly gf180mcuA, gf180mcuB, gf180mcuC (ea9d541)" >&2; exit 1; }; \
     python3 -P -c "import inspect; from librelane.common.metrics import Metric; import librelane.common.metrics.library; from librelane.steps.klayout import LVS; from librelane.steps.misc import ReportManufacturability; m = Metric.by_name.get('klayout__lvs_error__count'); assert m is not None and m.critical and not m.higher_is_better, m; assert LVS.METRIC == 'klayout__lvs_error__count', LVS.METRIC; assert 'NOT_MEASURED' in inspect.getsource(LVS.run), 'LVS.run skip message'; assert 'klayout__lvs_error__count' in str(vars(ReportManufacturability)), 'ReportManufacturability klayout_lvs engine'; print('KLayout.LVS: klayout__lvs_error__count declared; a skipped step leaves it NOT_MEASURED')" \
         || { echo "FAIL: klayout__lvs_error__count is not declared / written only by KLayout.LVS / an engine of ReportManufacturability (81fb28d)" >&2; exit 1; }; \
+    python3 -P -c "from librelane.steps.misc import ReportManufacturability as R; e = R.ENGINE_METRICS; assert e['lvs'] == ['design__lvs_error__count'], e['lvs']; assert e['netgen_lvs'] == ['design__lvs_unmatched_pin__count', 'design__lvs_unmatched_net__count'], e.get('netgen_lvs'); d = {v.name: v for v in R.config_vars}['MANUFACTURABILITY_REQUIRED_ENGINES'].default; assert 'lvs' in d and 'netgen_lvs' not in d, d; print('ReportManufacturability: lvs requires the count both LVS steps write; Netgen breakdown is netgen_lvs, not required by default')" \
+        || { echo "FAIL: ReportManufacturability still requires Netgen's unmatched counts under lvs, so a KLayout.LVS flow is NOT_MEASURED (9f2f681)" >&2; exit 1; }; \
     python3 -P -c "import inspect; from librelane.steps.checker import MetricChecker, YosysUnmappedCells, missing_metric_variable; from librelane.steps.misc import NOT_MEASURED; assert missing_metric_variable.name == 'ERROR_ON_MISSING_METRIC' and missing_metric_variable.default is True, missing_metric_variable; assert callable(MetricChecker.metric_not_measured) and 'NOT_MEASURED' in inspect.getsource(MetricChecker.metric_not_measured); assert 'self.metric_not_measured()' in inspect.getsource(MetricChecker.run); assert missing_metric_variable in YosysUnmappedCells.config_vars; assert NOT_MEASURED == 'NOT_MEASURED'; print('checkers: an absent metric is NOT_MEASURED (ERROR_ON_MISSING_METRIC defaults to true)')" \
         || { echo "FAIL: a checker's absent metric is not NOT_MEASURED / ERROR_ON_MISSING_METRIC is not declared (2678800)" >&2; exit 1; }; \
     if grep -nE '^[^#]*utl[.]metric_?' $LLN/scripts/odbpy/*.py; then \
