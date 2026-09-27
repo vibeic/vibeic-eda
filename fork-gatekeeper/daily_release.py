@@ -4085,7 +4085,7 @@ def _last_line(proc) -> str:
             or ["(no output)"])[-1]
 
 
-def publish_release_page(version: str, *, run=subprocess.run,
+def publish_release_page(version: str, *, run=None,
                          out: Optional[str] = None) -> Tuple[bool, str]:
     """Write the public page for the release that just published `version`.
 
@@ -4106,6 +4106,13 @@ def publish_release_page(version: str, *, run=subprocess.run,
     rather than written with the previous one. Advisory like before -- a page
     failure never fails a release that is already in the registry.
     """
+    # Resolved at CALL time, never bound as a default argument. A default
+    # `run=subprocess.run` captured the real function at import, so every
+    # test that stubs `daily_release.subprocess.run` (the release tests do,
+    # module-wide) still ran the real discover_forks with
+    # GK_PRODUCTION_WRITER=1 -- measured 2026-09-27 11:52: a pytest run of
+    # #259 rewrote the production ledger from a scratch checkout.
+    run = run or subprocess.run
     here = Path(__file__).resolve()
     env = {**os.environ, "GK_PRODUCTION_WRITER": "1"}
     notes = []
