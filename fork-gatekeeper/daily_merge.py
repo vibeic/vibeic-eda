@@ -527,8 +527,24 @@ def _salient(out: str, err: str) -> str:
     """
     for stream in (err, out):
         lines = (stream or "").splitlines()
-        hit = [ln.strip() for ln in lines
-               if any(k in ln for k in _DEFECT_MARKERS)]
+        hit: List[str] = []
+        for i, ln in enumerate(lines):
+            if not any(k in ln for k in _DEFECT_MARKERS):
+                continue
+            hit.append(ln.strip())
+            # A marker line that ENDS IN A COLON announces a list, and the list
+            # is the finding. Measured 2026-09-27: klayout's check_suite_list.sh
+            # prints "FAIL: run_all.sh does not name these harnesses ...:" and
+            # then the harness path on the next, indented, line; keeping only
+            # the marker line put an empty list in the round log and in the
+            # tick's REFUSE, so the reader had to rerun the check to learn
+            # which file it meant. Carry the indented lines that follow.
+            if ln.rstrip().endswith(":"):
+                for nxt in lines[i + 1:i + 1 + 8]:
+                    if not nxt.strip() or not nxt[:1].isspace():
+                        break
+                    if nxt.strip() not in hit:
+                        hit.append(nxt.strip())
         if hit:
             return " | ".join(hit[:8])[:400]
     tail = ((err or "").strip() or (out or "").strip()).splitlines()
