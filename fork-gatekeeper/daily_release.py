@@ -3892,20 +3892,7 @@ def _main_under_release_lock(argv=None) -> int:
             # fail a release that already succeeded and is already in the
             # registry.
             if pushed:
-                try:
-                    import subprocess as _sp
-                    _pg = _sp.run(
-                        [sys.executable,
-                         str(Path(__file__).resolve().with_name(
-                             "build_page.py")),
-                         "--out", _PRODUCTION_PAGE],
-                        env={**os.environ, "GK_PRODUCTION_WRITER": "1"},
-                        capture_output=True, text=True, timeout=600)
-                    _pok = _pg.returncode == 0
-                    _pnote = ((_pg.stdout or _pg.stderr or "").strip()
-                              .splitlines() or ["(no output)"])[-1]
-                except Exception as _e:      # noqa: BLE001
-                    _pok, _pnote = False, f"{_e.__class__.__name__}: {_e}"
+                _pok, _pnote = publish_release_page(new)
                 print(f"  page: {'published' if _pok else 'FAILED'} — {_pnote}")
                 result.setdefault("page_publish", {})["ok"] = bool(_pok)
                 result["page_publish"]["note"] = _pnote
@@ -4091,6 +4078,53 @@ def _option_value(argv: List[str], name: str) -> Optional[str]:
         if item.startswith(prefix):
             return item[len(prefix):]
     return None
+
+
+def _last_line(proc) -> str:
+    return ((proc.stdout or proc.stderr or "").strip().splitlines()
+            or ["(no output)"])[-1]
+
+
+def publish_release_page(version: str, *, run=subprocess.run,
+                         out: Optional[str] = None) -> Tuple[bool, str]:
+    """Write the public page for the release that just published `version`.
+
+    THE PAGE NAMES THE VERSION IT WAS RENDERED FROM, AND THAT WAS THE WRONG ONE.
+    `build_page` renders the fork LEDGER, and the ledger's `image_version` (with
+    every pin and count beside it) is written by `discover_forks`, which this
+    step never ran. Measured 2026-09-27: 0.3.81 was released at 10:48, this step
+    rewrote https://vibeic.ai/eda-forks.html at 10:49 from the ledger discovery
+    had written at 07:37, after 0.3.80, and the page said "0.3.80" on all 42
+    rows while RELEASED.json and VERSION said 0.3.81. The round that followed
+    refreshed the ledger but skipped its own publish (gap open), so the stale
+    page stayed up.
+
+    So the ledger is refreshed FIRST, from the record this release has already
+    committed and pushed, and `build_page` is told which version this release
+    published: it refuses (and the last page stays) unless every ledger row
+    names it. A page that cannot say the version it certifies is not written,
+    rather than written with the previous one. Advisory like before -- a page
+    failure never fails a release that is already in the registry.
+    """
+    here = Path(__file__).resolve()
+    env = {**os.environ, "GK_PRODUCTION_WRITER": "1"}
+    notes = []
+    try:
+        disc = run([sys.executable, str(here.with_name("discover_forks.py"))],
+                   env=env, capture_output=True, text=True, timeout=1800)
+        if disc.returncode != 0:
+            notes.append(f"ledger refresh rc={disc.returncode}: "
+                         f"{_last_line(disc)}")
+        pg = run([sys.executable, str(here.with_name("build_page.py")),
+                  "--out", out or _PRODUCTION_PAGE,
+                  "--expect-image-version", version],
+                 env=env, capture_output=True, text=True, timeout=600)
+        ok = pg.returncode == 0
+        notes.append(_last_line(pg))
+    except Exception as e:      # noqa: BLE001
+        ok = False
+        notes.append(f"{e.__class__.__name__}: {e}")
+    return ok, " · ".join(notes)
 
 
 # The published page path, resolved from gk_state without importing it at module

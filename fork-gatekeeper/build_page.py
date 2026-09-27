@@ -2474,7 +2474,30 @@ def _atomic_page(out: Path, html: str) -> None:
             pass
 
 
-def build(out: Path, *, publication: PublicationEvidence | None = None):
+def require_image_version(ledgers: list[dict], expected: str) -> None:
+    """Refuse unless every ledger row names `expected` as its image version.
+
+    The page's headline version is `LEDGERS[0].image_version`, and every pin and
+    count beside it comes from the same rows. A release that has just published
+    `expected` and renders ledgers written before it would put the PREVIOUS
+    version on the page -- measured 2026-09-27, 0.3.81 released and the page
+    said 0.3.80 on all 42 rows. Absent is not a match either.
+    """
+    if not ledgers:
+        raise PublicationEvidenceError(
+            f"no ledger rows to render for image {expected}")
+    wrong = sorted({f"{row.get('tool')}={row.get('image_version')!r}"
+                    for row in ledgers
+                    if row.get("image_version") != expected})
+    if wrong:
+        raise PublicationEvidenceError(
+            f"ledger does not describe image {expected}: "
+            f"{len(wrong)} row(s) say otherwise ({', '.join(wrong[:5])}"
+            f"{', ...' if len(wrong) > 5 else ''})")
+
+
+def build(out: Path, *, publication: PublicationEvidence | None = None,
+          expect_image_version: str | None = None):
     # vibeic/vibeic-eda#12. The published page is the third shared production artefact
     # with the same exposure as the cache and the ledgers: it is derived from whatever
     # state THIS process happened to read, so a run against an empty or scratch state
@@ -2502,6 +2525,8 @@ def build(out: Path, *, publication: PublicationEvidence | None = None):
               file=sys.stderr)
     strict = publication is not None
     ledgers = _load_ledgers(strict=strict)
+    if expect_image_version is not None:
+        require_image_version(ledgers, expect_image_version)
     if publication is not None:
         _validate_ledger_round(ledgers, publication)
     # A report file is a separately-written best-effort artefact with no run
@@ -2646,6 +2671,9 @@ def main(argv=None) -> int:
     ap.add_argument("--fork-github-json", type=Path)
     ap.add_argument("--release-ll-json", type=Path)
     ap.add_argument("--expected-github-actor")
+    ap.add_argument("--expect-image-version",
+                    help="refuse unless every ledger row names this image "
+                         "version (a release's page must name its release)")
     args = ap.parse_args(argv)
     values = (
         args.round_at, args.run_id, args.forks_json, args.gap_json,
@@ -2664,7 +2692,8 @@ def main(argv=None) -> int:
         )
     else:
         publication = None
-    build(args.out, publication=publication)
+    build(args.out, publication=publication,
+          expect_image_version=args.expect_image_version)
     return 0
 
 
