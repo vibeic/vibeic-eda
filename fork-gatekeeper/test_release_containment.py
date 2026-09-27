@@ -2760,7 +2760,7 @@ def _sweep(monkeypatch, led: dict) -> int:
     monkeypatch.setattr(df.gk_state, "require_writable", lambda *a, **k: None)
     monkeypatch.setattr(df, "_gh_file", lambda *a, **k: "")
     monkeypatch.setattr(df, "gh", lambda p: {"_err": "no network in this test"})
-    monkeypatch.setattr(df, "discover_one", lambda fork, pins, ver: dict(led, tool=TOOL))
+    monkeypatch.setattr(df, "discover_one", lambda fork, pins, ver, *overlays: dict(led, tool=TOOL))
     return df.main()
 
 

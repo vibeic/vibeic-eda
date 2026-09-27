@@ -72,6 +72,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # IMPORTED, never re-derived — see its docstring, and vibeic-eda#29 for what two
 # copies of one rule cost.
 import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79)
+import overlay_ship  # noqa: E402 — overlay-installed tools ship a LIST, not a pin
 # IMPORTED for `_ls_remote_head`, never re-spelled: three programs now need to
 # ask a remote what a branch really points at, and a fourth copy of that rule is
 # how this same defect reached three files. See `fetch_confirms_current`.
@@ -170,6 +171,25 @@ def pins_from_dockerfiles(repo: Path, ref: str = "origin/main") -> Dict[str, str
             continue
         for stem, sha in ARG_RE.findall(body):
             out.setdefault(stem, sha)
+    return out
+
+
+def overlays_from_dockerfiles(repo: Path, ref: str = "origin/main"
+                              ) -> Dict[str, "overlay_ship.Overlay"]:
+    """Every per-commit overlay the image build applies, keyed by ARG stem.
+
+    Same committed tree as `pins_from_dockerfiles`. A tool listed here ships
+    the overlay's commits, not its pinned tree -- see `overlay_ship`.
+    """
+    out: Dict[str, overlay_ship.Overlay] = {}
+    listing = _git(repo, "ls-tree", "-r", "--name-only", ref) or ""
+    for path in listing.splitlines():
+        if not path.endswith("Dockerfile"):
+            continue
+        body = _git(repo, "show", f"{ref}:{path}")
+        if body:
+            for stem, ov in overlay_ship.parse_overlays(body).items():
+                out.setdefault(stem, ov)
     return out
 
 
@@ -342,46 +362,6 @@ def upstream_head(clone: Path, default_branch: Optional[str] = None) -> Optional
     return None
 
 
-def ours_past_the_pin(clone: Path, pin: str, up: str,
-                      tip: str) -> Optional[List[dict]]:
-    """Our commits that the image does NOT ship: `pin..<published tip>` minus
-    what upstream has.
-
-    Q2 was first answered with the ledger's `integrated` flag — "does the image
-    build from our fork at all". It does, for OpenROAD and iverilog and three
-    more, and the answer published was "0 stranded" while a fix of ours from that
-    same morning sat past the pin, unbuilt. `integrated` is a fact about the
-    Dockerfile; where the PIN STOPPED is a different fact, and it is the one the
-    question asks about.
-
-    DERIVED, not author-matched. Our commits are by definition the ones upstream
-    does not carry, so a set difference finds them — including a commit an
-    outside contributor landed on our fork, which an @vibeic/@defintek email
-    pattern silently drops.
-
-    `merge` is recorded per commit rather than filtered out here, because the two
-    populations need opposite handling: a merge of ours whose CONTENT is
-    upstream's is not our fix going unshipped, and counting it would raise an
-    alarm after every routine 05:30 sync. The headline counts substantive only;
-    the merge count stays visible so the lag is never invisible either.
-
-    None (never []) when it cannot be derived — an unresolvable pin is NOT zero.
-    """
-    out = _git(clone, "rev-list", f"{pin}..{tip}", "--not", up, timeout=120)
-    if out is None:
-        return None
-    rows: List[dict] = []
-    for sha in out.split():
-        meta = _git(clone, "show", "-s", "--format=%p\x1f%an\x1f%ad\x1f%s",
-                    "--date=short", sha, timeout=30)
-        if meta is None:
-            return None                      # partial truth is not truth here
-        parents, an, ad, subj = (meta.split("\x1f") + ["", "", "", ""])[:4]
-        rows.append({"sha": sha[:12], "merge": len(parents.split()) >= 2,
-                     "author": an, "date": ad, "subject": subj})
-    return rows
-
-
 def vendored_pin(forks_root: Path, led: dict) -> Optional[str]:
     """The effective pin of a fork that reaches the image INSIDE another fork.
 
@@ -495,7 +475,7 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
     ledger's `vibeic_branch` on the strength of `rev-parse --verify` — EXISTENCE,
     not currency — and ranked it ABOVE `origin/master`. A recorded branch that has
     stopped tracking the default still resolves perfectly well, and `sync_lag`,
-    `release_lag` and `ours_past_the_pin` are then all counted from it. A stale
+    `release_lag` and `overlay_ship.classify` are then all counted from it. A stale
     tip counts FEWER of our commits past the pin than there are, so the report
     reads GREEN precisely when work is stranded. The docstring above exists to
     refuse an untrustworthy ref; the code below trusted a different one.
@@ -646,8 +626,12 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
 
 def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
             merge_evidence: Optional[dict] = None,
-            require_merge_evidence: bool = False) -> dict:
+            require_merge_evidence: bool = False,
+            forks_json: Optional[Path] = None,
+            tracker_state=overlay_ship.gh_tracker_state) -> dict:
     pins = pins_from_dockerfiles(repo)
+    overlays = overlays_from_dockerfiles(repo)
+    held = overlay_ship.load_held(forks_json)
     assertions = assertions_from_dockerfiles(repo)
     rows: List[dict] = []
     for lf in sorted(ledger.glob("*.json")):
@@ -838,12 +822,28 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
             elif row.get("sync_lag_at_merge") == row["sync_lag"]:
                 # standalone legacy path: same conservative fallback as sync
                 row["image_behind_at_merge"] = row["image_behind"]
-            ours = ours_past_the_pin(clone, row["pin"], up, tip)
-            row["ours_unshipped"] = None if ours is None else len(ours)
+            # OVERLAY-AWARE (see `overlay_ship`). A tool the image builds at
+            # its pin ships `pin..tip`; a tool whose Dockerfile OVERLAYS a list
+            # of fork commits ships that list, whatever the pin says -- and
+            # the pin is moved to the fork tip by every release, so `pin..tip`
+            # read 0 while fork commits outside the list shipped nothing.
+            # HELD commits (FORKS.json, open tracker) are listed, not counted.
+            ov = overlay_ship.overlay_for(overlays, tool)
+            ship = overlay_ship.classify(clone, row["pin"], tip, up, ov,
+                                         held.get(tool) or [], tracker_state)
+            row["ship_model"] = "overlay" if ov is not None else "pin"
+            row["ours_unshipped"] = None if ship is None else ship["ours_unshipped"]
             row["ours_unshipped_substantive"] = (
-                None if ours is None else len([c for c in ours if not c["merge"]]))
+                None if ship is None else ship["ours_unshipped_substantive"])
             row["unshipped_commits"] = (
-                [] if ours is None else [c for c in ours if not c["merge"]])
+                [] if ship is None else ship["unshipped_commits"])
+            row["held_commits"] = [] if ship is None else ship["held_commits"]
+            row["held_notes"] = [] if ship is None else ship["held_notes"]
+            if ov is not None and ship is not None:
+                row["overlay"] = {
+                    "listed": ship["listed"], "shipped": ship["shipped"],
+                    "shipped_how": ship["shipped_how"],
+                    "out_of_scope": ship["out_of_scope"]}
         elif not row["integrated"]:
             row["note"] = "image does not build from our fork (no ARG pin) — see vibeic-eda#60"
         else:
@@ -854,6 +854,8 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         r.setdefault("ours_unshipped", None)
         r.setdefault("ours_unshipped_substantive", None)
         r.setdefault("unshipped_commits", [])
+        r.setdefault("held_commits", [])
+        r.setdefault("held_notes", [])
     measurable = [r for r in rows if r["image_behind"] is not None]
     # A contents assertion is EXCLUDED FROM BOTH, and the second exclusion is the
     # one that takes thought. Dropping it from `measurable` is obvious. Dropping
@@ -909,6 +911,12 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
             sum(r["ours_unshipped_substantive"] or 0 for r in rows),
         "q2_unshipped_commits": [dict(c, tool=r["tool"])
                                  for r in rows for c in r["unshipped_commits"]],
+        # Deliberately kept out of the image, each with its reason and an OPEN
+        # tracker. Listed beside the count, never inside it, and never hidden.
+        "q2_held_commits": [dict(c, tool=r["tool"])
+                            for r in rows for c in r["held_commits"]],
+        "q2_held_notes": [f"{r['tool']}: {n}"
+                          for r in rows for n in r["held_notes"]],
         "q2_unmeasured_ship": [r["tool"] for r in rows
                                if r["integrated"] and r["pin"]
                                and r["ours_unshipped"] is None],
@@ -1375,7 +1383,7 @@ def main(argv=None) -> int:
     current_round = a.round_at is not None
     payload = analyse(
         a.repo, a.forks_root, a.ledger, not a.no_fetch, mev,
-        require_merge_evidence=current_round)
+        require_merge_evidence=current_round, forks_json=a.forks_json)
     payload.update(_fleet_evidence(a.forks_json, a.ledger,
                                    payload.get("rows"), mev,
                                    require_merge_evidence=current_round))
@@ -1429,6 +1437,23 @@ def main(argv=None) -> int:
     for c in rep["q2_unshipped_commits"]:
         print(f"          {c['tool']}/{c['sha']}  {c['date']}  {c['author']}")
         print(f"              {c['subject']}")
+    held = rep.get("q2_held_commits") or []
+    print(f"      HELD (not counted while the tracker is open): {len(held)}")
+    for c in held:
+        print(f"          HELD {c['tool']}/{c['sha']}  {c['subject']}")
+        print(f"              reason: {c['reason']}  tracked by {c['tracked_by']}"
+              f" ({c['tracker_state']})")
+    for n in rep.get("q2_held_notes") or []:
+        print(f"          held declaration: {n}")
+    for r in rep["rows"]:
+        ov = r.get("overlay")
+        if ov:
+            print(f"      {r['tool']}: OVERLAY — {ov['listed']} commit(s) listed in "
+                  f"the Dockerfile, {ov['shipped']} fork commit(s) shipped by "
+                  f"it, {r.get('ours_unshipped_substantive')} not, "
+                  f"{len(ov['out_of_scope'])} outside its scope (nothing to ship)")
+            for c in ov["out_of_scope"]:
+                print(f"          out of scope {r['tool']}/{c['sha']}  {c['subject']}")
     # Named as its own category, not merely skipped. A row that vanishes is a row
     # nobody can audit, and the fact these carry — WHICH upstream commit the
     # shipped artefact contains — is the whole reason the ARG exists.
