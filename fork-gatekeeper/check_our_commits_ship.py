@@ -78,8 +78,37 @@ def _squash_carried(repo_dir: Path, pin: str, br: str) -> bool:
     return bool(carried_by)
 
 
-def stranded(repo_dir: Path, pin: str) -> List[dict]:
-    """Our commits reachable from some local branch but NOT from the pin."""
+def _held_for_its_pr(repo_dir: Path, br: str):
+    """`(verdict, reason)` when `br` waits on a pull request, else None.
+
+    daily_0530 no longer consolidates a branch that heads an OPEN pull request
+    on the fork, or whose newest PR was closed unmerged (librelane #16/#17,
+    2026-09-27): the PR is where that work is decided. Such a branch is not
+    stranded -- counting it here would turn every PR under review into a red
+    tick (rc=6) and push the next person to merge it by hand, which is the
+    defect all over again. One predicate, imported, so the program that merges
+    and the program that audits cannot disagree about which branches are owed.
+
+    Unknown PR state returns None: the branch is reported as stranded, because
+    unknown never hides a stranded commit.
+    """
+    try:
+        from daily_0530 import (_fork_branch_pull_requests,
+                                consolidation_verdict)
+    except ImportError:
+        return None
+    verdict, why = consolidation_verdict(_fork_branch_pull_requests(
+        ("git", "-C", str(repo_dir)), br))
+    if verdict in ("open_pr", "declined_pr"):
+        return verdict, why
+    return None
+
+
+def stranded(repo_dir: Path, pin: str, held: List[dict] = None) -> List[dict]:
+    """Our commits reachable from some local branch but NOT from the pin.
+
+    Commits on a branch that is waiting on its pull request are appended to
+    `held` (when given) instead of being returned."""
     if not sh("git", "-C", str(repo_dir), "cat-file", "-t", pin):
         return []
     out: List[dict] = []
@@ -128,6 +157,7 @@ def stranded(repo_dir: Path, pin: str) -> List[dict]:
         # probe, imported, so the two programs cannot disagree about it.
         if _squash_carried(repo_dir, pin, br):
             continue
+        rows: List[dict] = []
         log = sh("git", "-C", str(repo_dir), "log", "--no-merges",
                  "--format=%H%x1f%an%x1f%ad%x1f%s", "--date=short", f"{pin}..{br}")
         for line in log.splitlines():
@@ -141,9 +171,23 @@ def stranded(repo_dir: Path, pin: str) -> List[dict]:
                 continue
             if not any(o in author.lower() for o in OURS):
                 continue
-            seen.add(sha)
-            out.append({"sha": sha[:9], "author": author, "date": date,
-                        "subject": subject[:100], "branch": br})
+            rows.append({"sha": sha[:9], "author": author, "date": date,
+                         "subject": subject[:100], "branch": br, "_full": sha})
+        if not rows:
+            continue
+        pending = _held_for_its_pr(repo_dir, br)
+        for row in rows:
+            full = row.pop("_full")
+            if pending is not None:
+                # NOT added to `seen`: the same patch on a branch without a
+                # PR is still stranded there.
+                if held is not None:
+                    row["held"] = pending[0]
+                    row["reason"] = pending[1]
+                    held.append(row)
+                continue
+            seen.add(full)
+            out.append(row)
     return out
 
 
@@ -166,6 +210,7 @@ def main(argv=None) -> int:
         if forks_root.is_dir() else {}
 
     report: Dict[str, list] = {}
+    held_report: Dict[str, list] = {}
     checked = 0
     for var, pin in sorted(pins(bake_path.read_text()).items()):
         cand = var.lower().replace("_", "-")
@@ -173,9 +218,12 @@ def main(argv=None) -> int:
         if d is None:
             continue
         checked += 1
-        s = stranded(d, pin)
+        held: List[dict] = []
+        s = stranded(d, pin, held)
         if s:
             report[d.name] = s
+        if held:
+            held_report[d.name] = held
 
     if not checked:
         print(f"{PROGRAM}: no fork checkout matched any pin — nothing verified",
@@ -185,10 +233,15 @@ def main(argv=None) -> int:
     total = sum(len(v) for v in report.values())
     summary = {"program": PROGRAM, "tools_checked": checked,
                "tools_with_stranded_work": len(report),
-               "stranded_commits": total, "detail": report}
+               "stranded_commits": total, "detail": report,
+               "held_for_pull_request": held_report}
     if args.json:
         Path(args.json).write_text(json.dumps(summary, indent=2) + "\n")
 
+    for tool, rows in sorted(held_report.items()):
+        print(f"  {tool}: {len(rows)} commit(s) held for their pull request "
+              f"(not stranded): " + ", ".join(sorted(
+                  {f"{r['branch']} ({r['reason']})" for r in rows})))
     if not report:
         print(f"{PROGRAM}: {checked} tool(s) checked; every commit of ours is "
               f"reachable from the branch its pin names")

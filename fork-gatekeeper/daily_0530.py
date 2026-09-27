@@ -48,6 +48,11 @@ WHAT IT REFUSES
   that looked stale locally was 7924 upstream commits BEHIND its own origin,
   and an unguarded force would have destroyed them.
 * It never cuts an image version when no tool changed.
+* It never merges a branch whose pull request is still OPEN on the fork, or
+  whose newest pull request was closed unmerged, and it refuses (needs_human)
+  when GitHub cannot say which: the PR is the gatekeeper's decision point, and
+  consolidation that merges past it took the decision away (librelane #16/#17,
+  2026-09-27). See `consolidation_verdict`.
 * It never RESOLVES a conflict by itself. A merge conflict between our own work
   and upstream is a judgement call, and pretending otherwise is how a fix gets
   silently dropped.
@@ -1101,8 +1106,160 @@ def _branch_work_against(g, target, branch):
     return [], evidence
 
 
+_FORK_BRANCH_PRS_GRAPHQL = (
+    "query($owner:String!,$name:String!,$head:String!){"
+    " repository(owner:$owner,name:$name){ nameWithOwner"
+    "  pullRequests(headRefName:$head, first:100,"
+    "   states:[OPEN,CLOSED,MERGED]){"
+    "   totalCount"
+    "   nodes{ number url state createdAt mergedAt closedAt"
+    "          headRefName headRefOid headRepository{ nameWithOwner } } } } }")
+
+
+def _fork_branch_pull_requests(g, branch):
+    """Every pull request ON THE FORK whose head is `branch`, asked of GitHub.
+
+    WHY CONSOLIDATION NEEDS THIS (measured 2026-09-27)
+    --------------------------------------------------
+    The 09:17 round merged `origin/next/claude-mig104-fill-area` and
+    `origin/next/claude-mig105-signoff-not-silent` into librelane's main and
+    pushed. Both were the heads of OPEN pull requests on vibeic/librelane --
+    #17 under a fork-gatekeeper HOLD review for a DRC/LVS defect, #16 with its
+    verification still running -- and GitHub marked both MERGED at
+    01:23:43Z because their commits had arrived on the base by another road.
+
+    The selection rule was the 2026-07-31 one: any origin branch that holds a
+    patch of ours absent from BOTH mainlines is "stranded work" and gets merged.
+    It predates PRs on the forks. The owner's ruling it implements says the
+    branch exists "為了要驗證某一個 PR 有沒有結束，結束了以後" -- the commits
+    come in AFTER the PR is done. A branch whose PR is still open is not
+    stranded; it is waiting on the gatekeeper, and the PR is where that decision
+    is made. Git cannot answer "is there a PR", so GitHub is asked -- through
+    GraphQL, because REST/search have returned empty sets for this org.
+
+    Returns ``{"outcome": "complete", "prs": [...]}`` or
+    ``{"outcome": "norecord", "reason": ...}``. NORECORD is never "no PRs":
+    the caller refuses to merge on it.
+    """
+    head = branch.removeprefix("origin/")
+    origin_url = out(*g, "remote", "get-url", "origin")
+    slug = _remote_slug(origin_url)
+
+    def _norecord(reason, **extra):
+        row = {"outcome": "norecord", "repository": slug or None,
+               "head_ref": head, "prs": None, "reason": reason}
+        row.update(extra)
+        return row
+
+    if not slug or not _is_github_remote(origin_url):
+        return _norecord("origin is not a GitHub repository; a local remote is "
+                         "not evidence that the branch has no pull request")
+    owner, name = slug.split("/", 1)
+    result = sh("gh", "api", "graphql",
+                "-f", f"owner={owner}", "-f", f"name={name}",
+                "-f", f"head={head}",
+                "-f", f"query={_FORK_BRANCH_PRS_GRAPHQL}",
+                timeout=GITHUB_API_TIMEOUT_S)
+    if result.returncode != 0:
+        return _norecord(f"GitHub GraphQL failed: {_first_error_line(result)}",
+                         rc=result.returncode)
+    try:
+        body = json.loads(result.stdout or "")
+    except (TypeError, json.JSONDecodeError):
+        return _norecord("GitHub GraphQL answer is not complete JSON")
+    if not isinstance(body, dict) or body.get("errors"):
+        return _norecord("GitHub GraphQL answered with errors: "
+                         f"{str((body or {}).get('errors'))[:200]}")
+    repo = (body.get("data") or {}).get("repository")
+    if not isinstance(repo, dict):
+        return _norecord("GitHub GraphQL did not resolve the repository")
+    if str(repo.get("nameWithOwner", "")).lower() != slug.lower():
+        return _norecord(f"GitHub answered for {repo.get('nameWithOwner')!r}, "
+                         f"not {slug!r}")
+    conn = repo.get("pullRequests")
+    if not isinstance(conn, dict):
+        return _norecord("pullRequests connection missing")
+    total, nodes = conn.get("totalCount"), conn.get("nodes")
+    if type(total) is not int or not isinstance(nodes, list):
+        return _norecord("pullRequests connection malformed")
+    if total != len(nodes):
+        # More than one page (or a truncated one). An unread page may hold the
+        # open PR; partial evidence is not evidence.
+        return _norecord(f"{total} pull request(s) exist, {len(nodes)} read")
+    prs = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            return _norecord("pull request node is not an object")
+        number, state = node.get("number"), node.get("state")
+        if type(number) is not int or number <= 0:
+            return _norecord("pull request number missing")
+        if state not in ("OPEN", "CLOSED", "MERGED"):
+            return _norecord(f"pull request #{number} has state {state!r}")
+        if node.get("headRefName") != head:
+            return _norecord(f"pull request #{number} head is "
+                             f"{node.get('headRefName')!r}, not {head!r}")
+        head_repo = node.get("headRepository")
+        head_slug = (head_repo.get("nameWithOwner")
+                     if isinstance(head_repo, dict) else None)
+        # A PR from ANOTHER repository that happens to use the same branch
+        # name is not about our branch. A deleted head repository cannot be
+        # told apart from ours, so it is kept: holding a merge on a PR that
+        # might be ours costs a day; merging past one costs the review.
+        if isinstance(head_slug, str) and head_slug.lower() != slug.lower():
+            continue
+        prs.append({"number": number, "state": state, "url": node.get("url"),
+                    "created_at": node.get("createdAt"),
+                    "merged_at": node.get("mergedAt"),
+                    "closed_at": node.get("closedAt"),
+                    "head_oid": node.get("headRefOid")})
+    return {"outcome": "complete", "repository": slug, "head_ref": head,
+            "prs": prs, "via": "graphql"}
+
+
+def consolidation_verdict(evidence):
+    """Whether a branch's PR state lets consolidation merge it.
+
+    Returns ``(verdict, detail)``:
+
+    * ``"merge"``      -- no pull request ever had this head (lane work nobody
+                          put up for review: the 2026-07-31 consolidation
+                          rule), or its newest one was MERGED (the PR is done;
+                          "結束了以後" its commits come in).
+    * ``"open_pr"``    -- a PR with this head is OPEN. The PR is the
+                          gatekeeper's decision point -- HOLD, verification in
+                          progress, or simply unreviewed -- and a merge here
+                          would take that decision away from it.
+    * ``"declined_pr"``-- the newest PR was CLOSED without merging. Somebody
+                          said no (or superseded it); merging the branch would
+                          reverse that.
+    * ``"unknown"``    -- PR state could not be determined. Refuse, loudly.
+    """
+    if not isinstance(evidence, dict) or evidence.get("outcome") != "complete":
+        reason = (evidence or {}).get("reason") if isinstance(
+            evidence, dict) else None
+        return "unknown", reason or "pull request state not measured"
+    prs = evidence.get("prs")
+    if not isinstance(prs, list):
+        return "unknown", "pull request list missing"
+    open_prs = [p for p in prs if p.get("state") == "OPEN"]
+    if open_prs:
+        return "open_pr", ", ".join(f"#{p['number']}" for p in open_prs)
+    if not prs:
+        return "merge", "no pull request has this head"
+    newest = max(prs, key=lambda p: p["number"])
+    if newest.get("state") == "MERGED":
+        return "merge", f"#{newest['number']} merged"
+    return "declined_pr", f"#{newest['number']} closed without merging"
+
+
 def step2_ours(g, main, rep):
-    """Our branches -> master, against local and authoritative remote lines."""
+    """Our branches -> master, against local and authoritative remote lines.
+
+    Only branches whose pull-request state allows it are merged: a branch that
+    heads an OPEN PR on the fork, or whose newest PR was closed unmerged, is
+    left for the PR to decide (see `consolidation_verdict`), and a branch whose
+    PR state cannot be read is REFUSED with `needs_human` -- never merged.
+    """
     brs = _fork_branches(g, main)
     if brs is None:
         # NOT `[]`. An unanswerable question rendered as "this fork has no
@@ -1240,9 +1397,45 @@ def step2_ours(g, main, rep):
                 "branch": b, "outcome": "no_owned_work", "checks": checks,
             })
             continue
+        # THE PR, NOT GIT, DECIDES WHETHER THIS BRANCH IS DONE. Asked only for
+        # a branch that would otherwise merge, so a quiet fork costs no API
+        # call; asked BEFORE the merge, so nothing is undone afterwards.
+        pr_evidence = _fork_branch_pull_requests(g, b)
+        verdict, why = consolidation_verdict(pr_evidence)
+        if verdict != "merge":
+            outcome = {"open_pr": "held_by_open_pr",
+                       "declined_pr": "held_by_declined_pr",
+                       "unknown": "refused_pr_state_unknown"}[verdict]
+            rep.setdefault("ours_branch_evidence", []).append({
+                "branch": b, "outcome": outcome, "commits": len(mine),
+                "reason": why, "pull_requests": pr_evidence, "checks": checks,
+            })
+            rep.setdefault("ours_held", []).append({
+                "branch": b, "commits": len(mine), "verdict": verdict,
+                "reason": why,
+            })
+            if verdict == "unknown":
+                # FAIL LOUDLY. Silence here was the old behaviour's whole
+                # defect in a different costume: an unanswered question read
+                # as permission.
+                print(f"  [REFUSED] {b}: pull-request state unknown ({why}); "
+                      f"not merged", file=sys.stderr)
+                # Also `merge_unmeasurable`: whether this branch conflicts was
+                # never measured, and the release authorizer already refuses
+                # a round carrying that key -- so the refusal reaches the
+                # release gate, not only this round's exit code.
+                rep.setdefault("merge_unmeasurable", []).append({
+                    "branch": b, "commits": len(mine),
+                    "outcome": "unmeasurable", "rc": pr_evidence.get("rc")
+                    if isinstance(pr_evidence, dict) else None,
+                    "stage": "pull_request_state", "detail": why,
+                })
+                rep["needs_human"] = True
+            continue
         rep.setdefault("ours_branch_evidence", []).append({
             "branch": b, "outcome": "outstanding",
             "commits": len(mine), "checks": checks,
+            "pull_requests": pr_evidence,
         })
         r = sh(*g, "merge", "--no-edit", "-m",
                f"consolidate: bring {b} onto {main} (one line, no long-lived branches)", b,
@@ -2925,6 +3118,12 @@ def main_(argv=None) -> int:
             bits.append(f"upstream: {r['upstream']}")
         if r.get("merged"):
             bits.append(f"merged {len(r['merged'])} branch(es)")
+        held = r.get("ours_held") or []
+        refused = [h for h in held if h.get("verdict") == "unknown"]
+        if len(held) > len(refused):
+            bits.append(f"held {len(held) - len(refused)} branch(es) for their PR")
+        if refused:
+            bits.append(f"❌ REFUSED {len(refused)} branch(es): PR state unknown")
         if r.get("conflicted"):
             bits.append(f"❌ {len(r['conflicted'])} CONFLICT")
         if r.get("pruned"):
