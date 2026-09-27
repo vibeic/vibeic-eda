@@ -144,6 +144,7 @@
       "expect_modified": 3,
       "expect_added": 0,
       "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#256",
       "fork_commits": [],
       "fork_note": "No fork commit corresponds: the deck is globalfoundries-pdk-libs-gf180mcu_fd_pv's, which this org does not fork, and vibeic/open_pdks only copies it (gf180mcu/Makefile.in, klayout-%). The correction exists in the image only through this recipe step."
     }
