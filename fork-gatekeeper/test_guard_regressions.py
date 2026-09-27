@@ -93,6 +93,32 @@ def test_a_toolchain_archive_is_never_counted_as_ours(tmp_path):
         "the toolchain URL must not be left in the 'ours' count"
 
 
+@pytest.mark.parametrize("text, ok, why", [
+    ("FROM ubuntu:24.04 AS toolchain\nRUN true\n"
+     "FROM toolchain AS seed\nRUN true\n"
+     "FROM toolchain AS build\nCOPY --from=seed /a /a\n", True,
+     "a stage on a stage of this file is built on that stage's allowed base"),
+    ("FROM evil/thing:1 AS toolchain\nRUN true\n"
+     "FROM toolchain AS build\nRUN true\n", False,
+     "one hop through a stage name must not launder a disallowed base"),
+    ("FROM evil/thing:1 AS a\nFROM a AS b\nFROM b AS c\n", False,
+     "nor two hops"),
+    ("FROM b AS a\nFROM a AS b\n", False,
+     "a cycle ends on a stage name, which is not an allowed base"),
+])
+def test_a_stage_on_a_stage_is_judged_by_its_root_base(tmp_path, text, ok, why):
+    """tools/klayout/Dockerfile builds its compiler-cache seed and its build on
+    one `toolchain` stage, so both compile with the same compiler binary."""
+    m = _load(_ROOT / "tools" / "check_fork_only.py", "cfo")
+    df = tmp_path / "Dockerfile"
+    df.write_text(text)
+    problems, _examined, _deferred, _toolchain = m.check(df, {})
+    assert (problems == []) is ok, (why, problems)
+    if not ok:
+        assert all("evil/thing" in p or "FROM a" in p or "FROM b" in p
+                   for p in problems), problems
+
+
 def test_inventory_resolves_the_repo_root_from_its_own_location():
     """The NameError was `ROOT` in a module that defines `DIR`.
 

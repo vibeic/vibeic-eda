@@ -30,13 +30,13 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:da11f47-597610
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:da11f47-9783a8
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4d57205-baa757
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf82c3e-3381fb
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:80eddc1-ad5bcd
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:80eddc1-287057
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7505d83-29a18b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:f43f95e-0cb417

@@ -226,8 +226,19 @@ def check(path: Path, PENDING: dict) -> Tuple[List[str], int, List[str], List[st
             for m in ARG_LINE.finditer(text)}
 
     # Every stage base, whether or not anything copies from it.
+    #
+    # A stage built FROM another stage of this file (`FROM toolchain AS build`)
+    # is built on whatever that stage is built on, so the chain is followed to
+    # its root and the ROOT is judged. Judging the stage name itself reported
+    # every such stage as "not one of our artefacts" although the bytes under it
+    # are an allowed base's; skipping it instead would let `FROM evil/x AS tc`
+    # + `FROM tc AS build` launder the base through one hop. Bounded by the
+    # number of stages, so a cycle ends on a stage name and is reported.
     for name, base in known.items():
-        rb = expand(base, args)
+        root, hops = base, 0
+        while root.lower() in known and hops < len(known):
+            root, hops = known[root.lower()], hops + 1
+        rb = expand(root, args)
         if rb is None:
             examined += 1
             problems.append(

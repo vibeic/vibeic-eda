@@ -17,15 +17,28 @@
 # Source is `github.com/vibeic/*` and nothing else (owner rule 2026-07-29);
 # `tools/check_fork_only.py` fails the build on anything else.
 
-FROM ubuntu:24.04 AS build
+# Declared once, before the first stage, because two stages clone it: the
+# compiler-cache seed and the build. A stage imports it with a bare `ARG
+# KLAYOUT_REPO`; the resolved value, and so every cache key, is the same as a
+# stage-local default (measured on a throwaway builder: identical layer).
 ARG KLAYOUT_REPO=https://github.com/vibeic/klayout.git
-ARG KLAYOUT_REF=80eddc1533113248f87129520728e50983a58fb0  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
+
+# The toolchain stage carries NO pin ARG. An ARG changes the cache key of every
+# later RUN in its stage whether or not the RUN reads it, so while KLAYOUT_REF
+# was declared above this apt layer every pin move re-ran it: 147.0 s in the
+# 2026-09-27 06:25Z round, installing the same packages again. The OpenROAD
+# recipe fixed the same shape in vibeic-eda#233.
+#
+# `ccache` is installed here so the seed and the build compile with one and the
+# same compiler binary: ccache keys a result on the compiler's mtime and size,
+# and both stages inherit this layer.
+FROM ubuntu:24.04 AS toolchain
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git python3-dev zlib1g-dev libexpat1-dev libcurl4-openssl-dev libpng-dev \
       qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
       qt6-multimedia-dev qt6-svg-dev qt6-5compat-dev libqt6opengl6-dev \
       ruby-dev \
-      ca-certificates \
+      ca-certificates ccache \
  && rm -rf /var/lib/apt/lists/*
 # BUILT WITH Qt, deliberately (vibeic-eda#17). `-without-qt` produces libraries and
 # buddy tools but NO `klayout` binary, so the CLI on PATH stayed the base image's
@@ -58,9 +71,90 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # that build over the base's klayout would have removed sign-off DRC and LVS
 # while every check we own reported a pass: `check_no_capability_lost` asks
 # whether a NAME still resolves, and `libklayout_drc.so` is not a name on PATH.
+#
+# ---- the compiler cache: a seed LAYER, not a cache mount --------------------
+#
+# A pin move used to recompile KLayout from nothing: 1200.9 s for the clone +
+# build step in the 2026-09-27 06:25Z round, for a move (12205af41 ->
+# 80eddc153) that changed two .cc files.
+#
+# The cache is a ccache directory built once at KLAYOUT_CCACHE_SEED, in its own
+# stage, and bind-mounted read-write into the build below. It is keyed only on
+# the toolchain layer and KLAYOUT_CCACHE_SEED, so it is CACHED across
+# KLAYOUT_REF moves; what the build adds to it is discarded with the mount, so
+# the build's own layer holds exactly what it held before.
+#
+# NOT `--mount=type=cache`. vibeic-builder runs BuildKit's default GC policy,
+# whose rule 0 keeps exec.cachemount records to 488 MiB / 48 h, and it runs
+# near its 93.13 GiB (100 GB) ceiling -- 88.5 GB on 2026-09-27 before the first
+# build of this recipe, 99.0 GB after it -- so its GC does run: a 3.47 GB cache
+# mount made for the bazel --disk_cache trial was gone within hours
+# (vibeic-eda#233). A throwaway builder with the same default policy kept a
+# 734 MB cache mount for over two hours while far below its ceiling, so the
+# loss is driven by that pressure, which on vibeic-builder is permanent; and a pin
+# that sits still for two days would find the mount expired anyway. A layer
+# falls under the 1440 h / 93 GiB rules instead, and a round that uses it keeps
+# it recent.
+#
+# WHY THE HITS SURVIVE A PIN MOVE. build.sh puts KLAYOUT_VERSION_REV (the short
+# commit) and KLAYOUT_VERSION_DATE (today) into DEFINES, so every compile line
+# carries two -D values that change with every pin and every day, and ccache's
+# direct mode, which hashes the command line, misses on all of them. ccache
+# then falls back to its preprocessor mode, which hashes the PREPROCESSED
+# source and leaves out options that act only through the preprocessor (-D,
+# -I): a translation unit that does not use those macros hits, and the ones
+# that do (src/version) see the new value in their preprocessed text and miss,
+# as they must.
+#
+# CORRECTNESS DOES NOT DEPEND ON THE SEED. A ccache result is served only for
+# an identical preprocessed input, compiler (mtime and size) and remaining
+# options, and ccache stores the compiler's own output, so a seed older than
+# the pin only means more compiling, never a different object.
+#
+# MEASURED 2026-09-27 on a throwaway builder, klayout 80eddc153 built with the
+# seed at the previous pin 12205af41 (the two .cc files of that pin move):
+#     clone + build step, no cache (this recipe before)   924.4 s
+#     the same step, from the seed                        113.5 s
+#         ccache: 1864 of 1885 cacheable units hit (98.9%), 1833 of them
+#         through the preprocessor mode described above
+#     seed stage, one-time per KLAYOUT_CCACHE_SEED         907.9 s, 164 MB
+# 893 of the 902 files under /klayout/bld are byte-identical to the uncached
+# build's. The other 9 are the libraries that embed Qt resources: rcc writes
+# each resource file's mtime -- the moment of the clone -- into the resource
+# tree, and the ELF build-id hashes those bytes. Every differing byte is one of
+# those two, so two uncached builds differ in the same places.
+#
+# Move KLAYOUT_CCACHE_SEED forward when the build
+# step grows long again (the `ccache --show-stats` line below says how many
+# units missed); nothing else reads it. Not named *_REF on purpose: every pin
+# reader here matches `ARG <NAME>_REF=`, and this is not a pin -- it changes no
+# shipped byte.
+#
+# `QMAKE_CCACHE=1` is build.sh's own switch (it adds CONFIG+=ccache, which puts
+# `ccache` in front of the compiler qmake writes into every Makefile).
+# CCACHE_MAXSIZE bounds the directory well above one full build, so nothing is
+# evicted while the seed is written.
+FROM toolchain AS ccache-seed
+ARG KLAYOUT_REPO
+ARG KLAYOUT_CCACHE_SEED=80eddc1533113248f87129520728e50983a58fb0
 RUN git clone "${KLAYOUT_REPO}" /klayout \
- && cd /klayout && git checkout ${KLAYOUT_REF} \
+ && cd /klayout && git checkout ${KLAYOUT_CCACHE_SEED} \
+ && export CCACHE_DIR=/ccache CCACHE_MAXSIZE=5G QMAKE_CCACHE=1 \
  && ./build.sh -qmake /usr/lib/qt6/bin/qmake -nolibgit2 -j"$(nproc)" -bin /foss/tools/klayout-vibeic -build /klayout/bld \
+ && ccache --show-stats \
+ && cd / && rm -rf /klayout /foss/tools/klayout-vibeic \
+ && echo "ccache seeded at ${KLAYOUT_CCACHE_SEED}: $(du -sb /ccache | cut -f1) bytes"
+
+FROM toolchain AS build
+ARG KLAYOUT_REPO
+ARG KLAYOUT_REF=80eddc1533113248f87129520728e50983a58fb0  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
+RUN --mount=type=bind,from=ccache-seed,source=/ccache,target=/ccache,rw \
+    git clone "${KLAYOUT_REPO}" /klayout \
+ && cd /klayout && git checkout ${KLAYOUT_REF} \
+ && export CCACHE_DIR=/ccache CCACHE_MAXSIZE=5G QMAKE_CCACHE=1 \
+ && ccache --zero-stats \
+ && ./build.sh -qmake /usr/lib/qt6/bin/qmake -nolibgit2 -j"$(nproc)" -bin /foss/tools/klayout-vibeic -build /klayout/bld \
+ && ccache --show-stats \
  && for e in klayout libklayout_drc.so libklayout_lvs.so libklayout_db.so; do \
       test -e "/klayout/bld/$e" || { echo "FAIL: the build produced no $e"; exit 1; }; \
     done \
