@@ -298,7 +298,13 @@ def test_local_main_ancestry_is_sufficient_when_remote_main_is_stale(tmp_path):
     assert len(rep["ours_branch_evidence"][0]["checks"]) == 1
 
 
-def test_work_absent_from_both_mainlines_still_forms_real_ai_case(tmp_path):
+def test_work_absent_from_both_mainlines_still_forms_real_ai_case(
+        tmp_path, monkeypatch):
+    # The branch has no pull request, so consolidation may try it. A local
+    # origin cannot say that on its own (the lookup would refuse), so GitHub's
+    # answer is supplied; test_consolidation_skips_open_prs owns the PR side.
+    monkeypatch.setattr(D, "_fork_branch_pull_requests", lambda g, b: {
+        "outcome": "complete", "prs": [], "head_ref": b})
     clone, _origin, source_tip = _graph(tmp_path, "absent")
     g = ["git", "-C", str(clone)]
     for target in ("master", "origin/master"):
