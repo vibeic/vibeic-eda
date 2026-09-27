@@ -208,3 +208,165 @@ def misnamed_pins(text: str) -> List[Tuple[str, str]]:
     """
     return [(k, str(v["why"])) for k, v in classify(text).items()
             if v.get("misnamed")]
+
+
+# ---------------------------------------------------------------------------
+# WHAT THE BUILD DOES TO THE ARTEFACT A CONTENTS ASSERTION NAMES (vibeic-eda#253)
+# ---------------------------------------------------------------------------
+#
+# A contents assertion says which upstream commit a PREBUILT artefact was cut
+# from, and it must not move (#74/#78/#79). But the image does not ship that
+# artefact as delivered: the build patches it, and every such step is declared
+# in a manifest that `pdk_local_mods.py verify` reconciles against a digest of
+# the volume as delivered -- an undeclared change fails the build. So the
+# manifest, not the ref, is the complete statement of what the build changed.
+#
+# Measured on 0.3.80: vibeic/open_pdks#1/#2 (bccc9cd / merge 1e2380a) ships as
+# the recipe step of vibeic-eda#250, and the open_pdks row listed only commits
+# up to the asserted b344c97eacc2 -- which is correct and incomplete. The fix is
+# NOT to move the reference (that is the #74 defect); it is to state the
+# declared steps beside it.
+#
+# THE LINK IS READ OFF THE BUILD, NOT A TABLE. The step that reconciles names
+# both halves in one instruction: `--upstream-sha "${<STEM>_VOLUME_CONTENTS_SHA}"`
+# and `--manifest <in-image path>`, and the manifest reaches that path through a
+# `COPY <repo dir>/ <image dir>/`. A manifest nothing verifies against the
+# assertion is not attributed to it.
+
+#: The step that holds a manifest of local modifications to a prebuilt volume.
+_RECONCILE = re.compile(r"pdk_local_mods\.py\s+verify\b")
+_MANIFEST_OPT = re.compile(r"--manifest\s+[\"']?([^\s\"'\\]+)")
+_UPSTREAM_OPT = re.compile(r"--upstream-sha\s+[\"']?\$\{?(\w+)\}?")
+#: `COPY <src> <dst>` from the build context (not `--from=`).
+_COPY_RE = re.compile(r"^COPY\s+((?:--(?!from)\S+\s+)*)(\S+)\s+(\S+)\s*$", re.M)
+#: `owner/repo#N`
+_PR_RE = re.compile(r"^([\w.-]+/[\w.-]+)#(\d+)$")
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def dockerfiles(root) -> Dict[str, str]:
+    """{repo-relative path: text} for the composing Dockerfile and the per-tool
+    ones -- the same set `discover_forks` reads its pins from."""
+    from pathlib import Path
+    root = Path(root)
+    out: Dict[str, str] = {}
+    top = root / "Dockerfile"
+    if top.is_file():
+        out["Dockerfile"] = top.read_text(encoding="utf-8")
+    for p in sorted((root / "tools").glob("*/Dockerfile")):
+        out[str(p.relative_to(root))] = p.read_text(encoding="utf-8")
+    return out
+
+
+def _context_path(image_path: str, text: str) -> str | None:
+    """The build-context path a `COPY` put at `image_path`, or None."""
+    for _flags, src, dst in _COPY_RE.findall(text):
+        if dst == image_path:
+            return src
+        if dst.endswith("/") and src.endswith("/") and image_path.startswith(dst):
+            return src + image_path[len(dst):]
+    return None
+
+
+def _normalise_entry(m: dict, manifest: str) -> Dict[str, object]:
+    """One manifest entry, reduced to what the page states about it.
+
+    `fork_commits` is three-valued ON PURPOSE. Absent -> None: nobody recorded
+    whether a fork commit corresponds, and the page says "not recorded" rather
+    than implying there is none. A list -> those commits. An EMPTY list must
+    carry `fork_note` saying why there is none, so "none" is a statement
+    somebody made, not a default.
+    """
+    mid = m.get("id")
+    paths = m.get("paths")
+    if not isinstance(mid, str) or not mid:
+        raise ValueError(f"{manifest}: an entry has no id")
+    if not isinstance(paths, list) or not paths \
+            or not all(isinstance(p, str) and p for p in paths):
+        raise ValueError(f"{manifest}: {mid}: 'paths' must be a non-empty list")
+    fork = m.get("fork_commits")
+    note = m.get("fork_note")
+    if fork is not None:
+        if not isinstance(fork, list):
+            raise ValueError(f"{manifest}: {mid}: 'fork_commits' must be a list")
+        norm = []
+        for c in fork:
+            pr, sha = (c or {}).get("pr"), (c or {}).get("sha")
+            if not (isinstance(pr, str) and _PR_RE.match(pr)):
+                raise ValueError(f"{manifest}: {mid}: fork commit pr {pr!r} "
+                                 "is not owner/repo#N")
+            if not (isinstance(sha, str) and _SHA_RE.match(sha)):
+                raise ValueError(f"{manifest}: {mid}: fork commit sha {sha!r} "
+                                 "is not a commit")
+            norm.append({"pr": pr, "sha": sha, "what": str(c.get("what") or "")})
+        if not norm and not (isinstance(note, str) and note.strip()):
+            raise ValueError(f"{manifest}: {mid}: 'fork_commits' is empty and "
+                             "no 'fork_note' says why there is none")
+        fork = norm
+    rpr = m.get("recipe_pr")
+    if rpr is not None and not (isinstance(rpr, str) and _PR_RE.match(rpr)):
+        raise ValueError(f"{manifest}: {mid}: recipe_pr {rpr!r} is not owner/repo#N")
+    rc = m.get("recipe_commit")
+    if rc is not None and not (isinstance(rc, str) and _SHA_RE.match(rc)):
+        raise ValueError(f"{manifest}: {mid}: recipe_commit {rc!r} is not a commit")
+    return {"id": mid, "issue": str(m.get("issue") or ""), "paths": list(paths),
+            "step": str(m.get("step") or ""), "manifest": manifest,
+            "recipe_pr": rpr, "recipe_commit": rc,
+            "fork_commits": fork,
+            "fork_note": note if isinstance(note, str) else None}
+
+
+def recipe_patches(root, asserted_sha: str) -> Dict[str, object]:
+    """The declared build steps applied to the artefact `asserted_sha` names.
+
+    {"arg": ARG name or None, "patches": [entry, ...] or None, "error": str or None}
+
+    `patches` is None when no contents assertion in the tree asserts that sha, or
+    none of them is reconciled against a manifest -- the row then has nothing to
+    add and renders exactly as before. `error` is set, never swallowed, when the
+    build names a manifest that cannot be read: a list that silently came back
+    empty would publish "no recipe patches" about an artefact that has them.
+    """
+    import json
+    from pathlib import Path
+    root = Path(root)
+    texts = dockerfiles(root)
+    res: Dict[str, object] = {"arg": None, "patches": None, "error": None}
+    seen: List[str] = []
+    patches: List[Dict[str, object]] = []
+    for _rel, text in texts.items():
+        for name, meta in classify(text).items():
+            if meta["kind"] != KIND_CONTENTS_ASSERTION or meta["sha"] != asserted_sha:
+                continue
+            res["arg"] = name
+            for ins in _instructions(text):
+                if not _RECONCILE.search(ins):
+                    continue
+                up = _UPSTREAM_OPT.search(ins)
+                man = _MANIFEST_OPT.search(ins)
+                if not up or up.group(1) != name:
+                    continue
+                if not man:
+                    res["error"] = (f"a reconcile step verifies {name} but names "
+                                    "no --manifest")
+                    return res
+                src = _context_path(man.group(1), text)
+                if src is None:
+                    res["error"] = (f"{man.group(1)} (the manifest reconciled "
+                                    f"against {name}) reaches the image by no COPY")
+                    return res
+                if src in seen:
+                    continue
+                seen.append(src)
+                try:
+                    doc = json.loads((root / src).read_text(encoding="utf-8"))
+                    mods = doc["modifications"]
+                    if not isinstance(mods, list):
+                        raise ValueError("'modifications' is not a list")
+                    patches += [_normalise_entry(m, src) for m in mods]
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    res["error"] = f"{src}: {exc}"
+                    return res
+    if seen:
+        res["patches"] = patches
+    return res

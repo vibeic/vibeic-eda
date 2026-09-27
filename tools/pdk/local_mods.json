@@ -17,7 +17,15 @@
     "",
     "Paths are relative to 'root'. `*` matches one path segment, `**` any depth --",
     "the version segment is a `*` on purpose, so the sha lives in exactly one place",
-    "(the Dockerfile ARG) and this file does not have to be advanced with it."
+    "(the Dockerfile ARG) and this file does not have to be advanced with it.",
+    "",
+    "OPTIONAL PROVENANCE, read by fork-gatekeeper (vibeic-eda#253). The fork ledger",
+    "lists every entry below on the row of the contents assertion this manifest is",
+    "verified against (--upstream-sha), because the asserted ref must not move and",
+    "these steps are not commits on it. 'recipe_pr' / 'recipe_commit' name the change",
+    "to THIS repo that added the step. 'fork_commits' names the fork commit(s) whose",
+    "content the step applies; ABSENT means nobody recorded it, an EMPTY list means",
+    "there is none and 'fork_note' must say why."
   ],
   "root": "/foss/pdks/ciel",
   "modifications": [
@@ -33,7 +41,8 @@
       ],
       "expect_modified": 12,
       "expect_added": 0,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_commit": "01e06c5963b83b6b5aa189ae3a58580e2f75187a"
     },
     {
       "id": "gf180mcu-pl8-poly-density-counts-dummy",
@@ -47,7 +56,8 @@
       ],
       "expect_modified": 2,
       "expect_added": 0,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#174"
     },
     {
       "id": "gf180mcu-sealring-cells-library",
@@ -60,7 +70,8 @@
       ],
       "expect_modified": 0,
       "expect_added": 4,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#174"
     },
     {
       "id": "gf180mcu-cup-io-pad-masters-are-not-design-metal",
@@ -73,7 +84,8 @@
       ],
       "expect_modified": 1,
       "expect_added": 0,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#215"
     },
     {
       "id": "gf180mcu-xyce-defines-the-5v-cell-devices",
@@ -87,7 +99,10 @@
       ],
       "expect_modified": 2,
       "expect_added": 0,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#249",
+      "fork_commits": [],
+      "fork_note": "No fork commit corresponds: vibeic/open_pdks has no commit or PR that defines nfet_05v0/pfet_05v0 in the Xyce tree (its only PRs, #1 and #2, are the LAYERS_RC change). The two definitions exist in the image only through this recipe step."
     },
     {
       "id": "gf180mcu-librelane-layers-rc-ohm",
@@ -100,7 +115,20 @@
       ],
       "expect_modified": 1,
       "expect_added": 0,
-      "expect_removed": 0
+      "expect_removed": 0,
+      "recipe_pr": "vibeic/vibeic-eda#250",
+      "fork_commits": [
+        {
+          "pr": "vibeic/open_pdks#2",
+          "sha": "1e2380a8fbe537a32c5118d50039a1caa996a9e5",
+          "what": "merge of #2, whose fd_sc ohm/um values this step writes"
+        },
+        {
+          "pr": "vibeic/open_pdks#1",
+          "sha": "bccc9cd1c0881a135b2a2ea71d4c64f00fd24624",
+          "what": "#1, the same Metal2-5 res change, superseded by #2"
+        }
+      ]
     }
   ]
 }

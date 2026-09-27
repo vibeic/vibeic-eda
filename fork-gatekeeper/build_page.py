@@ -39,6 +39,7 @@ import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic
 import inventory  # noqa: E402 — the tool inventory, measured at build time
 import capture_release_ll as release_ll  # noqa: E402 — canonical evidence validators
 import daily_release as release_program  # noqa: E402 — RELEASE_IMAGE, the one image name
+import pin_kinds  # noqa: E402 — what the build applies to an asserted artefact (vibeic-eda#253)
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
@@ -1777,11 +1778,19 @@ function enhBlock(tool){
         + `${sl && rl ? ` · ` : ``}${rl ? `release ${rl}：bump pin 重建` : ``}">`
         + `${sl ? `sync ${sl}` : ``}${sl && rl ? ` · ` : ``}${rl ? `release ${rl}` : ``}</span>`
       : ``;
+    // RECIPE PATCHES (vibeic-eda#253). A contents assertion's ref must not move,
+    // so a fix the image ships as a declared build step on that artefact is not
+    // in `carried_patches` and was invisible here. Stated beside the count, not
+    // added to it: `ahead` is bound to the certified gap row and counts commits.
+    const recipes = Array.isArray(d.recipe_patches) ? d.recipe_patches : null;
+    const recipeNote = (recipes && recipes.length)
+      ? `<br><span style="color:var(--text-muted,#6b7684);font-size:.78rem" data-en="+ ${recipes.length} applied by the build" data-zh="+ ${recipes.length} 個由建置套用">+ ${recipes.length} applied by the build</span>`
+      : (d.recipe_patches_error ? `<br><span class="pill warn" data-en="build steps unreadable" data-zh="建置步驟讀不到">build steps ?</span>` : ``);
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
       <td class="fork-hide-sm">${pin}</td>
-      <td>${pill(ahead,'ahead')}${lagWhich}</td>
+      <td>${pill(ahead,'ahead')}${lagWhich}${recipeNote}</td>
       <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref_full||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
       <td>${inImagePill(d)}</td>
@@ -1793,6 +1802,29 @@ function enhBlock(tool){
       : (d.integrated
           ? `<h5 data-en="Patches we carry" data-zh="我們揹著的補丁">Patches we carry</h5><p class="fork-caption" data-en="Pinned to upstream with no local patches yet." data-zh="鎖定於上游，尚無本地補丁。">Pinned to upstream with no local patches yet.</p>`
           : `<h5 data-en="Not layered into the image" data-zh="未納入 image">Not layered into the image</h5><p class="fork-caption" data-en="Forked, but the image uses upstream directly (no fix warranted) — nothing to sync." data-zh="已 fork，但 image 直接用上游（無需修補）— 無需同步。">Forked, but the image uses upstream directly — nothing to sync.</p>`);
+    // WHAT THE BUILD APPLIES TO THE ASSERTED ARTEFACT (vibeic-eda#253). Every
+    // entry is a step the manifest declares and the build reconciles against a
+    // digest of the volume as delivered, so this list cannot be incomplete. Each
+    // names the files it changes, the fork commit(s) whose content it applies
+    // (or says there is none, or that none was recorded) and the change to this
+    // repo that added it. Rendered only where the row carries the field: every
+    // other row's drawer is byte-for-byte what it was.
+    const ghUrl = ref => { const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref||""); return m ? `https://github.com/${m[1]}/pull/${m[2]}` : "#"; };
+    const prLink = ref => `<a href="${esc(ghUrl(ref))}" target="_blank" rel="noopener">${esc(ref)}</a>`;
+    const forkOf = r => Array.isArray(r.fork_commits)
+      ? (r.fork_commits.length
+          ? r.fork_commits.map(c=>{ const repo = (/^([\w.-]+\/[\w.-]+)#/.exec(c.pr||"")||[])[1]||""; return `${prLink(c.pr)} <a class="sha" href="https://github.com/${esc(repo)}/commit/${esc(c.sha)}" target="_blank" rel="noopener">${esc((c.sha||"").slice(0,12))}</a>${c.what?` (${esc(c.what)})`:""}`; }).join("; ")
+          : `<span data-en="none" data-zh="無">none</span> — ${esc(r.fork_note||"")}`)
+      : `<span data-en="not recorded" data-zh="未記錄">not recorded</span>`;
+    const recipeOf = r => r.recipe_pr ? prLink(r.recipe_pr)
+      : (r.recipe_commit ? `<a class="sha" href="https://github.com/vibeic/vibeic-eda/commit/${esc(r.recipe_commit)}" target="_blank" rel="noopener">${esc(r.recipe_commit.slice(0,12))}</a> <span data-en="(direct commit, no PR)" data-zh="（直接 commit，無 PR）">(direct commit, no PR)</span>` : `<span data-en="not recorded" data-zh="未記錄">not recorded</span>`);
+    const recipeBlock = recipes && recipes.length
+      ? `<h5 style="margin-top:1rem" data-en="Applied by the image build to this artefact (${recipes.length}) — ${esc(recipes[0].manifest||'')}" data-zh="建置時套用到此 artefact 的修改（${recipes.length}）— ${esc(recipes[0].manifest||'')}">Applied by the image build to this artefact (${recipes.length})</h5>`
+        + `<p class="fork-caption" data-en="Not commits on the asserted ref: that ref states what the prebuilt artefact was cut from and stays where it is. The build applies each step below to the artefact and fails unless every file it changed is declared here." data-zh="這些不是被斷言 ref 上的 commit：那個 ref 說明預建 artefact 從哪裡切出來，不會移動。建置時會把下列每一步套用到該 artefact，只要有任何被改動的檔案沒在這裡宣告，建置就失敗。">Not commits on the asserted ref: that ref states what the prebuilt artefact was cut from and stays where it is. The build applies each step below and fails unless every file it changed is declared here.</p>`
+        + recipes.map(r=>`<div class="fork-commit fork-recipe"><span class="sha">${esc(r.id)}</span><span><span data-en="files" data-zh="檔案">files</span>: ${(r.paths||[]).map(p=>`<code>${esc(p)}</code>`).join(", ")}<br><span data-en="fork" data-zh="fork">fork</span>: ${forkOf(r)}<br><span data-en="recipe" data-zh="recipe">recipe</span>: ${recipeOf(r)}</span></div>`).join("")
+      : (d.recipe_patches_error
+          ? `<h5 style="margin-top:1rem" data-en="Applied by the image build to this artefact" data-zh="建置時套用到此 artefact 的修改">Applied by the image build to this artefact</h5><p class="fork-caption" data-en="Could not be read: ${esc(d.recipe_patches_error)}. That is not a list of zero." data-zh="讀不到：${esc(d.recipe_patches_error)}。這不等於零個。">Could not be read: ${esc(d.recipe_patches_error)}. That is not a list of zero.</p>`
+          : "");
     // The releases nobody could DECIDE, in the detail drawer, with the literal
     // error each one failed on. Rendered BEFORE the "on the latest upstream
     // release" reassurance, and suppressing it: a fork with an undecided release
@@ -1854,7 +1886,7 @@ function enhBlock(tool){
       : "";
     const prov = `<details class="enh-wrap prov-wrap"><summary>`
       + `<span data-en="Carried patches · Releases · Daily sync log" data-zh="揹著的補丁 · Release · 每日同步 Log">Carried patches · Releases · Daily sync log</span>`
-      + `</summary><div class="prov-inner">${carried}${rel}${log}</div></details>`;
+      + `</summary><div class="prov-inner">${carried}${recipeBlock}${rel}${log}</div></details>`;
     const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${enhBlock(d.tool)}${prov}</div></td></tr>`;
     return row+detail;
   }).join("");
@@ -2379,6 +2411,25 @@ def _validate_ledger_round(ledgers: list[dict], evidence: PublicationEvidence
                 raise PublicationEvidenceError(
                     f"ledger {tool!r}.{ledger_name} differs from "
                     f"fork-gap rows.{gap_name}")
+
+        # RECIPE PATCHES (vibeic-eda#253). The drawer of a contents-assertion row
+        # lists the declared build steps applied to the artefact it asserts. That
+        # list is a statement about THIS certified tree -- which manifest the
+        # build reconciles against the asserted sha, and what it declares -- so
+        # it is re-derived here from the tree `HEAD` is bound to below, keyed on
+        # the gap row's own `asserted_contents` rather than on anything the
+        # ledger says about itself. Any other row kind may carry none.
+        if gap_row.get("kind") == "contents_assertion":
+            want = pin_kinds.recipe_patches(
+                HERE.parent, str(gap_row.get("asserted_contents") or ""))
+            want_patches, want_error = want["patches"], want["error"]
+        else:
+            want_patches = want_error = None
+        if (row.get("recipe_patches") != want_patches
+                or row.get("recipe_patches_error") != want_error):
+            raise PublicationEvidenceError(
+                f"ledger {tool!r}.recipe_patches differs from the manifest "
+                "the certified tree reconciles against its asserted contents")
 
 
 def _page_json(value: Any) -> str:

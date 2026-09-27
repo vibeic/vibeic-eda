@@ -2733,6 +2733,19 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
     # discarded.
     if pin.get("pinned_via"):
         led["pinned_via"] = pin["pinned_via"]
+    # WHAT THE BUILD APPLIES TO THE ASSERTED ARTEFACT (vibeic-eda#253). The ref of
+    # a contents assertion must not move, so a fix the image ships as a declared
+    # recipe step on that artefact -- vibeic/open_pdks#1/#2 via vibeic-eda#250 --
+    # is not in the carried range below and the row said nothing about it. The
+    # manifest the build reconciles against THIS assertion is read off the tree
+    # this program is running from, which is the tree the release builds and the
+    # one a certified page is bound to (`build_page._validate_ledger_round`
+    # re-derives it there and refuses a row that disagrees).
+    if led["pin_kind"] == pin_kinds.KIND_CONTENTS_ASSERTION and ref:
+        _rp = pin_kinds.recipe_patches(HERE.parent, ref)
+        if _rp["patches"] is not None or _rp["error"] is not None:
+            led["recipe_patches"] = _rp["patches"]
+            led["recipe_patches_error"] = _rp["error"]
     # A fork the image never fetches is forked but NOT layered in. Track it honestly:
     # such a tool uses upstream directly, so there is nothing to sync into the image.
     # `integrated` = REACHES THE SHIPPED IMAGE, by either route — its own ARG pin, or
