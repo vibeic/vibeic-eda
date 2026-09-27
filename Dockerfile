@@ -30,13 +30,13 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:30a1edb-bcc2af
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:dd02eba-d989e9
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:4d57205-baa757
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cf82c3e-3381fb
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:12205af-e9aa6a
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:80eddc1-ad5bcd
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:7505d83-29a18b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:d3ee550-c19248
@@ -47,7 +47,7 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:97a2b64-82801d
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
 ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-1b916b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-e4d34a5-d99399
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-05b92d
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #

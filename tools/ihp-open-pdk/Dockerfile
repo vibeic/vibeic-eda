@@ -34,7 +34,7 @@ RUN git clone --filter=blob:none "${IHP_OPEN_PDK_REPO}" /src/ihp \
 # families are one PDK in two repositories; they are pinned together here so
 # they cannot drift apart again. Same repository rule: a vibeic mirror.
 ARG IHP_SG13CMOS5L_REPO=https://github.com/vibeic/ihp-sg13cmos5l.git
-ARG IHP_SG13CMOS5L_REF=e4d34a546eca7fc7def75581ad341c4569801739  # pinned; branch main — identical to IHP-GmbH/ihp-sg13cmos5l@main today
+ARG IHP_SG13CMOS5L_REF=2b1a5e9b0f2294a796c7d0b15578b7743b24c85e  # pinned; branch main — identical to IHP-GmbH/ihp-sg13cmos5l@main today
 RUN git clone --filter=blob:none "${IHP_SG13CMOS5L_REPO}" /src/ihp-sg13cmos5l \
  && git config --global --add safe.directory /src/ihp-sg13cmos5l \
  && cd /src/ihp-sg13cmos5l && git checkout ${IHP_SG13CMOS5L_REF} \
