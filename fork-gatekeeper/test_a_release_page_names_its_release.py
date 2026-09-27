@@ -133,3 +133,19 @@ def test_the_release_path_uses_the_function_that_names_the_version():
     # the only build_page invocation left in daily_release is the one that
     # passes the version it is publishing
     assert src.count('"build_page.py"') == 1
+
+
+def test_a_stubbed_module_subprocess_is_the_one_it_runs(monkeypatch):
+    """The release tests stub `daily_release.subprocess.run` module-wide. The
+    page step must go through that stub, or a test run executes the real
+    discover_forks/build_page as the production writer (it did, 2026-09-27
+    11:52, rewriting the production ledger from a scratch checkout)."""
+    seen = []
+
+    def stub(cmd, **kw):
+        seen.append(Path(cmd[1]).name)
+        return _Proc(0, "stubbed")
+
+    monkeypatch.setattr(R.subprocess, "run", stub)
+    ok, _ = R.publish_release_page("0.3.81", out="/x/p.html")
+    assert ok and seen == ["discover_forks.py", "build_page.py"]
