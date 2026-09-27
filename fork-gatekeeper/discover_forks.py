@@ -54,6 +54,7 @@ import gk_state  # noqa: E402 — WHERE state lives and WHO may write it (vibeic
 # programs carrying two copies of one rule is how they came to say opposite
 # things about the same four pins (vibeic-eda#29).
 import pin_kinds  # noqa: E402 — build INPUT vs claim ABOUT one (vibeic-eda#79)
+import overlay_ship  # noqa: E402 — overlay-installed tools ship a LIST, not a pin
 
 STATE = gk_state.state_dir()
 LEDGER = STATE / "ledger"             # runtime state — outside the source tree
@@ -2666,7 +2667,9 @@ def record_behind(led: dict, n) -> dict:
     return led
 
 
-def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
+def discover_one(fork: dict, pins: dict, image_version: str,
+                 overlays: dict | None = None,
+                 tracker_state=overlay_ship.gh_tracker_state) -> dict:
     tool, up_full = fork["tool"], fork["upstream"]
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     led = {"tool": tool, "role": fork.get("role", ""),
@@ -2898,18 +2901,22 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
         led["sync_lag"] = _ls["sync_lag"]
         led["release_lag"] = _ls["release_lag"]
         led["lag_split_exact"] = _ls["split_exact"]
+        # OVERLAY-AWARE, by the same derivation `fork_gap_report` publishes
+        # (`overlay_ship.classify`): a tool whose Dockerfile overlays a list of
+        # fork commits ships that list, not `pin..tip`, and a HELD commit
+        # (FORKS.json, open tracker) is listed on the row but not counted.
+        led["held_commits"] = []
         if _cl is not None and _pinref and up_branch and _tip:
-            _r = _git(_cl, "rev-list", f"{_pinref}..{_tip}", "--not",
-                      f"upstream/{up_branch}")
-            if _r.rc == 0:
-                _sh = [x for x in _r.out.split() if x]
-                led["ours_unshipped"] = len(_sh)
-                _sub = 0
-                for _c in _sh:
-                    _m = _git(_cl, "show", "-s", "--format=%p", _c, timeout=30)
-                    if _m.rc == 0 and len(_m.out.split()) < 2:
-                        _sub += 1          # one parent => not a merge
-                led["ours_unshipped_substantive"] = _sub
+            _ov = overlay_ship.overlay_for(overlays or {}, tool)
+            _ship = overlay_ship.classify(
+                _cl, _pinref, _tip, f"upstream/{up_branch}", _ov,
+                fork.get("held") or [], tracker_state)
+            if _ship is not None:
+                led["ours_unshipped"] = _ship["ours_unshipped"]
+                led["ours_unshipped_substantive"] = \
+                    _ship["ours_unshipped_substantive"]
+                led["held_commits"] = _ship["held_commits"]
+                led["ship_model"] = _ship["model"]
         # Classify releases by the FORK POINT (merge-base) date — the point where our
         # branch diverges from upstream = the release our patches are based on. Using a
         # patch's own author date is wrong: rebasing onto a new release preserves the
@@ -2992,6 +2999,8 @@ def discover_one(fork: dict, pins: dict, image_version: str) -> dict:
                 "ours_unshipped", "ours_unshipped_substantive",
                 "ours_unshipped_measured_against"):
             led[field] = None
+        led.pop("held_commits", None)
+        led.pop("ship_model", None)
 
     led.setdefault("last_sync", None)
     return led
@@ -3019,6 +3028,7 @@ def main():
     if tool_dirs:
         print(f"  read pins from Dockerfile + {len(tool_dirs)} tools/*/Dockerfile")
     pins = parse_dockerfile_pins(df)
+    overlays = overlay_ship.parse_overlays(df)
     image_version = (_gh_file(EDA_REPO, "VERSION") or "").strip() or "unknown"
     if not pins:
         # Before the per-tool split an empty parse could mean "no ARG pins yet".
@@ -3052,7 +3062,7 @@ def main():
                 sync_log, last_sync = old.get("sync_log", []), old.get("last_sync")
             except json.JSONDecodeError:
                 pass
-        led = discover_one(fork, pins, image_version)
+        led = discover_one(fork, pins, image_version, overlays)
         led["sync_log"], led["last_sync"] = sync_log, last_sync
         led[gk_state.PROVENANCE_KEY] = gk_state.provenance()
         prev.write_text(json.dumps(led, indent=2, ensure_ascii=False) + "\n")

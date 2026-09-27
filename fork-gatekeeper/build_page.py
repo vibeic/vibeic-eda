@@ -1412,6 +1412,10 @@ function enhBlock(tool){
   // ours carrying upstream work is not a fix of ours going unshipped, and
   // counting it would cry wolf on every sync.
   const unshipAll = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped==="number"?d.ours_unshipped:0),0);
+  // HELD: commits of ours deliberately kept out of the image, each declared in
+  // FORKS.json with a reason and an OPEN tracker. Not in the counts above --
+  // and therefore always named here, so "0 not shipped" can never hide them.
+  const heldAll = LEDGERS.reduce((a,d)=>a+(Array.isArray(d.held_commits)?d.held_commits.length:0),0);
   const unship    = LEDGERS.reduce((a,d)=>a+(typeof d.ours_unshipped_substantive==="number"?d.ours_unshipped_substantive:0),0);
   // A CONTENTS ASSERTION HAS NO SHIPPED/UNSHIPPED QUESTION TO BE UNSURE ABOUT.
   // `open_pdks` is `ARG OPEN_PDKS_VOLUME_CONTENTS_SHA`, a claim about a
@@ -1631,10 +1635,12 @@ function enhBlock(tool){
      // counted only the substantive ones.
      {en:"Our commits in the shipped image"
          + (unshipAll ? ` — ${unshipAll} past the pin`
-                        + (unship !== unshipAll ? `, ${unship} substantive` : ``) : ``),
+                        + (unship !== unshipAll ? `, ${unship} substantive` : ``) : ``)
+         + (heldAll ? ` — ${heldAll} HELD (not counted, tracker open)` : ``),
       zh:"進到 image 的自有 commit"
          + (unshipAll ? ` —— ${unshipAll} 個卡在 pin 之後`
-                        + (unship !== unshipAll ? `，其中 ${unship} 個是實質修改` : ``) : ``)}],
+                        + (unship !== unshipAll ? `，其中 ${unship} 個是實質修改` : ``) : ``)
+         + (heldAll ? ` —— ${heldAll} 個 HELD（追蹤中，不計入）` : ``)}],
     // REMOVED: "Untracked forks (no patches, not synced)". It counted
     // `ahead==0 && behind>0` and today read 1 — OpenROAD-flow-scripts, which
     // FORKS.json itself describes as "a pure mirror… we carry NO commits of our
@@ -1786,11 +1792,15 @@ function enhBlock(tool){
     const recipeNote = (recipes && recipes.length)
       ? `<br><span style="color:var(--text-muted,#6b7684);font-size:.78rem" data-en="+ ${recipes.length} applied by the build" data-zh="+ ${recipes.length} 個由建置套用">+ ${recipes.length} applied by the build</span>`
       : (d.recipe_patches_error ? `<br><span class="pill warn" data-en="build steps unreadable" data-zh="建置步驟讀不到">build steps ?</span>` : ``);
+    const held = Array.isArray(d.held_commits) ? d.held_commits : [];
+    const heldNote = held.length
+      ? `<br><span class="pill warn" data-en="HELD ${held.length}" data-zh="HELD ${held.length}">HELD ${held.length}</span>`
+      : ``;
     const row = `<tr class="trow" data-i="${i}">
       <td class="fork-tool">${esc(d.tool)}<span class="role">${esc(d.role||'')}</span></td>
       <td class="fork-mono"><a href="${esc(d.upstream_url)}" target="_blank" rel="noopener" style="color:#63a8ea;text-decoration:none">${esc(d.upstream)}</a></td>
       <td class="fork-hide-sm">${pin}</td>
-      <td>${pill(ahead,'ahead')}${lagWhich}${recipeNote}</td>
+      <td>${pill(ahead,'ahead')}${lagWhich}${recipeNote}${heldNote}</td>
       <td class="fork-hide-sm fork-mono">${esc(d.base_release||d.pinned_ref_full||d.pinned_ref||'—')}</td>
       <td class="fork-mono">${esc(d.upstream_latest_release||'—')}</td>
       <td>${inImagePill(d)}</td>
@@ -1829,6 +1839,12 @@ function enhBlock(tool){
     // error each one failed on. Rendered BEFORE the "on the latest upstream
     // release" reassurance, and suppressing it: a fork with an undecided release
     // is not a fork that was checked and found level.
+    const trackerUrl = ref => { const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(ref||""); return m ? `https://github.com/${m[1]}/issues/${m[2]}` : "#"; };
+    const heldBlock = held.length
+      ? `<h5 style="margin-top:1rem" data-en="HELD out of the image (${held.length})" data-zh="暫緩、不進 image（HELD，${held.length}）">HELD out of the image (${held.length})</h5>`
+        + `<p class="fork-caption" data-en="Commits of ours deliberately not shipped. Each is declared in FORKS.json with its reason and is left out of the not-shipped count only while its tracker is open." data-zh="刻意不出貨的自有 commit。每一個都在 FORKS.json 宣告理由，只有在追蹤的 issue/PR 仍開啟時才不計入未出貨數。">Commits of ours deliberately not shipped. Each is declared in FORKS.json with its reason and is left out of the not-shipped count only while its tracker is open.</p>`
+        + held.map(c=>`<div class="fork-commit"><span class="sha">${esc(c.sha||'')}</span><span>${esc(c.subject||'')}<br><span data-en="reason" data-zh="理由">reason</span>: ${esc(c.reason||'')}<br><span data-en="tracked by" data-zh="追蹤">tracked by</span>: <a href="${esc(trackerUrl(c.tracked_by))}" target="_blank" rel="noopener">${esc(c.tracked_by||'')}</a> (${esc(c.tracker_state||'')})</span></div>`).join("")
+      : "";
     const undRows = (d.undetermined_releases||[]);
     const undBlock = undRows.length
       ? `<h5 style="margin-top:1rem" data-en="Releases whose containment could not be determined (${undRows.length})" data-zh="無法判定是否已包含的 release（${undRows.length}）">Releases whose containment could not be determined (${undRows.length})</h5>`
@@ -1886,7 +1902,7 @@ function enhBlock(tool){
       : "";
     const prov = `<details class="enh-wrap prov-wrap"><summary>`
       + `<span data-en="Carried patches · Releases · Daily sync log" data-zh="揹著的補丁 · Release · 每日同步 Log">Carried patches · Releases · Daily sync log</span>`
-      + `</summary><div class="prov-inner">${carried}${recipeBlock}${rel}${log}</div></details>`;
+      + `</summary><div class="prov-inner">${carried}${heldBlock}${recipeBlock}${rel}${log}</div></details>`;
     const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${enhBlock(d.tool)}${prov}</div></td></tr>`;
     return row+detail;
   }).join("");
@@ -2411,6 +2427,14 @@ def _validate_ledger_round(ledgers: list[dict], evidence: PublicationEvidence
                 raise PublicationEvidenceError(
                     f"ledger {tool!r}.{ledger_name} differs from "
                     f"fork-gap rows.{gap_name}")
+
+        # HELD commits are rendered from the ledger and excluded from the
+        # certified count by the gap row; both producers derive them with
+        # `overlay_ship.classify`, and they must name the same commits.
+        if (row.get("held_commits") or []) != (gap_row.get("held_commits") or []):
+            raise PublicationEvidenceError(
+                f"ledger {tool!r}.held_commits differs from fork-gap "
+                "rows.held_commits")
 
         # RECIPE PATCHES (vibeic-eda#253). The drawer of a contents-assertion row
         # lists the declared build steps applied to the artefact it asserts. That
