@@ -243,8 +243,11 @@ def _rendered_rows(tmp: Path, rows: list[dict]) -> dict[str, str]:
 def test_the_assertion_row_lists_each_recipe_patch(tmp_path):
     rows = _rendered_rows(tmp_path, [_assertion_row(True), _row("plain")])
     op = rows["open_pdks"]
-    assert "Applied by the image build to this artefact (6)" in op
-    assert "+ 6 applied by the build" in op
+    # Every declared step is listed: the count is the manifest's, not a number
+    # that has to be edited each time a recipe patch is added.
+    n = len(json.loads((REPO / "tools" / "pdk" / "local_mods.json").read_text())["modifications"])
+    assert f"Applied by the image build to this artefact ({n})" in op
+    assert f"+ {n} applied by the build" in op
     for needle in ("gf180mcu-librelane-layers-rc-ohm",
                    "gf180mcu/versions/*/gf180mcuD/libs.tech/librelane/config.tcl",
                    "vibeic/open_pdks#2", "1e2380a8fbe5",
