@@ -336,6 +336,12 @@ def test_strict_zero_round_keeps_github_truth_without_an_internal_status_card(
     assert "未完成交付 PR · GitHub" not in html
     assert '{en:"Last check time", zh:"最後檢查時間", wide:true}' in html
     assert ".fork-kpi.is-wide{grid-column:span 2}" in html
+    # A KPI value never wraps ("2026-09-28" / "05:41", "v0.3.8" / "4"); it
+    # shrinks to fit its card instead.
+    assert "word-break:break-all" not in html
+    assert "color:#f5f8fb;white-space:nowrap}" in html
+    assert "function fitKpiNumbers()" in html
+    assert "  fitKpiNumbers();\n" in html
     assert "The upstream-gap card is a live follow-up measurement" not in html
     assert "上游落後數是即時追蹤值" not in html
     assert "Last Gatekeeper run:" not in html

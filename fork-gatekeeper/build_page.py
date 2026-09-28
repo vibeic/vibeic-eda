@@ -821,7 +821,10 @@ STYLE = """<style>
 .fork-kpi.is-stale .n{color:#ff9d9d}
 .fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
 .fork-kpi.is-wide{grid-column:span 2}
-.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:#f5f8fb;word-break:break-all}
+/* A KPI value is one token ("2026-09-28 05:41", "v0.3.84", "1126/1126"): it
+   never wraps. break-all split it mid-number ("v0.3.8" / "4") whenever a card
+   was narrower than the value; fitKpiNumbers() shrinks the font instead. */
+.fork-kpi .n{font-size:1.9rem;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:#f5f8fb;white-space:nowrap}
 .fork-kpi .l{font-size:.8rem;color:#9fb0c0;margin-top:.35rem;text-transform:uppercase;letter-spacing:.05em}
 .fork-table{width:100%;border-collapse:collapse;font-size:.92rem;margin-top:1rem}
 .fork-table th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted,#6b7684);font-weight:600;padding:.6rem .7rem;border-bottom:1px solid var(--border,#232a33)}
@@ -1653,8 +1656,24 @@ function enhBlock(tool){
     // has its own explained section further down the page, where the sentence
     // around it says what it is.
   ];
+  // Shrink each KPI value until it fits its card on one line (12px floor).
+  // A DOM without layout (the jstests renderer) has nothing to measure.
+  function fitKpiNumbers(){
+    if (typeof getComputedStyle !== "function" || !document.querySelectorAll) return;
+    document.querySelectorAll("#forkMetrics .fork-kpi .n").forEach(n=>{
+      n.style.fontSize = "";
+      let px = parseFloat(getComputedStyle(n).fontSize);
+      while (n.scrollWidth > n.clientWidth && px > 12) { px -= 1; n.style.fontSize = px + "px"; }
+    });
+  }
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
     `<div class="fork-kpi${l.wide?" is-wide":""}${l.wide&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+  fitKpiNumbers();
+  if (typeof window.addEventListener === "function" && !window.__fitKpiBound) {
+    window.__fitKpiBound = true;
+    window.addEventListener("resize", fitKpiNumbers);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitKpiNumbers);
+  }
   const staleEl = document.getElementById("forkStale");
   if (staleEl && (stale || ahead || (generatedAt && !isFinite(genMs)))) {
     const en = ahead
