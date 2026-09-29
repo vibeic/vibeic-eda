@@ -10,6 +10,7 @@ rc=$?
 echo "[$(date -Is)] docker build exit ${rc}" | tee -a "$LOG"
 if [ "$rc" = 0 ]; then
   docker run --rm --entrypoint bash "${TAG}" -lc 'magic --version && netgen -batch quit </dev/null 2>&1 | head -1; yosys -V | head -1 && echo SMOKE_OK' >>"$LOG" 2>&1
-  echo "[$(date -Is)] smoke exit $?" | tee -a "$LOG"
+  smoke_rc=$?   # before the log line: its $(date -Is) would reset $? to 0
+  echo "[$(date -Is)] smoke exit ${smoke_rc}" | tee -a "$LOG"
 fi
 exit ${rc}

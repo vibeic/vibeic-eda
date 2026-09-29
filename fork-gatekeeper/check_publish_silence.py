@@ -225,18 +225,45 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated",
     if not (summary.strip() and report_md.strip()):
         return (False, "refusing to open an alert PR with an empty title or body")
 
+    # A pushed branch proves nothing about delivery: gh can fail after the
+    # push (2026-09-30). Deduplicate only an actual PR, open or closed.
+    rc, out = _sh("gh", "pr", "list", "-R", GH_REPO, "--state", "all",
+                  "--head", branch, "--json", "number,url")
+    if rc != 0:
+        return (False, f"alert PR lookup failed: {out.strip()[:200]}")
+    try:
+        prs = json.loads(out)
+        if not isinstance(prs, list) or any(
+                not isinstance(p, dict) or not isinstance(p.get("number"), int)
+                for p in prs):
+            raise ValueError("expected a PR list")
+    except (TypeError, ValueError) as exc:
+        return (False, f"alert PR lookup unreadable: {exc}")
+    if prs:
+        return (True, f"alert PR #{prs[0]['number']} already raised for {branch}")
+
     rc, out = _sh("git", "-C", str(REPO), "fetch", "origin", "main", "-q")
     if rc != 0:
         return (False, f"git fetch failed: {out.strip()[:200]}")
     rc, out = _sh("git", "-C", str(REPO), "ls-remote", "--heads", "origin", branch)
-    if rc == 0 and out.strip():
-        return (True, f"alert branch {branch} already on origin — already raised")
+    if rc != 0:
+        return (False, f"alert branch lookup failed: {out.strip()[:200]}")
+    orphan = bool(out.strip())
+    start = "origin/main"
+    if orphan:
+        # Preserve the undelivered commit and retry its PR. Any new alert text
+        # is a normal descendant commit; do not force-push the alert branch.
+        start = f"refs/remotes/origin/{branch}"
+        rc, out = _sh("git", "-C", str(REPO), "fetch", "origin",
+                      f"refs/heads/{branch}:{start}", "-q")
+        if rc != 0:
+            return (False, f"orphan alert fetch failed: {out.strip()[:200]}")
 
     wt = Path(tempfile.gettempdir()) / f"gk-eda-alert-{kind}-{date}"
     _sh("git", "-C", str(REPO), "worktree", "remove", "--force", str(wt))
     shutil.rmtree(wt, ignore_errors=True)
     rc, out = _sh("git", "-C", str(REPO), "worktree", "add", "-q", "--detach",
-                  str(wt), "origin/main")
+                  str(wt), start)
     if rc != 0:
         return (False, f"worktree add failed: {out.strip()[:200]}")
     try:
@@ -245,9 +272,13 @@ def _default_escalate(summary: str, report_md: str, round_at: str = "undated",
         (adir / f"{date}-{kind}.md").write_text(
             f"# {summary}\n\n{report_md}", encoding="utf-8")
         _sh("git", "-C", str(wt), "add", ALERT_DIR)
-        rc, out = _sh("git", "-C", str(wt), "commit", "-q", "-m", summary)
-        if rc != 0:
-            return (False, f"commit failed: {out.strip()[:200]}")
+        changed, out = _sh("git", "-C", str(wt), "diff", "--cached", "--quiet")
+        if changed not in (0, 1):
+            return (False, f"alert diff failed: {out.strip()[:200]}")
+        if changed or not orphan:
+            rc, out = _sh("git", "-C", str(wt), "commit", "-q", "-m", summary)
+            if rc != 0:
+                return (False, f"commit failed: {out.strip()[:200]}")
         if os.environ.get("GK_PR_DRYRUN") in ("1", "true", "yes"):
             rc, diff = _sh("git", "-C", str(wt), "show", "--stat", "HEAD")
             return (True, f"DRY-RUN — would open alert PR '{summary}'\n{diff.strip()[:600]}")
