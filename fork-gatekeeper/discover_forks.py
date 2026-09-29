@@ -2676,6 +2676,8 @@ def discover_one(fork: dict, pins: dict, image_version: str,
            "upstream": up_full, "upstream_url": f"https://github.com/{up_full}",
            "fork_url": f"https://github.com/{ORG}/{tool}",
            "image_version": image_version, "generated_at": now}
+    if fork.get("integration_notes"):
+        led["integration_notes"] = fork["integration_notes"]
 
     meta = gh(f"repos/{ORG}/{tool}")
     if meta.get("_err"):
