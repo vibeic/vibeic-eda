@@ -111,7 +111,8 @@ def test_the_alarm_kind_is_an_excluded_prefix():
 
 def test_one_pr_per_failing_day():
     """A round that fails four times in a day must not open four PRs. The date
-    is in the branch name and an existing origin branch means already-raised."""
+    is in the branch name and an existing PR means already-raised."""
     src = (HERE / "check_publish_silence.py").read_text(encoding="utf-8")
     assert 'branch = f"{kind}-{date}"' in src
-    assert "already on origin — already raised" in src
+    assert '"--state", "all"' in src
+    assert "already raised for" in src

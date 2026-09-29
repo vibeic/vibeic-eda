@@ -331,7 +331,7 @@ if [ -x "${DIR}/check_release_failed.py" ] || [ -f "${DIR}/check_release_failed.
     # `$?` to 0, which logged "exit 0" for the 2026-09-30 alert that could not
     # be raised (the checker returned 1, [COULD NOT RAISE]).
     RELEASE_ALERT=$?
-    echo "[$(date -Is)] check_release_failed exit ${RELEASE_ALERT} (0=nothing to raise, 1=raised, 2=NORECORD)" >> "${LOG}"
+    echo "[$(date -Is)] check_release_failed exit ${RELEASE_ALERT} (0=nothing to raise, 1=raised, 2=NORECORD, 3=COULD_NOT_RAISE)" >> "${LOG}"
 else
     echo "[$(date -Is)] check_release_failed NOT CHECKED — checker missing" >> "${LOG}"
 fi

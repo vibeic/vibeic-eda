@@ -19,6 +19,9 @@ The scanner is a small lexer, not a regex, because the real files carry the
 cases a regex gets wrong: comments that quote the bad pattern, `;`-separated
 captures after a `$(dirname ...)`, arithmetic, and python heredocs inside
 `$( ... )`.  It is calibrated against bash itself before it is trusted.
+
+This guard is local to a simple command: it does not trace variable data flow
+such as TS="$(date)"; echo "$TS $?". Capture status before any separate command.
 """
 from __future__ import annotations
 
@@ -60,6 +63,18 @@ def scan(src: str):
                 line += 1
             i += 1
             continue
+        if top == "aq":  # ANSI-C quotes allow escaped single quotes.
+            if c == "\\":
+                if src[i + 1:i + 2] == "\n":
+                    line += 1
+                i += 2
+            else:
+                if c == "'":
+                    stack.pop()
+                elif c == "\n":
+                    line += 1
+                i += 1
+            continue
         if c == "\n":
             line += 1
             i += 1
@@ -75,7 +90,7 @@ def scan(src: str):
                             line += 1
                             closed = True
                             break
-                        if not quoted and "$?" in body:
+                        if not quoted and ("$?" in body or "${?}" in body):
                             unscanned.append(line)
                         line += 1
                     if not closed:
@@ -99,6 +114,10 @@ def scan(src: str):
         if c == "'" and top != "dq":
             stack.append("sq")
             i += 1
+            continue
+        if src.startswith("$'", i) and top != "dq":
+            stack.append("aq")
+            i += 2
             continue
         if c == '"':
             if top == "dq":
@@ -154,14 +173,17 @@ def scan(src: str):
                 heredocs.append((delim, m.group(1) == "-", quoted))
                 i = m.end()
                 continue
-        if src.startswith("$?", i):
+        if src.startswith("$?", i) or src.startswith("${?}", i):
             if seen and not any(s in _SUBST for s in stack):
                 stale.append(line)
-            i += 2
+            i += 4 if src.startswith("${?}", i) else 2
             continue
-        if not stack and c in ";&|":
+        if not stack and c in ";&|" and not (
+                c == "&" and i > 0 and src[i - 1] in "<>"):
             seen = False
         i += 1
+    if stack:
+        unscanned.append(line)
     return stale, unscanned
 
 
@@ -214,10 +236,20 @@ def test_what_the_scanner_cannot_read_is_reported_not_passed():
 
 
 def _scripts():
-    found = []
-    for base in SCAN_DIRS:
-        found.extend(sorted(base.rglob("*.sh")))
-    return found
+    found = set(ROOT.glob("*.sh"))
+    for base in (ROOT, ROOT / "fork-gatekeeper", ROOT / "tools"):
+        paths = base.iterdir() if base == ROOT else base.rglob("*")
+        for path in paths:
+            if not path.is_file():
+                continue
+            if path.suffix == ".sh":
+                found.add(path)
+            elif not path.suffix:
+                with path.open("rb") as f:
+                    first = f.readline(256).decode("utf-8", errors="replace")
+                if re.match(r"^#!.*(?:/|\s)(?:bash|sh|dash|ksh|zsh)(?:\s|$)", first):
+                    found.add(path)
+    return sorted(found)
 
 
 def test_no_script_logs_a_substitutions_status_as_a_commands():

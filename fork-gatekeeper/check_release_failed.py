@@ -13,12 +13,12 @@ of a week before anything said a word.
 So this reports the CAUSE, on the round it happens.
 
     rc 0  the release did not fail, or the failure is already raised
-    rc 1  a release failure was found and escalated (or escalation refused)
+    rc 1  a release failure was found and escalated
     rc 2  NORECORD — the tick evidence could not be read, which is not "fine"
+    rc 3  COULD NOT RAISE — alert delivery failed
 
-ONE PR PER FAILING DAY. The branch name carries the date, and an existing branch
-on origin means the day is already raised — a round that fails four times in a
-day does not open four PRs.
+ONE PR PER FAILING DAY. An existing open or closed PR for the date-keyed branch
+means already raised. A branch without a PR is an undelivered alert to retry.
 """
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ sys.path.insert(0, str(_HERE))
 from check_publish_silence import _default_escalate  # noqa: E402
 
 RC_OK, RC_ESCALATED, RC_NORECORD = 0, 1, 2
+RC_COULD_NOT_RAISE = 3
 
 ALARM_KIND = "release-failed"
 
@@ -65,7 +66,8 @@ def _cap_line(line: str, cap: int = DETAIL_LINE_CAP) -> str:
     head = (room * 3) // 4
     tail = room - head
     elided = len(line) - head - tail
-    return line[:head] + _ELISION.format(n=elided) + line[len(line) - tail:]
+    return (line[:head] + _ELISION.format(n=elided)
+            + line[len(line) - tail:])[:cap]
 
 
 def _cap_block(text: str, cap: int = DETAIL_BLOCK_CAP) -> str:
@@ -76,20 +78,21 @@ def _cap_block(text: str, cap: int = DETAIL_BLOCK_CAP) -> str:
         return whole
     kept: list[str] = []
     used = 0
+    remaining = len(whole)
     for i, ln in enumerate(lines):
-        rest = "\n".join(lines[i:])
-        note = (f"... [{len(lines) - i} more line(s), {len(rest)} chars elided; "
+        note = (f"... [{len(lines) - i} more line(s), {remaining} chars elided; "
                 "the full record is the release JSON]")
         if used + len(ln) + 1 + len(note) > cap:
             kept.append(note)
             break
         kept.append(ln)
         used += len(ln) + 1
+        remaining -= len(ln) + 1
     return "\n".join(kept)[:cap]
 
 
-_DETAIL_KEYS = ("summary", "reason", "category", "detail", "note", "subject",
-                "stage")
+_DETAIL_KEYS = ("stage", "category", "subject", "retryable", "summary",
+                "reason", "detail", "note")
 
 
 def _detail_from(release: dict) -> str:
@@ -121,16 +124,16 @@ def _detail_from(release: dict) -> str:
     def _emit(prefix: str, obj) -> None:
         if not isinstance(obj, dict):
             if obj:
-                lines.append(f"{prefix}: {obj}")
+                lines.append(_cap_line(f"{prefix}: {obj}".replace("\n", "\\n")
+                                       .replace("\r", "\\r")))
             return
         for key in _DETAIL_KEYS:
-            if obj.get(key):
-                lines.append(f"{prefix}{key}: {obj[key]}")
-        if "retryable" in obj:
-            lines.append(f"{prefix}retryable: {obj['retryable']}")
+            if obj.get(key) or key == "retryable" and key in obj:
+                value = str(obj[key]).replace("\n", "\\n").replace("\r", "\\r")
+                lines.append(_cap_line(f"{prefix}{key}: {value}"))
 
-    _emit("", release)
     _emit("failure.", release.get("failure"))
+    _emit("", release)
     for i, item in enumerate(release.get("unmeasured") or []):
         _emit(f"unmeasured[{i}].", item)
     return "\n".join(lines) + ("\n" if lines else "")
@@ -221,7 +224,7 @@ def main(argv=None) -> int:
     ok, note = _default_escalate(summary, body, round_at=a.round_at,
                                  kind=ALARM_KIND)
     print(f"[{'RAISED' if ok else 'COULD NOT RAISE'}] {summary} — {note}")
-    return RC_ESCALATED
+    return RC_ESCALATED if ok else RC_COULD_NOT_RAISE
 
 
 if __name__ == "__main__":

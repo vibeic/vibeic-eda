@@ -351,13 +351,16 @@ _READBACK_ONLY_CATEGORIES = frozenset({"registry_manifest_unstable"})
 # of times before returning UNKNOWN; this mirrors the compose retry policy but
 # never turns an unmeasured answer into an absence or a successful publication.
 #
-# Five attempts, 102 s of waiting in all (previously three over 12 s).  How
+# Only the CLI's manifest fallback widens to five attempts over 102 s. Other
+# transport errors retain three attempts over 12 s. How
 # long the 2026-09-30 condition lasted was never measured -- that read was not
 # retried at all, and the tag read healthy again minutes later -- so the window
 # is widened toward that scale rather than fitted to it.  Exhausting it is
 # still UNKNOWN, never PRESENT or ABSENT.
-MANIFEST_TRANSIENT_ATTEMPTS = 5
-MANIFEST_RETRY_DELAYS = (2, 10, 30, 60)
+MANIFEST_TRANSIENT_ATTEMPTS = 3
+MANIFEST_RETRY_DELAYS = (2, 10)
+MANIFEST_UNSTABLE_ATTEMPTS = 5
+MANIFEST_UNSTABLE_RETRY_DELAYS = (2, 10, 30, 60)
 
 
 def _utcnow() -> str:
@@ -1629,12 +1632,14 @@ def _probe_remote_manifest(ref: str, *,
     format" fallback, which masks a failed first fetch (see
     ``registry_manifest_unstable``) -- are retried before the final UNKNOWN
     verdict.  The retry does not change the meaning of an answer: only an
-    explicit not-found reply becomes ABSENT, only rc 0 is PRESENT, and exhausted
-    retries remain UNKNOWN.  Classification reads the full reply; callers bound
-    what they store.
+    explicit not-found reply becomes ABSENT only if no previous reply showed
+    existence. The unsupported-format fallback prints a fetched manifest; any
+    later not-found contradicts that evidence and remains UNKNOWN. Only rc 0
+    is PRESENT. Classification reads the full reply; callers bound storage.
     """
     sleeper = sleep or time.sleep
-    for attempt in range(1, MANIFEST_TRANSIENT_ATTEMPTS + 1):
+    existence_seen = False
+    for attempt in range(1, MANIFEST_UNSTABLE_ATTEMPTS + 1):
         rc, out, err = _sh(["docker", "manifest", "inspect", ref], timeout=180)
         detail = (err or out).strip()
         if rc == 0:
@@ -1656,20 +1661,34 @@ def _probe_remote_manifest(ref: str, *,
             return PresenceMeasurement(
                 Presence.PRESENT, ref, "registry", detail, identity,
             )
-        if _REMOTE_ABSENCE.search(detail):
+        # Inspect the existence marker independently of category priority:
+        # network text and even manifest bytes containing "manifest unknown"
+        # must not erase the fact that the CLI fetched a manifest.
+        unstable = "unsupported manifest format" in detail.lower()
+        existence_seen = existence_seen or unstable
+        if not unstable and _REMOTE_ABSENCE.search(detail):
+            if existence_seen:
+                return PresenceMeasurement(
+                    Presence.UNKNOWN, ref, "registry",
+                    "registry contradicted prior manifest existence evidence: "
+                    + detail,
+                )
             return PresenceMeasurement(Presence.ABSENT, ref, "registry", detail)
 
         category = transient_failure_category(detail)
+        attempts = (MANIFEST_UNSTABLE_ATTEMPTS if existence_seen
+                    else MANIFEST_TRANSIENT_ATTEMPTS)
+        delays = (MANIFEST_UNSTABLE_RETRY_DELAYS if existence_seen
+                  else MANIFEST_RETRY_DELAYS)
         if (category not in _EXTENDED_RETRY_CATEGORIES
-                or attempt >= MANIFEST_TRANSIENT_ATTEMPTS):
+                or attempt >= attempts):
             return PresenceMeasurement(
                 Presence.UNKNOWN, ref, "registry", detail or (
                     "docker manifest inspect exited "
                     f"{rc} without an explicit not-found answer"
                 ))
-        delay = MANIFEST_RETRY_DELAYS[min(
-            attempt - 1, len(MANIFEST_RETRY_DELAYS) - 1)]
-        print(f"  registry manifest probe {attempt}/{MANIFEST_TRANSIENT_ATTEMPTS} "
+        delay = delays[min(attempt - 1, len(delays) - 1)]
+        print(f"  registry manifest probe {attempt}/{attempts} "
               f"for {ref} failed ({category}); retrying in {delay}s",
               flush=True)
         sleeper(delay)

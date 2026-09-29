@@ -143,14 +143,14 @@ def test_a_not_found_reply_is_absent_at_once(monkeypatch):
     assert sleeps == []
 
 
-def test_a_not_found_after_an_unstable_reply_is_absent(monkeypatch):
-    """A retry re-asks the question; the answer it gets keeps its meaning."""
+def test_a_not_found_after_an_unstable_reply_is_unknown(monkeypatch):
+    """A fetched manifest followed by absence is contradictory evidence."""
     sleeps = []
     asked = _registry(monkeypatch, {REF: [(1, "", OBSERVED), (1, "", NOT_FOUND)]})
 
     measured = R._probe_remote_manifest(REF, sleep=sleeps.append)
 
-    assert measured.state is R.Presence.ABSENT
+    assert measured.state is R.Presence.UNKNOWN
     assert asked == [REF, REF]
     assert sleeps == [2]
 

@@ -225,7 +225,7 @@ def test_the_alarm_path_refuses_an_empty_alert(monkeypatch, tmp_path):
 
 
 def test_a_streak_already_on_origin_is_not_raised_twice(monkeypatch, tmp_path):
-    """A branch surviving a restart must not become a second PR."""
+    """A delivered PR surviving a restart must not become a second PR."""
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(S, "REPO", repo)
@@ -233,15 +233,15 @@ def test_a_streak_already_on_origin_is_not_raised_twice(monkeypatch, tmp_path):
 
     def _sh(*argv, **k):
         calls.append(argv)
-        if "ls-remote" in argv:
-            return 0, "abc123\trefs/heads/publish-silence-2026-08-21\n"
+        if argv[:3] == ("gh", "pr", "list"):
+            return 0, '[{"number": 123, "url": "https://example/pr/123"}]'
         return 0, ""
 
     monkeypatch.setattr(S, "_sh", _sh)
     ok, detail = S._default_escalate("t", "b", "2026-08-21T05:30:01+08:00")
     assert ok is True and "already raised" in detail
     assert not any("create" in a for a in calls), \
-        "it reached gh pr create despite the branch already existing"
+        "it reached gh pr create despite the PR already existing"
 
 
 def test_the_alarm_reports_a_refused_push_instead_of_swallowing_it():
