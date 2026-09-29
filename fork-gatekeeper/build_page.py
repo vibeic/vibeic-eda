@@ -1826,6 +1826,10 @@ function enhBlock(tool){
       <td>${verd}</td>
     </tr>`;
     const commit = c => `<div class="fork-commit"><a class="sha" href="${esc(c.url||'#')}" target="_blank" rel="noopener">${esc(c.sha)}</a><span>${esc(c.title)}</span><span style="margin-left:auto">${esc(c.date)}</span></div>`;
+    // Keep the list's role concise; installation history belongs in the closed drawer.
+    const integrationBlock = d.integration_notes
+      ? `<h5 data-en="Image integration details" data-zh="Image 整合細節">Image integration details</h5><p class="fork-caption">${esc(d.integration_notes)}</p>`
+      : "";
     const carried = (d.carried_patches&&d.carried_patches.length)
       ? `<h5 data-en="Patches we carry (${ahead}) — branch ${esc(d.vibeic_branch||'')}" data-zh="我們揹著的補丁（${ahead}）— 分支 ${esc(d.vibeic_branch||'')}">Patches we carry (${ahead})</h5>` + d.carried_patches.map(commit).join("")
       : (d.integrated
@@ -1921,7 +1925,7 @@ function enhBlock(tool){
       : "";
     const prov = `<details class="enh-wrap prov-wrap"><summary>`
       + `<span data-en="Carried patches · Releases · Daily sync log" data-zh="揹著的補丁 · Release · 每日同步 Log">Carried patches · Releases · Daily sync log</span>`
-      + `</summary><div class="prov-inner">${carried}${heldBlock}${recipeBlock}${rel}${log}</div></details>`;
+      + `</summary><div class="prov-inner">${integrationBlock}${carried}${heldBlock}${recipeBlock}${rel}${log}</div></details>`;
     const detail = `<tr class="fork-detail" data-d="${i}"><td colspan="8"><div class="inner">${enhBlock(d.tool)}${prov}</div></td></tr>`;
     return row+detail;
   }).join("");
