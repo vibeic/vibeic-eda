@@ -89,7 +89,7 @@ def test_the_verdict_is_ordered_by_the_round_not_by_who_finished_first():
 def test_a_failure_still_carries_its_tool_and_category():
     block = _build_block()
     for needle in ('"tool": t', '"category": build_category',
-                   "progress_stall", "transient_failure_category(err)",
+                   "progress_stall", "_build_failure_category(err)",
                    "RC_NEEDS_HUMAN"):
         assert needle in block, needle
 

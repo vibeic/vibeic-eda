@@ -38,6 +38,55 @@ RC_OK, RC_ESCALATED, RC_NORECORD = 0, 1, 2
 
 ALARM_KIND = "release-failed"
 
+#: What this alert allows itself.  GitHub refuses a PR body over 65,536
+#: characters ("GraphQL: Body is too long (maximum is 65536 characters)"); the
+#: margin covers the footer `_default_escalate` appends and anything else added
+#: on the way.  2026-09-30: the record carried an 85,923-character detail twice
+#: (failure.summary and unmeasured[0].detail), the body passed 170,000
+#: characters, `gh pr create` refused it, and the one alarm for a failed release
+#: was never raised.
+BODY_CAP = 60000
+#: One `key: value` line of the record in the alert.  Longer lines keep their
+#: start (the key and what failed) and their end, around an elision marker.
+DETAIL_LINE_CAP = 2000
+#: The whole "What the release said" block.  Lines past it are counted, not
+#: shown; the failure's own lines come first in the block, so they are kept.
+DETAIL_BLOCK_CAP = 40000
+
+_ELISION = " ... [{n} chars elided] ... "
+
+
+def _cap_line(line: str, cap: int = DETAIL_LINE_CAP) -> str:
+    """At most ``cap`` characters: head, elision marker, tail."""
+    if len(line) <= cap:
+        return line
+    # The marker for the whole length is at least as long as the real one.
+    room = max(0, cap - len(_ELISION.format(n=len(line))))
+    head = (room * 3) // 4
+    tail = room - head
+    elided = len(line) - head - tail
+    return line[:head] + _ELISION.format(n=elided) + line[len(line) - tail:]
+
+
+def _cap_block(text: str, cap: int = DETAIL_BLOCK_CAP) -> str:
+    """Cap every line, then the block; say what was left out, never silently."""
+    lines = [_cap_line(ln) for ln in text.split("\n")]
+    whole = "\n".join(lines)
+    if len(whole) <= cap:
+        return whole
+    kept: list[str] = []
+    used = 0
+    for i, ln in enumerate(lines):
+        rest = "\n".join(lines[i:])
+        note = (f"... [{len(lines) - i} more line(s), {len(rest)} chars elided; "
+                "the full record is the release JSON]")
+        if used + len(ln) + 1 + len(note) > cap:
+            kept.append(note)
+            break
+        kept.append(ln)
+        used += len(ln) + 1
+    return "\n".join(kept)[:cap]
+
 
 _DETAIL_KEYS = ("summary", "reason", "category", "detail", "note", "subject",
                 "stage")
@@ -90,11 +139,14 @@ def _detail_from(release: dict) -> str:
 def _report(tick_exit, tick_state: str, round_at: str, detail: str) -> tuple:
     summary = (f"release failed on the {round_at[:10]} round "
                f"(run_tick exit {tick_exit})")
-    body = (
+    head = (
         f"`run_tick` exited **{tick_exit}** (state `{tick_state}`) on the "
         f"{round_at} round, so no image was published and `build_page` was "
         f"skipped.\n\n"
-        f"## What the release said\n\n```\n{detail.strip() or '(no detail captured)'}\n```\n\n"
+        f"## What the release said\n\n```\n"
+    )
+    tail = (
+        "\n```\n\n"
         "## Why this is a PR and not a page banner\n\n"
         "The page cannot report that the page did not update. Until this alarm "
         "existed the only signal was `check_publish_silence`, which measures the "
@@ -109,6 +161,13 @@ def _report(tick_exit, tick_state: str, round_at: str, detail: str) -> tuple:
         "round's own `recover_pin_only_dirty_tree` handles that at the next start.\n\n"
         "---\n_Opened by the round itself. Operational alert, not an auto-merge._\n"
     )
+    # The detail is the only part whose size the record decides; it gets what
+    # the fixed text leaves under BODY_CAP.  A normal record fits untouched.
+    room = max(0, min(DETAIL_BLOCK_CAP, BODY_CAP - len(head) - len(tail)))
+    shown = _cap_block(detail.strip() or "(no detail captured)", room)
+    body = head + shown + tail
+    if len(body) > BODY_CAP:        # only an absurd --round-at/--tick-state
+        body = _cap_line(body, BODY_CAP)
     return summary, body
 
 

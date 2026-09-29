@@ -327,7 +327,11 @@ if [ -x "${DIR}/check_release_failed.py" ] || [ -f "${DIR}/check_release_failed.
     python3 "${DIR}/check_release_failed.py" \
         --tick-exit "${TICK}" --tick-state "${TICK_STATE}" \
         --round-at "${ROUND_AT}" >> "${LOG}" 2>&1
-    echo "[$(date -Is)] check_release_failed exit $? (0=nothing to raise, 1=raised, 2=NORECORD)" >> "${LOG}"
+    # Captured BEFORE the log line: its `$(date -Is)` runs first and resets
+    # `$?` to 0, which logged "exit 0" for the 2026-09-30 alert that could not
+    # be raised (the checker returned 1, [COULD NOT RAISE]).
+    RELEASE_ALERT=$?
+    echo "[$(date -Is)] check_release_failed exit ${RELEASE_ALERT} (0=nothing to raise, 1=raised, 2=NORECORD)" >> "${LOG}"
 else
     echo "[$(date -Is)] check_release_failed NOT CHECKED — checker missing" >> "${LOG}"
 fi

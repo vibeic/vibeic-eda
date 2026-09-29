@@ -140,6 +140,37 @@ class PresenceMeasurement:
     identity: Optional[str] = None
 
 
+#: How much of a tool's diagnostic is STORED -- in evidence, in an exception,
+#: in a failure summary.  Classification always reads the full text first; this
+#: bounds only what is kept.
+#:
+#: 2026-09-30: `docker manifest inspect` failed with "unsupported manifest
+#: format: &{...}" followed by the whole deserialized manifest as a Go struct,
+#: raw bytes printed as decimals -- 85,893 characters on ONE line (85,923 as
+#: stored, with its prefix).  The exception carried all of it, the failure
+#: summary carried it again, and the alert built from the record exceeded
+#: GitHub's body limit.  The evidence dict next to it was already cut to
+#: `[-1200:]`, but a tail alone kept only the byte dump and dropped the one
+#: phrase that says what went wrong.  So the bound keeps BOTH ends: the first
+#: line (what failed, capped, because it can be the whole text) and the last
+#: characters (where the tool ended up).
+DETAIL_HEAD_CHARS = 400
+DETAIL_TAIL_CHARS = 1200
+#: Room for the elision marker, so bounding a bounded text returns it unchanged.
+_DETAIL_SLACK = 64
+
+
+def _bounded_detail(text: Optional[str], *, head: int = DETAIL_HEAD_CHARS,
+                    tail: int = DETAIL_TAIL_CHARS) -> str:
+    """First line (at most ``head`` chars) + an elision marker + last ``tail``."""
+    text = text or ""
+    if len(text) <= head + tail + _DETAIL_SLACK:
+        return text
+    first = text.split("\n", 1)[0][:head]
+    elided = len(text) - len(first) - tail
+    return f"{first} ... [{elided} chars elided] ... {text[-tail:]}"
+
+
 class ReleaseMeasurementUnknown(RuntimeError):
     """A release input could not be measured, so mutation must not proceed."""
 
@@ -148,8 +179,10 @@ class ReleaseMeasurementUnknown(RuntimeError):
         self.stage = stage
         self.category = category
         self.subject = subject
-        self.detail = detail
-        super().__init__(f"{subject}: {detail}")
+        # Bounded here, once, for every raiser: this text becomes the
+        # `unmeasured[]` entry, the failure summary and the [UNMEASURED] line.
+        self.detail = _bounded_detail(detail)
+        super().__init__(f"{subject}: {self.detail}")
 
     def as_dict(self) -> dict:
         return {
@@ -286,18 +319,45 @@ _TRANSIENT_FAILURES = (
     ("service_unavailable", ("http 429", "http 502", "http 503", "http 504",
                              "too many requests", "service unavailable")),
     ("progress_stall", ("watchdog_stalled",)),
+    # A `docker manifest inspect` reply that does not describe the tag.  The
+    # docker CLI (29.7.1, cli/command/manifest/inspect.go) asks GetManifest
+    # first -- which for an OCI image manifest ALSO fetches the config blob
+    # (internal/registryclient/fetcher.go:98) -- and on ANY error discards that
+    # error and falls back to GetManifestList.  A single image manifest is not
+    # a list, so fetchList answers "unsupported manifest format: %v" and prints
+    # the manifest it successfully fetched (fetcher.go:54).  The message
+    # therefore means "the first fetch failed for a reason the CLI threw away".
+    # 2026-09-30 05:30: 0.3.88's read-back got this once, fully published; the
+    # same command then returned rc 0 for 0.3.88 and :latest twelve times in a
+    # row.  LAST in the table, so a network signature in the same text names
+    # the cause instead.
+    ("registry_manifest_unstable", ("unsupported manifest format",)),
 )
 _EXTENDED_RETRY_CATEGORIES = {
     "dns", "network_timeout", "network_reset", "service_unavailable",
+    "registry_manifest_unstable",
 }
+#: Categories whose meaning comes from the REGISTRY READ-BACK command and only
+#: from it.  The fallback that produces "unsupported manifest format" exists in
+#: `docker manifest inspect`; in a build or compose log the same words would be
+#: a manifest that genuinely does not parse, which waiting does not change.
+#: `_build_failure_category` removes these, so a deterministic compose failure
+#: keeps exactly the attempts, category and `retryable` it had before.
+_READBACK_ONLY_CATEGORIES = frozenset({"registry_manifest_unstable"})
 
 # Registry presence is a release-authority input, so an UNKNOWN answer must
 # still fail closed.  A single TLS handshake timeout, however, is not evidence
 # that an immutable artefact is absent.  Re-ask the same tag a bounded number
 # of times before returning UNKNOWN; this mirrors the compose retry policy but
 # never turns an unmeasured answer into an absence or a successful publication.
-MANIFEST_TRANSIENT_ATTEMPTS = 3
-MANIFEST_RETRY_DELAYS = (2, 10)
+#
+# Five attempts, 102 s of waiting in all (previously three over 12 s).  How
+# long the 2026-09-30 condition lasted was never measured -- that read was not
+# retried at all, and the tag read healthy again minutes later -- so the window
+# is widened toward that scale rather than fitted to it.  Exhausting it is
+# still UNKNOWN, never PRESENT or ABSENT.
+MANIFEST_TRANSIENT_ATTEMPTS = 5
+MANIFEST_RETRY_DELAYS = (2, 10, 30, 60)
 
 
 def _utcnow() -> str:
@@ -326,6 +386,11 @@ def _finish(result: dict, json_path: Optional[str], rc: int, status: str,
     result["exit_code"] = rc
     result["finished_at"] = _utcnow()
     if failure is not None:
+        # The summary is what an alert and a page quote; whoever produced it,
+        # it is stored bounded (see DETAIL_HEAD_CHARS).
+        summary = failure.get("summary")
+        if isinstance(summary, str):
+            failure = {**failure, "summary": _bounded_detail(summary)}
         result["failure"] = failure
     else:
         result.pop("failure", None)
@@ -356,6 +421,17 @@ def transient_failure_category(text: str) -> Optional[str]:
         if any(needle in low for needle in needles):
             return category
     return None
+
+
+def _build_failure_category(text: str) -> Optional[str]:
+    """`transient_failure_category` for a BUILD or COMPOSE diagnostic.
+
+    A read-back-only category is not a transient here (see
+    `_READBACK_ONLY_CATEGORIES`): it reads as unclassified, which keeps the one
+    defence-in-depth retry and `retryable: false`, exactly as before it existed.
+    """
+    category = transient_failure_category(text)
+    return None if category in _READBACK_ONLY_CATEGORIES else category
 
 
 def _one_line_error(text: str) -> str:
@@ -400,7 +476,7 @@ def compose_with_retries(bake: List[str], root: Path,
                 env={**BUILD_ENV, **(extra_env or {})},
                 stall_grace=BUILD_STALL_GRACE_S,
             )
-        category = transient_failure_category(err)
+        category = _build_failure_category(err)
         history.append({
             "attempt": attempt,
             "started_at": started,
@@ -1549,9 +1625,13 @@ def _probe_remote_manifest(ref: str, *,
                            ) -> PresenceMeasurement:
     """Measure a registry tag; only an explicit manifest absence is ABSENT.
 
-    Transient transport failures are retried before the final UNKNOWN verdict.
-    The retry does not change the meaning of an answer: only an explicit
-    not-found reply becomes ABSENT, and exhausted retries remain UNKNOWN.
+    Transient transport failures -- and the docker CLI's "unsupported manifest
+    format" fallback, which masks a failed first fetch (see
+    ``registry_manifest_unstable``) -- are retried before the final UNKNOWN
+    verdict.  The retry does not change the meaning of an answer: only an
+    explicit not-found reply becomes ABSENT, only rc 0 is PRESENT, and exhausted
+    retries remain UNKNOWN.  Classification reads the full reply; callers bound
+    what they store.
     """
     sleeper = sleep or time.sleep
     for attempt in range(1, MANIFEST_TRANSIENT_ATTEMPTS + 1):
@@ -1619,7 +1699,7 @@ def verify_remote_immutable_publication(
         "state": measured.state.value,
         "source": measured.source,
         "identity": measured.identity,
-        "detail": measured.detail[-1200:],
+        "detail": _bounded_detail(measured.detail),
     }
     if measured.state is Presence.UNKNOWN:
         raise ReleaseMeasurementUnknown(
@@ -1679,7 +1759,7 @@ def verify_remote_release_publication(
             "state": item.state.value,
             "source": item.source,
             "identity": item.identity,
-            "detail": item.detail[-1200:],
+            "detail": _bounded_detail(item.detail),
         }
         for key, item in measured.items()
     }
@@ -3406,7 +3486,7 @@ def _main_under_release_lock(argv=None) -> int:
                     return _finish(result, a.json, RC_NEEDS_HUMAN, "failed", {
                         "stage": "tool_build", "category": build_category,
                         "retryable": (
-                            transient_failure_category(err)
+                            _build_failure_category(err)
                             in _EXTENDED_RETRY_CATEGORIES),
                         "tool": t, "summary": _one_line_error(err),
                         "supervision": {

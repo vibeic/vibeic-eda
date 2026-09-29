@@ -12,6 +12,7 @@ echo "[$(date -Is)] docker build exit ${rc}" | tee -a "$LOG"
 if [ "$rc" = 0 ]; then
   echo "--- smoke: tools run in the fresh image ---" | tee -a "$LOG"
   docker run --rm --entrypoint bash "${TAG}" -lc 'yosys -V && openroad -version && echo SMOKE_OK' >>"$LOG" 2>&1
-  echo "[$(date -Is)] smoke exit $?" | tee -a "$LOG"
+  smoke_rc=$?   # before the log line: its $(date -Is) would reset $? to 0
+  echo "[$(date -Is)] smoke exit ${smoke_rc}" | tee -a "$LOG"
 fi
 exit ${rc}
