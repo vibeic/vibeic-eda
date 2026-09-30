@@ -2,8 +2,8 @@
 
 2026-09-30 05:30: `daily_release` published 0.3.88 end to end -- pushed, record
 commit c533a53 on origin/main, `:latest` tagged, smoke 12/12.  The no-op
-publication read-back then ran `docker manifest inspect
-ghcr.io/vibeic/vibeic-eda:0.3.88` and got rc != 0 with
+publication read-back then ran `docker manifest inspect` against the
+`0.3.88` version tag and got rc != 0 with
 
     unsupported manifest format: &{{{2 application/vnd.oci.image.manifest.v1+json} ...
 
@@ -36,7 +36,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import daily_release as R  # noqa: E402
 
-REF = "ghcr.io/vibeic/vibeic-eda:0.3.88"
+VERSION = (HERE.parent / "VERSION").read_text().strip()
+REF = "ghcr.io/vibeic/vibeic-eda:" + VERSION
 LATEST = "ghcr.io/vibeic/vibeic-eda:latest"
 
 _HEAD = (
@@ -165,7 +166,7 @@ def test_the_publication_readback_survives_the_observed_reply(monkeypatch):
     })
 
     ok, evidence = R.verify_remote_release_publication(
-        "0.3.88", probe=lambda ref: R._probe_remote_manifest(
+        VERSION, probe=lambda ref: R._probe_remote_manifest(
             ref, sleep=sleeps.append))
 
     assert ok is True, evidence
@@ -184,7 +185,7 @@ def test_an_exhausted_readback_stores_a_bounded_detail(monkeypatch, tmp_path):
                             LATEST: [(0, MANIFEST, "")]})
     try:
         R.verify_remote_release_publication(
-            "0.3.88", probe=lambda ref: R._probe_remote_manifest(
+            VERSION, probe=lambda ref: R._probe_remote_manifest(
                 ref, sleep=lambda _s: None))
     except R.ReleaseMeasurementUnknown as exc:
         raised = exc
