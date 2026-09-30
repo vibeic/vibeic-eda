@@ -96,6 +96,7 @@ def test_ai_can_run_past_the_old_total_limit_when_progressing(
             out=json.dumps({"type": "result", "result": "landed"}) + "\n")
 
     monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setenv("GK_AI_BACKEND", "claude")
     monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
     monkeypatch.setattr(D.watchdog, "run_supervised", run)
     monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, True))
@@ -119,6 +120,7 @@ def test_ai_can_run_past_the_old_total_limit_when_progressing(
 
 def test_stalled_ai_keeps_unverified_cases_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setenv("GK_AI_BACKEND", "claude")
     monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
     monkeypatch.setattr(
         D.watchdog, "run_supervised",
@@ -144,6 +146,7 @@ def test_stalled_ai_keeps_unverified_cases_pending(tmp_path, monkeypatch):
 
 def test_rc_zero_alone_cannot_clear_an_unverified_case(tmp_path, monkeypatch):
     monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setenv("GK_AI_BACKEND", "claude")
     monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/claude")
     monkeypatch.setattr(
         D.watchdog, "run_supervised", lambda *a, **k: _supervised(rc=0),
@@ -155,6 +158,63 @@ def test_rc_zero_alone_cannot_clear_an_unverified_case(tmp_path, monkeypatch):
     assert result["rc"] == 0 and result["outcome"] == "natural"
     assert result["verified"] is False
     assert D._ai_needs_attention(result) is True
+
+
+@pytest.mark.parametrize("configured", [None, "codex"])
+def test_codex_handoff_is_selected_and_supervised(tmp_path, monkeypatch, configured):
+    # The same existing conflict handoff must work when Claude subscription
+    # access is disabled. A missing CLI or failed turn must never clear work.
+    captured = {}
+    if configured is None:
+        monkeypatch.delenv("GK_AI_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("GK_AI_BACKEND", configured)
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/disabled-claude")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/codex" if name == "codex" else None)
+    def run(cmd, **kwargs):
+        captured.update(cmd=cmd, kwargs=kwargs,
+                        brief=(tmp_path / "state" / "ai_decisions_brief.txt").read_text())
+        return _supervised(out=json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "source landed"}}) + "\n")
+    monkeypatch.setattr(D.watchdog, "run_supervised", run)
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, True))
+    result = D.step2b_ai_decisions(_report(), tmp_path / "state", apply=True)
+    assert captured["cmd"][0:2] == ["/bin/codex", "exec"]
+    assert "--json" in captured["cmd"]
+    assert captured["cmd"][-1] == captured["brief"]
+    assert captured["kwargs"]["output_progress"] is True
+    assert captured["kwargs"]["process_tree_cpu_progress"] is True
+    assert "timeout" not in captured["kwargs"]
+    assert result["tail"] == "source landed"
+    assert result["verified"] is True
+
+
+@pytest.mark.parametrize("backend,available,rc,verified", [
+    ("codex", False, 0, False),
+    ("codex", True, 1, False),
+    ("codex", True, 0, False),
+    ("unsupported", True, 0, False),
+])
+def test_backend_refusal_or_undelivered_turn_keeps_the_case_pending(
+        tmp_path, monkeypatch, backend, available, rc, verified):
+    monkeypatch.setenv("GK_AI_BACKEND", backend)
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr(D, "_claude_bin", lambda: "/bin/disabled-claude")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/codex" if available else None)
+    calls = []
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _supervised(rc=rc)
+    monkeypatch.setattr(D.watchdog, "run_supervised", run)
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, verified))
+    result = D.step2b_ai_decisions(_report(), tmp_path / "state", apply=True)
+    assert all(cmd[0] != "/bin/disabled-claude" for cmd in calls)
+    if not available or backend == "unsupported":
+        assert calls == []
+        assert result["invoked"] is False and result["error"]
+    assert D._ai_needs_attention(result) is True
+    assert len(json.loads((tmp_path / "state" / "ai_decisions_pending.json").read_text())) == 1
 
 
 def _git(repo: Path, *args: str) -> str:

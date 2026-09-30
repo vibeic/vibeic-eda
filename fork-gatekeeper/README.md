@@ -126,12 +126,17 @@ host's gatekeeper. For each conflict it collects the evidence a decision needs
 **before** aborting the merge, because aborting destroys it: the conflicting
 files, our commits on that branch with their subjects and touched files, and
 git's own message. Those land in `$GK_STATE_DIR/ai_decisions_pending.json` and
-`ai_decisions_brief.txt`, and the brief is passed straight to a `claude -p`
-turn. **That turn is the gatekeeper.** The call blocks — detaching it would end
-the process before the turn produced anything. It has no total-runtime cutoff:
-Claude's stream-json/tool activity and process-tree CPU renew a forward-progress
-lease, so a long healthy decision can finish; a turn is stopped only after all
-progress signals stay flat for `--ai-stall-grace`.
+`ai_decisions_brief.txt`, and the brief is passed straight to a `codex exec
+--json` turn by default. `GK_AI_BACKEND=claude` explicitly selects the legacy
+`claude -p --output-format stream-json` CLI. Unknown backends and missing CLIs
+leave a named pending record; the runner never silently retries a partially
+executed turn with another provider. **That turn is the gatekeeper.** The call
+blocks — detaching it would end the process before the turn produced anything.
+It has no total-runtime cutoff: JSON lifecycle/tool activity and process-tree
+CPU renew a forward-progress lease, so a long healthy decision can finish; a
+turn is stopped only after all progress signals stay flat for `--ai-stall-grace`.
+The retained result names the selected backend; a backend change never supplies
+release authorization without the same remote landing postconditions.
 
 Process completion is not landing evidence. After the turn, the runner reads
 each fork's remote mainline and proves the captured source tip arrived by Git
