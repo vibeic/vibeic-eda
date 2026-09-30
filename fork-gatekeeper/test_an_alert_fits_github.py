@@ -28,7 +28,7 @@ import check_release_failed as C  # noqa: E402
 
 ROUND_AT = "2026-09-30T05:30:01+08:00"
 GITHUB_LIMIT = 65536
-SUBJECT = "ghcr.io/vibeic/vibeic-eda:0.3.88"
+SUBJECT = "ghcr.io/vibeic/vibeic-eda:" + (HERE.parent / "VERSION").read_text().strip()
 HUGE = ("registry manifest unmeasured: unsupported manifest format: &{{{2 "
         "application/vnd.oci.image.manifest.v1+json} " + " 32" * 70_000 + " 125]}")
 
