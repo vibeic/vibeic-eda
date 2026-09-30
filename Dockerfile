@@ -486,7 +486,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=f199e900aedbed9edcbc99fd0a4cf13cbd3e8161
+ARG LIBRELANE_REF=8f096f0846c91d021f0a84d916c1a6b352492041
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2198,7 +2198,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              2678800f927e5a21d9eaa91276204e44f0e6308f 2f324495ed8ae1fa8a590b5d9d54cad7d7a2284d \
              de4b3fd864cd80dab715a3acd81e237e704462f4 ea9d54191cc27ca4e10e5d6931bdd31832e268e1 \
              81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb \
-             9f2f6815f2e9da427f753f44f2fd484de49209af 7834b463bb235bb23ad9b8502732c7afe01d202d; do \
+             9f2f6815f2e9da427f753f44f2fd484de49209af 7834b463bb235bb23ad9b8502732c7afe01d202d \
+             46426c9d996aa057d4d36089e7bf1105ad7aa17c; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2269,6 +2270,15 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
         || { echo "FAIL: ReportManufacturability still requires Netgen's unmatched counts under lvs, so a KLayout.LVS flow is NOT_MEASURED (9f2f681)" >&2; exit 1; }; \
     python3 -P -c "import os, librelane; from librelane.steps.pyosys import Synthesis; v = {x.name: x for x in Synthesis.config_vars}['SYNTH_TRIBUF_LOGIC']; assert v.type is bool and v.default is False, v; src = open(os.path.join(os.path.dirname(librelane.__file__), 'scripts', 'pyosys', 'synthesize.py')).read(); assert 'def tristate_pass(' in src and 'tribuf -logic' in src, 'tristate_pass'; print('Synthesis: SYNTH_TRIBUF_LOGIC declared (bool, default False); tristate_pass picks tribuf / tribuf -logic / nothing')" \
         || { echo "FAIL: SYNTH_TRIBUF_LOGIC is not declared as a bool defaulting to False, or synthesize.py has no tristate_pass (7834b46)" >&2; exit 1; }; \
+    python3 -P -c "from typing import Optional; from librelane.steps.openroad import ResizerTimingPostCTS; v = {x.name: x for x in ResizerTimingPostCTS.config_vars}['PL_RESIZER_HOLD_MAX_BUFFER_COUNT']; assert v.type == Optional[int] and v.default is None, v; print('Post-CTS: optional absolute hold count declared, default None')" \
+        || { echo "FAIL: absolute hold count is not optional int / default None (46426c9)" >&2; exit 1; }; \
+    grep -qF 'append_if_exists_argument hold_args PL_RESIZER_HOLD_MAX_BUFFER_COUNT -max_buffer_count' $LLN/scripts/openroad/rsz_timing_postcts.tcl \
+        || { echo "FAIL: post-CTS does not forward the absolute hold count (46426c9)" >&2; exit 1; }; \
+    grep -q 'LL_HOLD_ABSOLUTE_CAP_UNSUPPORTED' $LLN/scripts/openroad/rsz_timing_postcts.tcl \
+        || { echo "FAIL: post-CTS has no native absolute-count ABI guard (46426c9)" >&2; exit 1; }; \
+    printf '%s\n' 'if { [llength [info commands rsz::hold_buffer_count_limit_abi]] != 1 || [rsz::hold_buffer_count_limit_abi] != 1 } { puts stderr "FAIL: native absolute hold count ABI is missing"; exit 1 }' > /tmp/hold-count-abi.tcl; \
+    openroad -no_splash -no_init -exit /tmp/hold-count-abi.tcl; \
+    rm -f /tmp/hold-count-abi.tcl; \
     python3 -P -c "import inspect; from librelane.steps.checker import MetricChecker, YosysUnmappedCells, missing_metric_variable; from librelane.steps.misc import NOT_MEASURED; assert missing_metric_variable.name == 'ERROR_ON_MISSING_METRIC' and missing_metric_variable.default is True, missing_metric_variable; assert callable(MetricChecker.metric_not_measured) and 'NOT_MEASURED' in inspect.getsource(MetricChecker.metric_not_measured); assert 'self.metric_not_measured()' in inspect.getsource(MetricChecker.run); assert missing_metric_variable in YosysUnmappedCells.config_vars; assert NOT_MEASURED == 'NOT_MEASURED'; print('checkers: an absent metric is NOT_MEASURED (ERROR_ON_MISSING_METRIC defaults to true)')" \
         || { echo "FAIL: a checker's absent metric is not NOT_MEASURED / ERROR_ON_MISSING_METRIC is not declared (2678800)" >&2; exit 1; }; \
     if grep -nE '^[^#]*utl[.]metric_?' $LLN/scripts/odbpy/*.py; then \
@@ -2308,7 +2318,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 29 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcuD run and gf180mcuA/B/C held, klayout__lvs_error__count NOT_MEASURED when skipped, checkers NOT_MEASURED on an absent metric, FILL_INSERTION_AREA planned per row, odbpy metrics on %OL_METRIC, LVS measured under KLayout.LVS, SYNTH_TRIBUF_LOGIC for internal tri-state buses)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 30 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcuD run and gf180mcuA/B/C held, klayout__lvs_error__count NOT_MEASURED when skipped, checkers NOT_MEASURED on an absent metric, FILL_INSERTION_AREA planned per row, odbpy metrics on %OL_METRIC, LVS measured under KLayout.LVS, SYNTH_TRIBUF_LOGIC for internal tri-state buses, optional attested absolute hold count)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
