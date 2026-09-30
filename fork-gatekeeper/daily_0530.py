@@ -83,7 +83,7 @@ whose stream/tool/CPU signals all stay flat for the stall grace is stopped.
 Exit: 0 clean, 1 something needs a human, 2 nothing could be checked.
 """
 from __future__ import annotations
-import argparse, json, os, re, secrets, subprocess, sys
+import argparse, json, os, re, secrets, shutil, subprocess, sys
 from datetime import datetime
 from pathlib import Path
 
@@ -2161,6 +2161,33 @@ def _claude_bin():
     return p if p else None
 
 
+
+def _gatekeeper_command(brief):
+    """Choose one explicit CLI; never replay a partially executed AI turn.
+
+    Codex is the current host gatekeeper. Operators may explicitly select the
+    legacy Claude CLI. Missing or invalid configuration leaves cases pending;
+    process completion still needs the existing remote landing proof.
+    """
+    backend = os.environ.get("GK_AI_BACKEND", "codex")
+    if backend == "codex":
+        binary = shutil.which("codex")
+        argv = ([binary, "exec", "--json", "--skip-git-repo-check",
+                 "--dangerously-bypass-approvals-and-sandbox", brief]
+                if binary else None)
+    elif backend == "claude":
+        binary = _claude_bin()
+        argv = ([binary, "-p", brief, "--permission-mode", "bypassPermissions",
+                 "--output-format", "stream-json", "--verbose"]
+                if binary else None)
+    else:
+        return backend, None, (
+            f"unsupported GK_AI_BACKEND={backend!r}; choose codex or claude "
+            "— cases left pending")
+    return backend, argv, (None if argv else
+                          f"no {backend} binary on this host — cases left pending")
+
+
 def _atomic_json(path, value):
     """Publish one complete JSON object or leave the previous object intact."""
     path = Path(path)
@@ -2339,12 +2366,16 @@ def _verify_ai_cases(cases):
 
 
 def _ai_stream_tail(out: str) -> str:
-    """The final result text from Claude's stream-json, or a bounded fallback."""
+    """Final message from either CLI's JSON events, or a bounded fallback."""
     for line in reversed((out or "").splitlines()):
         try:
             event = json.loads(line)
         except (TypeError, ValueError):
             continue
+        if isinstance(event, dict) and event.get("type") == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                return str(item.get("text", "")).strip()[-600:]
         if isinstance(event, dict) and event.get("type") == "result":
             value = event.get("structured_output", event.get("result", ""))
             if isinstance(value, (dict, list)):
@@ -2423,22 +2454,21 @@ def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
                 "verified": False,
                 "note": "dry run — brief written, gatekeeper not invoked"}
 
-    binp = _claude_bin()
-    if not binp:
+    backend, command, launch_error = _gatekeeper_command(brief)
+    if launch_error:
         return {"cases": len(cases), "invoked": False,
-                "verified": False,
-                "error": "no claude binary on this host — cases left pending"}
+                "verified": False, "backend": backend,
+                "error": launch_error}
 
     log = state_dir / "ai_decisions.log"
     # BLOCKING on purpose. Detaching would end this process before the
     # gatekeeper's turn produced anything, which is the failure mode that has
     # already cost this campaign four rounds on one cell.  Runtime itself is
-    # NOT a verdict.  Claude emits stream-json lifecycle/tool events as it
+    # NOT a verdict. The selected CLI emits JSON lifecycle/tool events as it
     # works; each output advance or process-tree CPU advance renews the lease.
     # There is no total-runtime ceiling, so a healthy long decision completes.
     run = watchdog.run_supervised(
-        [binp, "-p", brief, "--permission-mode", "bypassPermissions",
-         "--output-format", "stream-json", "--verbose"],
+        command,
         stall_grace_s=stall_grace_s,
         output_progress=True,
         process_tree_cpu_progress=True,
@@ -2482,7 +2512,8 @@ def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
         "outcome": run.outcome,
         "elapsed_seconds": round(run.elapsed_s, 3),
         "stall_grace_seconds": stall_grace_s,
-        "progress_mode": "claude_stream_json_or_process_tree_cpu",
+        "backend": backend,
+        "progress_mode": f"{backend}_json_events_or_process_tree_cpu",
         "verified": bool(verification and not remaining),
         "verified_cases": sum(1 for v in verification if v.get("verified")),
         "unverified_cases": remaining,
