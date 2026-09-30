@@ -6,6 +6,9 @@ The page renderer writes into the live ``vibeic.ai`` checkout.  A successful
 GitHub main branch stale.  This publisher admits exactly one tracked page,
 refuses every unrelated worktree/index change, publishes with an explicit
 remote-tip lease, and verifies the branch readback.
+
+The round uses the opt-in isolated mode to snapshot the generated allowlist
+into a fresh origin clone. Shared source files, index and HEAD are never changed.
 """
 from __future__ import annotations
 
@@ -284,6 +287,103 @@ def publish(root: Path, page: str, branch: str, message: str,
     return RC_OK, result
 
 
+def _generated_path(root: Path, name: str) -> Path:
+    relative = Path(name)
+    if relative.is_absolute() or {"..", ".git"} & set(relative.parts):
+        raise ValueError("generated path is outside the site file allowlist")
+    path = root / relative
+    path.resolve().relative_to(root.resolve())
+    current = path
+    while current != root:
+        if current.is_symlink():
+            raise ValueError("generated paths must not traverse symlinks")
+        current = current.parent
+    if not path.is_file():
+        raise OSError(f"generated page {name} is missing")
+    return path
+
+
+def _matrix_parts(value: str) -> Tuple[str, str, str]:
+    if value.count(MATRIX_BEGIN) != 1 or value.count(MATRIX_END) != 1:
+        raise ValueError("matrix requires exactly one ordered marker pair")
+    start = value.index(MATRIX_BEGIN) + len(MATRIX_BEGIN)
+    end = value.index(MATRIX_END)
+    if end < start:
+        raise ValueError("matrix requires exactly one ordered marker pair")
+    return value[:start], value[start:end], value[end:]
+
+
+def publish_isolated(root: Path, page: str, branch: str, message: str,
+                     matrix_pages: Iterable[str] = ()) -> Tuple[int, dict]:
+    """Publish generated snapshots on origin's tip, preserving shared work.
+
+    Matrix pages transfer only their generated region; their remote surrounding
+    text is retained. The existing clean-index, allowlist, ancestry, lease and
+    readback gates still execute on the isolated checkout.
+    """
+    matrix_pages = tuple(dict.fromkeys(matrix_pages))
+    result = {"program": "publish_site_page", "schema_version": 1,
+              "status": "running", "root": str(root), "page": page,
+              "matrix_pages": list(matrix_pages), "branch": branch,
+              "isolated": True, "commit": None}
+
+    def fail(rc, detail):
+        result.update(status="refused" if rc == RC_REFUSED else "unmeasured",
+                      detail=detail)
+        return rc, result
+
+    if not (root / ".git").exists():
+        return fail(RC_UNMEASURED, "source is not a Git checkout")
+    snapshots = {}
+    try:
+        for name in dict.fromkeys([page, *matrix_pages]):
+            source = _generated_path(root, name)
+            rc, _, _ = _run(root, "ls-files", "--error-unmatch", "--", name)
+            if rc != 0:
+                return fail(RC_REFUSED, f"{name} is not a tracked site file")
+            snapshots[name] = source.read_bytes()
+        for name in matrix_pages:
+            valid, detail = _matrix_change_is_generated(
+                root, name, before_ref="HEAD", after_ref=None)
+            if not valid:
+                return fail(RC_REFUSED, detail)
+            _matrix_parts(snapshots[name].decode("utf-8"))
+    except ValueError as exc:
+        return fail(RC_REFUSED, str(exc))
+    except OSError as exc:
+        return fail(RC_UNMEASURED, str(exc))
+
+    rc, out, _ = _run(root, "remote", "get-url", "origin")
+    if rc != 0 or not out.strip():
+        return fail(RC_UNMEASURED, "source origin could not be read")
+    origin = out.strip()
+    with tempfile.TemporaryDirectory(prefix="vibeic-site-publish-") as directory:
+        isolated = Path(directory) / "site"
+        rc, _, _ = _run(root, "clone", "--quiet", "--single-branch",
+                         "--branch", branch, "--", origin, str(isolated),
+                         timeout=1800)
+        if rc != 0:
+            return fail(RC_UNMEASURED, f"isolated origin clone failed (rc={rc})")
+        try:
+            for name, data in snapshots.items():
+                if _generated_path(root, name).read_bytes() != data:
+                    return fail(RC_REFUSED, f"generated source changed during isolation: {name}")
+            for name, data in snapshots.items():
+                target = _generated_path(isolated, name)
+                if name in matrix_pages:
+                    prefix, _, suffix = _matrix_parts(target.read_text(encoding="utf-8"))
+                    _, region, _ = _matrix_parts(data.decode("utf-8"))
+                    data = (prefix + region + suffix).encode("utf-8")
+                target.write_bytes(data)
+        except ValueError as exc:
+            return fail(RC_REFUSED, str(exc))
+        except OSError as exc:
+            return fail(RC_UNMEASURED, str(exc))
+        rc, published = publish(isolated, page, branch, message, matrix_pages)
+        published.update(root=str(root), isolated=True)
+        return rc, published
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--site-root", type=Path, required=True)
@@ -292,8 +392,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--branch", default="main")
     parser.add_argument("--message", default="dashboard: publish certified 05:30 fork state")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--isolated", action="store_true",
+                        help="publish generated snapshots from a fresh origin clone")
     args = parser.parse_args(argv)
-    rc, result = publish(
+    publisher = publish_isolated if args.isolated else publish
+    rc, result = publisher(
         args.site_root.resolve(), args.page, args.branch, args.message,
         args.matrix_page)
     if args.json:
