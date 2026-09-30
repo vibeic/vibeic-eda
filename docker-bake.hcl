@@ -51,7 +51,7 @@ variable "CIEL_RECIPE" { default = "1b916b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "05b92d" }
-variable "OPENROAD_RECIPE" { default = "0012fe" }
+variable "OPENROAD_RECIPE" { default = "749cc0" }
 variable "YOSYS_RECIPE" { default = "cc711b" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
@@ -62,7 +62,7 @@ variable "KLAYOUT_RECIPE" { default = "287057" }
 variable "VERILATOR_RECIPE" { default = "0dc41b" }
 variable "GTKWAVE_RECIPE" { default = "b2a1e2" }
 variable "XSCHEM_RECIPE" { default = "6e7876" }
-variable "SLANG_RECIPE" { default = "15efa8" }
+variable "SLANG_RECIPE" { default = "b92dde" }
 variable "XYCE_RECIPE" { default = "aeae05" }
 variable "YICES2_RECIPE" { default = "9e884c" }
 variable "FAULT_RECIPE" { default = "aa0773" }
@@ -74,7 +74,7 @@ variable "SV_ELAB_RECIPE" { default = "15871d" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "974a8c95131f0a0b2e7c0db396dcb2114af75dff" }
+variable "OPENROAD_REF"    { default = "4c9dc421dbace089dbd303eb3b450dc0cf1e2001" }
 variable "YOSYS_REF"       { default = "398cbdd83cb99f19312b949d492bea1886c26e95" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -94,7 +94,7 @@ variable "VERILATOR_REF"   { default = "ed72b07f1ff2d499aa7b7927d90a294758f1ad59
 variable "GTKWAVE_REF" { default = "132a0863a5ce97c275fd35f1c88cd7cc4f2b4ca9" }
 variable "XSCHEM_REF" { default = "903861594d60954c7dbacf9fa80ec92dfa8787ad" }
 variable "FAULT_REF" { default = "1e55e374c9086d4f861ee82ced45ab628e676c22" }
-variable "SLANG_REF" { default = "24732e0838e266db3552e819513772fd0804b74e" }
+variable "SLANG_REF" { default = "292805396d9c9952a457f9d14ff900c8f6a3d3f2" }
 variable "XYCE_REF" { default = "f091c8b81bdd922a8060a83ef32fa635b0f33923" }
 variable "YICES2_REF" { default = "9e5d726aa3261c7960e064250a0da83a6de4011a" }
 variable "SV_ELAB_REF" { default = "2db1baae4a55edd3cc9ec0fd418aa14fba6b9f70" }

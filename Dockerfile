@@ -30,7 +30,7 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:974a8c9-0012fe
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:4c9dc42-749cc0
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:398cbdd-cc711b
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
@@ -40,7 +40,7 @@ ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:80eddc1-287057
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:ed72b07-0dc41b
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:9038615-6e7876
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:24732e0-15efa8
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:2928053-b92dde
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
