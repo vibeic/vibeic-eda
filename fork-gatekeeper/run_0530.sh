@@ -586,6 +586,7 @@ if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
         rm -f "${SITE_PUBLISH_JSON}"
         if [ -f "${DIR}/publish_site_page.py" ]; then
             python3 "${DIR}/publish_site_page.py" \
+                --isolated \
                 --site-root /home/reyerchu/vibeic.ai \
                 --page eda-forks.html --branch main \
                 --matrix-page evaluation.html \
