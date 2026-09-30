@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.90",
-  "pins_fingerprint": "7dab51e9ac65",
+  "version": "0.3.91",
+  "pins_fingerprint": "cec165218449",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -13,7 +13,7 @@
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
     "OpenROAD": "4c9dc421dbace089dbd303eb3b450dc0cf1e2001",
     "OpenROAD-flow-scripts": "a12d46907510891a2e3d3310abdd19975d28db0e",
-    "Trilinos": "03381fb666337880a5d35e93dd1dc972b2f9fe66",
+    "Trilinos": "e066fa2effd9481dec61284a553899fdab778cca",
     "Xyce": "f091c8b81bdd922a8060a83ef32fa635b0f33923",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "0bda38790a6b08af5ae9ae5c0d38cc771576efc4",
@@ -44,7 +44,7 @@
     "yosys": "398cbdd83cb99f19312b949d492bea1886c26e95"
   },
   "recipes": {
-    "recipe:__compose__": "85b216",
+    "recipe:__compose__": "c0c212",
     "recipe:ciel": "1b916b",
     "recipe:fastercap": "b84994",
     "recipe:fault": "aa0773",
@@ -61,9 +61,9 @@
     "recipe:sv2v": "3a8690",
     "recipe:verilator": "0dc41b",
     "recipe:xschem": "6e7876",
-    "recipe:xyce": "aeae05",
+    "recipe:xyce": "8bda64",
     "recipe:yices2": "9e884c",
     "recipe:yosys": "cc711b"
   },
-  "manifest_identity": "6b09d913a20a6f9fa131c55a3fbb9217831621713605114ccb110a1024979693"
+  "manifest_identity": "e4dcd30eb0e283c90c5506e783bcae2b15c4f337e1b578e098433cec372e6aec"
 }
