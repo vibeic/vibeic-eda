@@ -111,3 +111,23 @@ def test_an_empty_sha_is_not_asked_about(monkeypatch):
     monkeypatch.setattr(_df, "gh", lambda p: calls.append(p) or [])
     assert _df._branch_for_pin("magic", "") is None
     assert calls == []
+
+
+def test_discovery_uses_each_registered_publication_branch_when_the_pin_is_old(monkeypatch):
+    import json
+    from pathlib import Path
+    forks = json.loads((Path(__file__).parent / "FORKS.json").read_text())["forks"]
+    monkeypatch.setattr(df, "_branch_for_pin", lambda *a: None)
+    monkeypatch.setattr(df, "_clone_for", lambda *a: None)
+    def fake(path):
+        if "compare" in path:
+            return {"ahead_by": 0, "behind_by": 0, "merge_base_commit": {}, "commits": []}
+        if path.count("/") == 2:
+            return {"created_at": "2026-01-01T00:00:00Z", "default_branch": "main",
+                    "parent": {"default_branch": "main"}}
+        return []
+    monkeypatch.setattr(df, "gh", fake)
+    for fork in forks:
+        row = df.discover_one(fork, {fork["tool"]: {"ref": "c" * 40}}, "test")
+        assert row["vibeic_branch"] == fork["branch"], fork["tool"]
+        assert row["vibeic_branch_source"] == "registry"

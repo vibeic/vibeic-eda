@@ -554,6 +554,14 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
     """
     dflt = default_ref(clone)
     claim = led.get("vibeic_branch")
+    declared = led.get("vibeic_branch_source") == "registry"
+    if declared:
+        if (not isinstance(claim, str) or not claim
+                or _run(clone, "check-ref-format", "refs/heads/" + claim).returncode != 0):
+            return TipVerdict(None, TIP_UNDETERMINED,
+                              f"invalid declared publication branch {claim!r} — NOT MEASURED")
+        # A missing declared line cannot be measured through some other branch.
+        dflt = None
 
     if not claim:
         if dflt:
@@ -570,6 +578,10 @@ def published_tip(clone: Path, led: dict, pin: Optional[str] = None) -> TipVerdi
             f"this clone, so its currency is UNVERIFIABLE"
             + (f"; measuring against {dflt} instead" if dflt
                else " and there is no default branch either — NOT MEASURED"))
+
+    if declared and not pin:
+        return TipVerdict(ref, TIP_CURRENT,
+                          "declared publication line; no image pin to compare")
 
     # WHAT WE COMPARE THE CANDIDATE AGAINST (vibeic-eda#102). The pin — "what
     # this fork last shipped" — when one is known and resolves in this clone;
@@ -632,6 +644,15 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
     pins = pins_from_dockerfiles(repo)
     overlays = overlays_from_dockerfiles(repo)
     held = overlay_ship.load_held(forks_json)
+    registry_path = forks_json or repo / "fork-gatekeeper" / "FORKS.json"
+    try:
+        registry = json.loads(Path(registry_path).read_text(encoding="utf-8"))
+        branches = {entry["tool"]: entry["branch"]
+                    for entry in registry.get("forks", [])
+                    if isinstance(entry, dict) and "tool" in entry and "branch" in entry}
+    except (OSError, ValueError, AttributeError, TypeError):
+        # Fleet validation independently rejects unreadable registries.
+        branches = {}
     assertions = assertions_from_dockerfiles(repo)
     rows: List[dict] = []
     for lf in sorted(ledger.glob("*.json")):
@@ -648,6 +669,9 @@ def analyse(repo: Path, forks_root: Path, ledger: Path, fetch: bool,
         if not isinstance(led, dict):
             continue
         tool = led.get("tool") or lf.stem
+        if tool in branches:
+            led = {**led, "vibeic_branch": branches[tool],
+                   "vibeic_branch_source": "registry"}
         clone = forks_root / tool
         row = {"tool": tool, "integrated": bool(led.get("integrated")),
                "pin_source": "ARG", "pin_disagreement": None,

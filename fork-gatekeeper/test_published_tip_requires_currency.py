@@ -393,3 +393,52 @@ def test_a_dangling_origin_head_is_not_a_default(fleet):
     _git(fleet["fork"], "symbolic-ref", "refs/remotes/origin/HEAD",
          "refs/remotes/origin/deleted-long-ago")
     assert m.default_ref(fleet["fork"]) is None
+
+
+@pytest.mark.parametrize("declared,ledger_claim", [
+    ("main", None), ("main", "vibeic/stale"),
+    ("vibeic/pub", None), ("vibeic/pub", "vibeic/stale"),
+])
+def test_registry_published_line_overrides_conventional_and_historical_branches(
+        fleet, declared, ledger_claim):
+    _git(fleet["fork"], "update-ref", "refs/remotes/origin/" + declared, fleet["o3"])
+    fleet["forks_json"].write_text(json.dumps({"forks": [
+        {"tool": "toolx", "branch": declared}]}))
+    led = _ledger(fleet, ledger_claim)
+    result = _load().analyse(fleet["repo"], fleet["forks_root"], led, False,
+                             forks_json=fleet["forks_json"])
+    row = result["rows"][0]
+    assert row["release_lag"] == 3
+    assert row["ours_unshipped"] == 3
+    assert row["tip"] == "origin/" + declared
+
+
+def test_missing_declared_line_cannot_fall_back_to_an_existing_master(fleet):
+    fleet["forks_json"].write_text(json.dumps({"forks": [
+        {"tool": "toolx", "branch": "published/missing"}]}))
+    led = _ledger(fleet, None)
+    result = _load().analyse(fleet["repo"], fleet["forks_root"], led, False,
+                             forks_json=fleet["forks_json"])
+    row = result["rows"][0]
+    assert row["sync_lag"] is None
+    assert row["release_lag"] is None
+    assert "published/missing" in row["note"]
+
+
+def test_registry_line_missing_shipped_content_cannot_measure_a_different_line(fleet):
+    fleet["forks_json"].write_text(json.dumps({"forks": [
+        {"tool": "toolx", "branch": "vibeic/stale"}]}))
+    _set_pin(fleet, fleet["o2"])
+    led = _ledger(fleet, None, fleet["o2"])
+    result = _load().analyse(fleet["repo"], fleet["forks_root"], led, False,
+                             forks_json=fleet["forks_json"])
+    row = result["rows"][0]
+    assert row["release_lag"] is None
+    assert row["tip_state"] == "behind"
+
+
+def test_declared_watch_only_line_can_be_measured_without_an_image_pin(fleet):
+    verdict = _load().published_tip(fleet["fork"], {
+        "vibeic_branch": "vibeic/pub", "vibeic_branch_source": "registry"})
+    assert verdict.ref == "origin/vibeic/pub"
+    assert verdict.state == "current"

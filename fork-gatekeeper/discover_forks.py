@@ -2712,14 +2712,18 @@ def discover_one(fork: dict, pins: dict, image_version: str,
     ref = pin.get("ref")
     led["pinned_ref"] = (ref or "")[:12] if ref else None
     led["pinned_ref_full"] = ref
-    # git first, comment second. `_branch_at_head` answers from the repository; the
-    # comment is a human note that has been wrong three times (vibeic-eda#55). When both
-    # answer and disagree, the git answer wins and the disagreement is recorded, because a
-    # comment that has drifted from the pin it annotates is itself worth seeing.
-    _git_branch = _branch_for_pin(tool, pin.get("ref") or "")
+    # The registry declares the publishing line. Older unregistered fixtures
+    # retain git-before-comment inference; neither overrides a declaration.
+    _git_branch = (None if "branch" in fork
+                   else _branch_for_pin(tool, pin.get("ref") or ""))
     _cmt_branch = pin.get("branch")
-    led["vibeic_branch"] = _git_branch or _cmt_branch
-    led["vibeic_branch_source"] = ("git" if _git_branch
+    # FORKS.json declares the line synchronization and releases advance.
+    # An older pin need not be the head of any branch; its old comment or a
+    # conventional master must not replace that publication identity.
+    declared = fork.get("branch")
+    led["vibeic_branch"] = declared if "branch" in fork else _git_branch or _cmt_branch
+    led["vibeic_branch_source"] = ("registry" if "branch" in fork
+                                   else "git" if _git_branch
                                    else "comment" if _cmt_branch else None)
     if _git_branch and _cmt_branch and _git_branch != _cmt_branch:
         led["vibeic_branch_comment_disagrees"] = _cmt_branch
@@ -2888,8 +2892,11 @@ def discover_one(fork: dict, pins: dict, image_version: str,
         _pinref = pin.get("ref") or ""
         _tip = None
         if _cl is not None:
-            for _c in ([f"origin/{led['vibeic_branch']}"] if led.get("vibeic_branch") else []) \
-                      + ["origin/master", "origin/main"]:
+            candidates = ([f"origin/{led['vibeic_branch']}"]
+                          if led.get("vibeic_branch") else [])
+            if led.get("vibeic_branch_source") != "registry":
+                candidates += ["origin/master", "origin/main"]
+            for _c in candidates:
                 if _git(_cl, "rev-parse", "--verify", "-q", _c).rc == 0:
                     _tip = _c
                     break
