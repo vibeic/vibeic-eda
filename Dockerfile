@@ -31,7 +31,7 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:ca60daa-ea7265
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:2b99844-700d27
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:7f31c9c-3bc27e
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510

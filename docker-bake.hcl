@@ -52,7 +52,7 @@ variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "05b92d" }
 variable "OPENROAD_RECIPE" { default = "ea7265" }
-variable "YOSYS_RECIPE" { default = "700d27" }
+variable "YOSYS_RECIPE" { default = "3bc27e" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "a19510" }
@@ -75,7 +75,7 @@ variable "SV_ELAB_RECIPE" { default = "263070" }
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
 variable "OPENROAD_REF"    { default = "ca60daaa03d327a0af0850a7e8d43365d8f3c8d9" }
-variable "YOSYS_REF"       { default = "2b99844450f2e7c129d2d439941a87433be475ad" }
+variable "YOSYS_REF"       { default = "7f31c9c0fb274f29686cfbd29ee9a26400e97457" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
