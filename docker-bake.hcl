@@ -51,8 +51,8 @@ variable "CIEL_RECIPE" { default = "1b916b" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "05b92d" }
-variable "OPENROAD_RECIPE" { default = "1d6920" }
-variable "YOSYS_RECIPE" { default = "3a36be" }
+variable "OPENROAD_RECIPE" { default = "ea7265" }
+variable "YOSYS_RECIPE" { default = "700d27" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "a19510" }
@@ -66,7 +66,7 @@ variable "SLANG_RECIPE" { default = "959e2d" }
 variable "XYCE_RECIPE" { default = "5202d8" }
 variable "YICES2_RECIPE" { default = "9e884c" }
 variable "FAULT_RECIPE" { default = "aa0773" }
-variable "SV_ELAB_RECIPE" { default = "c60f70" }
+variable "SV_ELAB_RECIPE" { default = "263070" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -74,8 +74,8 @@ variable "SV_ELAB_RECIPE" { default = "c60f70" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "b3f2891a7ba838d05f561ec1a69a30ee1e1b64ba" }
-variable "YOSYS_REF"       { default = "14d2a5e17d2f37db74766a8839fbc7a63ca65a58" }
+variable "OPENROAD_REF"    { default = "ca60daaa03d327a0af0850a7e8d43365d8f3c8d9" }
+variable "YOSYS_REF"       { default = "2b99844450f2e7c129d2d439941a87433be475ad" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
@@ -97,7 +97,7 @@ variable "FAULT_REF" { default = "1e55e374c9086d4f861ee82ced45ab628e676c22" }
 variable "SLANG_REF" { default = "2f93a7a12fed6f4903cd342f44f2da4216b5ce79" }
 variable "XYCE_REF" { default = "f091c8b81bdd922a8060a83ef32fa635b0f33923" }
 variable "YICES2_REF" { default = "9e5d726aa3261c7960e064250a0da83a6de4011a" }
-variable "SV_ELAB_REF" { default = "1275513d784e55a17b3418ea1233016b5d621ca5" }
+variable "SV_ELAB_REF" { default = "473a0357d5b42974a3872c12f37cce747c65ebe3" }
 
 function "short" {
   params = [ref]

@@ -24,18 +24,18 @@
 # bump that breaks plugin loading will surface in the composed image's smoke
 # test rather than here.
 
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:b35f2c6-74a892
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:2b99844-700d27
 
 FROM ${IMG_YOSYS} AS yosys-artefact
 
 FROM ubuntu:24.04 AS build
 
 ARG SV_ELAB_REPO=https://github.com/vibeic/sv-elab.git
-ARG SV_ELAB_REF=1275513d784e55a17b3418ea1233016b5d621ca5
+ARG SV_ELAB_REF=473a0357d5b42974a3872c12f37cce747c65ebe3
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential git cmake ninja-build pkg-config ca-certificates \
-      python3 libreadline-dev tcl-dev zlib1g-dev libffi-dev \
+      python3 libpython3.12 libreadline-dev tcl-dev zlib1g-dev libffi-dev \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=yosys-artefact /foss/tools/yosys /foss/tools/yosys
