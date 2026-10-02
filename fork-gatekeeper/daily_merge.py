@@ -833,7 +833,8 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         # upstream for a branch that had already been merged.
         _sh(["git", "-C", str(src), "remote", "set-branches", "origin", "*"])
         rc, _, err = _sh(
-            ["git", "-C", str(src), "fetch", "origin", "--prune"],
+            ["git", "-C", str(src), "fetch", "--no-recurse-submodules",
+             "origin", "--prune"],
             progress=True,
         )
         if rc != 0:
@@ -854,7 +855,11 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                         "default branch cannot be verified"),
             )
             return res
-        rc, _, err = _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
+        # Only parent refs are being compared. Unpublished dependency gitlinks
+        # on unrelated feature branches must not make this fetch fail; the
+        # candidate's actual dependencies remain subject to post-merge checks.
+        rc, _, err = _sh(["git", "-C", str(src), "fetch",
+                         "--no-recurse-submodules", "upstream", "--prune"],
                          progress=True)
         if rc != 0:
             res.update(state=("FETCH_STALLED" if rc == watchdog.RC_STALLED
@@ -920,12 +925,15 @@ def merge_one(repo: str, branch: str, dry: bool = False,
         rc, sh_out, _ = _sh(["git", "-C", str(src), "rev-parse",
                              "--is-shallow-repository"])
         if sh_out.strip() == "true":
-            rc, _, err = _sh(["git", "-C", str(src), "fetch", "--unshallow",
+            rc, _, err = _sh(["git", "-C", str(src), "fetch",
+                              "--no-recurse-submodules", "--unshallow",
                               "origin"], progress=True)
             if rc != 0:
-                _sh(["git", "-C", str(src), "fetch", "--depth=2147483647",
+                _sh(["git", "-C", str(src), "fetch", "--no-recurse-submodules",
+                     "--depth=2147483647",
                      "origin"], progress=True)
-            _sh(["git", "-C", str(src), "fetch", "upstream", "--prune"],
+            _sh(["git", "-C", str(src), "fetch", "--no-recurse-submodules",
+                 "upstream", "--prune"],
                 progress=True)
             rc, sh_out, _ = _sh(["git", "-C", str(src), "rev-parse",
                                  "--is-shallow-repository"])

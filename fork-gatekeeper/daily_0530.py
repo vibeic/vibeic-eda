@@ -296,7 +296,12 @@ def _first_error_line(cp) -> str:
     path the path IS the whole cap, and the function silently returns nothing
     that names anything.
     """
-    for ln in ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines():
+    lines = ((cp.stderr or "") + "\n" + (cp.stdout or "")).splitlines()
+    # --progress can precede the actual diagnosis with successful transfer
+    # messages. Preserve the first error, then fall back to arbitrary output.
+    diagnoses = [ln for ln in lines
+                 if re.match(r"\s*(?:remote:\s*)?(?:fatal|error):", ln)]
+    for ln in diagnoses or lines:
         ln = ln.strip()
         if ln:
             if len(ln) <= CAUSE_LINE_CAP:
@@ -479,7 +484,13 @@ def _fetch(g, remote, *extra):
     # ``--progress`` makes object transfer visible even under cron redirection.
     # It is evidence for the renewable lease, not verdict evidence: a stall is
     # UNKNOWN and never means the remote is current or the fetch failed.
-    fr = sh(*g, "fetch", remote, *extra, "--progress", progress=True)
+    # This operation measures parent refs. An unrelated upstream feature
+    # branch can name an unpublished submodule object unavailable from the
+    # fork's configured dependency remote. Recursive fetch then returns 1 even
+    # though the parent refs arrived. Dependency checkout/build validation has
+    # its own boundary; do not fetch every feature branch's dependencies here.
+    fr = sh(*g, "fetch", "--no-recurse-submodules", remote, *extra,
+            "--progress", progress=True)
     if fr.returncode == 0:
         return True, ""
     if fr.returncode == watchdog.RC_STALLED:
