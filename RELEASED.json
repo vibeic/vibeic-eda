@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.95",
-  "pins_fingerprint": "14aa8ba2243d",
+  "version": "0.3.96",
+  "pins_fingerprint": "c37d4a3676f9",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -39,12 +39,12 @@
     "sv-elab": "9012c14d5ca97cb86da11593582cc53cb89e5033",
     "sv2v": "493a88f930802da68f592c192ec86991eaf95c49",
     "verilator": "7e4cb4e64c0239d04a4dfad22f0688dcb869da12",
-    "xschem": "e88d757a1cca05910ca7b80c34d97fae45908a24",
+    "xschem": "ada76bb0a6b255f9249d4ee52a32fe7bc9f0753f",
     "yices2": "9e5d726aa3261c7960e064250a0da83a6de4011a",
     "yosys": "cb1dac59cc1bd87245a33de643c4aa2075d9ddb5"
   },
   "recipes": {
-    "recipe:__compose__": "212dd3",
+    "recipe:__compose__": "a8ba6e",
     "recipe:ciel": "cc8aa4",
     "recipe:fastercap": "be0c46",
     "recipe:fault": "dfe3bc",
@@ -60,10 +60,10 @@
     "recipe:sv-elab": "26919a",
     "recipe:sv2v": "aa2ec6",
     "recipe:verilator": "0c5de5",
-    "recipe:xschem": "a1b6f1",
+    "recipe:xschem": "468c3b",
     "recipe:xyce": "e5d3cb",
     "recipe:yices2": "9e884c",
     "recipe:yosys": "24e7ef"
   },
-  "manifest_identity": "3219b329523ca99dc70b51562121f02554ca62105853cd122e45abd432aee521"
+  "manifest_identity": "24cb6a5258dd1cc64dd52b382aa30fe0c458bf6aa89451adb819206ce9e49c56"
 }
