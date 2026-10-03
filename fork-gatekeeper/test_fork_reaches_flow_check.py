@@ -114,8 +114,11 @@ def test_against_the_real_root_dockerfile():
     assert "/foss/tools/openroad/bin/" in paths["openroad"]
     assert "/foss/tools/openroad/bin/sta" not in paths["openroad"]
     assert "/foss/tools/bin/" in paths["sat-solvers"]
-    # both IHP families land from the one artefact with a directory COPY (vibeic-eda#176)
-    assert paths["ihp-open-pdk"] == ["/foss/pdks/"]
+    # The provenance collector takes its measured source record, while both
+    # IHP families still land together through the PDK directory COPY (#176).
+    assert paths["ihp-open-pdk"] == [
+        "/vibeic/provenance/ihp-open-pdk.json", "/foss/pdks/",
+    ]
 
 
 def test_ihp_open_pdk_is_declared_no_command():
