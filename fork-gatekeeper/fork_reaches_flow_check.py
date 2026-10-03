@@ -240,16 +240,31 @@ def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
 
     # The composition also installs artefacts with a read-only BuildKit bind
     # mount followed by `cp -a`. A mount by itself installs nothing. Recognise
-    # only the leading, unconditional literal copy; do not infer shell branches,
-    # variables, later commands, or a copy from outside that mount.
+    # only the first unconditional literal copy, optionally after literal
+    # `mkdir -p DIR... &&`. Created directories are not copied ownership. Do
+    # not infer shell branches, variables, later copies, or an outside source.
     logical = re.sub(r"\\\r?\n", " ", text)
     literal = r"/[A-Za-z0-9_./+-]+"
     for m in re.finditer(
             r"^RUN[ \t]+((?:--mount=\S+[ \t]+)+)"
-            rf"cp[ \t]+-a[ \t]+({literal})[ \t]+({literal})"
-            r"[ \t]*(?=&&|$)", logical, re.M):
-        src, dst = m.group(2), m.group(3)
-        if ".." in Path(src).parts or ".." in Path(dst).parts:
+            rf"(?:mkdir[ \t]+-p(?P<created>(?:[ \t]+{literal})+)"
+            r"[ \t]+&&[ \t]+)?"
+            rf"cp[ \t]+-a[ \t]+(?P<src>{literal})[ \t]+(?P<dst>{literal})"
+            r"(?P<tail>[ \t]*(?:&&[^\n]*)?)$", logical, re.M):
+        src, dst = m.group("src"), m.group("dst")
+        created = (m.group("created") or "").split()
+        if any(".." in Path(path).parts for path in (src, dst, *created)):
+            continue
+        # If dst is a directory just created above, cp places a child there;
+        # granting that entire directory would incorrectly own sibling tools.
+        # Leave that ambiguous form unproved rather than widening containment.
+        if Path(dst) in {Path(path) for path in created}:
+            continue
+        # The newly accepted mkdir prelude stays within a literal AND-chain:
+        # do not let OR/list/pipeline/background suffixes rescue a failed copy.
+        # Existing immediate-copy recipes include compound shell constructs
+        # (e.g. KLayout's for loop); their established parsing is unchanged.
+        if created and re.search(r"[;|]|(?<!&)&(?!&)", m.group("tail")):
             continue
         for mount in m.group(1).split():
             opts = dict(part.split("=", 1) if "=" in part else (part, "")

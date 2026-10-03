@@ -267,3 +267,84 @@ def test_buddy_resolving_to_base_is_still_a_built_tool_failure(tmp_path, monkeyp
 def test_real_composition_mounted_klayout_paths():
     paths = F.copied_paths(Path(__file__).resolve().parents[1] / "Dockerfile")
     assert "/foss/tools/klayout-vibeic" in paths["klayout"], paths["klayout"]
+
+
+def _literal_file_report(tmp_path, monkeypatch, body, resolved="/owned/bin/neutral",
+                         mount="type=bind,from=img-neutral,source=/build,target=/mounted,ro"):
+    df = _write_dockerfile(tmp_path, "FROM scratch\n"
+        "COPY --from=img-neutral /p.json /provenance/neutral.json\n"
+        f"RUN --mount={mount} {body}\n")
+    monkeypatch.setattr(F, "_EXTRA", ())
+    monkeypatch.setattr(F, "_INSTALLED_FROM_SOURCE", {})
+    monkeypatch.setattr(F, "_sh", lambda *args, **kwargs: (
+        0, f"neutral /tools/current/neutral {resolved}\n", ""))
+    return F.check("fixture:image", df), F.copied_paths(df)
+
+
+@pytest.mark.parametrize("directories", ["/owned/bin", "/owned/bin /owned/lib"])
+def test_literal_mkdir_then_mounted_file_copy_has_exact_ownership(
+        tmp_path, monkeypatch, directories):
+    rows, paths = _literal_file_report(tmp_path, monkeypatch,
+        f"mkdir -p {directories} && cp -a /mounted/bin/neutral /owned/bin/neutral"
+        " && test -x /owned/bin/neutral")
+    assert rows == [], rows
+    assert paths["neutral"] == ["/provenance/neutral.json", "/owned/bin/neutral"]
+
+
+@pytest.mark.parametrize("resolved", [
+    "/base/neutral", "/owned/bin/neighbor", "/owned/lib/neutral", "/owned/other",
+])
+def test_literal_file_copy_does_not_own_mkdir_parents_or_wrong_image_path(
+        tmp_path, monkeypatch, resolved):
+    rows, _ = _literal_file_report(tmp_path, monkeypatch,
+        "mkdir -p /owned/bin /owned/lib && cp -a /mounted/bin/neutral /owned/bin/neutral",
+        resolved=resolved)
+    assert [(r["tool"], r["resolved"], r["we_build_it"]) for r in rows] == [
+        ("neutral", resolved, True)]
+
+
+@pytest.mark.parametrize("body", [
+    "mkdir -p /owned/bin",
+    "mkdir -p /owned/bin && ln -s /mounted/bin/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin || cp -a /mounted/bin/neutral /owned/bin/neutral",
+    "false || mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral",
+    "if true; then mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral; fi",
+    "mkdir -p $DEST && cp -a /mounted/bin/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin && echo 'cp -a /mounted/bin/neutral /owned/bin/neutral'",
+    "mkdir -p /owned/bin && cp -a /elsewhere/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin && cp -a /mounted-adjacent/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin && cp -a /mounted/../base/neutral /owned/bin/neutral",
+    "mkdir -p /owned/../owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin/neutral && cp -a /mounted/bin/neutral /owned/bin/neutral",
+    "mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral && false || true",
+    "mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral && false; true",
+    "mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral && false & true",
+    "mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral && false | true",
+])
+def test_literal_mkdir_without_unconditional_exact_copy_stays_unproved(
+        tmp_path, monkeypatch, body):
+    rows, paths = _literal_file_report(tmp_path, monkeypatch, body)
+    assert any(r["tool"] == "neutral" and r.get("we_build_it") for r in rows), rows
+    assert paths["neutral"] == ["/provenance/neutral.json"]
+
+
+@pytest.mark.parametrize("mount", [
+    "type=bind,from=img-neutral,source=/build,target=/mounted",
+    "type=bind,from=unattributed,source=/build,target=/mounted,ro",
+    "type=cache,from=img-neutral,source=/build,target=/mounted,ro",
+    "type=bind,from=img-neutral,source=/build,target=/mounted/../elsewhere,ro",
+])
+def test_literal_mkdir_does_not_relax_mount_source_requirements(
+        tmp_path, monkeypatch, mount):
+    rows, paths = _literal_file_report(tmp_path, monkeypatch,
+        "mkdir -p /owned/bin && cp -a /mounted/bin/neutral /owned/bin/neutral",
+        mount=mount)
+    assert any(r["tool"] == "neutral" and r.get("we_build_it") for r in rows), rows
+    assert paths["neutral"] == ["/provenance/neutral.json"]
+
+
+def test_real_composition_mounted_fault_owns_binary_not_created_directories():
+    paths = F.copied_paths(Path(__file__).resolve().parents[1] / "Dockerfile")
+    assert paths["fault"] == [
+        "/vibeic/provenance/fault.json", "/foss/tools/fault/bin/fault",
+    ]
