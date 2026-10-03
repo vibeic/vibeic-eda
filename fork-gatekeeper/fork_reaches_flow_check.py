@@ -255,10 +255,13 @@ def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
         created = (m.group("created") or "").split()
         if any(".." in Path(path).parts for path in (src, dst, *created)):
             continue
-        # If dst is a directory just created above, cp places a child there;
-        # granting that entire directory would incorrectly own sibling tools.
-        # Leave that ambiguous form unproved rather than widening containment.
-        if Path(dst) in {Path(path) for path in created}:
+        # mkdir -p also creates ancestors. If dst is any such directory, cp
+        # places a child there; owning the directory would own unrelated tools.
+        # Collapse Linux's equivalent leading-slash spellings for this rejection
+        # only; do not broaden the returned destination or containment predicate.
+        dst_path = Path("/" + dst.lstrip("/"))
+        created_paths = [Path("/" + path.lstrip("/")) for path in created]
+        if any(dst_path == path or dst_path in path.parents for path in created_paths):
             continue
         # The newly accepted mkdir prelude stays within a literal AND-chain:
         # do not let OR/list/pipeline/background suffixes rescue a failed copy.

@@ -303,6 +303,22 @@ def test_literal_file_copy_does_not_own_mkdir_parents_or_wrong_image_path(
         ("neutral", resolved, True)]
 
 
+@pytest.mark.parametrize("created", [
+    "/owned/bin/neutral/lib", "/owned/bin/neutral/lib/nested",
+    "//owned/bin/neutral/lib",
+])
+def test_literal_mkdir_implicit_ancestor_does_not_own_unrelated_child(
+        tmp_path, monkeypatch, created):
+    # mkdir -p implicitly creates every ancestor. cp would install a child
+    # named neutral, not make every pre-existing child of that directory ours.
+    wrong = "/owned/bin/neutral/base-neutral"
+    rows, paths = _literal_file_report(tmp_path, monkeypatch,
+        f"mkdir -p {created} && cp -a /mounted/bin/neutral /owned/bin/neutral",
+        resolved=wrong)
+    assert paths["neutral"] == ["/provenance/neutral.json"]
+    assert [(r["resolved"], r["we_build_it"]) for r in rows] == [(wrong, True)]
+
+
 @pytest.mark.parametrize("body", [
     "mkdir -p /owned/bin",
     "mkdir -p /owned/bin && ln -s /mounted/bin/neutral /owned/bin/neutral",
