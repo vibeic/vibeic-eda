@@ -309,9 +309,9 @@
       "post_merge_check": [
         {
           "name": "gf180-layers-rc-units",
-          "path": "tests_vibeic/test_gf180_layers_rc_units.py",
-          "cmd": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests_vibeic/test_gf180_layers_rc_units.py"],
-          "why": "Run the previously unreachable per-SCL Liberty resistance-unit regression. Without a built PDK the test checks its source-pinned recorded Liberty/LEF values and refuses changed source pins; this is source coverage, not acceptance of a rebuilt PDK."
+          "path": "tests_vibeic",
+          "cmd": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests_vibeic/test_gf180_layers_rc_units.py", "tests_vibeic/test_gf180_unit_reference_controls.py"],
+          "why": "Run the per-SCL Liberty resistance-unit regression and its unit-reference controls. Both files are selected explicitly so the daily check executes the original cases and the controls added by open_pdks PR 3. Without a built PDK the test checks its source-pinned recorded Liberty/LEF values and refuses changed source pins; this is source coverage, not acceptance of a rebuilt PDK."
         }
       ]
     },

@@ -73,6 +73,31 @@ def test_cace_and_open_pdks_regressions_are_reached_by_daily_declarations():
     assert findings == {"cace": [], "open_pdks": []}
 
 
+def test_open_pdks_daily_selection_collects_original_and_reference_controls():
+    """A file-specific pytest command must actually collect both fork suites."""
+    modules = ["tests_vibeic/test_gf180_layers_rc_units.py",
+               "tests_vibeic/test_gf180_unit_reference_controls.py"]
+    declaration, = json.loads(M.declared_checks("open_pdks", HERE / "FORKS.json"))
+
+    def collect(command):
+        proc = subprocess.run(
+            [*command, "--collect-only"], cwd=_fork("open_pdks"),
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        ids = {line for line in proc.stdout.splitlines()
+               if line.startswith("tests_vibeic/") and "::" in line}
+        assert ids, proc.stdout
+        return ids
+
+    actual = collect(declaration["cmd"])
+    expected = collect([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *modules])
+    assert len(actual) == len(expected), {"selected": len(actual), "available": len(expected)}
+    assert actual == expected
+    assert [arg for arg in declaration["cmd"] if arg.startswith("tests_vibeic")] == modules
+    assert declaration["path"] == "tests_vibeic"
+
+
 # --------------------------------------------------------------------------
 # The synthetic cases: exact control over what the tree contains.
 # --------------------------------------------------------------------------
