@@ -76,6 +76,7 @@ PROBE_STALL_GRACE_S = float(
 #: in-image provenance names vibeic/yices2 at the pinned commit.
 _MULTI_BINARY = {"lvs": ("magic", "netgen"),
                  "sat-solvers": ("kissat", "cadical"),
+                 "klayout": ("klayout", "strm2gds"),
                  "yices2": ("yices", "yices-sat", "yices-smt", "yices-smt2")}
 
 #: Targets that deliberately install NO command. Reporting these as "not on
@@ -229,12 +230,37 @@ def copied_paths(dockerfile: Path) -> Dict[str, List[str]]:
     enforces.
     """
     out: Dict[str, List[str]] = {}
+    text = dockerfile.read_text(errors="replace")
     for m in re.finditer(
             r"^COPY[ \t]+--from=img-([A-Za-z0-9_-]+)[ \t]+(\S+(?:[ \t]+\S+)*)$",
-            dockerfile.read_text(errors="replace"), re.M):
+            text, re.M):
         tokens = m.group(2).split()
         dst = tokens[-1]
         out.setdefault(m.group(1).replace("_", "-"), []).append(dst)
+
+    # The composition also installs artefacts with a read-only BuildKit bind
+    # mount followed by `cp -a`. A mount by itself installs nothing. Recognise
+    # only the leading, unconditional literal copy; do not infer shell branches,
+    # variables, later commands, or a copy from outside that mount.
+    logical = re.sub(r"\\\r?\n", " ", text)
+    literal = r"/[A-Za-z0-9_./+-]+"
+    for m in re.finditer(
+            r"^RUN[ \t]+((?:--mount=\S+[ \t]+)+)"
+            rf"cp[ \t]+-a[ \t]+({literal})[ \t]+({literal})"
+            r"[ \t]*(?=&&|$)", logical, re.M):
+        src, dst = m.group(2), m.group(3)
+        if ".." in Path(src).parts or ".." in Path(dst).parts:
+            continue
+        for mount in m.group(1).split():
+            opts = dict(part.split("=", 1) if "=" in part else (part, "")
+                        for part in mount.removeprefix("--mount=").split(","))
+            target, stage = opts.get("target", ""), opts.get("from", "")
+            if (opts.get("type") == "bind" and re.fullmatch(r"img-[A-Za-z0-9_-]+", stage)
+                    and ("ro" in opts or "readonly" in opts)
+                    and target.startswith("/")
+                    and ".." not in Path(target).parts
+                    and (src == target or src.startswith(target.rstrip("/") + "/"))):
+                out.setdefault(stage[4:].replace("_", "-"), []).append(dst)
     return out
 
 
@@ -397,10 +423,13 @@ def check(image: str, dockerfile: Path) -> List[dict]:
             continue
         # It resolves somewhere we did not copy from any artefact. If we built
         # this tool at all, the flow is running someone else's build of it.
-        built = tool in ours or any(tool in k for k in ours)
+        tool_dests = [d for target, dests in ours.items()
+                      if tool in _MULTI_BINARY.get(target, (target,))
+                      for d in dests]
+        built = bool(tool_dests)
         findings.append({
             "tool": tool, "resolved": real,
-            "ours": sorted(ours.get(tool, [])),
+            "ours": sorted(tool_dests),
             "problem": ("resolves outside every path copied from our artefact"
                         if built else
                         "we copy nothing for this tool — it is the base "
