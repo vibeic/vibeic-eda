@@ -45,9 +45,9 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:2f93a7a-959e2d
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
 # would otherwise have shipped nothing.
-ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
-ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-1b916b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-05b92d
+ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-aa2ec6
+ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-cc8aa4
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
@@ -87,9 +87,9 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-05b92d
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:f091c8b-3931f7
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9e5d726-9e884c
-ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-aa0773
+ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:9012c14-26919a
-ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-be0c46
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
