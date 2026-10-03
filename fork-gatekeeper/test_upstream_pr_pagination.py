@@ -484,6 +484,9 @@ def test_remote_expected_sha_delete_precedes_local_expected_sha_delete(
 
     def command(*args, **kwargs):
         commands.append(args)
+        if "worktree" in args:
+            return _cp(args, stdout=(
+                f"worktree /work/fork\0HEAD {TIP_A}\0branch refs/heads/main\0\0"))
         return _cp(args)
 
     monkeypatch.setattr(D, "sh", command)
@@ -492,8 +495,9 @@ def test_remote_expected_sha_delete_precedes_local_expected_sha_delete(
     D.step4_prune(G, "main", rep, apply=True)
 
     assert rep["pruned"] == ["origin/fix/x"]
-    assert ["push" in c for c in commands] == [True, False]
-    assert commands[1][-4:] == (
+    assert ["push" in c for c in commands] == [True, False, False]
+    assert commands[1][-4:] == ("worktree", "list", "--porcelain", "-z")
+    assert commands[2][-4:] == (
         "update-ref", "-d", "refs/heads/fix/x", TIP_A)
     assert rep["prune_rechecks"][0]["remote_delete"] == "complete"
     assert rep["prune_rechecks"][0]["local_delete"] == "complete"
@@ -519,6 +523,157 @@ def test_changed_local_branch_is_preserved_after_remote_delete(monkeypatch):
     assert len(commands) == 1 and "push" in commands[0]
     assert rep["prune_local_preserved"][0]["local_tip"] == TIP_B
     assert rep["prune_rechecks"][0]["local_delete"] == "preserved_changed"
+
+
+def _git(repo, *args, check=True):
+    result = subprocess.run(["git", "-C", str(repo), *args],
+                            capture_output=True, text=True)
+    if check:
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+    return result
+
+
+@pytest.fixture
+def prune_repo(tmp_path, monkeypatch):
+    """Real merged scaffolding: only external PR/image-pin policy is injected."""
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "--bare", "-q", "--initial-branch=main", str(origin))
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    _git(clone, "config", "user.name", "prune fixture")
+    _git(clone, "config", "user.email", "prune@example.invalid")
+    (clone / "tracked.txt").write_text("retained worktree data\n", encoding="utf-8")
+    _git(clone, "add", "tracked.txt")
+    _git(clone, "commit", "-qm", "base")
+    branch = "vibeic/merged-topic"
+    _git(clone, "branch", branch)
+    tip = _git(clone, "rev-parse", branch).stdout.strip()
+    _git(clone, "commit", "--allow-empty", "-qm", "main advanced")
+    _git(clone, "commit", "--allow-empty", "-qm", "main advanced again")
+    _git(clone, "push", "-q", "origin", "main", branch)
+    monkeypatch.setattr(D, "_branches_an_image_pin_depends_on", lambda *a: set())
+    monkeypatch.setattr(D, "_upstream_pull_request_evidence", lambda *a: _complete_prs())
+    monkeypatch.setattr(D, "GIT_PROGRESS_POLL_S", 0.01)
+    return clone, origin, branch, tip
+
+
+@pytest.mark.parametrize("state", [
+    "current", "linked", "locked", "missing", "locked-missing",
+    "whitespace", "detached", "bisect", "unused",
+])
+def test_real_worktree_binding_controls_only_local_prune(
+        prune_repo, tmp_path, state, record_property):
+    clone, origin, branch, tip = prune_repo
+    linked = tmp_path / ("linked path\nwith newline" if state == "whitespace" else "linked")
+    protected = state != "unused"
+    if state == "current":
+        _git(clone, "checkout", "-q", branch)
+        linked = clone
+    elif state != "unused":
+        if state == "detached":
+            _git(clone, "worktree", "add", "-q", "--detach", str(linked), tip)
+        else:
+            _git(clone, "worktree", "add", "-q", str(linked), branch)
+        if state == "bisect":
+            _git(linked, "bisect", "start", "main", tip)
+            assert _git(linked, "symbolic-ref", "-q", "HEAD", check=False).returncode == 1
+        if "locked" in state:
+            _git(clone, "worktree", "lock", "--reason", "fixture locked", str(linked))
+        if "missing" in state:
+            linked.rename(tmp_path / "parked-worktree")
+    before = _git(clone, "worktree", "list", "--porcelain", "-z").stdout
+    if state == "linked":
+        (linked / "tracked.txt").write_text("uncommitted user edit\n", encoding="utf-8")
+        (linked / "untracked.txt").write_text("untracked user data\n", encoding="utf-8")
+    if linked.exists():
+        head_before = _git(linked, "rev-parse", "HEAD").stdout
+        status_before = _git(linked, "status", "--porcelain").stdout
+        files_before = {p.name: p.read_bytes() for p in linked.iterdir() if p.is_file()}
+    rep = {}
+
+    D.step4_prune(("git", "-C", str(clone)), "main", rep, apply=True)
+
+    local = _git(clone, "show-ref", "--verify", f"refs/heads/{branch}", check=False)
+    record_property("worktree_inventory_before", repr(before))
+    record_property("local_ref_rc_after", local.returncode)
+    if linked.exists():
+        record_property("worktree_HEAD_rc_after", _git(linked, "rev-parse", "--verify", "HEAD", check=False).returncode)
+    record_property("prune_report", json.dumps(rep, sort_keys=True))
+    # This is the substantive RED: old code actually deletes the checked-out ref.
+    assert local.returncode == (0 if protected else 128), local
+    assert not _git(origin, "for-each-ref", f"refs/heads/{branch}").stdout
+    assert rep["pruned"] == [f"origin/{branch}"]
+    assert not rep.get("needs_human"), rep
+    boundary = rep["prune_rechecks"][0]
+    assert boundary["remote_delete"] == "complete"
+    expected = ("preserved_detached_worktree" if state in {"detached", "bisect"}
+                else "preserved_checked_out" if protected else "complete")
+    assert boundary["local_delete"] == expected
+    if protected:
+        assert local.stdout.split()[0] == tip
+        assert rep["prune_local_preserved"][0]["worktrees"] == [str(linked)]
+        if linked.exists():
+            assert _git(linked, "rev-parse", "HEAD").stdout == head_before
+            assert _git(linked, "status", "--porcelain").stdout == status_before
+            assert {p.name: p.read_bytes() for p in linked.iterdir() if p.is_file()} == files_before
+
+
+@pytest.mark.parametrize("inventory", [
+    "command-error", "empty", "truncated", "missing-binding", "duplicate-branch",
+    "detached-value", "bare-value", "unknown-field",
+])
+def test_unknown_worktree_inventory_preserves_real_local_ref(
+        prune_repo, monkeypatch, inventory, record_property):
+    clone, origin, branch, tip = prune_repo
+    real_sh = D.sh
+
+    def command(*args, **kwargs):
+        if args[-4:] == ("worktree", "list", "--porcelain", "-z"):
+            prefix = f"worktree {clone}\0HEAD {tip}\0"
+            malformed = {
+                "empty": "", "truncated": prefix + "branch refs/heads/main\0",
+                "missing-binding": prefix + "\0",
+                "duplicate-branch": prefix + "branch refs/heads/main\0branch refs/heads/main\0\0",
+                "detached-value": prefix + "detached junk\0\0",
+                "bare-value": f"worktree {clone}\0bare junk\0\0",
+                "unknown-field": prefix + "detached\0unexpected\0\0",
+            }
+            if inventory == "command-error":
+                return _cp(args, 128, stderr="fatal: worktree metadata unreadable")
+            return _cp(args, stdout=malformed[inventory])
+        return real_sh(*args, **kwargs)
+
+    monkeypatch.setattr(D, "sh", command)
+    rep = {}
+    D.step4_prune(("git", "-C", str(clone)), "main", rep, apply=True)
+    local = _git(clone, "show-ref", "--verify", f"refs/heads/{branch}", check=False)
+    record_property("prune_report", json.dumps(rep, sort_keys=True))
+    assert local.returncode == 0, local
+    assert local.stdout.split()[0] == tip
+    assert not _git(origin, "for-each-ref", f"refs/heads/{branch}").stdout
+    assert rep["prune_rechecks"][0]["local_delete"] == "preserved_unmeasurable"
+    assert "worktree inventory" in rep["prune_local_preserved"][0]["reason"]
+    assert rep["needs_human"] is True
+
+
+def test_local_sha_lease_still_protects_a_move_after_inventory(prune_repo, monkeypatch):
+    clone, origin, branch, tip = prune_repo
+    advanced = _git(clone, "rev-parse", "main").stdout.strip()
+    real_sh = D.sh
+
+    def command(*args, **kwargs):
+        result = real_sh(*args, **kwargs)
+        if args[-4:] == ("worktree", "list", "--porcelain", "-z"):
+            _git(clone, "update-ref", f"refs/heads/{branch}", advanced, tip)
+        return result
+
+    monkeypatch.setattr(D, "sh", command)
+    rep = {}
+    D.step4_prune(("git", "-C", str(clone)), "main", rep, apply=True)
+    assert _git(clone, "rev-parse", branch).stdout.strip() == advanced
+    assert not _git(origin, "for-each-ref", f"refs/heads/{branch}").stdout
+    assert rep["prune_rechecks"][0]["local_delete"] == "preserved_lease_failure"
+    assert rep["needs_human"] is True
 
 
 def test_every_repository_row_retains_the_structured_evidence(

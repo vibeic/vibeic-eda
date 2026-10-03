@@ -1901,6 +1901,51 @@ def _prune_failure(rep, row, stage, reason):
     rep["needs_human"] = True
 
 
+def _worktree_branches(g):
+    """Measure every registered worktree's branch; unknown is never empty.
+
+    Local deletion is BLOCKED on unreadable or malformed inventory. Locked and
+    prunable/missing worktrees still own their branch. NUL records preserve
+    whitespace in paths. Detached entries are retained separately: they may
+    reserve an original branch during rebase/bisect that porcelain does not name.
+    """
+    result = sh(*g, "worktree", "list", "--porcelain", "-z")
+    if result.returncode:
+        return None, result, _first_error_line(result)
+    raw = result.stdout or ""
+    branches = {}
+    if not raw.endswith("\0\0"):
+        return None, result, "worktree inventory is empty or unterminated"
+    for record in raw[:-2].split("\0\0"):
+        fields = {}
+        for field in record.split("\0"):
+            key, _, value = field.partition(" ")
+            if key in fields or key not in {
+                    "worktree", "HEAD", "branch", "detached", "bare",
+                    "locked", "prunable"}:
+                return None, result, "worktree inventory has invalid fields"
+            fields[key] = value
+        if not record.startswith("worktree ") or not fields.get("worktree"):
+            return None, result, "worktree inventory has no path"
+        if any(fields.get(flag) for flag in ("bare", "detached")):
+            return None, result, "worktree inventory has invalid state flags"
+        if "bare" in fields:
+            valid = not any(k in fields for k in ("HEAD", "branch", "detached"))
+        else:
+            valid = (bool(_FULL_OBJECT_ID.fullmatch(fields.get("HEAD", "")))
+                     and (("branch" in fields) != ("detached" in fields)))
+        if not valid:
+            return None, result, "worktree inventory has ambiguous HEAD binding"
+        if "branch" in fields:
+            branch = fields["branch"]
+            if not branch.startswith("refs/heads/") or not branch[11:]:
+                return None, result, "worktree inventory has invalid branch binding"
+            branches.setdefault(branch, []).append(fields["worktree"])
+        elif "detached" in fields:
+            branches.setdefault("detached", []).append(fields["worktree"])
+    return branches, result, ""
+
+
 def step4_prune(g, main, rep, apply):
     """Delete only what git itself says holds nothing unique -- AND what is not
     serving an open upstream PR -- AND what we created in the first place."""
@@ -2124,7 +2169,9 @@ def step4_prune(g, main, rep, apply):
 
         # A local branch is separate state.  Remove it only if it still equals
         # the remote tip proved above, using update-ref's old-value argument as
-        # a second lease.  A locally advanced branch is preserved verbatim.
+        # a second lease. A locally advanced branch is preserved verbatim.
+        # update-ref does not protect checked-out branches, so measure ALL
+        # registered worktrees immediately before using that low-level API.
         local_tip, local_read = _ref_tip(g, f"refs/heads/{local}")
         if local_tip is None:
             if local_read.returncode in (1, 128) and not local_read.stdout:
@@ -2145,18 +2192,42 @@ def step4_prune(g, main, rep, apply):
             })
             rep["needs_human"] = True
         else:
-            local_deleted = sh(
-                *g, "update-ref", "-d", f"refs/heads/{local}", expected_tip)
-            if local_deleted.returncode == 0:
-                boundary["local_delete"] = "complete"
-            else:
-                boundary["local_delete"] = "preserved_lease_failure"
+            bindings, inventory, why = _worktree_branches(g)
+            if bindings is None:
+                boundary["local_delete"] = "preserved_unmeasurable"
                 rep.setdefault("prune_local_preserved", []).append({
                     "branch": local, "expected_tip": expected_tip,
-                    "reason": _first_error_line(local_deleted),
-                    "rc": local_deleted.returncode,
+                    "reason": "worktree inventory unavailable: " + why,
+                    "rc": inventory.returncode,
                 })
                 rep["needs_human"] = True
+            elif (paths := bindings.get(f"refs/heads/{local}")) or (
+                    paths := bindings.get("detached")):
+                # An active checkout is ordinary retained local state, not a
+                # failed remote prune or unfinished contribution.
+                attached = f"refs/heads/{local}" in bindings
+                boundary["local_delete"] = ("preserved_checked_out" if attached
+                                            else "preserved_detached_worktree")
+                rep.setdefault("prune_local_preserved", []).append({
+                    "branch": local, "expected_tip": expected_tip,
+                    "reason": ("local branch is checked out in a registered worktree"
+                               if attached else "detached worktree may reserve a branch "
+                               "during rebase, bisect, or sequencer operations"),
+                    "worktrees": paths,
+                })
+            else:
+                local_deleted = sh(
+                    *g, "update-ref", "-d", f"refs/heads/{local}", expected_tip)
+                if local_deleted.returncode == 0:
+                    boundary["local_delete"] = "complete"
+                else:
+                    boundary["local_delete"] = "preserved_lease_failure"
+                    rep.setdefault("prune_local_preserved", []).append({
+                        "branch": local, "expected_tip": expected_tip,
+                        "reason": _first_error_line(local_deleted),
+                        "rc": local_deleted.returncode,
+                    })
+                    rep["needs_human"] = True
         boundary["outcome"] = "remote_deleted"
         rep.setdefault("prune_rechecks", []).append(boundary)
     rep["pruned"] = gone
