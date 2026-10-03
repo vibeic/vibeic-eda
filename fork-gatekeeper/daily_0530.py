@@ -2716,6 +2716,7 @@ def resume_ours_after_ai_landing(report, ai, apply):
             # success read as "could not measure" — caught by
             # test_a_verified_landing_runs_the_consolidation_it_deferred.
             rep.pop("ours_skipped", None)
+            conflicts_before = len(rep.get("conflicted") or [])
             step2_ours(g, main, rep)
         except Exception as exc:                      # never take the round down
             rep.setdefault("ours_skipped", OURS_DEFERRED_BY_UPSTREAM_CONFLICT)
@@ -2731,6 +2732,21 @@ def resume_ours_after_ai_landing(report, ai, apply):
                 {"fork": fork,
                  "reason": "step2_ours could not measure: "
                            + str(rep.get("ours_skipped"))[:120]})
+            continue
+
+        # Newly discovered conflicts have NOT been through step 2b: the AI
+        # verified only the cases present before this resumption. Ordinary
+        # step2_ours appends these cases for that later decision rather than
+        # setting needs_human, so this after-AI call must retain its own hold.
+        new_conflicts = len(rep.get("conflicted") or []) - conflicts_before
+        if new_conflicts > 0:
+            rep["needs_human"] = True
+            rep["ours_skipped"] = (
+                f"branch consolidation found {new_conflicts} new conflict(s) "
+                "after the AI decision step; they are not verified")
+            summary["declined"].append(
+                {"fork": fork, "new_conflicts": new_conflicts,
+                 "reason": "consolidation found conflicts after the AI step"})
             continue
 
         # THE PUSH STEP HAS ALREADY RUN FOR THIS FORK. `resume` happens after
@@ -2837,7 +2853,8 @@ def main_(argv=None) -> int:
                 or started_at.isoformat())
     run_id = secrets.token_hex(16)
     pins = image_pins()
-    report, needs_human = {}, False
+    report = {}
+    pending_upstream_conflicts = set()
     registry = watch_only_reset.load_registry(FORKS_JSON)
     fleet, fleet_errors = registered_fleet(FORKS_JSON)
     if fleet_errors:
@@ -2942,7 +2959,6 @@ def main_(argv=None) -> int:
                 },
                 "push": "ok" if clean else f"WATCH RESET {reset.get('status')}",
             }
-            needs_human |= not clean
             report[d.name] = rep
             continue
         g = ["git", "-C", str(d)]
@@ -2953,7 +2969,6 @@ def main_(argv=None) -> int:
                               "pin": pins.get(d.name.lower()),
                               "needs_human": True,
                               "upstream_pull_requests": upstream_prs}
-            needs_human = True
             continue
         # Branch identity is a release fact, not a naming convention.  Refresh
         # origin before resolving the declaration so a deleted/renamed branch
@@ -2971,7 +2986,6 @@ def main_(argv=None) -> int:
                     "needs_human": True,
                     "upstream_pull_requests": upstream_prs,
                 }
-                needs_human = True
                 continue
         main = published_mainline(g, d.name)
         if not main:
@@ -2986,7 +3000,6 @@ def main_(argv=None) -> int:
                 "needs_human": True,
                 "upstream_pull_requests": upstream_prs,
             }
-            needs_human = True
             continue
         # Step 4 owns the PR-evidence verdict for a usable checkout: it records
         # NORECORD and refuses pruning.  Other early-exit paths below already
@@ -3006,10 +3019,16 @@ def main_(argv=None) -> int:
                     + str(selection.get("reason") or "no diagnostic"))
                 rep["checkout_outcome"] = selection.get("outcome")
                 rep["needs_human"] = True
-                needs_human = True
                 report[d.name] = rep
                 continue
             step1_upstream(g, main, rep)
+            if rep.get("upstream_merge_outcome") == "conflict":
+                # This fresh row had no attention cause before step 1. Keep
+                # its known conflict cause separately until AI + deferred
+                # consolidation finish; every later stage can independently
+                # set needs_human, and no later success clears those failures.
+                pending_upstream_conflicts.add(d.name)
+                rep["needs_human"] = False
             # A stalled/failed upstream merge is not a conflict and must not be
             # followed by more merges on a base whose state was unmeasurable.
             if rep.get("upstream_merge_outcome") in {
@@ -3048,7 +3067,6 @@ def main_(argv=None) -> int:
                     + f" — NOT pushed; origin/{main} stays at its previous tip, "
                       f"the local {main} holds the unpublished merge")
                 rep["needs_human"] = True
-                needs_human = True
             # EQUAL TREES, DIFFERENT SHAS -> adopt the remote, do not push
             # (vibeic-eda#61). Checked BEFORE the push, because the push would
             # be rejected and that rejection is indistinguishable from a lost
@@ -3134,7 +3152,6 @@ def main_(argv=None) -> int:
                     rep["needs_human"] = True
         else:
             step4_prune(g, main, rep, False)
-        needs_human |= rep.get("needs_human", False)
         report[d.name] = rep
 
     # A REGISTERED FORK WITH NO ROW is how the 2026-09-27 round lost cace, eqy
@@ -3149,7 +3166,6 @@ def main_(argv=None) -> int:
             "upstream_merge_outcome": "unmeasurable",
             "needs_human": True, "pin": pins.get(tool.lower()),
         }
-        needs_human = True
 
     for tool in sorted(set(registry["policies"]) - seen_reset_tools):
         policy = registry["policies"][tool]
@@ -3164,7 +3180,6 @@ def main_(argv=None) -> int:
             "watch_only_reset": reset, "needs_human": True,
             "error": reset["reason"], "pin": pins.get(tool.lower()),
         }
-        needs_human = True
 
     # Step 2b — the AI half. A conflict is NOT a reason to stop the round; it
     # is the one decision this script is not allowed to make alone.
@@ -3177,14 +3192,24 @@ def main_(argv=None) -> int:
     # for the 2026-08-20 OpenROAD round this closes.
     report["_ours_resumed"] = resume_ours_after_ai_landing(
         report, ai, args.apply and not args.no_ai)
+    resumed_forks = {r["fork"] for r in report["_ours_resumed"]["resumed"]}
+    for fork in pending_upstream_conflicts:
+        if (fork not in resumed_forks
+                or report[fork].get("upstream_merge_outcome") != "conflict_resolved"):
+            report[fork]["needs_human"] = True
     report["_watch_only_resets"] = watch_only_reset.make_round_evidence(
         round_at=round_at, run_id=run_id, applied=args.apply,
         registry=registry, results=reset_results)
     # Process rc is transport evidence, not delivery evidence.  Only a natural
     # turn whose every source tip is verified on the remote mainline clears the
     # case.  A stalled, failed, or rc=0-but-unverified turn stays actionable.
-    if _ai_needs_attention(ai):
-        needs_human = True
+    # Derive the exit from FINAL fork state, not a pre-AI latch. Resolved
+    # conflict history remains in the report without becoming permanent rc1;
+    # post-check/push/prune/resumption failures still block independently.
+    needs_human = (_ai_needs_attention(ai)
+                   or any(rep.get("needs_human", False)
+                          for fork, rep in report.items()
+                          if not fork.startswith("_")))
 
     # RETAIN THE ROUND (vibeic-eda#85). The live `--json` path is a SINGLE
     # path that every morning overwrites, so the only record of what a round
