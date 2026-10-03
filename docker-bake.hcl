@@ -45,18 +45,18 @@ variable "TAG" { default = "dev" }
 # `contexts` map — and when only the program knew about the recipe those two
 # stopped agreeing, which silently disabled the local-build redirect (#21).
 variable "SV2V_REF"    { default = "493a88f930802da68f592c192ec86991eaf95c49" }
-variable "SV2V_RECIPE" { default = "3a8690" }
+variable "SV2V_RECIPE" { default = "aa2ec6" }
 variable "CIEL_REF"    { default = "1d2526e67a062ac408166a51183222e281a7b9a3" }
-variable "CIEL_RECIPE" { default = "1b916b" }
+variable "CIEL_RECIPE" { default = "cc8aa4" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
-variable "IHP_OPEN_PDK_RECIPE" { default = "05b92d" }
+variable "IHP_OPEN_PDK_RECIPE" { default = "305a91" }
 variable "OPENROAD_RECIPE" { default = "0d6319" }
 variable "YOSYS_RECIPE" { default = "24e7ef" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "a19510" }
-variable "FASTERCAP_RECIPE" { default = "b84994" }
+variable "FASTERCAP_RECIPE" { default = "be0c46" }
 variable "IVERILOG_RECIPE" { default = "9468c5" }
 variable "KLAYOUT_RECIPE" { default = "f02c7e" }
 variable "VERILATOR_RECIPE" { default = "0c5de5" }
@@ -65,7 +65,7 @@ variable "XSCHEM_RECIPE" { default = "a1b6f1" }
 variable "SLANG_RECIPE" { default = "959e2d" }
 variable "XYCE_RECIPE" { default = "3931f7" }
 variable "YICES2_RECIPE" { default = "9e884c" }
-variable "FAULT_RECIPE" { default = "aa0773" }
+variable "FAULT_RECIPE" { default = "dfe3bc" }
 variable "SV_ELAB_RECIPE" { default = "26919a" }
 
 

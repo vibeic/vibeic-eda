@@ -33,9 +33,36 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # compile, which is why it lands hundreds of packages in and looks like a
 # dependency problem.
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+# Stack 2.9.3's bootstrap keys predate Hackage's root-key rotation. Configure
+# the supported package-index override with the current authenticated root set;
+# retain the three-signature threshold and enforce metadata expiry.
+# Source: haskell-infra/hackage-root-keys@68ed020253c23517e3b10b54876d8aba93d4c15c/root.json
+# https://docs.haskellstack.org/en/latest/configure/yaml/non-project/#package-index
+RUN mkdir -p /etc/stack \
+ && printf '%s\n' \
+      'package-index:' \
+      '  download-prefix: https://hackage.haskell.org/' \
+      '  hackage-security:' \
+      '    keyids:' \
+      '    - 0a5c7ea47cd1b15f01f5f51a33adda7e655bc0f0b0615baa8e271f4c3351e21d' \
+      '    - 1ea9ba32c526d1cc91ab5e5bd364ec5e9e8cb67179a471872f6e26f0ae773d42' \
+      '    - 51f0161b906011b52c6613376b1ae937670da69322113a246a09f807c62f6921' \
+      '    - c7de58fc6a224b92b5b513f26fbb8b370f2d97c7cfe0075a951314a55734be93' \
+      '    - fe331502606802feac15e514d9b9ea83fee8b6ffef71335479a2e68d84adc6b0' \
+      '    - d26e46f3b631aae1433b89379a6c68bd417eb5d1c408f0643dcc07757fece522' \
+      '    key-threshold: 3' \
+      '    ignore-expiry: false' \
+      > /etc/stack/config.yaml
+# Authenticate the package index before downloading GHC. The tool-local cache
+# survives a failed build, while Stack still verifies downloaded metadata and
+# package hashes; the compiler/dependency cache is never a shipped artifact.
+RUN --mount=type=cache,id=vibeic-sv2v-stack-ubuntu24,target=/root/.stack,sharing=locked \
+    stack update
 RUN git clone "${SV2V_REPO}" /sv2v \
  && git config --global --add safe.directory /sv2v \
- && cd /sv2v && git checkout ${SV2V_REF} \
+ && cd /sv2v && git checkout ${SV2V_REF}
+RUN --mount=type=cache,id=vibeic-sv2v-stack-ubuntu24,target=/root/.stack,sharing=locked \
+    cd /sv2v \
  && stack build --copy-bins --local-bin-path /out \
  && test -x /out/sv2v
 
@@ -47,5 +74,13 @@ RUN printf 'module t;\n  logic [3:0] a;\n  always_comb a = 4%s1;\n  initial $dis
  && ! grep -q "always_comb" /tmp/t.v \
  && echo "sv2v self-test: SystemVerilog always_comb lowered to Verilog"
 
+RUN mkdir -p /vibeic/provenance \
+ && source_ref=$(git -C /sv2v rev-parse HEAD) \
+ && test "$source_ref" = "${SV2V_REF}" \
+ && printf '{"tool":"sv2v","repo":"%s","ref":"%s"}\n' \
+      "$(git -C /sv2v remote get-url origin)" "$source_ref" \
+      > /vibeic/provenance/sv2v.json
+
 FROM scratch AS artifact
 COPY --from=build /out/sv2v /foss/tools/bin/sv2v
+COPY --from=build /vibeic/provenance/sv2v.json /vibeic/provenance/sv2v.json

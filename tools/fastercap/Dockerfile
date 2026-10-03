@@ -235,8 +235,17 @@ RUN set -e; \
     echo "fastercap: starts with no display, solves the two-plate geometry at both paths, wx-linked, no GTK, identical"
 
 RUN mkdir -p /vibeic/provenance \
- && printf '{"tool":"fastercap","repo":"%s","ref":"%s"}\n' \
-      "${FASTERCAP_REPO}" "${FASTERCAP_REF}" > /vibeic/provenance/fastercap.json
+ && fastercap_ref=$(git -C /src/FasterCap rev-parse HEAD) \
+ && linalg_ref=$(git -C /src/LinAlgebra rev-parse HEAD) \
+ && geometry_ref=$(git -C /src/Geometry rev-parse HEAD) \
+ && test "$fastercap_ref" = "${FASTERCAP_REF}" \
+ && test "$linalg_ref" = "${LINALGEBRA_REF}" \
+ && test "$geometry_ref" = "${GEOMETRY_REF}" \
+ && printf '{"tool":"fastercap","repo":"%s","ref":"%s","linalg_repo":"%s","linalg_ref":"%s","geometry_repo":"%s","geometry_ref":"%s"}\n' \
+      "$(git -C /src/FasterCap remote get-url origin)" "$fastercap_ref" \
+      "$(git -C /src/LinAlgebra remote get-url origin)" "$linalg_ref" \
+      "$(git -C /src/Geometry remote get-url origin)" "$geometry_ref" \
+      > /vibeic/provenance/fastercap.json
 
 FROM scratch
 COPY --from=build /foss/tools/fastercap /foss/tools/fastercap

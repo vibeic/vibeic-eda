@@ -45,9 +45,9 @@ ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:2f93a7a-959e2d
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
 # would otherwise have shipped nothing.
-ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-3a8690
-ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-1b916b
-ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-05b92d
+ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-aa2ec6
+ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:1d2526e-cc8aa4
+ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
 #
@@ -87,9 +87,9 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-05b92d
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
 ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:f091c8b-3931f7
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9e5d726-9e884c
-ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-aa0773
+ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:9012c14-26919a
-ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-b84994
+ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-be0c46
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
 # artefact is named once here as a stage. These are pure aliases: nothing is
@@ -267,6 +267,11 @@ RUN git init /orfs -q \
  && git -C /orfs checkout ${OPENROAD_FLOW_SCRIPTS_REF} \
  && test "$(git -C /orfs rev-parse HEAD)" = "${OPENROAD_FLOW_SCRIPTS_REF}"
 
+RUN mkdir -p /vibeic/provenance \
+ && printf '{"tool":"openroad-flow-scripts","repo":"%s","ref":"%s"}\n' \
+      "$(git -C /orfs remote get-url origin)" "$(git -C /orfs rev-parse HEAD)" \
+      > /vibeic/provenance/openroad-flow-scripts.json
+
 # ---------------------------------------------------------------------------
 # Stage 9b — ASAP7 device-LVS source-of-truth (B1/#174; all PUBLIC + BSD).
 #   The ORFS asap7 platform (Stage 9) ships only the physical enablement (LEF /
@@ -370,6 +375,18 @@ RUN git clone https://github.com/vibeic/ALIGN-public.git     /align/ALIGN-public
  && git clone https://github.com/vibeic/ALIGN-pdk-sky130.git /align/ALIGN-pdk-sky130 && git -C /align/ALIGN-pdk-sky130 checkout ${ALIGN_PDK_SKY130_REF} \
  && test -f /align/ALIGN-public/setup.py \
  && test -f /align/ALIGN-pdk-sky130/SKY130_PDK/mos.py
+
+# Measure the same checkouts copied into align-build, outside /align so adding
+# provenance does not change the source tree consumed by its compilation layer.
+RUN mkdir -p /vibeic/provenance \
+ && align_ref=$(git -C /align/ALIGN-public rev-parse HEAD) \
+ && pdk_ref=$(git -C /align/ALIGN-pdk-sky130 rev-parse HEAD) \
+ && test "$align_ref" = "${ALIGN_PUBLIC_REF}" \
+ && test "$pdk_ref" = "${ALIGN_PDK_SKY130_REF}" \
+ && printf '{"tool":"align","repo":"%s","ref":"%s","pdk_repo":"%s","pdk_ref":"%s"}\n' \
+      "$(git -C /align/ALIGN-public remote get-url origin)" "$align_ref" \
+      "$(git -C /align/ALIGN-pdk-sky130 remote get-url origin)" "$pdk_ref" \
+      > /vibeic/provenance/align.json
 
 # ---------------------------------------------------------------------------
 # Stage 11b — ALIGN, BUILT IN ITS OWN STAGE (vibeic-eda#26).
@@ -663,6 +680,12 @@ COPY --from=img-xyce /vibeic/provenance/xyce.json /vibeic/provenance/xyce.json
 COPY --from=img-yices2 /vibeic/provenance/yices2.json /vibeic/provenance/yices2.json
 COPY --from=img-sv-elab /vibeic/provenance/sv-elab.json /vibeic/provenance/sv-elab.json
 COPY --from=img-fastercap /vibeic/provenance/fastercap.json /vibeic/provenance/fastercap.json
+COPY --from=img-fault /vibeic/provenance/fault.json /vibeic/provenance/fault.json
+COPY --from=img-ciel /vibeic/provenance/ciel.json /vibeic/provenance/ciel.json
+COPY --from=img-sv2v /vibeic/provenance/sv2v.json /vibeic/provenance/sv2v.json
+COPY --from=img-ihp-open-pdk /vibeic/provenance/ihp-open-pdk.json /vibeic/provenance/ihp-open-pdk.json
+COPY --from=align-src /vibeic/provenance/align.json /vibeic/provenance/align.json
+COPY --from=nangate45-src /vibeic/provenance/openroad-flow-scripts.json /vibeic/provenance/openroad-flow-scripts.json
 COPY --from=librelane-src /vibeic/provenance/librelane.json /vibeic/provenance/librelane.json
 COPY --from=spicebind-build /vibeic/provenance/spicebind.json /vibeic/provenance/spicebind.json
 COPY --from=eqy-build /vibeic/provenance/eqy.json /vibeic/provenance/eqy.json

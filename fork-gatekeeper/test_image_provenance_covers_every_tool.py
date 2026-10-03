@@ -40,9 +40,14 @@ blindness. The one thing imported from it is the map under test.
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -206,3 +211,160 @@ def test_the_collected_layer_reaches_the_final_image():
                      text, re.M), (
         "nothing copies the collector stage into the final image, so every "
         "record is written, gathered, and thrown away")
+
+
+def _image_reader(monkeypatch, records):
+    """Exercise main's verdict using image reads, including absent records."""
+    def run(*cmd):
+        if cmd[:3] == ("docker", "image", "inspect"):
+            return 0, "{}"
+        if cmd[:2] == ("docker", "run"):
+            return 0, "test-container"
+        if cmd[:2] == ("docker", "rm"):
+            return 0, ""
+        if cmd[:2] == ("docker", "exec"):
+            name = Path(cmd[-1]).stem
+            if name not in records:
+                return 1, "No such file"
+            return 0, json.dumps(records[name])
+        raise AssertionError(cmd)
+    monkeypatch.setattr(M, "run", run)
+    monkeypatch.setattr(M, "_pending", lambda: {})
+
+
+@pytest.fixture
+def image_case(tmp_path, monkeypatch):
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("ARG UNIT_REF=" + "a" * 40 + "\n")
+    monkeypatch.setattr(M, "PRIMARY", {"unit": "UNIT_REF"})
+    monkeypatch.setattr(M, "pin_file", lambda _tool: dockerfile)
+    monkeypatch.setattr(M, "pinned_forks", lambda: {"unit": "a" * 40,
+                                                  "dependency": "b" * 40})
+    records = {"unit": {"tool": "unit", "repo": "https://github.com/vibeic/unit.git",
+                        "ref": "a" * 40,
+                        "dependency_repo": "https://github.com/vibeic/dependency.git",
+                        "dependency_ref": "b" * 40}}
+    _image_reader(monkeypatch, records)
+    return records
+
+
+@pytest.mark.parametrize("shape", ["legacy", "also"])
+def test_dependency_commit_mismatch_is_a_failed_verdict(image_case, shape, capsys):
+    record = image_case["unit"]
+    if shape == "legacy":
+        record["dependency_ref"] = "c" * 40
+    else:
+        del record["dependency_repo"], record["dependency_ref"]
+        record["also"] = {"dependency": "c" * 40}
+    assert M.main(["test-image"]) == 1
+    assert "dependency" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field,value", [
+    ("dependency_repo", "https://github.com/somewhere/dependency.git"),
+    ("dependency_repo", "https://github.com/vibeic/unpinned.git"),
+    ("dependency_ref", ""),
+    ("also", {"dependency": None}),
+    ("also", []),
+])
+def test_invalid_dependency_never_certifies_the_image(image_case, field, value):
+    image_case["unit"][field] = value
+    assert M.main(["test-image"]) == 1
+
+
+def test_unrecorded_pinned_dependency_is_a_failed_verdict(image_case, capsys):
+    del image_case["unit"]["dependency_repo"], image_case["unit"]["dependency_ref"]
+    assert M.main(["test-image"]) == 1
+    assert "dependency" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("shape", ["legacy", "also"])
+def test_correct_dependency_is_verified(image_case, shape, capsys):
+    record = image_case["unit"]
+    if shape == "also":
+        del record["dependency_repo"], record["dependency_ref"]
+        record["also"] = {"dependency": "b" * 40}
+    assert M.main(["test-image"]) == 0
+    assert "2 of 2 pinned fork(s)" in capsys.readouterr().out
+
+
+def test_unavailable_denominator_cannot_certify_the_image(image_case, monkeypatch):
+    def unavailable():
+        raise ValueError("pin inventory unreadable")
+    monkeypatch.setattr(M, "pinned_forks", unavailable)
+    assert M.main(["test-image"]) == 2
+
+
+def test_actual_pin_inventory_requires_each_secondary_source(monkeypatch):
+    """The real checkout supplies the pins and primary mapping under test."""
+    pins = M.pinned_forks()
+    records, primary_repos = {}, set()
+    for tool, arg in M.PRIMARY.items():
+        ref = dict(ARG_ANY.findall(M.pin_file(tool).read_text()))[arg]
+        repo = next(repo for repo, pin in pins.items() if pin == ref)
+        primary_repos.add(repo)
+        records[tool] = {"tool": tool, "repo": f"https://github.com/vibeic/{repo}.git",
+                         "ref": ref}
+    secondary = {repo: ref for repo, ref in pins.items() if repo not in primary_repos}
+    assert secondary, "the real multi-source artifacts vanished from this measurement"
+    record = next(iter(records.values()))
+    record["also"] = secondary.copy()
+    _image_reader(monkeypatch, records)
+    assert M.main(["test-image"]) == 0
+    for repo in secondary:
+        record["also"] = {key: value for key, value in secondary.items() if key != repo}
+        assert M.main(["test-image"]) == 1, f"unrecorded {repo} was accepted"
+
+
+def _measured_emitters():
+    """RUN commands in the real recipes that measure Git for their records."""
+    for path in _dockerfiles():
+        for line in _uncommented(path).replace("\\\n", " ").splitlines():
+            if line.startswith("RUN ") and EMIT.search(line) and "git -C " in line:
+                yield EMIT.search(line).group(1), line[4:]
+
+
+@pytest.mark.parametrize("tool,command", list(_measured_emitters()),
+                         ids=lambda value: value if len(value) < 60 else "recipe")
+def test_recipe_emits_actual_checkout_identity(tmp_path, tool, command):
+    """Execute each real emitter with independent Git repos, not pin-shaped data.
+
+    Only filesystem paths are relocated; the printf and Git measurements are
+    the exact Dockerfile RUN. A wrong requested pin must stop before emission.
+    """
+    source_paths = sorted(set(re.findall(r"git -C (/[^\s)]+)", command)))
+    assert source_paths, tool
+    expected, measured, relocated = set(), {}, {}
+    for index, source in enumerate(source_paths):
+        checkout = tmp_path / f"source-{index}"
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Test",
+                        "-c", "user.email=test@example.invalid", "commit", "-q",
+                        "--allow-empty", "-m", f"source-{index}"], check=True)
+        origin = f"https://github.com/vibeic/source-{index}.git"
+        subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin", origin], check=True)
+        ref = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+        expected.add((origin, ref))
+        measured[source], relocated[source] = ref, str(checkout)
+    variables = {name: measured[source] for name, source in re.findall(
+        r"([a-z_]+)=\$\(git -C (\S+) rev-parse HEAD\)", command)}
+    checks = re.findall(r'test "\$([a-z_]+)" = "\$\{([A-Z0-9_]+)\}"', command)
+    env = os.environ.copy()
+    env.update({arg: variables[name] for name, arg in checks})
+    output = tmp_path / "provenance"
+    command = command.replace("/vibeic/provenance", str(output))
+    for source in sorted(relocated, key=len, reverse=True):
+        command = command.replace("git -C " + source + " ",
+                                  "git -C " + relocated[source] + " ")
+    result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    record_path = output / f"{tool}.json"
+    record = json.loads(record_path.read_text())
+    assert {(repo, ref) for _, repo, ref in M.record_sources(record)} == expected
+    assert record["tool"] == tool
+    if checks:
+        record_path.unlink()
+        env[checks[0][1]] = "f" * 40
+        result = subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True)
+        assert result.returncode != 0, f"{tool} accepted a different checkout than requested"
+        assert not record_path.exists(), f"{tool} attested a requested pin it did not check out"
