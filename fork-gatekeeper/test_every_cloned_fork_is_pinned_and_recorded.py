@@ -141,12 +141,10 @@ def test_the_two_pairings_agree_with_the_structural_parser():
 def test_the_provenance_guard_states_the_set_it_cannot_speak_for():
     """`19/19` was true and meant "19 of the records that exist".
 
-    A fork with no `/vibeic/provenance/*.json` is not a FAIL in that checker — it
-    is absent from BOTH sides of the fraction, which is how `asap7sc7p5t_28`
-    could be unpinned, unrecorded and unmentioned while the guard printed a
-    confident PASS over the image that shipped its golden CDL. The denominator
-    that matters is the forks the build CLONES, and the ones no record speaks for
-    have to be NAMED, not silently excluded."""
+    Originally a fork without provenance was absent from both sides of its
+    fraction. The denominator must remain the forks the build CLONES, and the
+    ones no record speaks for must be named. Behavioral tests exercise main's
+    nonzero result for those gaps; this verifies the inventory reader itself."""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "check_image_provenance", ROOT / "tools" / "check_image_provenance.py")

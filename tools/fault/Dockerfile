@@ -47,6 +47,14 @@ RUN mkdir -p /out/bin /out/lib \
  && cp -L /usr/lib/swift/linux/x86_64/*.so /out/lib/ 2>/dev/null || true \
  && ls /out/lib | head -30
 
+RUN mkdir -p /vibeic/provenance \
+ && source_ref=$(git -C /fault rev-parse HEAD) \
+ && test "$source_ref" = "${FAULT_REF}" \
+ && printf '{"tool":"fault","repo":"%s","ref":"%s"}\n' \
+      "$(git -C /fault remote get-url origin)" "$source_ref" \
+      > /vibeic/provenance/fault.json
+
 FROM scratch AS artefact
 COPY --from=build /out/bin/fault /foss/tools/fault/bin/fault
 COPY --from=build /out/lib/ /foss/tools/fault/lib/
+COPY --from=build /vibeic/provenance/fault.json /vibeic/provenance/fault.json

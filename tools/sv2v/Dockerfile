@@ -47,5 +47,13 @@ RUN printf 'module t;\n  logic [3:0] a;\n  always_comb a = 4%s1;\n  initial $dis
  && ! grep -q "always_comb" /tmp/t.v \
  && echo "sv2v self-test: SystemVerilog always_comb lowered to Verilog"
 
+RUN mkdir -p /vibeic/provenance \
+ && source_ref=$(git -C /sv2v rev-parse HEAD) \
+ && test "$source_ref" = "${SV2V_REF}" \
+ && printf '{"tool":"sv2v","repo":"%s","ref":"%s"}\n' \
+      "$(git -C /sv2v remote get-url origin)" "$source_ref" \
+      > /vibeic/provenance/sv2v.json
+
 FROM scratch AS artifact
 COPY --from=build /out/sv2v /foss/tools/bin/sv2v
+COPY --from=build /vibeic/provenance/sv2v.json /vibeic/provenance/sv2v.json

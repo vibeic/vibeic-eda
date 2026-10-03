@@ -46,9 +46,11 @@ RUN git clone --filter=blob:none "${IHP_SG13CMOS5L_REPO}" /src/ihp-sg13cmos5l \
 # (verified: neither vibeic/IHP-Open-PDK nor upstream ships one) -- write it
 # from the ref we actually pinned, or the next change to this PDK is
 # undetectable from outside the image (vibeic-eda claims-gate finding, 0.2.68).
-RUN printf '%s' "${IHP_OPEN_PDK_REF}" > /src/ihp/ihp-sg13g2/COMMIT \
+RUN git -C /src/ihp rev-parse HEAD > /src/ihp/ihp-sg13g2/COMMIT \
+ && test "$(cat /src/ihp/ihp-sg13g2/COMMIT)" = "${IHP_OPEN_PDK_REF}" \
  && grep -qE '^[0-9a-f]{40}$' /src/ihp/ihp-sg13g2/COMMIT
-RUN printf '%s' "${IHP_SG13CMOS5L_REF}" > /src/ihp-sg13cmos5l/COMMIT \
+RUN git -C /src/ihp-sg13cmos5l rev-parse HEAD > /src/ihp-sg13cmos5l/COMMIT \
+ && test "$(cat /src/ihp-sg13cmos5l/COMMIT)" = "${IHP_SG13CMOS5L_REF}" \
  && grep -qE '^[0-9a-f]{40}$' /src/ihp-sg13cmos5l/COMMIT
 
 # The self-test asks what a PDK is FOR: the files every DRC/LVS/PnR run reads.
@@ -82,6 +84,17 @@ RUN ln -s /src/ihp/ihp-sg13g2 /src/ihp-sg13g2 \
  && rm -f /tmp/dangling.txt /src/ihp-sg13g2 \
  && echo "ihp-sg13cmos5l self-test: libs.tech + libs.ref present, LEF and a KLayout deck resolve, 0 dangling source symlinks into ihp-sg13g2 ($products link(s) to build products, resolved or not by later stages)"
 
+RUN mkdir -p /vibeic/provenance \
+ && ihp_ref=$(git -C /src/ihp rev-parse HEAD) \
+ && cmos_ref=$(git -C /src/ihp-sg13cmos5l rev-parse HEAD) \
+ && test "$ihp_ref" = "${IHP_OPEN_PDK_REF}" \
+ && test "$cmos_ref" = "${IHP_SG13CMOS5L_REF}" \
+ && printf '{"tool":"ihp-open-pdk","repo":"%s","ref":"%s","cmos_repo":"%s","cmos_ref":"%s"}\n' \
+      "$(git -C /src/ihp remote get-url origin)" "$ihp_ref" \
+      "$(git -C /src/ihp-sg13cmos5l remote get-url origin)" "$cmos_ref" \
+      > /vibeic/provenance/ihp-open-pdk.json
+
 FROM scratch AS artifact
 COPY --from=build /src/ihp/ihp-sg13g2 /foss/pdks/ihp-sg13g2
 COPY --from=build /src/ihp-sg13cmos5l /foss/pdks/ihp-sg13cmos5l
+COPY --from=build /vibeic/provenance/ihp-open-pdk.json /vibeic/provenance/ihp-open-pdk.json

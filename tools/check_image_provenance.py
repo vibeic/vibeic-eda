@@ -27,8 +27,14 @@ adding a tool to one of the three and not the others fails by name.
 
 Usage:  check_image_provenance.py <image>
 
-Exit: 0 all agree, 1 a disagreement, 2 the image could not be inspected
-(which is not a pass).
+This command fails on disagreements, missing records and unverified pinned
+sources. Its existing callers retain their policy: run_tick logs it as an
+advisory (|| true), while the GitHub release workflow requires a successful
+exit before publishing. Watch-only repositories and prebuilt volume contents
+assertions are outside the cloned-source pin inventory.
+
+Exit: 0 all pinned sources agree, 1 a disagreement or coverage gap, 2 the
+image or pin inventory could not be inspected (which is not a pass).
 """
 from __future__ import annotations
 
@@ -51,10 +57,10 @@ ROOT = Path(__file__).resolve().parent.parent
 #: "does `tools/<tool>/Dockerfile` exist" — under that rule a mistyped tool name
 #: would fall through to the root Dockerfile, find no such ARG, and compare the
 #: image against the empty string.
-ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs", "librelane", "cace", "spicebind", "eqy"}
+ROOT_PINNED = {"cocotb", "cocotb-coverage", "pyuvm", "sby", "asap7-lvs", "librelane", "cace", "spicebind", "eqy", "align", "openroad-flow-scripts"}
 
 #: tool -> the ARG that its provenance must report, in `pin_file(tool)`.
-#: Multi-source artefacts report the first; the second is checked via the tag.
+#: Multi-source artefacts also report dependencies, all checked against pins.
 PRIMARY = {
     "openroad": "OPENROAD_REF", "yosys": "YOSYS_REF",
     "sat-solvers": "KISSAT_REF", "ngspice": "NGSPICE_REF",
@@ -69,8 +75,13 @@ PRIMARY = {
     "asap7-lvs": "ASAP7SC_REF", "librelane": "LIBRELANE_REF",
     "cace": "CACE_REF", "spicebind": "SPICEBIND_REF",
     "eqy": "EQY_REF",
+    "fault": "FAULT_REF", "ciel": "CIEL_REF", "sv2v": "SV2V_REF",
+    "ihp-open-pdk": "IHP_OPEN_PDK_REF", "align": "ALIGN_PUBLIC_REF",
+    "openroad-flow-scripts": "OPENROAD_FLOW_SCRIPTS_REF",
 }
 ARG = re.compile(r"^\s*ARG\s+([A-Z0-9_]+)\s*=\s*(\S+)", re.M)
+FORK_REPO = re.compile(r"https://github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", re.I)
+SHA = re.compile(r"[0-9a-f]{40}$")
 
 
 def pin_file(tool: str) -> Path:
@@ -102,22 +113,30 @@ def pinned_forks() -> dict:
     return {repo: site["ref"] for repo, site in pin_sites(ROOT).items()}
 
 
-def covered_forks(record: dict) -> set:
-    """The forks ONE provenance record makes a statement about.
+def record_sources(record: dict) -> list[tuple[str, str, str]]:
+    """Read both existing dependency encodings; neither may certify by name only."""
+    if not isinstance(record, dict):
+        raise ValueError("provenance must be a JSON object")
+    sources = [("primary", record.get("repo", ""), record.get("ref", ""))]
+    prefixes = {key.rsplit("_", 1)[0] for key in record if key.endswith(("_repo", "_ref"))}
+    for prefix in sorted(prefixes):
+        # Missing either half must remain visible to validation.
+        sources.append((prefix, record.get(prefix + "_repo", ""),
+                        record.get(prefix + "_ref", "")))
+    also = record.get("also", {})
+    if not isinstance(also, dict):
+        raise ValueError("also must map repository names to commits")
+    for repo, ref in also.items():
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+            raise ValueError(f"invalid also repository name: {repo!r}")
+        sources.append((repo, f"https://github.com/vibeic/{repo}.git", ref))
+    return sources
 
-    `repo` is the artefact's primary source. `also` is the optional map a
-    multi-source stage uses to name the rest, so a record can cover more than one
-    fork without the checker having to know which stage built what.
-    """
-    out = set()
-    repo = record.get("repo") or ""
-    m = re.search(r"github\.com/vibeic/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", repo, re.I)
-    if m:
-        out.add(m.group(1))
-    also = record.get("also")
-    if isinstance(also, dict):
-        out |= set(also)
-    return out
+
+def covered_forks(record: dict) -> set:
+    """Names stated by a record; main validates every corresponding ref."""
+    return {match.group(1) for _, repo, _ in record_sources(record)
+            if isinstance(repo, str) and (match := FORK_REPO.fullmatch(repo))}
 
 
 def main(argv) -> int:
@@ -125,6 +144,19 @@ def main(argv) -> int:
         print(__doc__.strip().split("\n\n")[-2], file=sys.stderr)
         return 2
     image = argv[0]
+
+    try:
+        pins = pinned_forks()
+        if not pins or any(not isinstance(ref, str) or not SHA.fullmatch(ref)
+                           for ref in pins.values()):
+            raise ValueError("empty or invalid cloned-source pin inventory")
+    except Exception as exc:
+        print(f"check_image_provenance: could not compute the fork denominator: {exc}",
+              file=sys.stderr)
+        return 2
+    # GitHub repository identity is case-insensitive; retain canonical pin names
+    # in diagnostics rather than losing OpenROAD/FasterCap-style capitalization.
+    canonical = {repo.lower(): repo for repo in pins}
 
     rc, out = run("docker", "image", "inspect", image)
     if rc != 0:
@@ -136,7 +168,8 @@ def main(argv) -> int:
     # `sleep infinity` with an explicit entrypoint: the image's own entrypoint
     # runs a login shell that may not exit, and a container that never starts
     # would look identical to a missing file.
-    rc, cid = run("docker", "run", "-d", "--entrypoint", "sleep", image, "infinity")
+    rc, cid = run("docker", "run", "-d", "--read-only", "--network", "none",
+                  "--entrypoint", "sleep", image, "infinity")
     if rc != 0:
         print(f"check_image_provenance: cannot start {image}\n{cid}", file=sys.stderr)
         return 2
@@ -147,8 +180,8 @@ def main(argv) -> int:
     covered: set = set()
     try:
         for tool, key in PRIMARY.items():
-            want = ARG.findall(pin_file(tool).read_text())
-            want = dict(want).get(key, "").split("#")[0].strip()
+            args = dict(ARG.findall(pin_file(tool).read_text()))
+            want = args.get(key, "").split("#")[0].strip()
             rc, body = run("docker", "exec", cid, "cat",
                            f"/vibeic/provenance/{tool}.json")
             if rc != 0:
@@ -160,26 +193,42 @@ def main(argv) -> int:
             seen += 1
             try:
                 got = json.loads(body)
-            except Exception:
-                bad.append(f"{tool}: provenance is not JSON: {body[:120]!r}")
+                sources = record_sources(got)
+            except (ValueError, TypeError) as exc:
+                bad.append(f"{tool}: invalid provenance: {exc}: {body[:120]!r}")
                 continue
-            covered |= covered_forks(got)
-            repo, ref = got.get("repo", ""), got.get("ref", "")
-            if not re.match(r"https://github\.com/vibeic/", repo, re.I):
-                slug = re.sub(r"^https://github\.com/", "", repo, flags=re.I)
-                slug = re.sub(r"\.git$", "", slug).lower()
-                exc = PENDING.get(slug)
-                if exc and not exc["expired"]:
-                    deferred.append(f"{tool}: built from {repo} "
-                                    f"(pending fork, expires {exc.get('expires')})")
-                elif exc:
-                    bad.append(f"{tool}: built from {repo}, whose exception in "
-                               f"PENDING_FORKS.json EXPIRED on {exc.get('expires')}")
-                else:
-                    bad.append(f"{tool}: built from {repo!r}, which is not ours")
-            if ref != want:
+            if got.get("ref") != want:
                 bad.append(f"{tool}: the image contains a different commit than "
-                           f"the pin names\n      image {ref}\n      pin   {want}")
+                           f"the pin names\n      image {got.get('ref')}\n      pin   {want}")
+            for source, repo, ref in sources:
+                label = f"{tool}/{source}"
+                if not isinstance(repo, str) or not isinstance(ref, str) or not SHA.fullmatch(ref):
+                    bad.append(f"{label}: invalid repository/commit: {repo!r} {ref!r}")
+                    continue
+                match = FORK_REPO.fullmatch(repo)
+                if not match:
+                    slug = re.sub(r"^https://github\.com/", "", repo, flags=re.I)
+                    slug = re.sub(r"\.git/?$", "", slug).lower()
+                    exc = PENDING.get(slug)
+                    if exc and not exc["expired"]:
+                        declared = want if source == "primary" else args.get(source.upper() + "_REF")
+                        if ref != declared:
+                            bad.append(f"{label}: exception source differs from its pin {declared!r}")
+                        else:
+                            deferred.append(f"{label}: built from {repo} "
+                                            f"(pending fork, expires {exc.get('expires')})")
+                    elif exc:
+                        bad.append(f"{label}: exception for {repo} EXPIRED on {exc.get('expires')}")
+                    else:
+                        bad.append(f"{label}: built from {repo!r}, which is not ours")
+                    continue
+                name = canonical.get(match.group(1).lower())
+                if name is None:
+                    bad.append(f"{label}: {repo} has no cloned-source pin")
+                elif ref != pins[name]:
+                    bad.append(f"{label}: {name} image {ref} differs from pin {pins[name]}")
+                else:
+                    covered.add(name)
     finally:
         run("docker", "rm", "-f", cid)
 
@@ -188,6 +237,10 @@ def main(argv) -> int:
               "image predates the per-tool split, or every COPY was dropped. "
               "Either way nothing was verified.", file=sys.stderr)
         return 2
+
+    unspoken = sorted(set(pins) - covered)
+    if unspoken:
+        bad.append("NOT CHECKED — no matching source provenance for: " + ", ".join(unspoken))
 
     if bad:
         print("check_image_provenance: %d disagreement(s) between %s and its "
@@ -201,35 +254,10 @@ def main(argv) -> int:
               "DATED exception:" % len(deferred))
         for d in deferred:
             print("  " + d)
-    print("check_image_provenance: %d/%d tools in %s are at the pinned commit, "
-          "%d from a vibeic/ repo" % (seen, len(PRIMARY), image, seen - len(deferred)))
-
-    # AND THE DENOMINATOR, STATED (vibeic-eda#104 finding 2). `19/19` was true
-    # and read as "every fork we ship". It is 19 of the records that exist, and
-    # a fork with no record is not a FAIL here — it is absent from both sides of
-    # the fraction, which is why asap7sc7p5t_28 could be unpinned, unrecorded and
-    # unmentioned while this printed a confident PASS over it. The set that
-    # matters is the forks the build CLONES, so that is what is divided into, and
-    # the ones no record speaks for are NAMED rather than silently excluded.
-    #
-    # Not an error: a missing record is a gap in what the image records, and
-    # failing here would only invite the record to be written without being
-    # checked. It is printed on every run so it cannot go unnoticed, and the
-    # remedy is a record from the stage that clones it, exactly as `asap7-lvs`
-    # now does.
-    try:
-        pins = pinned_forks()
-    except Exception as exc:                      # never turn a PASS into a crash
-        print(f"  (could not compute the fork denominator: {exc})")
-        return 0
-    unspoken = sorted(set(pins) - covered)
-    print("check_image_provenance: %d of %d pinned fork(s) are named by a record "
-          "in the image" % (len(pins) - len(unspoken), len(pins)))
-    if unspoken:
-        print("  NOT CHECKED — no provenance record in the image speaks for "
-              "these, so nothing here verifies what commit they carry:")
-        for repo in unspoken:
-            print(f"    {repo}")
+    print("check_image_provenance: %d/%d records in %s are at the pinned commit"
+          % (seen, len(PRIMARY), image))
+    print("check_image_provenance: %d of %d pinned fork(s) have verified source "
+          "provenance in the image" % (len(covered), len(pins)))
     return 0
 
 

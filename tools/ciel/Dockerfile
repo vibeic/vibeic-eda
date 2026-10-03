@@ -31,5 +31,13 @@ RUN /opt/ciel/bin/ciel --version \
  && grep -qi "sky130" /tmp/pdks.txt \
  && echo "ciel self-test: enumerates PDK families including sky130"
 
+RUN mkdir -p /vibeic/provenance \
+ && source_ref=$(git -C /src/ciel rev-parse HEAD) \
+ && test "$source_ref" = "${CIEL_REF}" \
+ && printf '{"tool":"ciel","repo":"%s","ref":"%s"}\n' \
+      "$(git -C /src/ciel remote get-url origin)" "$source_ref" \
+      > /vibeic/provenance/ciel.json
+
 FROM scratch AS artifact
 COPY --from=build /opt/ciel /opt/ciel
+COPY --from=build /vibeic/provenance/ciel.json /vibeic/provenance/ciel.json
