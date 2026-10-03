@@ -440,8 +440,18 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
                          "detail": f"MISSING: {rel} is not in the merged tree — "
                                    f"nothing was checked, which is not a clean result"})
             continue
+        if "container" in chk and not _is_pytest_command(cmd):
+            rows.append({"name": name, "ok": False, "rc": -1,
+                         "outcome": "malformed", "elapsed_seconds": 0.0,
+                         "detail": "MALFORMED: container execution is supported only for declared pytest commands"})
+            continue
         if _is_pytest_command(cmd):
-            rc, out, err, supervision = _semantic_pytest_run(cmd, wt)
+            if "container" in chk:
+                from fork_pytest_container import run_container_pytest
+                rc, out, err, supervision = run_container_pytest(
+                    cmd, wt, chk["container"], POST_MERGE_STALL_GRACE, POST_MERGE_POLL_S)
+            else:
+                rc, out, err, supervision = _semantic_pytest_run(cmd, wt)
             outcome = str(supervision.get("outcome") or "protocol_incomplete")
             elapsed = float(supervision.get("elapsed_seconds") or 0.0)
             progress_basis = "validated_pytest_lifecycle"

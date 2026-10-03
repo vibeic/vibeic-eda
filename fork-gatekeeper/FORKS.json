@@ -38,7 +38,22 @@
       "tool": "cace",
       "branch": "main",
       "role": "analog characterization (CACE): datasheet-driven corner/condition sweeps over ngspice. The image installs it from this fork at CACE_REF, replacing the base image's unforked 2.9.0, because upstream (2.13.0) stops every plain .spice template at a TODO; the fork's main carries the substitution and the netlist/schematic/<name>.spice fallback (vibeic/cace#1, merged as 9136e6d) and the rcx extracted-port fix (vibeic/cace#2, merged as 0479f0e, the CACE_REF pin). Created by push, not by forking: the fork API returned 403, the same block PENDING_FORKS.json records for the earlier mirrors, so GitHub records no parent; the upstream is declared here.",
-      "upstream": "fossi-foundation/cace"
+      "upstream": "fossi-foundation/cace",
+      "post_merge_check": [
+        {
+          "name": "spice-template-and-rcx-regressions",
+          "path": "tests_vibeic",
+          "cmd": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests_vibeic/test_rcx_split_ports.py", "tests_vibeic/test_spice_template.py"],
+          "container": {
+            "image": "released",
+            "environment": {"CACE_VIBEIC_SIM_TESTS": "1", "PDK_ROOT": "/foss/pdks", "PDK": "ihp-sg13g2"},
+            "required_commands": ["magic", "ngspice", "xschem"],
+            "required_paths": ["/foss/pdks/ihp-sg13g2"],
+            "source_modules": ["cace"]
+          },
+          "why": "Both fork regression files were unreachable. Run their unit, wiring, plain-SPICE, xschem and RCX cases against the candidate checkout; the released image supplies tools and the PDK. Every case must complete with zero skips before this fork can publish."
+        }
+      ]
     },
     {
       "tool": "cadical",
@@ -290,7 +305,15 @@
       "tool": "open_pdks",
       "branch": "main",
       "role": "PDK installer — produces /foss/pdks/sky130A and gf180mcuD; every DRC and LVS run reads its libs.tech",
-      "upstream": "fossi-foundation/open-pdks"
+      "upstream": "fossi-foundation/open-pdks",
+      "post_merge_check": [
+        {
+          "name": "gf180-layers-rc-units",
+          "path": "tests_vibeic/test_gf180_layers_rc_units.py",
+          "cmd": ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests_vibeic/test_gf180_layers_rc_units.py"],
+          "why": "Run the previously unreachable per-SCL Liberty resistance-unit regression. Without a built PDK the test checks its source-pinned recorded Liberty/LEF values and refuses changed source pins; this is source coverage, not acceptance of a rebuilt PDK."
+        }
+      ]
     },
     {
       "tool": "OpenROAD",
