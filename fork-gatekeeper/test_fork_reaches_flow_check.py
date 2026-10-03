@@ -28,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import json
+import pytest
 
 import fork_reaches_flow_check as F
 
@@ -218,3 +219,48 @@ def test_unknown_path_probe_makes_main_norecord_and_retains_json(
 
     assert rc == F.RC_NOTHING
     assert json.loads(report.read_text(encoding="utf-8"))["findings"] == [unknown]
+
+
+def _mounted_report(tmp_path, monkeypatch, installation, resolved="/tools/ours"):
+    df = _write_dockerfile(tmp_path, "FROM scratch\n"
+        "COPY --from=img-klayout /p.json /provenance/klayout.json\n" + installation)
+    monkeypatch.setattr(F, "_EXTRA", ())
+    monkeypatch.setattr(F, "_INSTALLED_FROM_SOURCE", {})
+    monkeypatch.setattr(F, "_sh", lambda *args, **kwargs: (
+        0, f"klayout /tools/current/klayout {resolved}/klayout\n"
+           f"strm2gds /tools/current/strm2gds {resolved}/strm2gds\n", ""))
+    return F.check("fixture:image", df)
+
+
+def test_mounted_artefact_reaches_both_primary_and_buddy(tmp_path, monkeypatch):
+    rows = _mounted_report(tmp_path, monkeypatch,
+        "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro \\\n"
+        "    cp -a /mounted /tools/ours && test -x /tools/ours/klayout\n")
+    assert rows == [], rows
+
+
+@pytest.mark.parametrize("installation", [
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro true\n",
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro cp -a /base /tools/ours\n",
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro cp -a /mounted/../base /tools/ours\n",
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted/../base,ro cp -a /mounted/../base /tools/ours\n",
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro false || cp -a /mounted /tools/ours\n",
+    "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro echo 'cp -a /mounted /tools/ours'\n",
+])
+def test_mount_without_proven_copy_keeps_origin_finding(
+        tmp_path, monkeypatch, installation):
+    rows = _mounted_report(tmp_path, monkeypatch, installation)
+    assert any(r["tool"] == "klayout" and r.get("we_build_it") for r in rows), rows
+
+
+def test_buddy_resolving_to_base_is_still_a_built_tool_failure(tmp_path, monkeypatch):
+    rows = _mounted_report(tmp_path, monkeypatch,
+        "RUN --mount=type=bind,from=img-klayout,source=/build,target=/mounted,ro "
+        "cp -a /mounted /tools/ours\n", resolved="/tools/base")
+    bad = {r["tool"] for r in rows if r.get("we_build_it")}
+    assert bad == {"klayout", "strm2gds"}, rows
+
+
+def test_real_composition_mounted_klayout_paths():
+    paths = F.copied_paths(Path(__file__).resolve().parents[1] / "Dockerfile")
+    assert "/foss/tools/klayout-vibeic" in paths["klayout"], paths["klayout"]

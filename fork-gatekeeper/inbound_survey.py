@@ -34,16 +34,21 @@ HONEST SCOPE, because the output invites over-reading
   candidates, because 250 extra API calls per tool per tick is not free.
 
 Exit: 0 survey completed, 1 a fork could not be surveyed, 2 nothing surveyed.
+The daily caller records and continues (advisory). Mirrors whose fork pins are
+unknown to GitHub's compare API can be surveyed using a complete local clone,
+bound to the live upstream SHA. This never fetches or mutates those clones.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import quote
 
 RC_OK, RC_PARTIAL, RC_NOTHING = 0, 1, 2
 
@@ -88,7 +93,8 @@ RELEVANT_PATHS: Dict[str, tuple] = {
 
 def _sh(cmd, timeout=120):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
         return p.returncode, p.stdout
     except Exception:
         return 1, ""
@@ -166,7 +172,63 @@ def declared_upstreams(eda_root: Path) -> Dict[str, str]:
     return out
 
 
-def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -> dict:
+def local_compare(repo: str, ref: str, upstream: str, branch: str,
+                  clone_root: Path) -> tuple:
+    """Compare a mirror's graph against an independently resolved live tip.
+
+    Read-only: never fetch or trust a remote-tracking ref as current. Missing
+    objects, shallow history, an unrelated clone, or transport errors remain
+    unmeasurable. The returned SHA identifies the measured upstream snapshot.
+    """
+    tip_doc = _gh_json(f"repos/{upstream}/git/ref/heads/{quote(branch, safe='')}")
+    tip = ((tip_doc or {}).get("object") or {}).get("sha", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", tip):
+        return None, "live upstream tip could not be resolved", None
+    if not re.fullmatch(r"[0-9a-f]{40}", ref):
+        return None, "pin is not a full commit identity", tip
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo) or repo in {".", ".."}:
+        return None, "invalid local repository name", tip
+    clone = clone_root / repo
+    git = ["git", "--no-replace-objects", "-C", str(clone)]
+    rc, remote = _sh(git + ["remote", "get-url", "upstream"])
+    slug = re.sub(r"^(?:https://github\.com/|git@github\.com:)", "", remote.strip())
+    slug = slug.removesuffix(".git").rstrip("/")
+    if rc or slug != upstream:
+        return None, "local clone has no matching upstream remote", tip
+    rc, shallow = _sh(git + ["rev-parse", "--is-shallow-repository"])
+    if rc or shallow.strip() != "false":
+        return None, "local graph is shallow or unavailable", tip
+    for label, sha in (("pin", ref), ("live upstream tip", tip)):
+        rc, _ = _sh(git + ["cat-file", "-e", sha + "^{commit}"])
+        if rc:
+            return None, f"local graph lacks {label} {sha}", tip
+    rc, base = _sh(git + ["merge-base", ref, tip])
+    if rc or not base.strip():
+        return None, "local pin and upstream have no measurable common history", tip
+    revision = f"{ref}..{tip}"
+    rc, count = _sh(git + ["rev-list", "--count", revision])
+    if rc or not count.strip().isdigit():
+        return None, "local upstream difference could not be counted", tip
+    total = int(count.strip())
+    rc, log = _sh(git + ["log", f"--max-count={COMPARE_CAP}",
+                        "--format=%H%x00%s%x00%aI", revision])
+    if rc:
+        return None, "local upstream commits could not be enumerated", tip
+    commits = []
+    for line in log.splitlines():
+        parts = line.split("\0")
+        if len(parts) != 3:
+            return None, "local upstream commit record is malformed", tip
+        sha, subject, date = parts
+        commits.append({"sha": sha, "commit": {
+            "message": subject, "author": {"date": date}}})
+    if len(commits) != min(total, COMPARE_CAP):
+        return None, "local upstream enumeration is incomplete", tip
+    return {"total_commits": total, "commits": commits}, None, tip
+
+
+def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None,
+               clone_root: Optional[Path] = None) -> dict:
     """Upstream commits reachable from their default branch but not from `ref`."""
     meta = _gh_json(f"repos/vibeic/{repo}")
     # Measured: for a non-fork this endpoint OMITS `parent` entirely, so a plain
@@ -188,11 +250,23 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
         # "master" on a repo that renamed to "main" turns a real survey into a
         # compare against a branch that does not exist, which reports as an
         # error rather than as the zero it would look like.
-        branch = (_gh_json(f"repos/{parent}") or {}).get("default_branch", "master")
+        branch = (_gh_json(f"repos/{parent}") or {}).get("default_branch")
+    if not branch:
+        return {"repo": repo, "upstream": parent, "upstream_source": source,
+                "state": UNMEASURABLE,
+                "error": "live upstream default branch could not be resolved"}
     owner = parent.split("/")[0]
 
     cmp_doc = _gh_json(f"repos/vibeic/{repo}/compare/{ref}...{owner}:{branch}")
     scope = "cross-repo"
+    if cmp_doc is None:
+        clone_root = clone_root or Path(
+            os.environ.get("GK_FORKS_DIR") or "/home/reyerchu/vibe-ic-forks")
+        cmp_doc, local_error, upstream_tip = local_compare(
+            repo, ref, parent, branch, clone_root)
+        scope = "local-graph-live-upstream"
+    else:
+        local_error, upstream_tip = None, None
     if cmp_doc is None:
         # A cross-repo compare 404s unless GitHub links the two as fork+parent,
         # which it only does for a repo created through the fork button. Our
@@ -215,7 +289,9 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
         # fields the reader happened to check, and the headline did not check.
         return {"repo": repo, "upstream": parent, "upstream_source": source,
                 "state": UNMEASURABLE,
-                "error": "compare failed in both cross-repo and upstream-internal scope"}
+                "branch": branch, "pin": ref[:9], "upstream_tip": upstream_tip,
+                "error": "compare failed in both cross-repo and upstream-internal "
+                         f"scope; local graph: {local_error}"}
 
     behind = cmp_doc.get("total_commits", 0)
     commits = cmp_doc.get("commits", []) or []
@@ -238,6 +314,7 @@ def survey_one(repo: str, ref: str, declared: Optional[Dict[str, str]] = None) -
         # cannot tell them apart is trusting our own claim as verification.
         "upstream_source": source,
         "compare_scope": scope,
+        "upstream_tip": upstream_tip,
         # True when the answer came from inside the upstream repo, which by
         # construction cannot observe commits that exist only in ours.
         "local_commits_invisible": scope == "upstream-internal",
@@ -260,6 +337,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--eda-root", default=str(Path(__file__).resolve().parents[1]))
     ap.add_argument("--json", default=None)
+    ap.add_argument("--clone-root", type=Path, default=None,
+                    help="read-only fork clones for live-tip-bound mirror comparison")
     ap.add_argument("--top", type=int, default=8,
                     help="commits to print per fork (all go to --json)")
     a = ap.parse_args(argv)
@@ -272,7 +351,8 @@ def main(argv=None) -> int:
         return RC_NOTHING
 
     declared = declared_upstreams(Path(a.eda_root))
-    results = [survey_one(repo, ref, declared) for repo, ref in sorted(pins.items())]
+    results = [survey_one(repo, ref, declared, a.clone_root)
+               for repo, ref in sorted(pins.items())]
     # UNMEASURABLE is a STATE, not the absence of one. `errored` is kept as the
     # exit-code input it has always been; what changed (vibeic-eda#101) is that
     # these rows are no longer inside the population the headline describes.
