@@ -503,7 +503,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=8f096f0846c91d021f0a84d916c1a6b352492041
+ARG LIBRELANE_REF=dacb849bd88e37bc9f6cf655c59e51776a05f28b
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2222,7 +2222,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              de4b3fd864cd80dab715a3acd81e237e704462f4 ea9d54191cc27ca4e10e5d6931bdd31832e268e1 \
              81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb \
              9f2f6815f2e9da427f753f44f2fd484de49209af 7834b463bb235bb23ad9b8502732c7afe01d202d \
-             46426c9d996aa057d4d36089e7bf1105ad7aa17c; do \
+             46426c9d996aa057d4d36089e7bf1105ad7aa17c \
+             dacb849bd88e37bc9f6cf655c59e51776a05f28b; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
