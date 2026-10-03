@@ -62,6 +62,17 @@ def _fork(name):
     return p
 
 
+def test_cace_and_open_pdks_regressions_are_reached_by_daily_declarations():
+    """Read the real fork trees: previously all three entry points were inert."""
+    findings = {}
+    for tool in ("cace", "open_pdks"):
+        state, orphans, meta = M.unreachable(
+            _fork(tool), M.declared_checks(tool, HERE / "FORKS.json"))
+        assert state != M.UNKNOWN, meta
+        findings[tool] = orphans
+    assert findings == {"cace": [], "open_pdks": []}
+
+
 # --------------------------------------------------------------------------
 # The synthetic cases: exact control over what the tree contains.
 # --------------------------------------------------------------------------

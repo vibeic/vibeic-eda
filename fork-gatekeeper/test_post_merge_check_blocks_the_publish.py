@@ -160,6 +160,42 @@ def test_a_clean_check_publishes(tmp_path, monkeypatch):
     assert [c["ok"] for c in res["checks"]] == [True]
 
 
+@pytest.mark.parametrize("kind", ["green", "skipped", "failed", "missing"])
+def test_container_pytest_verdict_controls_the_real_merge_push(tmp_path, monkeypatch, kind):
+    """Exercise the merge consumer with complete, skipped, red and absent evidence."""
+    import fork_pytest_container as C
+    from test_fork_pytest_container import _receipt
+    root, bare = _mech(tmp_path, PASSING)
+    before = _tip(bare)
+    def container(cmd, wt, config, grace, poll):
+        body = {"green": "", "skipped": "<skipped/>", "failed": "<failure/>", "missing": ""}[kind]
+        raw_rc = int(kind == "failed")
+        xml, semantic = _receipt(tmp_path, body, raw_rc)
+        if kind == "missing":
+            semantic = {}
+        rc, receipt = C.grade_receipts(raw_rc, semantic, xml)
+        return rc, "", receipt.get("reason", ""), receipt
+    monkeypatch.setattr(C, "run_container_pytest", container)
+    checks = [{"name": "container", "path": "etc/check.py",
+               "cmd": ["python3", "-m", "pytest", "etc/check.py"],
+               "container": {"image": "released"}}]
+    res = _run(monkeypatch, root, checks)
+    expected = "MERGED" if kind == "green" else (
+        "POST_MERGE_CHECK_UNMEASURABLE" if kind == "missing" else "POST_MERGE_CHECK_FAILED")
+    assert res["state"] == expected, res
+    assert (_tip(bare) != before) == (kind == "green")
+
+
+def test_container_declaration_cannot_silently_run_natively(tmp_path):
+    (tmp_path / "exists.py").write_text("pass\n")
+    row, = D.run_post_merge_checks(tmp_path, [{
+        "path": "exists.py", "cmd": [sys.executable, "-c", "print('native')"],
+        "container": {"image": "released"},
+    }])
+    assert row["ok"] is False
+    assert row["outcome"] == "malformed"
+
+
 def test_a_declared_check_missing_from_the_tree_is_not_a_pass(tmp_path, monkeypatch):
     """MISSING is not CLEAN. If upstream deletes or moves the checker, the merge
     is one nobody verified — and this repo's oldest rule is that a guard which

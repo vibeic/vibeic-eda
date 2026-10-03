@@ -93,6 +93,21 @@ def _ledger(tmp_path, rows):
 CHECK = [{"name": "noop", "path": "true.py", "cmd": ["true"], "why": "x"}]
 
 
+def test_selftest_receipt_retains_container_evidence_binding(tmp_path):
+    from types import SimpleNamespace
+    (tmp_path / "fork" / ".git").mkdir(parents=True)
+    supervision = {"evidence": "/receipt/run", "image_id": "sha256:exact",
+                   "source": {"head": "candidate", "tree": "candidate-tree"},
+                   "case_ids": ["test_subject.py::test_value"]}
+    dm = SimpleNamespace(run_post_merge_checks=lambda wt, checks: [
+        {"name": "noop", "ok": True, "rc": 0, "outcome": "natural",
+         "supervision": supervision}])
+    rows = M.check_fork("fork", CHECK, tmp_path, dm, tmp_path / "logs")
+    saved = json.loads((tmp_path / "logs" / "fork-selftest-fork.json").read_text())
+    assert rows[0]["state"] == "PASS"
+    assert saved[0]["supervision"] == supervision
+
+
 def test_it_names_the_patched_forks_that_declare_nothing(tmp_path):
     """The regression: silence about nineteen unwatched forks."""
     fj = _forks_json(tmp_path, [

@@ -206,6 +206,7 @@ def check_fork(tool: str, checks: list[dict], forks_dir: Path,
             "outcome": row.get("outcome"),
             "elapsed_seconds": row.get("elapsed_seconds"),
             "progress_basis": row.get("progress_basis"),
+            "supervision": row.get("supervision"),
             "reason": "" if state == PASS else row["detail"],
             "why": decl.get("why", "") if isinstance(decl, dict) else "",
         })
