@@ -147,7 +147,7 @@ RUN git clone "${KLAYOUT_REPO}" /klayout \
 
 FROM toolchain AS build
 ARG KLAYOUT_REPO
-ARG KLAYOUT_REF=7c07aed3495c0681e4dfc9dfaafcca8c8371b0ce  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
+ARG KLAYOUT_REF=2a382d02e184169270616b06e12616d6e9b1c022  # pinned; branch vibeic/klayout-signoff-int (0.2.23: + tl::Thread pthread_join heap-race ROOT-CAUSE fix — svrfdrc --threads use-after-free, TSan-proven 6race->0, report byte-identical; recompiles tlThreads.cc + relinks libklayout_tl.so)
 RUN --mount=type=bind,from=ccache-seed,source=/ccache,target=/ccache,rw \
     git clone "${KLAYOUT_REPO}" /klayout \
  && cd /klayout && git checkout ${KLAYOUT_REF} \
