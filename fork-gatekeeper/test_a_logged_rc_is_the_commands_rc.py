@@ -26,6 +26,7 @@ such as TS="$(date)"; echo "$TS $?". Capture status before any separate command.
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 from pathlib import Path
 
@@ -266,3 +267,38 @@ def test_no_script_logs_a_substitutions_status_as_a_commands():
         "substitution's status (e.g. `date`'s 0); capture rc=$? on the line "
         f"after the command and log the variable: {stale}")
     assert not blind, f"`$?` in an unquoted heredoc body is unscanned: {blind}"
+
+
+_ROUND_STATUS_INPUTS = (
+    "SIX", "TICK", "DISC", "PAGE", "FRESH", "CODE", "TESTS", "INPUT_CLEAR",
+    "AI_AUTH", "GAP_FATAL", "FORK_GH", "LL", "TERMINAL",
+)
+
+
+@pytest.mark.parametrize("gate,value,expected", [
+    (None, 0, 0),
+    *[(gate, value, 1) for gate in _ROUND_STATUS_INPUTS for value in (1, 2)],
+    ("SILENCE", 1, 0),  # Already escalated: existing advisory contract.
+    ("SILENCE", 2, 1),  # Could not check: still blocking.
+])
+def test_round_terminal_log_matches_its_actual_exit(tmp_path, gate, value, expected):
+    """Execute the production terminal block; never infer cron rc from a tick.
+
+    No release commands run here. Every blocking input, including SIX despite
+    successful publication, retains its existing nonzero-exit behavior.
+    """
+    source = (HERE / "run_0530.sh").read_text()
+    marker = "# 0 only when BOTH are clean:"
+    assert source.count(marker) == 1
+    terminal = source[source.index(marker):]
+    log = tmp_path / "round.log"
+    log.touch()
+    env = dict(os.environ, LOG=str(log))
+    env.update({key: "0" for key in (*_ROUND_STATUS_INPUTS, "SILENCE")})
+    if gate:
+        env[gate] = str(value)
+    result = subprocess.run(["bash", "-uc", terminal], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == expected, (gate, result.stdout, result.stderr)
+    assert re.search(rf"run_0530 exit {expected}(?:\s|$)", log.read_text()), (
+        gate, result.returncode, log.read_text())

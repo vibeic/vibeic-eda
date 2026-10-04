@@ -82,8 +82,9 @@ SIX=$?
 echo "[$(date -Is)] daily_0530 exit ${SIX}" >> "${LOG}"
 
 # A process exit is not the release authorization for AI-resolved conflicts.
-# `daily_0530` can return 1 after a conflict was successfully delivered, and an
-# AI process can return 0 while its source tip is still absent from the published
+# `daily_0530` can return 1 for another failed step after a conflict was
+# successfully delivered, and an AI process can return 0 while its source tip
+# is still absent from the published
 # mainline.  Read this round's retained postconditions and fail closed on both a
 # measured rejection and NORECORD.  The normalized sidecar is also the exact
 # evidence the learning loop retains later in this script.
@@ -679,6 +680,7 @@ fi
 # 0 only when BOTH are clean: the delivery pipeline and every
 # evidence/convergence boundary. The six steps' own 1 means "a case still needs
 # a human", which is information, not noise.
+ROUND_RC=0
 if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
    || [ "${TESTS}" -ne 0 ] || [ "${INPUT_CLEAR}" -ne 0 ] \
@@ -686,5 +688,8 @@ if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
    || [ "${AI_AUTH}" -ne 0 ] \
    || [ "${GAP_FATAL}" -ne 0 ] \
    || [ "${FORK_GH}" -ne 0 ] || [ "${LL}" -ne 0 ] \
-   || [ "${TERMINAL}" -ne 0 ]; then exit 1; fi
-exit 0
+   || [ "${TERMINAL}" -ne 0 ]; then ROUND_RC=1; fi
+# A successful release tick is not the wrapper's exit. Retain the exact value
+# returned here so an audit need not reconstruct it from earlier step logs.
+echo "[$(date -Is)] run_0530 exit ${ROUND_RC}" >> "${LOG}"
+exit "${ROUND_RC}"

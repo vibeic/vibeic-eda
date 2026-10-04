@@ -52,7 +52,7 @@ ROUND = HERE / "run_0530.sh"
 
 
 def _verdict_block() -> str:
-    """The final `if ...; then exit 1; fi` and the lines that feed it."""
+    """The final verdict predicate and the lines that feed it."""
     s = ROUND.read_text(encoding="utf-8")
     return s[s.index("# DID THE ROUND ACTUALLY CONVERGE?"):]
 
@@ -61,7 +61,7 @@ def test_the_verdict_consults_the_convergence_measurement():
     """THE REGRESSION. Seven exit codes were consulted and the gap was not."""
     block = _verdict_block()
     cond = block[block.rindex('if [ "${SIX}"'):]
-    cond = cond[:cond.index("then exit 1")]
+    cond = cond[:cond.index("; then")]
     assert re.search(r"GAP_FATAL|SYNC_LAG", cond), (
         "the round's final verdict does not consult the convergence "
         "measurement. `fork_gap_report` runs, its result is captured, and the "
