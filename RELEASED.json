@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.3.98",
-  "pins_fingerprint": "37b82ae9aee0",
+  "version": "0.3.99",
+  "pins_fingerprint": "783bb9cd98fb",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -28,7 +28,7 @@
     "iverilog": "93eb24fdee1ffed8f59ebc3a42a21b16f789c45b",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
     "klayout": "00a52a4b4abad87d05b3c086ccab91f4850946ed",
-    "librelane": "dacb849bd88e37bc9f6cf655c59e51776a05f28b",
+    "librelane": "719f0e22a4987f460af797384e612e8983ca58f7",
     "magic": "dae41d0ff2e138b5b833c8d0961b6e59058e761a",
     "netgen": "2a7fcc4fd579ac24b64c4d6fbc723b457f41420d",
     "ngspice": "60e13d3f7a2c59475c084df8f52076c9309e12d4",
@@ -44,7 +44,7 @@
     "yosys": "9543146e6d93f16dbab98f68b895553ca6dd18cf"
   },
   "recipes": {
-    "recipe:__compose__": "c41005",
+    "recipe:__compose__": "276a80",
     "recipe:ciel": "cc8aa4",
     "recipe:fastercap": "be0c46",
     "recipe:fault": "dfe3bc",
@@ -65,5 +65,5 @@
     "recipe:yices2": "9e884c",
     "recipe:yosys": "9950f5"
   },
-  "manifest_identity": "9792674a7e72159cb66dcfd5ae254f97acfb0978e49e622728cc2d0dbd994dfe"
+  "manifest_identity": "73bb6ee99a50f555b42ed107db30bad33cc21072efcff37272fabd8c1a88b1a8"
 }
