@@ -503,7 +503,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=dacb849bd88e37bc9f6cf655c59e51776a05f28b
+ARG LIBRELANE_REF=719f0e22a4987f460af797384e612e8983ca58f7
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2223,7 +2223,8 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              81fb28d866ac4a4861971fb1f3aa43c4d3bcbd3d 5f89863285eb2c06db8db62149424d93a46a40fb \
              9f2f6815f2e9da427f753f44f2fd484de49209af 7834b463bb235bb23ad9b8502732c7afe01d202d \
              46426c9d996aa057d4d36089e7bf1105ad7aa17c \
-             dacb849bd88e37bc9f6cf655c59e51776a05f28b; do \
+             dacb849bd88e37bc9f6cf655c59e51776a05f28b \
+             719f0e22a4987f460af797384e612e8983ca58f7; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
@@ -2342,7 +2343,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
     if grep -n 'getArea() \* micron_in_units' $LLN/scripts/odbpy/io_place.py; then \
         echo "FAIL: io_place.py still scales getArea() by dbu^2 (26Q1 um^2 assumption)" >&2; exit 1; \
     fi; \
-    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 30 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcuD run and gf180mcuA/B/C held, klayout__lvs_error__count NOT_MEASURED when skipped, checkers NOT_MEASURED on an absent metric, FILL_INSERTION_AREA planned per row, odbpy metrics on %OL_METRIC, LVS measured under KLayout.LVS, SYNTH_TRIBUF_LOGIC for internal tri-state buses, optional attested absolute hold count)"; \
+    echo "librelane: vibeic/librelane at $(git rev-parse HEAD): io.tcl x2 diffs, netgen.py, io_place.py, 32 fork-main diffs (FSM/ABC hooks, PDN/tapcell guards, GDS substance (on librelane Path views), FSM quoting, SDC units, full OpenROAD names, WriteLEF GDS route, IR drop over every net + LIB_VOLTAGE guard, seal ring verified per layer against DIE_AREA, power per corner aggregated to the worst, seal ring at an off-origin DIE_AREA, DRT_OR_SEED/DRT_OR_K + per-run drt marker counts kept out of route__drc_errors, XOR per-layout census counted by placements, KLayout.LVS run_runset with gf180mcuD run and gf180mcuA/B/C held, klayout__lvs_error__count NOT_MEASURED when skipped, checkers NOT_MEASURED on an absent metric, FILL_INSERTION_AREA planned per row, odbpy metrics on %OL_METRIC, LVS measured under KLayout.LVS, SYNTH_TRIBUF_LOGIC for internal tri-state buses, optional attested absolute hold count, ABC cell-only driver identity from validated cell/port config)"; \
     cd /; \
     find /foss/pdks/ciel /foss/pdks/ihp-sg13g2 /foss/pdks/ihp-sg13cmos5l /vibeic/pdk -name __pycache__ -type d -prune -exec rm -rf {} + ; \
     echo "ihp-sg13g2: PyCell runtime installed, SG13_dev registers; cap_cmomi/cap_cmomf .osdi built; every OSDI reference resolves"
