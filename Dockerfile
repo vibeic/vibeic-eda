@@ -35,8 +35,8 @@ ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:9543146-9950f5
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:189b74b-2ff4b7
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:2a382d0-9f263e
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:93eb24f-49b0c2
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:00a52a4-aa793e
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:de4d485-630031
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ada76bb-468c3b
@@ -222,7 +222,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=43b747f2ed5a453052a9196e5af467cbb3a4586f  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=2aeb23bcc3b5aa925abb991c4347ce73827b8b82  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
