@@ -144,6 +144,39 @@ def test_each_nonzero_late_gate_preserves_the_last_good_page(
     assert "build_page SKIPPED" in log
 
 
+def test_preflight_discovery_failure_blocks_tick_and_page(tmp_path):
+    """A failed producer must not authorize either release or publication.
+
+    The post-release discovery is allowed to succeed in this fixture so this
+    specifically exercises the *preflight* result rather than the existing
+    late discovery gate.
+    """
+    script, env, state = _shell_fleet(tmp_path, "verified")
+    _recording_page_builder(script.parent / "build_page.py")
+    _stub(script.parent / "discover_forks.py", r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+state = Path(os.environ["GK_STATE_DIR"])
+marker = state / "discover-count"
+count = int(marker.read_text()) if marker.exists() else 0
+marker.write_text(str(count + 1))
+raise SystemExit(1 if count == 0 else 0)
+''')
+
+    result = subprocess.run(
+        ["bash", str(script)], env=env, capture_output=True, text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    assert (state / "discover-count").read_text() == "2"
+    assert not (state / "run-tick.called").exists()
+    assert not (state / "build-page.called.json").exists()
+    log = (state / "daily_0530.log").read_text(encoding="utf-8")
+    assert "preflight discover_forks failed" in log
+    assert "build_page SKIPPED" in log
+
+
 def test_ai_skip_cannot_republish_a_stale_daily_release(tmp_path):
     prior_release = tmp_path / "state" / "daily-release.json"
     prior_release.parent.mkdir(parents=True)

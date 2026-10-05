@@ -261,6 +261,17 @@ elif [ "${CODE}" -ne 0 ]; then
     fi
     echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — ${CODE_KIND}; no release was authorised" >> "${LOG}"
     echo "[$(date -Is)] run_tick NOT CHECKED — ${CODE_KIND}" >> "${GK_STATE_DIR}/cron.log"
+elif [ "${DISC_PRE:-0}" -ne 0 ]; then
+    TICK=2
+    if [ "${DISC_PRE}" -eq 1 ]; then
+        TICK_STATE="not_checked_preflight_discovery_failed"
+        DISC_PRE_KIND="preflight discover_forks failed (rc=${DISC_PRE})"
+    else
+        TICK_STATE="not_checked_preflight_discovery_norecord"
+        DISC_PRE_KIND="preflight discover_forks produced NORECORD (rc=${DISC_PRE})"
+    fi
+    echo "[$(date -Is)] run_tick NOT CHECKED (TICK=2) — ${DISC_PRE_KIND}; no release was authorised" >> "${LOG}"
+    echo "[$(date -Is)] run_tick NOT CHECKED — ${DISC_PRE_KIND}" >> "${GK_STATE_DIR}/cron.log"
 elif [ "${AI_AUTH}" -ne 0 ]; then
     TICK=2
     if [ "${AI_AUTH}" -eq 1 ]; then
@@ -578,7 +589,8 @@ fi
 # timestamps and fleet denominator before its atomic rename.
 PAGE=0
 if [ "${TESTS}" -eq 0 ] && [ "${CODE}" -eq 0 ] \
-   && [ "${AI_AUTH}" -eq 0 ] && [ "${TICK}" -eq 0 ] \
+   && [ "${AI_AUTH}" -eq 0 ] && [ "${DISC_PRE:-0}" -eq 0 ] \
+   && [ "${TICK}" -eq 0 ] \
    && [ "${DISC}" -eq 0 ] && [ "${GAP}" -eq 0 ] \
    && [ "${FORK_GH}" -eq 0 ] && [ "${LL}" -eq 0 ] \
    && [ "${TERMINAL}" -eq 0 ] \

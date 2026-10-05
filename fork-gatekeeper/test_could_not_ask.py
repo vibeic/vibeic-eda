@@ -110,6 +110,48 @@ def test_one_source_answering_is_enough(monkeypatch):
     assert got is not None and got[0]["tag"] == "v1.0"
 
 
+def test_discover_one_records_an_unknown_release_source_without_crashing(monkeypatch):
+    """A failed release query is UNKNOWN, not a TypeError or a fake zero."""
+    def fake_gh(path):
+        if path == "repos/vibeic/Widget":
+            return {"default_branch": "main", "fork": False, "parent": None,
+                    "created_at": "2026-01-01T00:00:00Z"}
+        if path == "repos/them/Tool":
+            return {"default_branch": "master"}
+        if "/compare/" in path:
+            return {"_err": "HTTP 503"}
+        return {"_err": f"unexpected path {path}"}
+
+    monkeypatch.setattr(df, "gh", fake_gh)
+    monkeypatch.setattr(df, "_branch_for_pin", lambda *a: None)
+    monkeypatch.setattr(df, "_local_compare", lambda *a: None)
+    monkeypatch.setattr(df, "_clone_for", lambda *a: None)
+    monkeypatch.setattr(df, "_releases", lambda *a: None)
+
+    led = df.discover_one(
+        {"tool": "Widget", "upstream": "them/Tool", "role": "r",
+         "branch": "main"},
+        {"widget": {"ref": "a" * 40, "arg": "WIDGET_REF"}},
+        "0.0.0",
+    )
+
+    assert led["behind_releases"] is None
+    assert led["behind_releases_status"] == df.UNKNOWN
+    containment = led["release_containment"]
+    assert containment["candidates"] is None
+    assert containment["bucket_check"] == {
+        "checked": 0, "by_bucket": {}, "unverifiable": [], "violations": []}
+
+
+def test_gh_process_failure_is_an_error_record_not_an_exception(monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("no gh on PATH")
+
+    monkeypatch.setattr(df.subprocess, "run", boom)
+    result = df.gh("repos/them/Tool")
+    assert "could not be run" in result["_err"]
+
+
 # ── #48 pr_precheck: an unread compare is its own outcome ───────────────────
 _PR = {"state": "OPEN", "body": "Closes #7",
        "base": {"ref": "main"}, "head": {"ref": "topic"}}

@@ -65,8 +65,12 @@ CAP = 200
 
 
 def gh(path: str):
-    r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-                       capture_output=True, text=True, timeout=60)
+    try:
+        r = subprocess.run(
+            ["gh", "api", "-H", "Accept: application/vnd.github+json", path],
+            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"_err": f"gh could not be run: {exc}"}
     if r.returncode != 0:
         return {"_err": r.stderr.strip().splitlines()[-1][:160] if r.stderr else "error"}
     try:
@@ -2955,7 +2959,9 @@ def discover_one(fork: dict, pins: dict, image_version: str,
                                        "tag feed could be read")
         cl = {"new": [], "contained": [], "equivalent": [], "superseded": [],
               "folded": [], "undetermined": [], "behind": None,
-              "status": "UNKNOWN", "base": None, "api_calls": 0, "clone": None}
+              "status": UNKNOWN, "base": None, "api_calls": 0, "clone": None,
+              "bucket_check": {"checked": 0, "by_bucket": {},
+                               "unverifiable": [], "violations": []}}
     else:
         led["upstream_releases"] = rels[:15]
         led["upstream_latest_release"] = rels[0]["tag"] if rels else None
@@ -2980,7 +2986,8 @@ def discover_one(fork: dict, pins: dict, image_version: str,
     led["behind_releases"] = cl["behind"]
     led["behind_releases_status"] = cl["status"]
     led["release_containment"] = {"clone": cl["clone"], "api_calls": cl["api_calls"],
-                                  "candidates": len(rels), "fork_point_date": pin_date,
+                                  "candidates": (len(rels) if rels is not None else None),
+                                  "fork_point_date": pin_date,
                                   # WHAT WAS RE-PROVED, and how much of it. `checked`
                                   # is here so a clean result over zero rows reads as
                                   # zero rows rather than as a pass.
