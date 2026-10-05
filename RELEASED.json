@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.4.0",
-  "pins_fingerprint": "e4aadfda3f46",
+  "version": "0.4.1",
+  "pins_fingerprint": "42ab0eb00e02",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -11,7 +11,7 @@
     "Geometry": "de03ffebfd5013b96102bd60f71c8fe8b73870e2",
     "IHP-Open-PDK": "22d7eb44e3ae509d93c338bd634bbb29dc85351d",
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
-    "OpenROAD": "a7842f3d96fbaaaa4f6026829c8a7c450993fbad",
+    "OpenROAD": "700dd373de643edbe424583e56a49d250d448aee",
     "OpenROAD-flow-scripts": "2aeb23bcc3b5aa925abb991c4347ce73827b8b82",
     "Trilinos": "738e5460bc315e46f22533b51b9a44043d1f89da",
     "Xyce": "f091c8b81bdd922a8060a83ef32fa635b0f33923",
@@ -44,7 +44,7 @@
     "yosys": "9543146e6d93f16dbab98f68b895553ca6dd18cf"
   },
   "recipes": {
-    "recipe:__compose__": "de16ef",
+    "recipe:__compose__": "ee15bf",
     "recipe:ciel": "cc8aa4",
     "recipe:fastercap": "be0c46",
     "recipe:fault": "dfe3bc",
@@ -54,7 +54,7 @@
     "recipe:klayout": "33ef85",
     "recipe:lvs": "a19510",
     "recipe:ngspice": "1aaa99",
-    "recipe:openroad": "1c70af",
+    "recipe:openroad": "25d3dd",
     "recipe:sat-solvers": "755999",
     "recipe:slang": "7eb2c3",
     "recipe:sv-elab": "26919a",
@@ -65,5 +65,5 @@
     "recipe:yices2": "9e884c",
     "recipe:yosys": "9950f5"
   },
-  "manifest_identity": "fffbac1013618ced1df09e8681eb0be11e15d6cb85d8b5bdc06e7449b2efbade"
+  "manifest_identity": "86bf1484fa315d4a021f369ae56d45ab3fc521413e24f33bc56f84301c6a9949"
 }
