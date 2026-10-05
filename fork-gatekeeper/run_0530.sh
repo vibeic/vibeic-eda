@@ -144,6 +144,20 @@ python3 "${DIR}/check_round_code_is_current.py" >> "${LOG}" 2>&1
 CODE=$?
 echo "[$(date -Is)] check_round_code_is_current exit ${CODE}" >> "${LOG}"
 
+# Refresh the production ledger before the semantic suite consumes it.  The
+# suite includes live-ledger checks for fields emitted by discover_forks.py
+# (for example patch_equivalent_releases and the sync/release split).  Discovery
+# used to run only after the suite, so the first round after a producer change
+# tested yesterday's ledger and reported false red failures; the same discovery
+# then succeeded later in the round.  Keep the post-release discovery below for
+# the published image, but make this preflight the producer-before-consumer
+# boundary.  A failed refresh is retained as its own non-zero gate result; the
+# suite still runs its source/fixture checks, but stale live-ledger evidence can
+# never authorize publication.
+python3 "${DIR}/discover_forks.py" >> "${LOG}" 2>&1
+DISC_PRE=$?
+echo "[$(date -Is)] preflight discover_forks exit ${DISC_PRE}" >> "${LOG}"
+
 # ...and does that code still pass its own tests? NOTHING RAN THEM.
 #
 # The check above asks whether this checkout is CURRENT. It cannot ask whether
@@ -681,7 +695,8 @@ fi
 # evidence/convergence boundary. The six steps' own 1 means "a case still needs
 # a human", which is information, not noise.
 ROUND_RC=0
-if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC}" -ne 0 ] \
+if [ "${SIX}" -ne 0 ] || [ "${TICK}" -ne 0 ] || [ "${DISC_PRE:-0}" -ne 0 ] \
+   || [ "${DISC}" -ne 0 ] \
    || [ "${PAGE}" -ne 0 ] || [ "${FRESH}" -ne 0 ] || [ "${CODE}" -ne 0 ] \
    || [ "${TESTS}" -ne 0 ] || [ "${INPUT_CLEAR}" -ne 0 ] \
    || [ "${SILENCE}" -eq 2 ] \
