@@ -48,6 +48,8 @@ def test_a_successful_release_raises_nothing():
 @pytest.mark.parametrize("state", [
     "not_checked_pytest_red", "not_checked_ai_norecord",
     "not_checked_stale_round_code",
+    "not_checked_preflight_discovery_failed",
+    "not_checked_preflight_discovery_norecord",
 ])
 def test_a_round_that_never_reached_a_release_raises_nothing(state):
     """NOT CHECKED IS NOT A FAILURE. Whatever stopped the round earlier is its

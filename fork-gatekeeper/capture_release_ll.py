@@ -2596,6 +2596,10 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             category = "ai_postcondition_unverified"
         elif tick_state == "not_checked_ai_norecord":
             category = "ai_authorization_norecord"
+        elif tick_state == "not_checked_preflight_discovery_failed":
+            category = "preflight_discovery_failed"
+        elif tick_state == "not_checked_preflight_discovery_norecord":
+            category = "preflight_discovery_norecord"
         elif selftest and selftest["status"] == "red":
             category = "pytest_red"
         elif selftest and selftest["status"] == "norecord":
@@ -2605,7 +2609,11 @@ def make_record(release: Optional[dict], gap: Optional[dict], round_at: str,
             category = "release_tick_not_checked"
     control = None
     if tick_state != "ran":
-        if tick_state.startswith("not_checked_ai_"):
+        if tick_state.startswith("not_checked_preflight_discovery_"):
+            control = (
+                "do not invoke the release tick until current-round ledger "
+                "discovery completes with an authoritative result")
+        elif tick_state.startswith("not_checked_ai_"):
             control = (
                 "do not invoke the release tick until every AI conflict has "
                 "a current verified published-mainline postcondition")
@@ -2883,6 +2891,8 @@ def main(argv=None) -> int:
         "ran", "not_checked_pytest_red", "not_checked_pytest_norecord",
         "not_checked_stale_round_code", "not_checked_round_code_norecord",
         "not_checked_ai_unverified", "not_checked_ai_norecord",
+        "not_checked_preflight_discovery_failed",
+        "not_checked_preflight_discovery_norecord",
     ))
     a = ap.parse_args(argv)
     observed_now = datetime.now(timezone.utc)

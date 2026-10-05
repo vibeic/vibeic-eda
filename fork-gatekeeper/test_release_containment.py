@@ -2798,6 +2798,18 @@ def test_the_sweep_exit_status_tells_a_refutation_from_a_non_measurement(monkeyp
         "…and it must not be reported as a refutation (1): nothing contradicted "
         "itself, so the daily cron would go red on a transient")
 
+    source_unknown = dict(clean, behind_releases=None,
+                          behind_releases_status="unknown",
+                          undetermined_releases=[],
+                          release_source_error="neither release source answered")
+    assert _sweep(monkeypatch, source_unknown) == 2, (
+        "an UNKNOWN source failure with no release rows must still fail the "
+        "discovery sweep")
+
+    metadata_error = dict(clean, error="repo meta: HTTP 503")
+    assert _sweep(monkeypatch, metadata_error) == 2, (
+        "a metadata source failure must not be reported as a clean sweep")
+
     refuted = dict(clean, behind_releases=None, behind_releases_status="unknown",
                    undetermined_releases=[{"tag": "v1.0", "refuted": True,
                                            "error": "an independent check refutes it"}],

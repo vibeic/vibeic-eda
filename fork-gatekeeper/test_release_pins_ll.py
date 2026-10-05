@@ -252,6 +252,25 @@ def test_skipped_tick_does_not_read_a_prior_pin_sidecar(tmp_path, capsys):
     assert full["source_errors"] == []
 
 
+@pytest.mark.parametrize("tick_state", [
+    "not_checked_preflight_discovery_failed",
+    "not_checked_preflight_discovery_norecord",
+])
+def test_preflight_discovery_tick_states_are_retained(tmp_path, capsys,
+                                                      tick_state):
+    rc, full, _narrow = _capture(tmp_path, _pins("PASS"),
+                                 tick_state=tick_state)
+    capsys.readouterr()
+
+    assert rc == 0
+    assert full["release"]["status"] == "not_checked"
+    assert full["release"]["tick_state"] == tick_state
+    assert full["release_pins"]["reason"] == tick_state
+    assert full["lesson"]["trigger"] == tick_state.removeprefix(
+        "not_checked_")
+    assert "ledger discovery" in full["lesson"]["control"]
+
+
 def test_checker_writes_an_immutable_current_round_envelope(tmp_path, capsys):
     repo = _repo(tmp_path)
     sidecar = tmp_path / "pins.json"

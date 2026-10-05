@@ -3069,6 +3069,7 @@ def main():
     # not be able to reappear quietly.
     refuted: dict[str, list] = {}
     unmeasured: dict[str, list] = {}
+    unmeasured_reasons: dict[str, str] = {}
     for fork in FORKS:
         prev = LEDGER / f"{fork['tool']}.json"
         sync_log, last_sync = [], None
@@ -3095,10 +3096,13 @@ def main():
             refuted[fork["tool"]] = _bc["violations"]
         # …AND THE ROWS NOTHING COULD MEASURE, which are not the same thing and
         # must not be reported as the same thing. See the exit status below.
-        _un = [r for r in (led.get("undetermined_releases") or []) if not r.get("refuted")]
-        if _un:
-            unmeasured[fork["tool"]] = _un
         _st = release_gap_status(led)
+        _un = [r for r in (led.get("undetermined_releases") or []) if not r.get("refuted")]
+        _source_error = led.get("release_source_error") or led.get("error")
+        if _un or _st == UNKNOWN or _source_error:
+            unmeasured[fork["tool"]] = _un
+            unmeasured_reasons[fork["tool"]] = (
+                _source_error or "release gap is unknown")
         _n = ("unknown" if _st == UNKNOWN
               else ("not-probed" if _st == NOT_PROBED else release_gap(led)))
         tag = led.get("error") or (f"pin={led.get('pinned_ref')} patches={led.get('ahead','?')} "
@@ -3135,8 +3139,11 @@ def main():
         print("  NOT MEASURED — containment could not be decided for these releases, so "
               "the count and `base_release` are withheld for their tools:")
         for tool, rows in unmeasured.items():
-            for r in rows:
-                print(f"    {tool:16} {r['tag']:24} {(r.get('error') or '')[:110]}")
+            if rows:
+                for r in rows:
+                    print(f"    {tool:16} {r['tag']:24} {(r.get('error') or '')[:110]}")
+            else:
+                print(f"    {tool:16} {unmeasured_reasons[tool][:110]}")
     # THREE OUTCOMES, THREE EXIT STATUSES, and the third one is what this round
     # adds. See `EXIT_*`.
     if refuted:
