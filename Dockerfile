@@ -35,11 +35,11 @@ ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:9543146-9950f5
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:93eb24f-49b0c2
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:00a52a4-aa793e
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:de4d485-630031
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:e73dbc0-0fa947
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:8c4248e-33ef85
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:9c21043-8146fa
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ada76bb-468c3b
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:c15c6c0-7cf138
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:a29daca-7eb2c3
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
