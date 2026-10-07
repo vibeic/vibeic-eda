@@ -12,7 +12,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG CIEL_REPO=https://github.com/vibeic/ciel.git
-ARG CIEL_REF=1d2526e67a062ac408166a51183222e281a7b9a3  # pinned; branch main — identical to fossi-foundation/ciel@main today
+ARG CIEL_REF=d2af9cd676810db6ac7e15895a3285bf7d06034c  # pinned; branch main — identical to fossi-foundation/ciel@main today
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates python3 python3-pip python3-venv \
  && rm -rf /var/lib/apt/lists/*
