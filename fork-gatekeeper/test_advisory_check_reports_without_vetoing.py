@@ -22,7 +22,9 @@ an advisory check stops blocking, AND a normal failing check still blocks.
 """
 import json
 import pathlib
+import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,12 +68,44 @@ def test_advisory_does_not_hide_the_real_result(failing_tree):
     assert r["detail"] != "clean"
 
 
+def test_selftest_report_does_not_call_advisory_red_pass(tmp_path):
+    clone = tmp_path / "forks" / "Demo"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "chk.sh").write_text("#!/bin/sh\nexit 1\n")
+    registry = tmp_path / "FORKS.json"
+    registry.write_text(json.dumps({"forks": [{"tool": "Demo", "post_merge_check": [{
+        "name": "cross-repo", "path": "chk.sh", "cmd": ["sh", "chk.sh"],
+        "advisory": True}]}]}))
+    output = tmp_path / "selftests.json"
+    cp = subprocess.run([sys.executable, str(HERE / "check_fork_selftests.py"),
+        "--forks-dir", str(tmp_path / "forks"), "--forks-json", str(registry),
+        "--ledger", str(tmp_path / "ledger"), "--json", str(output)],
+        capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr  # still advisory
+    record = json.loads(output.read_text())
+    assert record["results"][0]["state"] == "ADVISORY-FAIL", record
+    assert record["results"][0]["rc"] == 1
+    assert record["advisory_failed"] == 1 and record["failed"] == 0
+    assert "0 pass" in cp.stdout and "1 ADVISORY-FAIL" in cp.stdout
+
+
 def test_absent_script_still_blocks_even_when_advisory(tmp_path):
     """MISSING is decided before the command runs, and it stays a block: a
     declaration naming a path no revision carries is a typo, not a waiver."""
     r = _row(tmp_path, advisory=True)
     assert r["ok"] is False, "a missing script became a pass via advisory"
     assert "MISSING" in r["detail"]
+
+
+@pytest.mark.parametrize("outcome,rc", [("stalled", 199), ("launch_error", 127),
+                                      ("protocol_incomplete", 0)])
+def test_advisory_noncompletion_cannot_authorize_a_merge(failing_tree, monkeypatch,
+                                                        outcome, rc):
+    monkeypatch.setattr(M.watchdog, "run_supervised", lambda *a, **k: SimpleNamespace(
+        outcome=outcome, rc=rc, out="partial output", err="", elapsed_s=1.0))
+    result = _row(failing_tree, advisory=True)
+    assert result["ok"] is False, result
+    assert result["outcome"] == outcome
 
 
 def test_advisory_cannot_turn_a_stall_into_a_completed_record(tmp_path,

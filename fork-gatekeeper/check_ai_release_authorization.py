@@ -420,6 +420,25 @@ def assess(round_record: dict, round_at: str, *, registered_forks: list[str],
         if not reasons:
             reasons.append("AI conflict delivery was not fully verified")
 
+    # Failed discovery and failed provider transport can coexist. Preserve the
+    # actionable provider cause even when the stricter result is NORECORD;
+    # diagnostics never alter authorization or the independent landing proof.
+    failure = ai.get("transport_failure")
+    if (isinstance(failure, dict)
+            and isinstance(failure.get("kind"), str)
+            and isinstance(failure.get("message"), str)):
+        failure = {"kind": failure["kind"][:80], "message": failure["message"][:1000]}
+    else:
+        failure = None
+    if status != "authorized":
+        if failure:
+            reasons.append(f"gatekeeper AI unavailable ({failure['kind']}): "
+                           f"{failure['message']}")
+        elif isinstance(ai.get("error"), str) and ai["error"]:
+            reasons.append(ai["error"][:1000])
+        if errors and false_keys:
+            reasons.append(f"{len(false_keys)} AI conflict case(s) remain pending")
+
     record = {
         "program": PROGRAM,
         "schema_version": SCHEMA_VERSION,
@@ -444,9 +463,11 @@ def assess(round_record: dict, round_at: str, *, registered_forks: list[str],
         "verified_count": actual_verified,
         "unverified_count": len(false_keys),
         "transport": {
+            "backend": ai.get("backend"),
             "invoked": ai.get("invoked"),
             "outcome": ai.get("outcome"),
             "rc": ai.get("rc"),
+            "failure": failure,
         },
         "case_results": normalized,
         "watch_only_reset": watch_reset,
@@ -531,7 +552,7 @@ def main(argv=None) -> int:
               + "; ".join(record["reasons"]), file=sys.stderr)
     else:
         print("[NOT CHECKED] AI release authorization: "
-              + "; ".join(record["source_errors"]),
+              + "; ".join(record["reasons"]),
               file=sys.stderr)
     return rc
 

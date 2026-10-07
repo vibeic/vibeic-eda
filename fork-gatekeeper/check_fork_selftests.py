@@ -33,22 +33,24 @@ So the two call sites answer two different questions:
 
 Every day, on the checked-out clone, against the same declared commands.
 
-THREE STATES
+FOUR STATES
 ------------
     PASS             the fork's own check ran and was clean
     FAIL             it ran and was red
+    ADVISORY-FAIL    it ran and was red, but declares no publication veto
     COULD-NOT-CHECK  clone absent, checker absent from the tree, malformed
                      declaration, could not execute, timed out
 
-`daily_merge` deliberately collapses the last two into one "do not publish"
+`daily_merge` collapses blocking FAIL and COULD-NOT-CHECK into "do not publish"
 verdict, which is correct where the only decision is push-or-not. Here the
 verdict is a REPORT, and "the fork deleted the checker" and "the checker found
 something" need different actions, so they are named differently. Both still
-fail the tick -- absence is never a pass.
+fail the tick -- absence is never a pass. A completed ADVISORY-FAIL remains
+visible but does not veto publication because it audits a different repository.
 
 EXIT
 ----
-    0   every declared check ran and passed
+    0   every declared check completed; only declared advisory findings allowed
     1   at least one ran and FAILED
     2   nothing failed, but at least one COULD NOT BE CHECKED
 
@@ -74,6 +76,7 @@ DEFAULT_FORKS_DIR = Path(
 PASS = "PASS"
 FAIL = "FAIL"
 UNKNOWN = "COULD-NOT-CHECK"
+ADVISORY_FAIL = "ADVISORY-FAIL"
 
 
 def _daily_merge():
@@ -196,12 +199,15 @@ def check_fork(tool: str, checks: list[dict], forks_dir: Path,
             # defect. Advisory removes a completed finding's veto; it cannot
             # manufacture a record when the command never completed.
             state = UNKNOWN
-        elif row["ok"]:
+        elif row["rc"] == 0:
             state = PASS
+        elif row.get("advisory") and row["ok"]:
+            state = ADVISORY_FAIL
         else:
             state = FAIL
         rows.append({
             "tool": tool, "name": row["name"], "state": state, "rc": row["rc"],
+            "advisory": bool(row.get("advisory")),
             "head": head,
             "outcome": row.get("outcome"),
             "elapsed_seconds": row.get("elapsed_seconds"),
@@ -250,6 +256,7 @@ def main(argv=None) -> int:
         results += check_fork(tool, checks, forks_dir, dm, log_dir)
 
     failed = [r for r in results if r["state"] == FAIL]
+    advisory_failed = [r for r in results if r["state"] == ADVISORY_FAIL]
     unknown = [r for r in results if r["state"] == UNKNOWN]
 
     for r in results:
@@ -266,8 +273,9 @@ def main(argv=None) -> int:
             print(f"      -> {r['reason']}")
 
     print(f"\nfork self-checks: {len(results)} declared, "
-          f"{len(results) - len(failed) - len(unknown)} pass, "
-          f"{len(failed)} FAIL, {len(unknown)} COULD-NOT-CHECK")
+          f"{sum(r['state'] == PASS for r in results)} pass, "
+          f"{len(failed)} FAIL, {len(unknown)} COULD-NOT-CHECK, "
+          f"{len(advisory_failed)} ADVISORY-FAIL (non-blocking)")
 
     # THE DENOMINATOR. Without it the line above reads as a statement about the
     # fleet, when it is a statement about the three checks that happen to exist.
@@ -312,6 +320,7 @@ def main(argv=None) -> int:
                 "forks_dir": str(forks_dir),
                 "declared": len(results),
                 "failed": len(failed),
+                "advisory_failed": len(advisory_failed),
                 "could_not_check": len(unknown),
                 "results": results,
             }, indent=2), encoding="utf-8")

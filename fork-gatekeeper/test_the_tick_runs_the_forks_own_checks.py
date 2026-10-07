@@ -299,6 +299,34 @@ def test_incomplete_merge_evidence_is_rerun_not_reused(tmp_path):
     assert "Changed" in argv and "Level" in argv, argv
 
 
+def test_advisory_red_is_not_reused_as_green(tmp_path):
+    tick_dir, marker = _reuse_fixture(tmp_path, [
+        {"repo": "Changed", "state": "MERGED", "checks": [{
+            "name": "changed-check", "ok": True, "rc": 1,
+            "advisory": True, "outcome": "natural"}]},
+        {"repo": "Level", "state": "ALREADY_CURRENT", "checks": []},
+    ])
+    cp = _run_fragment(_slice_block(TICK.read_text()), tmp_path,
+        f'DIR="{tick_dir}"\nexport SELFTEST_ARGV_MARKER="{marker}"')
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    argv = json.loads(marker.read_text())
+    assert "Changed" in argv and "Level" in argv, argv
+
+
+def test_tick_surfaces_advisory_red_without_blocking(tmp_path):
+    forks = tmp_path / "forks"
+    _make_fork(forks, parity_rc=1)
+    tick_dir = _tick_dir(tmp_path)
+    registry = json.loads((tick_dir / "FORKS.json").read_text())
+    registry["forks"][0]["post_merge_check"][0]["advisory"] = True
+    (tick_dir / "FORKS.json").write_text(json.dumps(registry))
+    cp = _run_fragment(_slice_block(TICK.read_text()), tmp_path,
+                       _block_env(tick_dir, forks))
+    assert "SELFTEST_RC=0" in cp.stdout, cp.stdout + cp.stderr
+    assert "ADVISORY-FAIL" in cp.stdout, cp.stdout
+    assert "DemoFork:parity" in cp.stdout
+
+
 @pytest.mark.parametrize("rc_in,want", [(0, 0), (1, 8), (2, 8)])
 def test_the_verdict_reaches_the_tick_exit_code(rc_in, want):
     """Running it is not enough -- the result has to be load-bearing. This

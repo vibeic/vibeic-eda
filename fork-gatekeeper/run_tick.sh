@@ -486,6 +486,7 @@ for tool, declarations in declared.items():
         and len(declared_names) == len(declarations)
         and observed_names == declared_names
         and all(c.get("ok") is True and c.get("outcome") == "natural"
+                and type(c.get("rc")) is int and c["rc"] == 0
                 for c in observed)
     )
     if reusable:
@@ -578,7 +579,7 @@ path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 PY
         fi
     fi
-    grep -E "^  (PASS|FAIL|COULD-NOT-CHECK) |^      -> |^fork self-checks:" "${SELFTEST_OUT}" \
+    grep -E "^  (PASS|FAIL|ADVISORY-FAIL|COULD-NOT-CHECK) |^      -> |^fork self-checks:" "${SELFTEST_OUT}" \
         | sed 's/^/[selftest] /' | tee -a "${LOG}" || true
     [ "${selftest_rc}" = "1" ] && log "[selftest] a fork's own check is RED; daily_release is blocked (vibe-ic#813)"
     [ "${selftest_rc}" = "2" ] && log "[selftest] a registered fork check formed NO RECORD; daily_release is blocked (vibe-ic#813)"

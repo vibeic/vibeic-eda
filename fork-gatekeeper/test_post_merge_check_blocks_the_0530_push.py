@@ -27,6 +27,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -105,7 +106,7 @@ def _fleet(tmp_path: pathlib.Path, checker: str):
     return forks, fork, origin
 
 
-def _run(tmp_path, monkeypatch, checker):
+def _run(tmp_path, monkeypatch, checker, *, advisory=False):
     forks, fork, origin = _fleet(tmp_path, checker)
     before = _git(origin, "rev-parse", "refs/heads/master").stdout.strip()
 
@@ -115,7 +116,7 @@ def _run(tmp_path, monkeypatch, checker):
     # the test states its own premise instead of depending on today's registry.
     monkeypatch.setattr(D, "post_merge_checks", lambda repo: [
         {"name": "dup-logger-ids", "path": "etc/check.py",
-         "cmd": ["python3", "etc/check.py"]}])
+         "cmd": ["python3", "etc/check.py"], "advisory": advisory}])
     monkeypatch.setattr(D, "step2b_ai_decisions", lambda *a, **k: {})
     monkeypatch.setattr(D, "step4_prune", lambda *a, **k: None)
     monkeypatch.setenv("GK_STATE_DIR", str(tmp_path / "state"))
@@ -139,6 +140,22 @@ def test_a_clean_check_lets_the_0530_push_through(tmp_path, monkeypatch):
     rc, before, after, fork, origin = _run(tmp_path, monkeypatch, PASSING)
     assert after != before, "a clean check must not stop the merge"
     assert rc == 0, f"rc={rc} on a clean round"
+
+
+@pytest.mark.parametrize("outcome,check_rc", [("stalled", 199), ("launch_error", 127)])
+def test_an_unfinished_advisory_check_stops_the_real_0530_push(
+        tmp_path, monkeypatch, outcome, check_rc):
+    import daily_merge as merger
+    supervise = merger.watchdog.run_supervised
+    def run(cmd, **kwargs):
+        if cmd == ["python3", "etc/check.py"]:
+            return SimpleNamespace(outcome=outcome, rc=check_rc, out="", err="",
+                                   elapsed_s=0.1)
+        return supervise(cmd, **kwargs)
+    monkeypatch.setattr(merger.watchdog, "run_supervised", run)
+    rc, before, after, _, _ = _run(tmp_path, monkeypatch, PASSING, advisory=True)
+    assert after == before, "an advisory check with no verdict allowed a real push"
+    assert rc == 1
 
 
 def test_the_refusal_says_the_local_branch_still_holds_the_merge(tmp_path, monkeypatch):

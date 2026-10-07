@@ -492,13 +492,15 @@ def run_post_merge_checks(wt: Path, checks: List[dict]) -> List[dict]:
         # the veto over publishing this fork. It must never be used to quiet a
         # check that DOES read the merged tree — that is the whole gate.
         advisory = bool(chk.get("advisory"))
-        rows.append({"name": name, "ok": rc == 0 or advisory, "rc": rc,
+        completed = outcome == "natural"
+        rows.append({"name": name, "ok": completed and (rc == 0 or advisory), "rc": rc,
                      "advisory": advisory,
                      "outcome": outcome,
                      "elapsed_seconds": round(elapsed, 3),
                      "progress_basis": progress_basis,
                      "supervision": supervision,
-                     "detail": ("clean" if rc == 0 else
+                     "detail": (f"COULD-NOT-CHECK ({outcome}) " + _salient(out, err)
+                                if not completed else "clean" if rc == 0 else
                                 ("ADVISORY (does not read the merged tree; "
                                  "reported, not blocking) " if advisory else "")
                                 + (_salient(out, err) if rc != 0 else ""))})
