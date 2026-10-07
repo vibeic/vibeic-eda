@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import build_page as PAGE                                      # noqa: E402
 import daily_release as R                                      # noqa: E402
+import gk_state                                                # noqa: E402
 
 TOOLS = ("OpenROAD", "librelane", "yosys")
 
@@ -89,6 +90,84 @@ def test_a_ledger_of_the_release_renders_that_release(tmp_path, monkeypatch):
 class _Proc:
     def __init__(self, rc: int, out: str = ""):
         self.returncode, self.stdout, self.stderr = rc, out, ""
+
+
+def _public_output(tmp_path, monkeypatch, spelling):
+    """Use real resolved-path classification without touching the actual site."""
+    public = tmp_path / "site" / "eda-forks.html"
+    public.parent.mkdir()
+    public.write_text("LAST COMPLETE PAGE", encoding="utf-8")
+    monkeypatch.setattr(gk_state, "PRODUCTION_PAGE", str(public))
+    # BASE's early publisher used this default; keep the red control local.
+    monkeypatch.setattr(R, "_PRODUCTION_PAGE", str(public), raising=False)
+    monkeypatch.setenv("GK_PRODUCTION_WRITER", "1")
+    if spelling == "directory-symlink":
+        alias = tmp_path / "site-alias"
+        alias.symlink_to(public.parent, target_is_directory=True)
+        out = alias / public.name
+    elif spelling == "file-symlink":
+        out = tmp_path / "page-alias.html"
+        out.symlink_to(public)
+    elif spelling == "normalized":
+        out = public.parent / ".." / "site" / public.name
+    else:
+        out = public
+    return public, out
+
+
+@pytest.mark.parametrize("spelling", [
+    "default", "empty-default", "canonical", "directory-symlink",
+    "file-symlink", "normalized",
+])
+def test_release_page_waits_for_complete_round_before_any_child_or_write(
+        tmp_path, monkeypatch, spelling):
+    _ledger(tmp_path, monkeypatch, "0.3.81")
+    public, out = _public_output(tmp_path, monkeypatch, spelling)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(Path(cmd[1]).name)
+        if cmd[1].endswith("build_page.py"):
+            # Run the real consumer: BASE actually replaces this last-good
+            # page before LL/current-round authorization has even happened.
+            return _Proc(PAGE.main(cmd[2:]) or 0)
+        return _Proc(0, "ledger ready")
+
+    kwargs = {} if spelling == "default" else {"out": str(out)}
+    if spelling == "empty-default":
+        kwargs["out"] = ""
+    ok, note = R.publish_release_page("0.3.81", run=run, **kwargs)
+
+    assert public.read_text(encoding="utf-8") == "LAST COMPLETE PAGE"
+    assert calls == [], "release ran an uncertified discovery/page child"
+    if spelling == "file-symlink":
+        assert out.is_symlink()
+    assert ok is None, "deferral must not claim page success or failure"
+    assert "deferred" in note.lower() and "current-round" in note
+
+
+@pytest.mark.parametrize("spelling", [
+    "canonical", "directory-symlink", "file-symlink", "normalized",
+])
+def test_production_output_without_certificate_is_refused_before_inventory(
+        tmp_path, monkeypatch, spelling):
+    _ledger(tmp_path, monkeypatch, "0.3.81")
+    public, out = _public_output(tmp_path, monkeypatch, spelling)
+    calls = []
+    monkeypatch.setattr(PAGE.inventory, "collect",
+                        lambda image: calls.append(image) or {"a": []})
+    refusal = None
+    try:
+        PAGE.main(["--out", str(out), "--expect-image-version", "0.3.81"])
+    except PAGE.PublicationEvidenceError as exc:
+        refusal = exc
+
+    assert public.read_text(encoding="utf-8") == "LAST COMPLETE PAGE"
+    assert calls == [], "production refusal occurred after inventory work"
+    assert isinstance(refusal, PAGE.PublicationEvidenceError)
+    assert "current-round evidence" in str(refusal)
+    if spelling == "file-symlink":
+        assert out.is_symlink()
 
 
 def test_the_release_refreshes_the_ledger_before_it_renders_the_page():

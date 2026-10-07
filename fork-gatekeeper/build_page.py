@@ -2392,24 +2392,15 @@ def build(out: Path, *, publication: PublicationEvidence | None = None,
     # ordinary way to render one by hand and is unaffected.
     gk_state.require_writable(out, "the published monitor page",
                               "Render one somewhere else with --out /tmp/page.html")
-    # OWNER DIRECTIVE 2026-08-19: publishing must never wait on a full 05:30
-    # round. This refused any production write without a complete same-round
-    # evidence bundle, so a fleet that had ALREADY converged -- upstream gap 0,
-    # every commit of ours in the image, PRs clear -- kept showing the old
-    # numbers until an hour-long tick happened to finish. The page is the only
-    # place the owner reads convergence; making it the slowest artefact to
-    # update inverted its purpose.
-    #
-    # The strict path is UNCHANGED and is still what run_0530.sh uses: pass the
-    # evidence and every cross-check below runs exactly as before. What is gone
-    # is the refusal to render at all without it. A page built from the live
-    # ledger states the ledger's own `image_version` and measured_at, so it is
-    # self-describing about how fresh it is.
+    # OWNER DIRECTIVE 2026-10-07 supersedes the early-publication policy:
+    # preserve the last complete public snapshot until the whole round is
+    # certified. BLOCKING at the actual writer, including resolved aliases;
+    # declaring GK_PRODUCTION_WRITER alone does not certify the data. Local
+    # previews remain available without a publication bundle.
     if publication is None and gk_state.is_production_path(out):
-        print("build_page: rendering from live ledger state without a "
-              "current-round evidence bundle (owner directive 2026-08-19); "
-              "run_0530.sh still publishes with full evidence",
-              file=sys.stderr)
+        raise PublicationEvidenceError(
+            "public page requires complete current-round evidence; "
+            "keep the last complete page until run_0530.sh certifies the round")
     strict = publication is not None
     ledgers = _load_ledgers(strict=strict)
     if expect_image_version is not None:

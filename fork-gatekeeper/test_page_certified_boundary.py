@@ -83,6 +83,39 @@ def _bind_forks_path(paths: dict, forks_path: Path) -> None:
     paths["ll_record"] = ll
 
 
+@pytest.mark.parametrize("ledger_state", ["complete", "missing-row", "unknown"])
+def test_production_page_requires_complete_certified_data(
+        tmp_path, monkeypatch, ledger_state):
+    checkout = _clean_checkout(tmp_path, monkeypatch)
+    paths = _strict_paths(tmp_path, checkout)
+    evidence = CERT_FIX._load_strict(paths)
+    state = CERT_FIX._page_state(tmp_path, monkeypatch)
+    out = tmp_path / "site" / "eda-forks.html"
+    out.parent.mkdir()
+    out.write_text("LAST COMPLETE PAGE", encoding="utf-8")
+    monkeypatch.setattr(PAGE.gk_state, "PRODUCTION_PAGE", str(out))
+    monkeypatch.setenv("GK_PRODUCTION_WRITER", "1")
+    ledger = state / "ledger" / f"{GAP_FIX.REGISTERED_FORKS[0]}.json"
+    if ledger_state == "missing-row":
+        ledger.unlink()
+    elif ledger_state == "unknown":
+        row = json.loads(ledger.read_text(encoding="utf-8"))
+        row["sync_lag"] = None
+        ledger.write_text(json.dumps(row), encoding="utf-8")
+
+    if ledger_state != "complete":
+        with pytest.raises(PAGE.PublicationEvidenceError):
+            PAGE.build(out, publication=evidence)
+        assert out.read_text(encoding="utf-8") == "LAST COMPLETE PAGE"
+    else:
+        PAGE.build(out, publication=evidence)
+        html = out.read_text(encoding="utf-8")
+        assert '"round_converged": true' in html
+        assert f'"image_version": "{CERT_FIX.EDA_VERSION}"' in html
+        assert evidence.ll["release_pins"]["revision"] == _git(
+            "-C", str(checkout), "rev-parse", "HEAD").stdout.strip()
+
+
 @pytest.mark.parametrize(
     "dirty_kind,relative,prefix",
     [
