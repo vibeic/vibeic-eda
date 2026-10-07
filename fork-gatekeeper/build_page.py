@@ -806,19 +806,15 @@ PIN_NOTES = {
 STYLE = """<style>
 .fork-wrap{max-width:1140px;margin:0 auto;padding:0 1.25rem}
 .fork-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin:2rem 0}
-/* HIDDEN ON THE PUBLIC PAGE. These three are the pipeline's own running
-   commentary -- what is stale, what lagged a release, and the tracking-gap
+/* HIDDEN ON THE PUBLIC PAGE. These are the pipeline's own running
+   commentary -- what lagged a release, and the tracking-gap
    list -- written for whoever is on the gatekeeper rota, not for a reader
    of vibeic.ai. The KPI cards between them stay: they say where the forks
    ARE, which is the page's subject. Hidden rather than deleted because the
    blocks are still built and still asserted by the page tests; the state is
    measured exactly as before, it is simply not the public page's subject. */
-.fork-stale{display:none;background:#3a1d1d;border:1px solid #7a3030;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
-.fork-stale b{color:#fff}
 .fork-release{display:none;background:#3a1d1d;border:1px solid #a74747;border-radius:14px;padding:.9rem 1.15rem;margin:0 0 1rem;color:#ffd9d9;font-size:.95rem;line-height:1.5}
 .fork-release b{color:#fff}.fork-release code{color:#fff;background:#241414;padding:.1rem .3rem;border-radius:4px}
-.fork-kpi.is-stale{border-color:#7a3030;background:#221316}
-.fork-kpi.is-stale .n{color:#ff9d9d}
 .fork-kpi{background:#12161c;border:1px solid #232a33;border-radius:14px;padding:1.1rem 1.25rem}
 .fork-kpi.is-wide{grid-column:span 2}
 /* A KPI value is one token ("2026-09-28 05:41", "v0.3.84", "1126/1126"): it
@@ -842,13 +838,6 @@ STYLE = """<style>
 .fork-gap h4{margin:0 0 .5rem;font-size:.98rem}
 .fork-gap-list{margin:.3rem 0 .7rem;padding-left:1.2rem;font-size:.9rem;line-height:1.7}
 .fork-gap-note{margin:0;font-size:.82rem;color:var(--text-muted,#6b7684);line-height:1.6}
-/* WHEN a count was measured, beside the count (vibeic-eda#91). Fresh is muted — it is
-   the ordinary case and should not compete with the number. Stale and unknown-age are
-   coloured, because those are the two states in which the number beside them does not
-   describe today, and the whole defect was that they looked exactly like the fresh one. */
-.fork-age{font-size:.8rem;color:var(--text-muted,#6b7684);margin-left:.35rem;white-space:nowrap}
-.fork-age-stale{color:#ff9d9d}
-.fork-age-unknown-age{color:#e2b04a}
 .fork-rel{border-left-color:#63a8ea;background:rgba(99,168,234,.07)}
 .fork-rel .fork-gap-list>li{margin-bottom:.55rem}
 .fork-rel .enh-pill{margin-left:.3rem}
@@ -935,7 +924,6 @@ __NAV__
             <p data-en="Each fork keeps the upstream source pristine and carries our enhancements as a small, rebasable patch series (the Debian / kernel model). The daily Gatekeeper detects new upstream commits, rebases our patches on top, runs the full open-source EDA regression (build + the real benchmark ICs), and only auto-merges when that review is green — otherwise it defers the commit and records why. Every carried patch tracks whether it has been sent upstream, so our permanent delta stays minimal." data-zh="每個 fork 保持上游原始碼零修改，把我們的強化以一小疊可重貼的補丁序列揹著（Debian／kernel 模型）。每日 Gatekeeper 偵測上游新 commit、把我們的補丁重貼上去、跑完整開源 EDA 回歸（build + 真實 benchmark IC），只有審查全綠才自動 merge — 否則 defer 該 commit 並記錄原因。每個揹著的補丁都追蹤是否已送回上游，讓永久 delta 保持最小。">Each fork keeps the upstream source pristine and carries our enhancements as a small, rebasable patch series (the Debian / kernel model). The daily Gatekeeper detects new upstream commits, rebases our patches on top, runs the full open-source EDA regression (build + the real benchmark ICs), and only auto-merges when that review is green — otherwise it defers the commit and records why. Every carried patch tracks whether it has been sent upstream, so our permanent delta stays minimal.</p>
         </div>
 
-        <div class="fork-stale" id="forkStale" hidden></div>
         <div class="fork-release" id="forkRelease" hidden></div>
         <div class="fork-metrics" id="forkMetrics"></div>
 <div class="fork-gap" id="forkGap"></div>
@@ -1290,104 +1278,10 @@ function enhBlock(tool){
   // is describing, so losing the stamp loses the 0 too.
   commitsBehind = (convergedRound && roundStamp) ? 0 : liveBehind;
 
-  // ============ HOW OLD IS EACH COUNT? (vibeic-eda#91) ==========================
-  //
-  // MEASURED 2026-08-04: this page rendered 39 commits behind for a state whose
-  // GitHub-fork half was, at that moment, 4 — iverilog 12/live 0, verilator 4/live 1,
-  // OpenROAD 2/live 3. Nothing about the page or the data said which. Every ledger
-  // row carried its count with no record of WHEN the count was taken, so a day-old
-  // 12 and a just-measured 0 were the same kind of thing, and the only signal that
-  // separated them was a FILE MTIME — a property of the filesystem, not of the
-  // record, which does not survive the row being read, embedded here, and published.
-  //
-  // WHY THIS IS NOT THE #58 BANNER AGAIN. That banner asks "has the whole page gone
-  // stale?" off ONE row's `generated_at` (`LEDGERS[0]`), and it is right to. It
-  // cannot answer this question. A round that runs and dies partway through rewrites
-  // some rows and leaves the rest at yesterday's values, so the page is FRESH by that
-  // banner's test while carrying counts of mixed age — and the mixed ones are summed
-  // into the headline above with no mark on them. Per-row age is the only thing that
-  // separates those.
-  //
-  // WHY NOT `generated_at` PER ROW, which exists and would need no new field.
-  // `generated_at` is stamped at the top of `discover_one` BEFORE anything is
-  // measured, and it survives every early return: a row whose repo meta 404'd, which
-  // measured nothing at all and has no `behind_commits`, still carries a
-  // `generated_at` from seconds ago. Using it here would answer "when was this
-  // measured?" with "when was this row written?" — an adjacent question wearing the
-  // asked one's clothes, which is the exact failure mode #91 was filed about. The
-  // count's own timestamp is written at the point the compare answers
-  // (`discover_forks.record_behind`) and is null when there was no answer.
-  //
-  // AGE THRESHOLD — 30 h, and it is the SAME literal the page-level banner below
-  // uses; `STALE_HOURS` is declared here and read there, deliberately one constant.
-  // The round is cron'd at 05:30 daily, so 24 h is one full cycle and 30 h adds six
-  // hours of slack for a round that starts on time and runs long; a count that has
-  // outlived that has outlived a round that should have replaced it. Two thresholds
-  // off one clock is how two programs came to say opposite things about the same
-  // four pins (#29). Same honest limitation as the banner's: this cannot fire AT the
-  // moment a round is missed, only on the morning after.
-  //
-  // THREE STATES, AND THE THIRD IS THE COMMON ONE. Every ledger written before this
-  // field existed has no stamp, and that is most of them on the day this ships. Such
-  // a row is UNKNOWN-AGE — it is NOT rendered as current, and it is not rendered as
-  // stale either, because we do not know that it is. A future stamp (clock skew) and
-  // an unparseable one land in the same bucket, for the reason the banner already
-  // gives: the one direction that must never read as healthy.
-  const STALE_HOURS = 30;
-  const measuredAgeH = d => {
-    const t = Date.parse((d && d.behind_measured_at) || "");
-    return isFinite(t) ? (Date.now() - t) / 3600000 : NaN;
-  };
-  // "fresh" | "stale" | "unknown-age" | "not-measured".
-  // `not-measured` is a row with NO COUNT — there is nothing for an age to qualify,
-  // and it is already reported as `+N?` beside the headline.
-  const measuredState = d => {
-    if (!d || typeof d.behind_commits !== "number") return "not-measured";
-    const a = measuredAgeH(d);
-    if (!isFinite(a) || a < -1) return "unknown-age";
-    return a > STALE_HOURS ? "stale" : "fresh";
-  };
-  const ageWords = h => !isFinite(h) ? "" : (Math.abs(h) < 48
-      ? `${Math.round(h)} h` : `${Math.floor(h/24)} d`);
-  // The clause that travels BESIDE a count wherever one is printed. A fresh row says
-  // when; a stale row says STALE and when; an unknown-age row says so and stops.
-  const ageClause = d => {
-    const s = measuredState(d);
-    if (s === "not-measured") return "";
-    if (s === "unknown-age") return ` · <b>UNKNOWN-AGE</b> (this row records no measurement time)`;
-    const w = ageWords(measuredAgeH(d));
-    return s === "stale" ? ` · <b>STALE</b>, measured ${w} ago` : ` · measured ${w} ago`;
-  };
-  const ageClauseZh = d => {
-    const s = measuredState(d);
-    if (s === "not-measured") return "";
-    if (s === "unknown-age") return ` · <b>年齡不明</b>（這一列沒有記錄量測時間）`;
-    const w = ageWords(measuredAgeH(d));
-    return s === "stale" ? ` · <b>已過期</b>，量測於 ${w} 前` : ` · ${w} 前量測`;
-  };
-  // The clause as the site's bilingual span, so `setLang` swaps it like every other
-  // string on the page instead of leaving an English age beside a Chinese sentence.
-  // Empty for a row with no count — there is nothing whose age to state.
-  const ageSpan = d => {
-    const en = ageClause(d);
-    if (!en) return "";
-    return `<span class="fork-age fork-age-${measuredState(d)}" data-en="${en.replace(/"/g,'&quot;')}" data-zh="${ageClauseZh(d).replace(/"/g,'&quot;')}">${en}</span>`;
-  };
-  // The headline sums these rows, so the headline has to carry how many of them are
-  // not known to be current. A total whose parts are of unknown age is of unknown
-  // age, and printing it bare is the sentence this whole block exists to stop.
-  const agedRows    = behindKnown.filter(d=>measuredState(d) === "stale");
-  const noStampRows = behindKnown.filter(d=>measuredState(d) === "unknown-age");
-  const notFreshTxt =
-      (agedRows.length ? `; ${agedRows.length} of the summed row(s) are STALE (measured over ${STALE_HOURS} h ago): ${esc(agedRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``)
-    + (noStampRows.length ? `; ${noStampRows.length} of the summed row(s) record NO measurement time, so their age is UNKNOWN and they are not known to be current: ${esc(noStampRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``);
-  const notFreshZh =
-      (agedRows.length ? `；被加總的列中有 ${agedRows.length} 列已過期（量測時間超過 ${STALE_HOURS} 小時）：${esc(agedRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``)
-    + (noStampRows.length ? `；被加總的列中有 ${noStampRows.length} 列沒有記錄量測時間，年齡不明，不能當作是現況：${esc(noStampRows.map(d=>d.tool||d.repo||"?").join(", "))}` : ``);
-  // The mark ON the number itself. A caveat only in the tooltip is a caveat nobody
-  // reads; the headline is what people act on, and two proposals already acted on
-  // this one (#74, #78).
-  const behindMark = agedRows.length ? " ⚠" : (noStampRows.length ? " ?" : "");
+  // Public figures are a completed snapshot, not a browser-clock monitor.
+  // Publication validates freshness and exact evidence before replacement;
+  // the absolute last-check stamp below identifies the retained snapshot.
+  // Keep missing counts as unknown, but never age a certified value in the UI.
   // THE SECOND DAILY QUESTION: are our own commits actually IN the shipped image?
   // `totalPatches` answers "how many patches do we HOLD", which is not the same
   // thing. A fork can carry 57 of our commits and ship none of them, because the
@@ -1459,9 +1353,8 @@ function enhBlock(tool){
   // DATE **AND** TIME. This sliced the stamp to 10 chars, so a page rebuilt
   // three times in an hour showed the same "2026-08-19" every time and a
   // reader could not tell a fresh page from one eight hours old (owner,
-  // 2026-08-19: "why no time?"). The day is still first, so the stale-page
-  // banner and the converged-at comparison below keep working on the prefix.
-  const lastCheckDay = generatedAt.slice(0,10) || "—";
+  // 2026-08-19: "why no time?"). Keep that absolute timestamp even when a later
+  // round has not finished: the published page describes this snapshot only.
   // WHEN THE ROUND FINISHED CHECKING -- that is what "last daily check" means.
   // `generated_at` is when the ledger file was written while assembling the
   // page, an implementation detail that ran minutes before the gap was
@@ -1486,39 +1379,6 @@ function enhBlock(tool){
       ? new Date(checkStamp).toLocaleString("sv-SE",
           {timeZone:"Asia/Taipei", hour12:false}).replace("T"," ").slice(0,16)
       : "—";
-  // STALENESS IS COMPUTED IN THE VIEWER'S BROWSER, not at build time, and that is
-  // the whole point (vibeic-eda#58).
-  //
-  // The daily tick published NOTHING for two days. Both of its steps exited 1 into
-  // a log nobody reads, and the only visible symptom was this page quietly
-  // describing an older world — noticed by a person, not by anything we built.
-  //
-  // A build-time banner cannot catch that: this page is rebuilt BY the tick, so a
-  // check that runs while building it is a check inside the process that stopped
-  // running. It would never render. Computing the age when the page is VIEWED works
-  // even when nothing has rebuilt it for a week, which is exactly the case that
-  // needs to be loud.
-  //
-  // THRESHOLD 30 h — one daily round plus six hours of slack for a long one.
-  //
-  // Stated honestly, because the trade is real: a timestamp CANNOT distinguish "the
-  // round ran and upstream was quiet" from "the round did not run" until enough time
-  // has passed that no successful round could have left data this old. So this fires
-  // on the morning AFTER a missed round, not at the moment one is missed, and there
-  // is no threshold that does better from this signal alone. Measured against the
-  // incident that prompted it (ledger frozen 2026-08-01T22:51): 30 h fires on 08-03,
-  // 36 h fires the same day but later, and neither would have fired on 08-02.
-  // Detecting the miss AS it happens needs the round to report its own liveness,
-  // which is a separate mechanism and belongs to whatever runs the round.
-  //
-  // A clock-skewed FUTURE timestamp is reported as "could not tell" rather than as
-  // freshness — the one direction that must never read as healthy.
-  const genMs = Date.parse(generatedAt);
-  const ageH  = isFinite(genMs) ? (Date.now() - genMs) / 3600000 : NaN;
-  const stale = isFinite(ageH) && ageH > STALE_HOURS;
-  const ahead = isFinite(ageH) && ageH < -1;
-  const ageTxt = !isFinite(ageH) ? "" : (ageH < 48
-      ? `${Math.round(ageH)} h` : `${Math.floor(ageH/24)} d`);
   const enhVals = Object.values(ENH||{});
   const enhRows = enhVals.reduce((a,e)=>a+((e.rows&&e.rows.length)||0),0);
   const enhDone = enhVals.reduce((a,e)=>a+(((e.counts&&e.counts.done)||0)),0);
@@ -1534,7 +1394,7 @@ function enhBlock(tool){
     // the round finished CHECKING, i.e. when the gap was measured and closed,
     // so that is the single value shown. The ledger's own write time is an
     // implementation detail of how the page was assembled.
-    [lastCheck + (stale ? ` (${ageTxt} old)` : ``),
+    [lastCheck,
      {en:"Last check time", zh:"最後檢查時間", wide:true}],
     // REMOVED, owner instruction 2026-08-26: the GitHub delivery card. GitHub
     // convergence remains part of the certified publication evidence, but a
@@ -1549,16 +1409,12 @@ function enhBlock(tool){
     // was wrong (#81): a reader who takes it as "every commit any fork is behind"
     // will act on it, and two proposals already did. The assertion clause appears
     // only when there is one, and it names the block further down that carries them.
-    // `behindMark` is on the NUMBER, not only in the label: ⚠ when a summed row is
-    // stale, ? when one records no measurement time at all. Both say the same thing
-    // in one glyph — this total is not known to describe today (vibeic-eda#91).
     // TWO CARDS, TWO NUMBERS. The labels used to carry the full split, every
     // exception and every caveat, and nobody read them -- an explanation that
     // long is not an explanation, it is a place for the number to hide.
     //
-    // What survives on the number itself: `⚠`/`?` (this total is not known to
-    // describe today, vibeic-eda#91) and `+N?` (N forks could not be measured,
-    // which is not zero). Both are one glyph and both change what you would do.
+    // What survives on the number itself: `+N?` (N forks could not be measured,
+    // which is not zero). Missing data is independent of a viewer's clock.
     // The sync/release split stays in the parenthetical only while it is
     // non-zero, because that is the only time it tells you which action to take.
     // THE VALUE IS SHARED BY BOTH LANGUAGES -- only the LABEL carries data-en /
@@ -1570,7 +1426,7 @@ function enhBlock(tool){
                          : "Forks · tools in the image",
       zh:NTOOLS === null ? "fork 數 · image 工具數未量測"
                          : "fork 數 · image 工具數"}],
-    [commitsBehind + behindMark + (behindUnknown?` +${behindUnknown}?`:``)
+    [commitsBehind + (behindUnknown?` +${behindUnknown}?`:``)
        // The split shows ONLY when one of the two halves is non-zero -- gated on
        // the SPLIT, not on `commitsBehind`. `sync + release == behind` is NOT an
        // identity (upstream commits between the pin and our tip are counted on
@@ -1599,8 +1455,8 @@ function enhBlock(tool){
      // so the word became the wrong half of the sentence. Dropped rather than
      // replaced with a clause: owner instruction 2026-08-05 keeps these cards
      // at the number and little else.
-     {en:"Commits behind upstream" + notFreshTxt,
-      zh:"落後上游的 commit 數" + notFreshZh}],
+     {en:"Commits behind upstream",
+      zh:"落後上游的 commit 數"}],
     // Q2. `totalPatches` (how many patches we HOLD) was a second card here and
     // read 345 beside this one's 345 — the same number twice, which invites the
     // reader to think one of them means something else. Held-but-not-shipped is
@@ -1667,27 +1523,12 @@ function enhBlock(tool){
     });
   }
   document.getElementById("forkMetrics").innerHTML = kpis.map(([n,l])=>
-    `<div class="fork-kpi${l.wide?" is-wide":""}${l.wide&&stale?" is-stale":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
+    `<div class="fork-kpi${l.wide?" is-wide":""}"><div class="n">${esc(n)}</div><div class="l" data-en="${l.en}" data-zh="${l.zh}">${l.en}</div></div>`).join("");
   fitKpiNumbers();
   if (typeof window.addEventListener === "function" && !window.__fitKpiBound) {
     window.__fitKpiBound = true;
     window.addEventListener("resize", fitKpiNumbers);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitKpiNumbers);
-  }
-  const staleEl = document.getElementById("forkStale");
-  if (staleEl && (stale || ahead || (generatedAt && !isFinite(genMs)))) {
-    const en = ahead
-      ? `This page's data is stamped in the FUTURE (${esc(lastCheck)}). Its age cannot be judged, so treat every number below as unverified.`
-      : !isFinite(genMs)
-      ? `This page's data carries no readable timestamp, so its age cannot be judged. Treat every number below as unverified.`
-      : `<b>This page is ${esc(ageTxt)} out of date.</b> The daily round last gathered data on ${esc(lastCheck)}. Every number below describes that day, not today — a round that did not publish leaves these figures unchanged, which looks identical to upstream having been quiet.`;
-    const zh = ahead
-      ? `本頁資料的時間戳在未來（${esc(lastCheck)}），無法判斷新舊，以下數字請一律視為未經驗證。`
-      : !isFinite(genMs)
-      ? `本頁資料沒有可讀的時間戳，無法判斷新舊，以下數字請一律視為未經驗證。`
-      : `<b>本頁已過期 ${esc(ageTxt)}。</b>最後一次每日彙集是 ${esc(lastCheck)}。以下每個數字描述的是那一天而不是今天 —— 一輪沒有發布會讓這些數字原封不動，看起來和「上游沒有變動」一模一樣。`;
-    staleEl.innerHTML = `<span data-en="${en.replace(/"/g,'&quot;')}" data-zh="${zh.replace(/"/g,'&quot;')}">${en}</span>`;
-    staleEl.hidden = false;
   }
   // Operational release diagnostics stay in the retained LL, not on the
   // public page.  Strict publication above already refuses a non-terminal
@@ -1727,10 +1568,9 @@ function enhBlock(tool){
     if (!gapTools.length) {
       gapEl.innerHTML = assertBlock + unrecBlock;
     } else {
-      // The count carries its "as of" in the same sentence as the count. A row with
-      // no recorded measurement time says UNKNOWN-AGE here; it is never printed bare,
-      // which would read as "measured just now" (vibeic-eda#91).
-      const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span>${ageSpan(d)}</li>`).join("");
+      // These counts belong to the snapshot's absolute last-check time, not
+      // to the browser clock. Measurement provenance remains in LEDGERS.
+      const rows = gapTools.map(d=>`<li><code>${esc(d.tool||d.repo||"?")}</code> — <span data-en="behind upstream by" data-zh="落後上游">behind upstream by</span> <b>${d.behind_commits}</b> <span data-en="commits, carrying none of ours" data-zh="個 commit，且沒有任何我們的補丁">commits, carrying none of ours</span></li>`).join("");
       gapEl.innerHTML = `<h4 data-en="The real tracking gap (${gapTools.length})" data-zh="真正的追蹤缺口（${gapTools.length}）">The real tracking gap (${gapTools.length})</h4><ul class="fork-gap-list">${rows}</ul><p class="fork-gap-note" data-en="Measured on the PINNED ref each Dockerfile builds (ARG &lt;TOOL&gt;_REF), not the fork default branch. A fork whose default branch drifts while its pinned work branch is current is fine by design — the default branch takes part in no build." data-zh="量的是每個 Dockerfile 實際建置的那個 PINNED ref（ARG &lt;TOOL&gt;_REF），不是 fork 的 default branch。一個 default branch 在漂、但 pinned 工作分支是最新的 fork，依設計就是正常的 —— default branch 不參與任何建置。">Measured on the PINNED ref each Dockerfile builds, not the fork default branch.</p>` + assertBlock + unrecBlock;
     }
     gapEl.hidden = !gapEl.innerHTML.trim();
@@ -2552,24 +2392,15 @@ def build(out: Path, *, publication: PublicationEvidence | None = None,
     # ordinary way to render one by hand and is unaffected.
     gk_state.require_writable(out, "the published monitor page",
                               "Render one somewhere else with --out /tmp/page.html")
-    # OWNER DIRECTIVE 2026-08-19: publishing must never wait on a full 05:30
-    # round. This refused any production write without a complete same-round
-    # evidence bundle, so a fleet that had ALREADY converged -- upstream gap 0,
-    # every commit of ours in the image, PRs clear -- kept showing the old
-    # numbers until an hour-long tick happened to finish. The page is the only
-    # place the owner reads convergence; making it the slowest artefact to
-    # update inverted its purpose.
-    #
-    # The strict path is UNCHANGED and is still what run_0530.sh uses: pass the
-    # evidence and every cross-check below runs exactly as before. What is gone
-    # is the refusal to render at all without it. A page built from the live
-    # ledger states the ledger's own `image_version` and measured_at, so it is
-    # self-describing about how fresh it is.
+    # OWNER DIRECTIVE 2026-10-07 supersedes the early-publication policy:
+    # preserve the last complete public snapshot until the whole round is
+    # certified. BLOCKING at the actual writer, including resolved aliases;
+    # declaring GK_PRODUCTION_WRITER alone does not certify the data. Local
+    # previews remain available without a publication bundle.
     if publication is None and gk_state.is_production_path(out):
-        print("build_page: rendering from live ledger state without a "
-              "current-round evidence bundle (owner directive 2026-08-19); "
-              "run_0530.sh still publishes with full evidence",
-              file=sys.stderr)
+        raise PublicationEvidenceError(
+            "public page requires complete current-round evidence; "
+            "keep the last complete page until run_0530.sh certifies the round")
     strict = publication is not None
     ledgers = _load_ledgers(strict=strict)
     if expect_image_version is not None:

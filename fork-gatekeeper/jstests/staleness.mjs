@@ -1,41 +1,23 @@
-import fs from "node:fs";
-const src = fs.readFileSync(process.argv[2], "utf8");
-// Extract the SHIPPED expressions rather than retyping them: a test that
-// re-derives the rule proves the re-derivation.
-// The threshold moved out to a shared constant when the per-row rule needed the same
-// number (vibeic-eda#91). EXTRACTED, not retyped: if the two ever stop being one
-// literal, this line stops finding it and the test says so instead of quietly
-// testing a 30 that only exists here.
-const thresholdDecl = src.match(/const STALE_HOURS = \d+;/);
-if (!thresholdDecl) { console.log("FAIL  `const STALE_HOURS = <n>;` not found in the page source"); process.exit(1); }
-const seg = src.slice(src.indexOf("const genMs = Date.parse(generatedAt);"));
-const body = thresholdDecl[0] + "\n" + seg.slice(0, seg.indexOf("const ageTxt")) ;
-const ageTxtLine = seg.slice(seg.indexOf("const ageTxt"));
-const ageTxtSrc = ageTxtLine.slice(0, ageTxtLine.indexOf(";") + 1);
-const NOW = Date.parse("2026-08-03T05:30:00+08:00");
-function run(generatedAt) {
-  const Date_ = { parse: Date.parse, now: () => NOW };
-  const f = new Function("generatedAt", "Date", `${body}${ageTxtSrc}
-    return {stale, ahead, ageH, ageTxt, readable: isFinite(genMs)};`);
-  return f(generatedAt, Date_);
+// Execute the emitted page, not a reimplementation of its display contract.
+// The last completed snapshot must not become a warning page when the browser
+// clock crosses 30 hours, a week, or is skewed relative to the server.
+import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
+import {fileURLToPath} from "node:url";
+
+const runner = fileURLToPath(new URL("./render_page.mjs", import.meta.url));
+const page = process.argv[2];
+const render = now => {
+  const cp = spawnSync(process.execPath, [runner, page, now], {encoding: "utf8"});
+  assert.equal(cp.status, 0, cp.stdout + cp.stderr);
+  return cp.stdout;
+};
+const snapshot = render("2026-08-05T09:00:00+08:00");
+assert.match(snapshot, /2026-08-05 08:30/);
+assert.match(snapshot, /<b>7<\/b>/);
+for (const now of ["2026-08-06T16:00:00+08:00", "2026-08-12T09:00:00+08:00",
+                   "2026-08-01T09:00:00+08:00"]) {
+  assert.equal(render(now), snapshot, `snapshot changed at browser time ${now}`);
 }
-const cases = [
-  ["2026-08-03T05:00:00+08:00", false, "half an hour old — a round that just ran"],
-  ["2026-08-02T05:30:00+08:00", false, "24 h — yesterday's round, today's not due yet"],
-  ["2026-08-01T22:51:45+08:00", true,  "the incident's frozen ledger, next morning"],
-  ["2026-07-28T05:30:00+08:00", true,  "six days"],
-];
-let bad = 0;
-for (const [ts, want, why] of cases) {
-  const r = run(ts);
-  const ok = r.stale === want;
-  if (!ok) bad++;
-  console.log(`  ${ok ? "ok  " : "FAIL"}  ${ts}  stale=${r.stale} age=${r.ageH.toFixed(1)}h (${r.ageTxt})  — ${why}`);
-}
-const fut = run("2026-08-09T00:00:00+08:00");
-console.log(`  ${fut.ahead && !fut.stale ? "ok  " : "FAIL"}  future stamp -> ahead=${fut.ahead} stale=${fut.stale}  — must not read as fresh`);
-if (!(fut.ahead && !fut.stale)) bad++;
-const junk = run("not a date");
-console.log(`  ${!junk.readable && !junk.stale ? "ok  " : "FAIL"}  unparseable -> readable=${junk.readable}  — must not read as fresh`);
-if (junk.readable) bad++;
-process.exit(bad ? 1 : 0);
+assert.doesNotMatch(snapshot, /\d+ [hd] old|are STALE|UNKNOWN-AGE|is-stale|fork-age/);
+console.log("PASS: emitted snapshot stays fixed across 31 h, 7 d and clock skew");

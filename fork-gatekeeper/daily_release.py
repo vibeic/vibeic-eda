@@ -3969,30 +3969,15 @@ def _main_under_release_lock(argv=None) -> int:
             # `fork_github_convergence` non-zero and skipped the NEXT round's
             # certified publish — measured across five rounds, 2026-08-20.
 
-            # OWNER DIRECTIVE 2026-08-19, stated three times in one session:
-            # "EVERYTIME YOU CONVERGE TO 0, YOU SHOULD MODIFY THE WEBSITE AS
-            # WELL -- DON'T WAIT ANYTHING. THE WEBPAGE RECORD SHOULD USE THE
-            # MOMENT THAT WE CONVERGE TO 0."
-            #
-            # The page used to be published only by run_0530.sh, at the END of
-            # an hour-long tick and only when eleven separate gates were all
-            # zero. So a release that closed the gap at 05:00 left the public
-            # page advertising the OLD version and the OLD gap until the next
-            # tick happened to finish -- and if any unrelated gate was red, it
-            # never updated at all. Measured this session: the registry was at
-            # 0.3.11 and every commit of ours shipped, while the page still
-            # said 0.3.6 with 10 commits stranded past the pin.
-            #
-            # Publishing is cheap (~2s) and reads its own state, so it happens
-            # HERE, the moment the version is published, timestamped by this
-            # release rather than by a later tick. run_0530.sh still publishes
-            # with the full certified evidence bundle; this is the floor, not a
-            # replacement. Advisory by construction: a page failure must never
-            # fail a release that already succeeded and is already in the
-            # registry.
+            # Image publication is not completion of the whole round. Keep
+            # the public snapshot unchanged until run_0530.sh certifies its
+            # post-release evidence (owner directive 2026-10-07).
             if pushed:
                 _pok, _pnote = publish_release_page(new)
-                print(f"  page: {'published' if _pok else 'FAILED'} — {_pnote}")
+                _pstate = ("deferred" if _pok is None else
+                           "published" if _pok else "FAILED")
+                print(f"  page: {_pstate} — {_pnote}")
+                result.setdefault("page_publish", {})["status"] = _pstate
                 result.setdefault("page_publish", {})["ok"] = bool(_pok)
                 result["page_publish"]["note"] = _pnote
 
@@ -4185,26 +4170,20 @@ def _last_line(proc) -> str:
 
 
 def publish_release_page(version: str, *, run=None,
-                         out: Optional[str] = None) -> Tuple[bool, str]:
-    """Write the public page for the release that just published `version`.
+                         out: Optional[str] = None) -> Tuple[Optional[bool], str]:
+    """Defer the public page; optionally render an explicit isolated preview.
 
-    THE PAGE NAMES THE VERSION IT WAS RENDERED FROM, AND THAT WAS THE WRONG ONE.
-    `build_page` renders the fork LEDGER, and the ledger's `image_version` (with
-    every pin and count beside it) is written by `discover_forks`, which this
-    step never ran. Measured 2026-09-27: 0.3.81 was released at 10:48, this step
-    rewrote https://vibeic.ai/eda-forks.html at 10:49 from the ledger discovery
-    had written at 07:37, after 0.3.80, and the page said "0.3.80" on all 42
-    rows while RELEASED.json and VERSION said 0.3.81. The round that followed
-    refreshed the ledger but skipped its own publish (gap open), so the stale
-    page stayed up.
-
-    So the ledger is refreshed FIRST, from the record this release has already
-    committed and pushed, and `build_page` is told which version this release
-    published: it refuses (and the last page stays) unless every ledger row
-    names it. A page that cannot say the version it certifies is not written,
-    rather than written with the previous one. Advisory like before -- a page
-    failure never fails a release that is already in the registry.
+    A published image does not yet have the outer round's LL/current evidence.
+    Production output is therefore deferred BEFORE discovery or rendering,
+    regardless of the caller's environment. Only run_0530's certified tail
+    publishes it. None means deferred, not a page PASS or a release failure.
+    Preview results remain advisory to an image already in the registry.
     """
+    import gk_state  # noqa: PLC0415
+
+    if not out or gk_state.is_production_path(out):
+        return None, ("deferred until run_0530.sh validates complete "
+                      "current-round evidence")
     # Resolved at CALL time, never bound as a default argument. A default
     # `run=subprocess.run` captured the real function at import, so every
     # test that stubs `daily_release.subprocess.run` (the release tests do,
@@ -4222,7 +4201,7 @@ def publish_release_page(version: str, *, run=None,
             notes.append(f"ledger refresh rc={disc.returncode}: "
                          f"{_last_line(disc)}")
         pg = run([sys.executable, str(here.with_name("build_page.py")),
-                  "--out", out or _PRODUCTION_PAGE,
+                  "--out", out,
                   "--expect-image-version", version],
                  env=env, capture_output=True, text=True, timeout=600)
         ok = pg.returncode == 0
@@ -4231,20 +4210,6 @@ def publish_release_page(version: str, *, run=None,
         ok = False
         notes.append(f"{e.__class__.__name__}: {e}")
     return ok, " · ".join(notes)
-
-
-# The published page path, resolved from gk_state without importing it at module
-# scope (this module deliberately has no gk_state dependency). Falls back to the
-# known production path so a release can still publish if the import moves.
-def _resolve_production_page() -> str:
-    try:
-        import gk_state as _gks  # noqa: PLC0415
-        return _gks.PRODUCTION_PAGE
-    except Exception:            # noqa: BLE001
-        return "/home/reyerchu/vibeic.ai/eda-forks.html"
-
-
-_PRODUCTION_PAGE = _resolve_production_page()
 
 
 def main(argv=None) -> int:

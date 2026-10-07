@@ -645,9 +645,18 @@ def test_new_release_refuses_dirty_source_before_any_writer_under_foreign_git_en
 
 
 def test_published_terminal_proves_smoke_remote_names_record_and_anchor(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, capsys):
     root = _root(tmp_path)
     _stub_release_inputs(monkeypatch, root, {})
+    child_calls = []
+
+    def source_reads_and_children(cmd, **kw):
+        if any(str(arg).endswith(("discover_forks.py", "build_page.py"))
+               for arg in cmd):
+            child_calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(R.subprocess, "run", source_reads_and_children)
     _calls, shell = _release_sh()
     monkeypatch.setattr(R, "_sh", shell)
     version_asks = {"count": 0}
@@ -691,6 +700,10 @@ def test_published_terminal_proves_smoke_remote_names_record_and_anchor(
     assert result["release_record_publication"]["identity"] == "b" * 40
     assert json.loads((root / "RELEASED.json").read_text(
         encoding="utf-8"))["manifest_identity"] == "d" * 64
+    assert child_calls == [], "published image ran an uncertified page child"
+    assert result["page_publish"]["status"] == "deferred"
+    assert result["page_publish"]["ok"] is False
+    assert "page: deferred" in capsys.readouterr().out
 
 
 

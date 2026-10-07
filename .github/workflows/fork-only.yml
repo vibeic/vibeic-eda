@@ -177,7 +177,7 @@ jobs:
       - name: The README-count guard must reject each way of going stale
         run: |
           python3 - <<'EOF'
-          import pathlib, subprocess, sys
+          import pathlib, re, subprocess, sys
 
           README = pathlib.Path("README.md").read_text()
           TMP = pathlib.Path("/tmp/doc.md")
@@ -201,21 +201,34 @@ jobs:
               assert README.count(old) == 1, f"probe target is not unique: {old!r}"
               return README.replace(old, new)
 
+          # Bind mutations to the unique real artefact row, not a historical
+          # count or command spelling. Other rows may carry the same count.
+          artefacts = list(re.finditer(
+              r"^\| per-tool build artefacts[^|\n]*\| \*\*(\d+)\*\* \| `([^\n]+)` \|$",
+              README, re.M))
+          assert len(artefacts) == 1, "expected one per-tool artefact count row"
+          artefact = artefacts[0]
+          row, count, command = artefact.group(0, 1, 2)
+
+          def mutate_artefact(old, new):
+              assert row.count(old) == 1, f"artefact field is not unique: {old!r}"
+              return mutate(row, row.replace(old, new))
+
           # 1. A count that no longer matches what the repository says.
-          probe("wrong number", 1, "the repository says", mutate("| **8** |", "| **9** |"))
+          probe("wrong number", 1, "the repository says",
+                mutate_artefact(f"**{count}**", f"**{int(count) + 1}**"))
 
           # 2. A count whose command was deleted. The claim survives, the binding
           #    does not — and deleting the command is the cheapest way to "fix" a
           #    red build, so it must fail exactly as loudly as a wrong number.
           probe("command deleted, claim kept", 1, "no longer parses",
-                mutate("`ls tools/*/Dockerfile \\| wc -l`", "(obvious)"))
+                mutate_artefact(f"`{command}`", "(obvious)"))
 
-          # 3. A command that cannot fail. Swapping the command for `echo 8`
+          # 3. A command that cannot fail. Echoing the declared count
           #    keeps every row green forever and measures nothing — the original
           #    defect, reintroduced through the mechanism built to prevent it.
           probe("constant instead of a measurement", 1, "names nothing in this repository",
-                mutate("| per-tool build artefacts (`tools/<name>/`) | **8** | `ls tools/*/Dockerfile \\| wc -l` |",
-                       "| per-tool build artefacts | **8** | `echo 8` |"))
+                mutate_artefact(f"`{command}`", f"`echo {count}`"))
 
           # 4. A document with no fences compared nothing, which is not a pass.
           probe("nothing to compare", 2, "nothing was compared", "# no counts here\n")
