@@ -1,19 +1,9 @@
-"""vibeic-eda#58 — two days of total publishing failure produced no signal.
+"""The public page retains its completed snapshot until a new round publishes.
 
-The daily tick exited 1 on both steps, into a log nobody reads. The ledger simply
-stopped advancing, which from the OUTPUT is indistinguishable from "upstream had
-no changes" — and the only visible symptom was this page quietly describing an
-older world, noticed by a person.
-
-WHY THE CHECK RUNS IN THE VIEWER'S BROWSER. The page is rebuilt BY the tick, so a
-staleness check evaluated while building it is a check inside the process that
-stopped running: it would never render on the mornings that matter. Computing the
-age when the page is VIEWED works even when nothing has rebuilt it for a week.
-
-WHY THESE TESTS SHELL OUT TO NODE. The rule is JavaScript in the emitted page. A
-Python re-implementation would test the re-implementation; `jstests/staleness.mjs`
-EXTRACTS the shipped expressions out of `build_page.py` and evaluates those, with
-`Date.now` pinned so the cases are deterministic.
+Owner directive, 2026-10-07: no browser-clock age suffix, stale banner, or long
+stale-tool lists. Keep the absolute snapshot time and unknown measurement state.
+These tests execute the real emitted JavaScript at clocks beyond 30 hours;
+publication authority and freshness remain in the backend boundary tests.
 """
 from __future__ import annotations
 
@@ -21,42 +11,47 @@ import pathlib
 import shutil
 import subprocess
 
+import pytest
+
+from test_page_ages_each_count import _build, _render, _row, _stamp, NOW
+
 _HERE = pathlib.Path(__file__).resolve().parent
 
 
-def _node():
-    return shutil.which("node")
+@pytest.mark.parametrize("hours", [31, 48, 168])
+def test_public_snapshot_does_not_age_in_the_viewers_browser(tmp_path, hours):
+    from datetime import datetime, timedelta
+    page = _build(tmp_path, [_row("alpha", 7, _stamp(2))])
+    first = _render(page, NOW)
+    later = _render(page, (datetime.fromisoformat(NOW) + timedelta(hours=hours)).isoformat())
+    assert later == first, "the completed snapshot mutated with the viewer's clock"
+    assert "2026-08-05 08:30" in later["forkMetrics"]
+    assert "<b>7</b>" in later["forkGap"]
+    shown = "\n".join(later.values())
+    assert " h old" not in shown and " d old" not in shown
+    assert "are STALE" not in shown and "UNKNOWN-AGE" not in shown
+    assert "fork-age" not in shown and "is-stale" not in shown
 
 
-def test_the_shipped_staleness_rule_behaves(capsys):
-    """Six cases, including the two that must NEVER read as fresh: a
-    clock-skewed future stamp and an unparseable one."""
-    node = _node()
+def test_public_snapshot_preserves_unmeasured_counts(tmp_path):
+    page = _build(tmp_path, [_row("alpha", 7, _stamp(2)), _row("unmeasured", None, None)])
+    rendered = _render(page, "2026-08-12T09:00:00+08:00")
+    assert "+1?" in rendered["forkMetrics"], rendered["forkMetrics"]
+    assert "<b>7</b>" in rendered["forkGap"]
+
+
+def test_full_emitted_snapshot_is_clock_independent(tmp_path):
+    node = shutil.which("node")
     if not node:
-        return
-    r = subprocess.run([node, str(_HERE / "jstests" / "staleness.mjs"),
-                        str(_HERE / "build_page.py")],
-                       capture_output=True, text=True, timeout=120)
-    print(r.stdout)
-    assert r.returncode == 0, r.stdout + r.stderr
+        pytest.skip("node unavailable; the subject is the emitted JavaScript")
+    page = _build(tmp_path, [_row("alpha", 7, _stamp(2))])
+    result = subprocess.run([node, str(_HERE / "jstests" / "staleness.mjs"), str(page)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_the_page_carries_the_banner_element():
-    """The rule can be right and render nowhere. `forkStale` is the element the
-    rule unhides, and it must exist in the emitted HTML."""
-    src = (_HERE / "build_page.py").read_text(encoding="utf-8")
-    assert 'id="forkStale"' in src
-    assert 'staleEl.hidden = false' in src
-
-
-def test_the_threshold_is_stated_with_its_limitation():
-    """LOAD-BEARING as documentation. A timestamp cannot distinguish "ran and
-    found nothing" from "did not run" until enough time has passed that no
-    successful round could have left data this old — so this fires the morning
-    AFTER a missed round, and the comment must keep saying so. A future reader
-    tightening the threshold to "catch it sooner" would only add false alarms."""
-    src = (_HERE / "build_page.py").read_text(encoding="utf-8")
-    seg = src[src.index("THRESHOLD 30 h"):]
-    seg = seg[:seg.index("const stale")]
-    assert "morning AFTER a missed round" in seg
-    assert "2026-08-01T22:51" in seg, "the incident it was measured against"
+def test_the_page_has_no_clock_driven_stale_ui():
+    source = (_HERE / "build_page.py").read_text(encoding="utf-8")
+    assert 'id="forkStale"' not in source
+    assert "Date.now()" not in source
+    assert "fork-age-stale" not in source and "fork-kpi.is-stale" not in source

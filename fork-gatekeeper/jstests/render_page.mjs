@@ -2,10 +2,8 @@
 //
 //     node jstests/render_page.mjs <page.html> [<pinned ISO now>]
 //
-// WHY THIS EXISTS AND WHY IT IS NOT `staleness.mjs`. Those harnesses extract an
-// expression and evaluate it, which proves the RULE. It does not prove the rule
-// reaches the page: a correct rule assigned to nothing, or rendered into an element
-// the HTML does not contain, passes an expression test and shows a viewer nothing.
+// Rendering the whole script proves its result reaches the actual page; a correct
+// expression assigned to nothing or rendered into a missing element proves less.
 // This runs the shipped <script> against the shipped markup, so what it prints is
 // what the browser would put on screen.
 //
@@ -26,9 +24,9 @@ const script = m[1];
 
 const els = new Map();
 // Whether the SHIPPED markup starts this element hidden, rather than a default this
-// harness invented. `forkStale` is `<div id="forkStale" hidden>` and the page unhides
-// it; every other element starts visible, and a shim that hid them all would report
-// a rendered fragment as invisible.
+// harness invented. A shim that hid every element would report real rendered
+// fragments as invisible. Keep forkStale in the default observation set below to
+// catch any accidental reintroduction of the retired browser-clock warning.
 const startsHidden = (id) =>
   new RegExp(`id="${id}"[^>]*\\shidden(\\s|>|=)`).test(html);
 const mkEl = (id) => {
