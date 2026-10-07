@@ -2476,6 +2476,35 @@ def _ai_needs_attention(ai) -> bool:
                 or not ai.get("verified"))
 
 
+def _ai_transport_failure(run) -> dict | None:
+    """Retain provider error events as diagnostics, never as authorization.
+
+    A natural process exit is not necessarily a completed AI turn. Do not retry
+    on another provider or infer availability from arbitrary agent prose.
+    """
+    if run.outcome != "natural" or run.rc == 0:
+        return None
+    for line in reversed((run.out or "").splitlines()):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "turn.failed":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+        elif event.get("type") == "error":
+            message = event.get("message")
+        else:
+            continue
+        if isinstance(message, str) and message.strip():
+            kind = ("usage_limit" if "usage limit" in message.lower()
+                    else "provider_error")
+            return {"kind": kind, "message": message.strip()[:1000]}
+    return None
+
+
 def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
     """Hand every merge-vs-cherry-pick conflict to the gatekeeper AI.
 
@@ -2603,7 +2632,13 @@ def step2b_ai_decisions(report, state_dir, apply, stall_grace_s=3600):
         "log": str(log),
         "tail": _ai_stream_tail(run.out),
     }
-    if run.outcome == "stalled":
+    transport_failure = _ai_transport_failure(run)
+    if transport_failure:
+        result["transport_failure"] = transport_failure
+        result["error"] = (
+            f"gatekeeper AI unavailable ({transport_failure['kind']}): "
+            f"{transport_failure['message']}; {len(remaining)} case(s) remain pending")
+    elif run.outcome == "stalled":
         result["error"] = (
             "gatekeeper AI made no observable progress for the configured "
             "stall grace; unfinished cases remain pending")

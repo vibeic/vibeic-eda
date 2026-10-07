@@ -111,6 +111,25 @@ def test_rc_zero_cannot_authorize_an_unverified_postcondition():
     assert "published-mainline postcondition" in " ".join(result["reasons"])
 
 
+def test_provider_unavailable_remains_visible_when_discovery_is_incomplete(tmp_path):
+    record, boundary = _record("unverified")
+    record["Demo"].update(upstream_merge_outcome="conflict", ours_skipped="pending")
+    record["_ai_decisions"].update(rc=1, backend="codex", transport_failure={
+        "kind": "usage_limit", "message": "You've hit your usage limit.",
+    })
+    rc, result = _assess(record, boundary)
+    assert rc == A.RC_NORECORD
+    assert "usage_limit" in " ".join(result["reasons"]), result["reasons"]
+    assert result["transport"]["failure"] == record["_ai_decisions"]["transport_failure"]
+    assert result["unverified_count"] == 1
+    assert any("discovery" in error for error in result["source_errors"])
+    registry = _registry(tmp_path / "FORKS.json")
+    result["registry"] = {"source": str(registry),
+                          "sha256": hashlib.sha256(registry.read_bytes()).hexdigest()}
+    _, errors = LL._validate_ai_authorization(result, tmp_path / "ai.json", boundary, registry)
+    assert "usage_limit" in " ".join(errors), errors
+
+
 def test_json_false_is_not_integer_zero_in_checker_or_ll(tmp_path):
     record, boundary = _record("verified")
     record["_ai_decisions"]["rc"] = False
@@ -426,6 +445,35 @@ def test_real_0530_script_authorizes_verified_or_empty_cases_even_when_six_is_on
     captured = json.loads((state / "ll-captured.json").read_text())
     assert captured["tick_state"] == "ran"
     assert captured["ai"]["status"] == "authorized"
+
+
+@pytest.mark.parametrize("mode,mutation", [
+    ("unverified", ""), ("malformed", ""),
+    ("unverified", "meta['started_at']=(now-timedelta(days=1)).isoformat()"),
+    ("unverified", "meta['finished_at']=(now+timedelta(days=1)).isoformat()"),
+    ("unverified", "meta['applied']=False"),
+    ("unverified", "meta['run_id']='bad'"),
+    ("unverified", "meta['schema_version']=True"),
+])
+def test_failed_round_keeps_diagnostic_identity_without_release_authority(tmp_path, mode, mutation):
+    script, env, state = _shell_fleet(tmp_path, mode)
+    producer = script.parent / "daily_0530.py"
+    producer.write_text(producer.read_text().replace(
+        "Path(a.json).write_text(json.dumps(record))",
+        mutation + "\nPath(a.json).write_text(json.dumps(record))"))
+    _stub(script.parent / "check_release_ll_terminal.py", r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ["GK_STATE_DIR"]).joinpath("terminal-identity.json").write_text(
+    json.dumps({"run_id": sys.argv[sys.argv.index("--run-id")+1]}))
+raise SystemExit(2)
+''')
+    result = subprocess.run(["bash", str(script)], env=env, capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 1
+    assert not (state / "run-tick.called").exists()
+    identity = json.loads((state / "terminal-identity.json").read_text())
+    assert identity["run_id"] == ("" if mutation else "a" * 64), identity
 
 
 def test_shell_and_python_entrypoints_parse():

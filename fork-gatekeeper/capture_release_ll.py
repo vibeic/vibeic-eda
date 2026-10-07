@@ -861,7 +861,7 @@ def _validate_ai_authorization(record: dict, path: Path, round_at: str,
             errors.append("norecord has no source error")
         return record, errors + [
             f"{path.name} reports NORECORD: "
-            + "; ".join(source_errors or reasons or ["unknown cause"])
+            + "; ".join(dict.fromkeys(source_errors + reasons) or ["unknown cause"])
         ]
 
     meta = record.get("round")

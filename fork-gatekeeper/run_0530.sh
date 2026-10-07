@@ -90,6 +90,7 @@ echo "[$(date -Is)] daily_0530 exit ${SIX}" >> "${LOG}"
 # evidence the learning loop retains later in this script.
 AI_AUTH_JSON="${GK_STATE_DIR}/ai-release-authorization.json"
 AI_RUN_ID=""
+ROUND_RUN_ID=""
 if ! rm -f "${AI_AUTH_JSON}"; then
     INPUT_CLEAR=1
     echo "[$(date -Is)] could not clear ${AI_AUTH_JSON} — stale AI authorization must not permit release" >> "${LOG}"
@@ -105,8 +106,10 @@ else
     echo "[$(date -Is)] AI release authorization NOT CHECKED — checker missing" >> "${LOG}"
 fi
 echo "[$(date -Is)] check_ai_release_authorization exit ${AI_AUTH} (0=authorized, 1=blocked, 2=NORECORD)" >> "${LOG}"
-if [ "${AI_AUTH}" -eq 0 ]; then
-    AI_RUN_ID="$(python3 - "${AI_AUTH_JSON}" <<'PY'
+# Identity is not permission: blocked/NORECORD rounds still have an identity
+# for terminal diagnostics. Keep release capability bound to AI_AUTH=0 below.
+ROUND_RUN_ID="$(python3 - "${AI_AUTH_JSON}" "${ROUND_AT}" "${AI_AUTH}" <<'PY'
+from datetime import datetime, timezone
 import json
 import re
 import sys
@@ -114,17 +117,28 @@ import sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 meta = value.get("round") if isinstance(value, dict) else None
 run_id = meta.get("run_id") if isinstance(meta, dict) else None
-if (value.get("status") != "authorized" or not isinstance(run_id, str)
-        or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", run_id)):
-    raise SystemExit("authorization sidecar has no valid authorized run_id")
+if (not isinstance(run_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", run_id)
+        or value.get("round_at") != sys.argv[2]
+        or type(meta.get("schema_version")) is not int
+        or meta["schema_version"] != 1 or meta.get("applied") is not True):
+    raise SystemExit("authorization sidecar has no valid current-round identity")
+boundary = datetime.fromisoformat(sys.argv[2])
+started = datetime.fromisoformat(meta["started_at"])
+finished = datetime.fromisoformat(meta["finished_at"])
+if not (boundary <= started <= finished <= datetime.now(timezone.utc)):
+    raise SystemExit("authorization sidecar round identity is stale or future")
+if sys.argv[3] == "0" and value.get("status") != "authorized":
+    raise SystemExit("authorization sidecar is not authorized")
 print(run_id)
 PY
 )"
-    if [ "$?" -ne 0 ]; then
-        AI_AUTH=2
-        AI_RUN_ID=""
-        echo "[$(date -Is)] AI release authorization sidecar could not supply its exact round nonce — forced NORECORD" >> "${LOG}"
-    fi
+if [ "$?" -ne 0 ]; then
+    AI_AUTH=2
+    ROUND_RUN_ID=""
+    echo "[$(date -Is)] AI release authorization sidecar could not supply its exact round nonce — forced NORECORD" >> "${LOG}"
+elif [ "${AI_AUTH}" -eq 0 ]; then
+    AI_RUN_ID="${ROUND_RUN_ID}"
 fi
 
 # Is this round even running the code that was landed for it?
@@ -486,7 +500,7 @@ LL_TERMINAL_JSON="${GK_STATE_DIR}/release-ll/latest.json"
 if [ -f "${DIR}/check_release_ll_terminal.py" ]; then
     python3 "${DIR}/check_release_ll_terminal.py" \
         --release-ll "${LL_TERMINAL_JSON}" \
-        --round-at "${ROUND_AT}" --run-id "${AI_RUN_ID}" >> "${LOG}" 2>&1
+        --round-at "${ROUND_AT}" --run-id "${ROUND_RUN_ID}" >> "${LOG}" 2>&1
     TERMINAL=$?
 else
     echo "[$(date -Is)] check_release_ll_terminal MISSING — a valid audit record cannot authorize convergence by itself" >> "${LOG}"

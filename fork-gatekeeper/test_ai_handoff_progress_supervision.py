@@ -217,6 +217,27 @@ def test_backend_refusal_or_undelivered_turn_keeps_the_case_pending(
     assert len(json.loads((tmp_path / "state" / "ai_decisions_pending.json").read_text())) == 1
 
 
+def test_usage_limit_is_retained_as_unavailable_without_provider_replay(tmp_path, monkeypatch):
+    message = "You've hit your usage limit. Try again later."
+    stream = json.dumps({"type": "error", "message": message}) + "\n" + json.dumps({
+        "type": "turn.failed", "error": {"message": message}})
+    monkeypatch.setenv("GK_AI_BACKEND", "codex")
+    monkeypatch.setattr(D, "FORKS", tmp_path / "forks")
+    monkeypatch.setattr("shutil.which", lambda _: "/bin/codex")
+    calls = []
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _supervised(rc=1, out=stream)
+    monkeypatch.setattr(D.watchdog, "run_supervised", run)
+    monkeypatch.setattr(D, "_verify_ai_cases", lambda cases: _proofs(cases, False))
+    result = D.step2b_ai_decisions(_report(), tmp_path / "state", apply=True)
+    assert "usage_limit" in result.get("error", ""), result
+    assert result["transport_failure"] == {"kind": "usage_limit", "message": message}
+    assert result["verified"] is False and len(result["unverified_cases"]) == 1
+    assert len(calls) == 1 and calls[0][0] == "/bin/codex"
+    assert len(json.loads((tmp_path / "state" / "ai_decisions_pending.json").read_text())) == 1
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True,
