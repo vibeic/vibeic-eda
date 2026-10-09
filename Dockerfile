@@ -30,16 +30,16 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:f17b50c-fd581c
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:6e3ac2d-ba9010
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:1f2057b-7b1457
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:0796dff-62019f
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
-ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:dae41d0-2a7fcc4-a19510
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:ddbe396-2431cc
+ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-2a7fcc4-3d3c76
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:eb53f89-174904
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:8c4248e-33ef85
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:58f519b-729fa9
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:59dd99e-969919
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:cc25bec-dbfa07
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ba08ba9-47cf0a
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:9ad44fd-8ec957
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
@@ -85,10 +85,10 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-f0151f
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-9e237d
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9e5d726-9e884c
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
-ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:5a85d1f-7e8a73
+ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:a0a79cd-9d1865
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-be0c46
 
 # BuildKit does not expand a variable in `COPY --from=`, so each pinned
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=163a24153b0c004afe5568a3e5fbcd3208b6d109  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=c9c45c3c4523327382c2ea651fbaa9f99e891d19  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=31d9182533f9c2898fccda6fd7f35b77998b7b7b  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
@@ -222,7 +222,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=9b26ff8ff651fc0b696f7ef20a356865ca6068bb  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=ef421749a1050a8e9a197e7dfcd05396807f889d  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
