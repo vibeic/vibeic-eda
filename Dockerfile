@@ -30,16 +30,16 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:1f2057b-7b1457
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:0796dff-62019f
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:faa478e-6ad223
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:92daebf-6fe525
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-2a7fcc4-3d3c76
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:eb53f89-174904
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:8c4248e-33ef85
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:59dd99e-969919
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:89846c4-75ff0c
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:132a086-b2a1e2
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:ba08ba9-47cf0a
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:4877ac3-35a369
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:9ad44fd-8ec957
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-9e237d
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-0786f8
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9e5d726-9e884c
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:a0a79cd-9d1865
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=c9c45c3c4523327382c2ea651fbaa9f99e891d19  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=37811791efa8afeb5d51418c311b9378668485c6  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=31d9182533f9c2898fccda6fd7f35b77998b7b7b  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
