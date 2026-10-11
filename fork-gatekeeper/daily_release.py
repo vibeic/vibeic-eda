@@ -69,6 +69,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from recipe_digest import recipe_digest                       # noqa: E402
 from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
                                 pin_sites,
                                 pinned_refs)
@@ -2554,7 +2556,7 @@ def _existing_versions(eda_root: Path) -> List[Tuple[int, int, int]]:
 
 
 def recipe_hash(eda_root: Path, target: str) -> str:
-    """Digest of the Dockerfile that BUILDS this tool.
+    """Digest of the Dockerfile and explicitly declared local build inputs.
 
     An artefact's identity is (source commit, build recipe). The tag carried only
     the first, so a change to HOW a tool is built produced no new tag and the
@@ -2574,7 +2576,7 @@ def recipe_hash(eda_root: Path, target: str) -> str:
     f = eda_root / "tools" / target / "Dockerfile"
     if not f.is_file():
         return "nofile"
-    return hashlib.sha256(f.read_bytes()).hexdigest()[:6]
+    return recipe_digest(f)
 
 
 def bake_recipe_vars(eda_root: Path) -> Dict[str, str]:

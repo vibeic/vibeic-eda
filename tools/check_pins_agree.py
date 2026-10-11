@@ -31,6 +31,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from recipe_digest import recipe_digest  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 
 #: tool -> the ARG names whose SHAs form its tag, in tag order.
@@ -147,16 +150,19 @@ def main() -> int:
                        f"never copies this tool in")
             continue
         # The tag carries a RECIPE component too — a digest of the tool's own
-        # Dockerfile — so that changing HOW a tool is built moves the tag even
-        # when the source commit does not. This check did not know about it, so
+        # Dockerfile and declared local helpers — changing HOW it is built moves
+        # the tag even when the source commit does not. This check did not know about it, so
         # it reported all eight tools as disagreeing while nothing was wrong:
         # the loudest possible false alarm, and the shape that gets a check
         # deleted rather than fixed.
         want_tag = "-".join((tool_args.get(k) or "?")[:7] for k in keys)
         rf = ROOT / "tools" / tool / "Dockerfile"
         if rf.is_file():
-            import hashlib
-            recipe = hashlib.sha256(rf.read_bytes()).hexdigest()[:6]
+            try:
+                recipe = recipe_digest(rf)
+            except (OSError, ValueError) as error:
+                bad.append(f"{tool}: invalid recipe inputs — {error}")
+                continue
             want_tag += "-" + recipe
             # THE RECIPE HAS THREE SITES AND THIS CHECKED TWO. The digest is
             # OF tools/<t>/Dockerfile (1); docker-bake.hcl's <T>_RECIPE decides
@@ -179,7 +185,7 @@ def main() -> int:
                     f"{tool}: the RECIPE digest disagrees — `bake` would "
                     f"publish a tag the composing Dockerfile does not pull\n"
                     f"      docker-bake.hcl          {declared}\n"
-                    f"      sha256(tools/{tool}/Dockerfile)[:6]  {recipe}")
+                    f"      recipe_digest(tools/{tool}/Dockerfile)  {recipe}")
         want = f"ghcr.io/vibeic/eda-tool-{tool}:{want_tag}"
         if pulled != want:
             bad.append(f"{tool}: Dockerfile pulls a tag the pins do not produce\n"
