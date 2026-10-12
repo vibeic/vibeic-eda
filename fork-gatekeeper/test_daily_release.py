@@ -32,6 +32,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_pins_current as C                                # noqa: E402
 import daily_release as R                                     # noqa: E402
@@ -111,6 +113,166 @@ def test_smoke_natural_nonzero_is_a_real_tool_failure(monkeypatch):
         "tool": "broken", "cmd": "false", "err": "real diagnostic",
         "outcome": "natural_failure", "rc": 9,
     }]
+
+
+@pytest.mark.parametrize("defect, expected", [
+    ("healthy", None),
+    ("qt_warning", None),
+    ("benign_error_word", None),
+    ("swallowed_error", "startup_error_diagnostic"),
+    ("indented_error", "startup_error_diagnostic"),
+    ("stdout_error", "startup_error_diagnostic"),
+    ("fatal", "startup_error_diagnostic"),
+    ("nonzero_with_marker", "nonzero_exit"),
+    ("missing_marker", "missing_or_duplicate_macro_marker"),
+    ("duplicate_marker", "missing_or_duplicate_macro_marker"),
+    ("missing_gds", "missing_or_empty_gds"),
+    ("empty_gds", "missing_or_empty_gds"),
+])
+@pytest.mark.parametrize("defect_mode", ["-z", "-b"])
+def test_klayout_smoke_executes_payload_and_rejects_bad_startup(
+        tmp_path, monkeypatch, capsys, defect, expected, defect_mode):
+    """Exercise the exact release payload, not a parallel verdict function.
+
+    The process double models KLayout's swallowed startup ERROR: the requested
+    macro still emits its marker and produces a GDS, and KLayout returns rc0.
+    Both modes must run with fresh output paths and implicit macros enabled.
+    """
+    import shlex
+    from types import SimpleNamespace
+
+    marker = "VIBEIC_KLAYOUT_ROUNDTRIP_OK\n"
+    calls = []
+
+    def klayout(argv, *, text, capture_output, env):
+        assert argv[0] == "klayout" and argv[1] in ("-z", "-b")
+        assert argv[2] == "-r" and len(argv) == 4
+        assert text and capture_output
+        assert env["QT_QPA_PLATFORM"] == "offscreen"
+        assert env["KLAYOUT_HOME"] == "/keep/bundled/autorun"
+        assert env["KLAYOUT_PATH"] == "/keep/extra/macros"
+        script = Path(argv[3])
+        compile(script.read_text(), str(script), "exec")
+        gds = Path(env["VIBEIC_KLAYOUT_SMOKE_GDS"])
+        assert not gds.exists(), "each mode must use a fresh output"
+        calls.append((argv[1], gds))
+        chosen = defect if argv[1] == defect_mode else "healthy"
+        if chosen != "missing_gds":
+            gds.write_bytes(b"" if chosen == "empty_gds" else b"GDS fixture")
+        stdout, stderr, rc = marker, "", 0
+        if chosen == "qt_warning":
+            stderr = "QStandardPaths: XDG_RUNTIME_DIR not set\n"
+        elif chosen == "benign_error_word":
+            stderr = "WARNING: error reporting fallback is disabled\n"
+        elif chosen == "swallowed_error":
+            stderr = "ERROR: NameError: name 'NetlistCell' is not defined\n"
+        elif chosen == "indented_error":
+            stderr = "  ERROR: startup failed\n"
+        elif chosen == "stdout_error":
+            stdout += "ERROR: startup failed\n"
+        elif chosen == "fatal":
+            stderr = "FATAL: startup failed\n"
+        elif chosen == "nonzero_with_marker":
+            rc = 7
+        elif chosen == "missing_marker":
+            stdout = ""
+        elif chosen == "duplicate_marker":
+            stdout += marker
+        return SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setenv("KLAYOUT_HOME", "/keep/bundled/autorun")
+    monkeypatch.setenv("KLAYOUT_PATH", "/keep/extra/macros")
+    monkeypatch.setattr(subprocess, "run", klayout)
+    argv = shlex.split(R.SMOKE["klayout"])
+    assert argv[:2] == ["python3", "-c"]
+    with pytest.raises(SystemExit) as stopped:
+        exec(compile(argv[2], "<release-klayout-smoke>", "exec"), {})
+    assert stopped.value.code == (1 if expected else 0)
+    output = capsys.readouterr().out
+    assert [mode for mode, _ in calls] == ["-z", "-b"]
+    assert calls[0][1] != calls[1][1]
+    if expected:
+        assert expected in output
+        assert f"klayout {defect_mode} rc=" in output
+    else:
+        assert output.count(" PASS\n") == 2
+
+
+@pytest.mark.parametrize("defect", [
+    None, "dbu", "top", "bbox", "shape_count", "window", "action", "plugin",
+    "cells", "ports", "subckt_instances", "implicit_top", "top_instances", "all_cells",
+])
+def test_klayout_smoke_macro_checks_roundtrip_and_plugin_contract(
+        tmp_path, monkeypatch, capsys, defect):
+    """Corrupt each restored value; the real embedded macro must reject it."""
+    from types import SimpleNamespace as NS
+    import shlex
+
+    payload = shlex.split(R.SMOKE["klayout"])[2]
+    tree = ast.parse(payload)
+    macro = next(ast.literal_eval(node.value) for node in tree.body
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "macro"
+                         for target in node.targets))
+    gds = tmp_path / "roundtrip.gds"
+    monkeypatch.setenv("VIBEIC_KLAYOUT_SMOKE_GDS", str(gds))
+    monkeypatch.setenv("VIBEIC_KLAYOUT_SMOKE_MODE", "-z")
+    shape = NS(insert=lambda box: None,
+               size=lambda: 2 if defect == "shape_count" else 1)
+    top = NS(name="WRONG" if defect == "top" else "VIBEIC_STARTUP_SMOKE",
+             bbox=lambda: (0, 0, 1, 1) if defect == "bbox" else (0, 0, 1700, 2900),
+             shapes=lambda layer: shape)
+
+    def layout():
+        result = NS(dbu=0.001, layer=lambda layer, datatype: (layer, datatype),
+                    create_cell=lambda name: top, top_cell=lambda: top,
+                    write=lambda path: Path(path).write_bytes(b"written GDS"))
+
+        def read(path):
+            assert Path(path).read_bytes() == b"written GDS"
+            if defect == "dbu":
+                result.dbu = 1.0
+        result.read = read
+        return result
+
+    window = NS(menu=lambda: NS(is_valid=lambda path: defect != "action"))
+    monkeypatch.setitem(sys.modules, "pya", NS(
+        Layout=layout, Box=lambda *values: values,
+        MainWindow=NS(instance=lambda: None if defect == "window" else window)))
+    monkeypatch.setitem(sys.modules, "netlist_import_plugin", NS())
+    if defect == "plugin":
+        monkeypatch.delitem(sys.modules, "netlist_import_plugin")
+    subckt = NS(name="smoke_cell", ports=["A", "B"], instances=[NS(name="R1")])
+    implicit = NS(name="smoke_top", instances=[NS(name="R2")])
+    parsed = NS(cells=[subckt], implicit_top_cell=implicit,
+                all_cells=[subckt, implicit])
+    if defect == "cells":
+        subckt.name = "wrong_cell"
+    elif defect == "ports":
+        subckt.ports = ["B", "A"]
+    elif defect == "subckt_instances":
+        subckt.instances = []
+    elif defect == "implicit_top":
+        implicit.name = "wrong_top"
+    elif defect == "top_instances":
+        implicit.instances = []
+    elif defect == "all_cells":
+        parsed.all_cells = [subckt]
+
+    def parse(path, *, implicit_top_cell_name):
+        assert implicit_top_cell_name == "smoke_top"
+        assert Path(path).read_text() == (
+            ".subckt smoke_cell A B\nR1 A B 1k\n.ends smoke_cell\nR2 X Y 2k\n")
+        return parsed
+    monkeypatch.setitem(sys.modules, "netlist_parser",
+                        NS(NetlistParser=lambda: NS(parse=parse)))
+    if defect:
+        with pytest.raises(AssertionError):
+            exec(compile(macro, "<klayout-roundtrip-macro>", "exec"), {})
+        assert "VIBEIC_KLAYOUT_ROUNDTRIP_OK" not in capsys.readouterr().out
+    else:
+        exec(compile(macro, "<klayout-roundtrip-macro>", "exec"), {})
+        assert capsys.readouterr().out == "VIBEIC_KLAYOUT_ROUNDTRIP_OK\n"
 
 
 def test_librelane_smoke_runs_classic_through_magic_streamout():

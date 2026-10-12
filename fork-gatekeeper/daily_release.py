@@ -59,6 +59,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -2682,6 +2683,82 @@ def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
     return missing
 
 
+_KLAYOUT_SMOKE = r"""
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+# BLOCKING startup smoke, including the bundled autorun macros.  KLayout can
+# finish the requested script with rc0 despite an earlier ERROR in an autorun
+# plugin (vibeic-eda#294).  Neither an exit code nor a GDS alone catches that.
+macro = r'''import os
+from pathlib import Path
+import sys
+import pya
+path = os.environ["VIBEIC_KLAYOUT_SMOKE_GDS"]
+layout = pya.Layout()
+layout.dbu = 0.001
+cell = layout.create_cell("VIBEIC_STARTUP_SMOKE")
+layer = layout.layer(71, 3)
+box = pya.Box(0, 0, 1700, 2900)
+cell.shapes(layer).insert(box)
+layout.write(path)
+restored = pya.Layout()
+restored.read(path)
+assert abs(restored.dbu - 0.001) < 1e-12
+top = restored.top_cell()
+assert top is not None and top.name == "VIBEIC_STARTUP_SMOKE"
+assert top.bbox() == box
+assert top.shapes(restored.layer(71, 3)).size() == 1
+if os.environ["VIBEIC_KLAYOUT_SMOKE_MODE"] == "-z":
+    window = pya.MainWindow.instance()
+    assert window is not None, "headless GUI backend missing"
+    assert window.menu().is_valid("file_menu.import_menu.import_netlist"), "Netlist Import action missing"
+    assert "netlist_import_plugin" in sys.modules, "Netlist Import plugin not loaded"
+    from netlist_parser import NetlistParser
+    netlist_path = Path(path).with_suffix(".sp")
+    netlist_path.write_text(".subckt smoke_cell A B\nR1 A B 1k\n.ends smoke_cell\nR2 X Y 2k\n")
+    parsed = NetlistParser().parse(str(netlist_path), implicit_top_cell_name="smoke_top")
+    assert [cell.name for cell in parsed.cells] == ["smoke_cell"]
+    assert parsed.cells[0].ports == ["A", "B"]
+    assert [inst.name for inst in parsed.cells[0].instances] == ["R1"]
+    assert parsed.implicit_top_cell.name == "smoke_top"
+    assert [inst.name for inst in parsed.implicit_top_cell.instances] == ["R2"]
+    assert [cell.name for cell in parsed.all_cells] == ["smoke_cell", "smoke_top"]
+print("VIBEIC_KLAYOUT_ROUNDTRIP_OK", flush=True)
+'''
+failed = False
+with tempfile.TemporaryDirectory(prefix="klayout-release-smoke-") as tmp:
+    script = Path(tmp) / "roundtrip.py"
+    script.write_text(macro)
+    for mode in ("-z", "-b"):
+        gds = Path(tmp) / (mode[1:] + ".gds")
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen",
+                   VIBEIC_KLAYOUT_SMOKE_GDS=str(gds),
+                   VIBEIC_KLAYOUT_SMOKE_MODE=mode)
+        result = subprocess.run(["klayout", mode, "-r", str(script)],
+                                text=True, capture_output=True, env=env)
+        errors = []
+        if result.returncode != 0:
+            errors.append("nonzero_exit")
+        if result.stdout.splitlines().count("VIBEIC_KLAYOUT_ROUNDTRIP_OK") != 1:
+            errors.append("missing_or_duplicate_macro_marker")
+        if re.search(r"(?im)^\s*(?:ERROR|FATAL)\b",
+                     result.stdout + "\n" + result.stderr):
+            errors.append("startup_error_diagnostic")
+        if not gds.is_file() or gds.stat().st_size == 0:
+            errors.append("missing_or_empty_gds")
+        print(result.stdout, end="", flush=True)
+        print(result.stderr, end="", flush=True)
+        print("klayout", mode, "rc=" + str(result.returncode),
+              "FAIL: " + ", ".join(errors) if errors else "PASS", flush=True)
+        failed = failed or bool(errors)
+raise SystemExit(1 if failed else 0)
+"""
+
+
 #: What each tool must do inside the composed image before it is called a
 #: release. Each entry RUNS the tool and asserts the binary is the one WE built:
 #: a bare `command -v` passes on the base image's copy, and `klayout -v` prints a
@@ -2691,12 +2768,9 @@ def missing_artefacts(eda_root: Path, refs_now: Dict[str, str],
 SMOKE = {
     "yosys":     "yosys -V | grep -qi yosys",
     "openroad":  "openroad -version",
-    # Our klayout fork ships as libraries + add-on engines, not as a `klayout`
-    # binary — see vibeic-eda#17: the `klayout` on PATH is the BASE image's build
-    # and links the base library. So this asserts our fork's library is present;
-    # it deliberately does NOT claim the fork is what `klayout` loads, because it
-    # is not.
-    "klayout":   "test -e /foss/tools/klayout-vibeic/libklayout_db.so",
+    # Run the actual command in both headless modes, keeping shipped autorun
+    # plugins enabled.  Source identity remains the provenance gate's job.
+    "klayout":   "python3 -c " + shlex.quote(_KLAYOUT_SMOKE),
     "iverilog":  "iverilog -V >/dev/null",
     "verilator": "verilator --version | grep -qi verilator",
     "ngspice":   "ngspice --version >/dev/null 2>&1 || command -v ngspice",

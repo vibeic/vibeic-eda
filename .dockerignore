@@ -26,3 +26,5 @@ tools/*
 # sentinel. It has to come from the context for the same reason tools/pdk does --
 # it replaces a file in THIS image, so no `git clone` can supply it.
 !tools/generate_container_user.sh
+# Bundled KLayout plugin compatibility repair (vibeic-eda#294).
+!tools/klayout_netlist_import_patch.py

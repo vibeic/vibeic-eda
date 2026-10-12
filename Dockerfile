@@ -2099,7 +2099,7 @@ RUN --mount=type=bind,from=eqy-build,source=/out/smoke,target=/tmp/vibeic-eqy-sm
 # base image's copy by the RUN below rather than by a COPY straight to
 # /dockerstartup/scripts/. A second COPY is one layer and the root composition
 # has one left (109/110); this is the same fold local_mods.json makes above.
-COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv tools/generate_container_user.sh /vibeic/
+COPY tools/refresh_versions_manifest.sh tools/tool_version_probes.tsv tools/generate_container_user.sh tools/klayout_netlist_import_patch.py /vibeic/
 USER root
 # The three PDK corrections that until 2026-09-07 lived only in Dockerfile.derived
 # -- the lane shortcut that builds FROM a published digest. This file is what
@@ -2157,8 +2157,12 @@ USER root
 # assumption, 10^6 too large on our 26Q3 odb), and each installed file must be
 # byte-identical to the fork's. `if ...; then exit 1; fi`, not `! grep`, because
 # set -e does not act on a `!` pipeline.
+# NetlistImportPlugin v0.3 forward reference; preserve GUI autorun (#294).
+# Pin helper bytes here so any repair edit changes the compose fingerprint.
 RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelane,ro \
     set -e; \
+    echo 'c6850a428e02baf36d683a1585505b39bcc007c44c9e9e573b7a4052b98af5ec  /vibeic/klayout_netlist_import_patch.py' | sha256sum -c -; \
+    python3 /vibeic/klayout_netlist_import_patch.py; \
     install -m 0755 -o root -g root /vibeic/generate_container_user.sh \
         /dockerstartup/scripts/generate_container_user.sh; \
     bash -n /dockerstartup/scripts/generate_container_user.sh; \
