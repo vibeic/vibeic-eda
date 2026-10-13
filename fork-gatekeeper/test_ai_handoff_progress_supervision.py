@@ -291,6 +291,81 @@ def test_cron_wires_a_stall_grace_not_a_total_timeout():
     assert "--ai-timeout" not in invocation
 
 
+@pytest.mark.parametrize("delivered", [True, False])
+@pytest.mark.parametrize("fetch_fault", [None, "failed", "stalled", "missing"])
+def test_isolated_publisher_verification_preserves_checkout(
+        tmp_path, monkeypatch, delivered, fetch_fault):
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "--bare", "-q", "-b", "main", str(origin))
+    repo = tmp_path / "observer"
+    _git(tmp_path, "clone", "-q", str(origin), str(repo))
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    (repo / "base").write_text("base\n")
+    _git(repo, "add", "base")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-qb", "topic")
+    (repo / "fix").write_text("required source change\n")
+    _git(repo, "add", "fix")
+    _git(repo, "commit", "-qm", "source change")
+    source = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "-q", "origin", "topic")
+    _git(repo, "checkout", "-q", "main")
+    publisher = tmp_path / "publisher"
+    _git(tmp_path, "clone", "-q", str(origin), str(publisher))
+    _git(publisher, "config", "user.name", "publisher")
+    _git(publisher, "config", "user.email", "publisher@example.invalid")
+    if delivered:
+        _git(publisher, "merge", "--no-ff", "-qm", "deliver source", "origin/topic")
+    else:
+        (publisher / "unrelated").write_text("source still absent\n")
+        _git(publisher, "add", "unrelated")
+        _git(publisher, "commit", "-qm", "unrelated change")
+    published = _git(publisher, "rev-parse", "HEAD")
+    _git(publisher, "push", "-q", "origin", "main")
+    assert subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", published],
+        capture_output=True).returncode != 0
+    # Verification may import objects, but must preserve refs and local work.
+    (repo / "base").write_text("staged local edit\n")
+    _git(repo, "add", "base")
+    (repo / "base").write_text("unstaged local edit\n")
+    (repo / ".git" / "FETCH_HEAD").write_text("preserve this receipt\n")
+    def snapshot():
+        return (_git(repo, "show-ref"), _git(repo, "rev-parse", "HEAD"),
+                _git(repo, "diff"), _git(repo, "diff", "--cached"),
+                (repo / ".git" / "FETCH_HEAD").read_bytes())
+    before = snapshot()
+    real_sh = D.sh
+    fetches = []
+    def run(*args, **kwargs):
+        if "fetch" in args:
+            fetches.append((args, kwargs))
+            if fetch_fault:
+                rc = {"failed": 128, "stalled": D.watchdog.RC_STALLED,
+                      "missing": 0}[fetch_fault]
+                return subprocess.CompletedProcess(args, rc, "", fetch_fault)
+        return real_sh(*args, **kwargs)
+    monkeypatch.setattr(D, "sh", run)
+    result = D._verify_ai_case({
+        "fork": "Demo", "branch": "topic", "mainline": "main",
+        "source_tip": source, "path": str(repo)})
+    assert result["verified"] is (delivered and fetch_fault is None), result
+    assert result["published_tip"] == published
+    assert snapshot() == before
+    assert len(fetches) == 1
+    args, kwargs = fetches[0]
+    assert args[-2:] == ("origin", published)
+    assert "--no-recurse-submodules" in args
+    assert "--no-write-fetch-head" in args and "--refmap=" in args
+    assert kwargs["progress"] is True and "timeout" not in kwargs
+    if fetch_fault:
+        assert "fetch" in result["reason"]
+    elif not delivered:
+        assert "remain absent" in result["reason"]
+
+
 def _semantic_record(*, rc: int, outcome: str) -> dict:
     process_rc = 0 if rc == 0 else (1 if rc == 1 else 0)
     cases = 1 if rc in {0, 1} else 0
