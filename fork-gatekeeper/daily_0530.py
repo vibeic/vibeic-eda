@@ -2393,16 +2393,35 @@ def _verify_ai_case(case):
     published_tip = fields[0]
     result["published_tip"] = published_tip
 
-    # The AI normally creates the published commit in this clone/worktree, so
-    # its object is locally available.  Do not hide a missing object behind an
-    # unbounded fetch here: inability to verify is an honest pending state.
+    # An isolated publisher need not share this clone's object store. Import
+    # only the immutable tip just observed on origin, under the normal Git
+    # progress lease. Do not move refs, FETCH_HEAD, the index or local work.
+    # Fetch success is not delivery proof: the same content checks below still
+    # decide, and a failed/stalled/incomplete transfer keeps the case pending.
     present = sh("git", "-C", str(path), "cat-file", "-e",
                  f"{published_tip}^{{commit}}")
     if present.returncode != 0:
-        result["reason"] = (
-            f"origin/{main} is {published_tip[:12]}, but that object is not in "
-            "the checkout; delivery could not be verified without changing it")
-        return result
+        fetched = sh(
+            "git", "-C", str(path), "-c", "gc.auto=0",
+            "-c", "maintenance.auto=false", "fetch", "--no-tags",
+            "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=",
+            "origin", published_tip, progress=True)
+        result["published_object_fetch"] = {
+            "tip": published_tip, "rc": fetched.returncode,
+            "outcome": getattr(fetched, "supervision_outcome", "natural"),
+        }
+        if fetched.returncode != 0:
+            result["reason"] = (
+                f"could not fetch published object {published_tip[:12]}: "
+                + _first_error_line(fetched))
+            return result
+        present = sh("git", "-C", str(path), "cat-file", "-e",
+                     f"{published_tip}^{{commit}}")
+        if present.returncode != 0:
+            result["reason"] = (
+                f"fetch returned success but published object "
+                f"{published_tip[:12]} is still unavailable")
+            return result
 
     ancestor = sh("git", "-C", str(path), "merge-base", "--is-ancestor",
                   source_tip, published_tip)
