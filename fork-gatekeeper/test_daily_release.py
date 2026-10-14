@@ -1344,6 +1344,95 @@ def test_unresolved_pin_stops_before_any_release_mutation(tmp_path, monkeypatch)
     assert writes == [], "an unresolved pin reached a release writer"
 
 
+@pytest.mark.parametrize("recovers", [False, True])
+def test_tip_get_retries_truncated_transport_but_never_uses_partial_sha(
+        monkeypatch, capsys, recovers):
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def answer(cmd, timeout=None):
+        calls.append((list(cmd), timeout))
+        if not recovers or len(calls) == 1:
+            return 1, "a" * 40, "unexpected end of JSON input"
+        return 0, "b" * 40, ""
+
+    monkeypatch.setattr(R, "_sh", answer)
+    assert R._gh_tip("yosys", "main") == ("b" * 40 if recovers else "")
+    assert len(calls) == (2 if recovers else 3)
+    assert all(call == calls[0] for call in calls)
+    assert calls[0][1] == 120
+    if not recovers:
+        diagnostic = capsys.readouterr().err
+        for number in (1, 2, 3):
+            assert f"attempt {number}/3" in diagnostic
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_release_consumes_real_pin_get_retry_before_any_writer(
+        tmp_path, monkeypatch, recovers):
+    from types import SimpleNamespace
+    import time
+
+    root = _tree(tmp_path)
+    before = {str(p.relative_to(root)): p.read_bytes()
+              for p in root.rglob("*") if p.is_file()}
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(R, "_release_lock_path", lambda: tmp_path / "release.lock")
+
+    def guard_only(cmd, **kwargs):
+        assert cmd[0] == sys.executable
+        assert cmd[-1].endswith(("check_pins_agree.py",
+                                 "check_dockerfile_layer_budget.py"))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(R.subprocess, "run", guard_only)
+    pins = C.pinned_refs(root)
+    attempts = []
+
+    def answer(cmd, timeout=180):
+        path = next(arg for arg in cmd if arg.startswith("repos/"))
+        repo = path.split("/")[2]
+        if "/branches?" in path:
+            return 0, f"{C.declared_branch(repo)} {pins[repo]}\n", ""
+        assert "/compare/" in path
+        payload = json.dumps({"status": "identical", "total_commits": 0})
+        if repo == "yosys":
+            attempts.append(list(cmd))
+            if not recovers or len(attempts) == 1:
+                return 1, payload, "unexpected end of JSON input"
+        return 0, payload, ""
+
+    monkeypatch.setattr(C, "_sh", answer)
+    # Do not replace check_one: this is the real release consumer and parser.
+    downstream_reads = []
+    monkeypatch.setattr(R, "missing_artefacts",
+                        lambda *args: downstream_reads.append("registry") or [])
+    writes = []
+    for name in ("write_recipe_vars", "rewrite_pin", "retag_images"):
+        monkeypatch.setattr(R, name,
+                            lambda *args, _name=name: writes.append(_name) or [])
+    record = tmp_path / "release.json"
+    args = ["--eda-root", str(root), "--json", str(record)]
+    # The healthy arm previews the real consumer; the exhausted arm invokes
+    # normal writer-capable mode and must stop before any mutation.
+    if recovers:
+        args.append("--dry-run")
+    rc = R.main(args)
+    result = json.loads(record.read_text())
+    assert result["status"] == ("dry_run" if recovers else "unmeasured")
+    assert rc == (R.RC_OK if recovers else R.RC_NEEDS_HUMAN)
+    assert len(attempts) == (2 if recovers else 3)
+    assert downstream_reads == (["registry"] if recovers else [])
+    if not recovers:
+        assert result["failure"]["category"] == "pin_compare_unmeasurable"
+        assert result["unresolved"][0]["verdict"] == "COMPARE_FAILED"
+    assert writes == []
+    assert before == {str(p.relative_to(root)): p.read_bytes()
+                      for p in root.rglob("*") if p.is_file()}
+
+
 def test_the_two_programs_share_one_implementation_of_the_question():
     """Two copies of this answer is how they came to disagree about four pins."""
     import check_pins_current as C
