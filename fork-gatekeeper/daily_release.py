@@ -73,6 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from recipe_digest import recipe_digest                       # noqa: E402
 from check_pins_current import (branch_is_ours, check_one,       # noqa: E402
+                                github_api_get,
                                 pin_sites,
                                 pinned_refs)
 import progress_watchdog as watchdog                            # noqa: E402
@@ -665,8 +666,8 @@ def _sh(cmd, cwd=None, timeout=None, stream=False, env=None,
 
 
 def _gh_tip(repo: str, branch: str) -> str:
-    rc, out, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/commits/{branch}",
-                      "--jq", ".sha"], timeout=120)
+    rc, out, _ = github_api_get(
+        f"repos/vibeic/{repo}/commits/{branch}", jq=".sha", timeout=120, run=_sh)
     return out.strip() if rc == 0 else ""
 
 

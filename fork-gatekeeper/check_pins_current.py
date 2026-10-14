@@ -51,12 +51,24 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 RC_CURRENT, RC_STALE, RC_NOTHING = 0, 1, 2
 BRANCH_LOOKUP_OK = "OK"
 BRANCH_LOOKUP_UNKNOWN = "BRANCH_LOOKUP_UNKNOWN"
+
+GH_READ_ATTEMPTS = 3
+GH_READ_RETRY_SLEEP_S = 5.0
+_GH_TRANSPORT_FAILURE = re.compile(
+    r"unexpected end of JSON input|\bEOF\b|TimeoutExpired|timed out|"
+    r"context deadline exceeded|Connection (?:reset|refused)|"
+    r"Could not resolve host|Temporary failure in name resolution|"
+    r"error connecting to|i/o timeout|TLS handshake timeout|no such host|"
+    r"HTTP(?:/\d(?:\.\d)?)?\s+(?:5[0-9]{2}|429)\b",
+    re.I,
+)
 
 #: Branch names that are not the build branch even when their tip equals the pin.
 #: A dated merge branch and a temporary fix branch both sit at the same commit as
@@ -73,11 +85,51 @@ def _sh(cmd, timeout=180):
         return 1, "", str(exc)
 
 
-def _gh(path: str, jq: Optional[str] = None, paginate: bool = False):
+def github_api_get(path: str, *, jq: Optional[str] = None,
+                   paginate: bool = False, timeout: int = 180, run=None):
+    """Bounded retry of an idempotent GET, never of an answered verdict.
+
+    The 2026-10-14 release stopped before any writer because nine pin reads
+    failed, including gh's ``unexpected end of JSON input`` on truncated
+    responses. Re-asking that request is not accepting an unmeasured pin.
+    Only nonzero transport/server failures are retried; rc0 malformed answers
+    and permission/absence replies still stand on their first response.
+
+    Path/query arguments cannot select POST or another mutation: this helper
+    constructs an explicit GET and accepts no arbitrary gh options. Exhaustion
+    is BLOCKING through the existing UNKNOWN/COMPARE_FAILED release paths.
+    Every failed attempt is recorded; partial stdout is never returned as data.
+    ``run`` preserves each consumer's one-shot runner and timeout contract.
+    """
     cmd = ["gh", "api"] + (["--paginate"] if paginate else []) + [path]
     if jq:
         cmd += ["--jq", jq]
-    rc, out, _ = _sh(cmd)
+    cmd += ["--method", "GET"]
+    runner = run or _sh
+    history = []
+    for attempt in range(1, GH_READ_ATTEMPTS + 1):
+        rc, out, err = runner(cmd, timeout=timeout)
+        if rc == 0:
+            return rc, out, err
+        detail = " ".join((err or out or f"gh exited {rc}").split())[:400]
+        record = f"attempt {attempt}/{GH_READ_ATTEMPTS} rc={rc}: {detail}"
+        history.append(record)
+        print(f"[GH_API_GET] {path}: {record}", file=sys.stderr)
+        # Even if an auth/absence reply also mentions EOF, its HTTP verdict is
+        # not a transport failure. Do not shop for a different answer.
+        response = f"{out}\n{err}"
+        client_codes = re.findall(
+            r"\bHTTP(?:/\d(?:\.\d)?)?\s+(4[0-9]{2})\b", response, re.I)
+        denied = any(code != "429" for code in client_codes)
+        if denied or not _GH_TRANSPORT_FAILURE.search(response):
+            break
+        if attempt < GH_READ_ATTEMPTS:
+            time.sleep(GH_READ_RETRY_SLEEP_S)
+    return rc, "", "; ".join(history)
+
+
+def _gh(path: str, jq: Optional[str] = None, paginate: bool = False):
+    rc, out, _ = github_api_get(path, jq=jq, paginate=paginate)
     return out if rc == 0 else ""
 
 
@@ -211,9 +263,8 @@ def _branches(repo: str) -> BranchLookup:
     empty-after-timeout/transport failure means no answer.
     """
     path = f"repos/vibeic/{repo}/branches?per_page=100"
-    cmd = ["gh", "api", "--paginate", path,
-           "--jq", '.[] | .name + " " + .commit.sha']
-    rc, out, err = _sh(cmd, timeout=180)
+    rc, out, err = github_api_get(
+        path, paginate=True, jq='.[] | .name + " " + .commit.sha', timeout=180)
     if rc != 0:
         detail = (err or out or f"gh exited {rc}").strip()
         return BranchLookup(
@@ -532,9 +583,8 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     is to leave a pin alone and say so. It must stay reachable, but it must not
     be reached by the branches this whole system exists to ship.
     """
-    meta_rc, meta_out, _meta_err = _sh(
-        ["gh", "api", f"repos/vibeic/{repo}",
-         "--jq", ".parent.full_name // empty"], timeout=120)
+    meta_rc, meta_out, _meta_err = github_api_get(
+        f"repos/vibeic/{repo}", jq=".parent.full_name // empty", timeout=120)
     meta = meta_out.strip() if meta_rc == 0 else ""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", meta):
         # gh may write an HTTP error document to stdout. It is not a repository
@@ -559,18 +609,18 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     if not meta:
         return None
     owner = meta.split("/")[0]
-    rc, out, _ = _sh(["gh", "api",
-                      f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
-                      "--jq", ".ahead_by"], timeout=120)
+    rc, out, _ = github_api_get(
+        f"repos/vibeic/{repo}/compare/{owner}:{branch}...vibeic:{branch}",
+        jq=".ahead_by", timeout=120)
     if rc == 0 and out.strip().isdigit():
         return int(out.strip()) > 0
     # The compare failed. Distinguish "upstream has no such branch" — which
     # answers the question rather than leaving it open — from a transport or
     # permission failure, which does not.
-    up_rc, _, up_err = _sh(["gh", "api", f"repos/{meta}/branches/{branch}",
-                            "--jq", ".name"], timeout=120)
-    ours_rc, _, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/branches/{branch}",
-                         "--jq", ".name"], timeout=120)
+    up_rc, _, up_err = github_api_get(
+        f"repos/{meta}/branches/{branch}", jq=".name", timeout=120)
+    ours_rc, _, _ = github_api_get(
+        f"repos/vibeic/{repo}/branches/{branch}", jq=".name", timeout=120)
     if ours_rc == 0 and _definitely_missing_branch(up_rc, up_err):
         return True
 
@@ -587,12 +637,11 @@ def branch_is_ours(repo: str, branch: str) -> Optional[bool]:
     # "No commit found for SHA" from AUCOHL/Fault, while upstream's own tip
     # `cf5509f` returns 200 there AND 200 in our fork. The negative control
     # matters — without it, "everything 422s" would look like the same answer.
-    tip_rc, tip, _ = _sh(["gh", "api", f"repos/vibeic/{repo}/commits/{branch}",
-                          "--jq", ".sha"], timeout=120)
+    tip_rc, tip, _ = github_api_get(
+        f"repos/vibeic/{repo}/commits/{branch}", jq=".sha", timeout=120)
     if tip_rc == 0 and tip.strip():
-        up_rc, up_tip, up_err = _sh(
-            ["gh", "api", f"repos/{meta}/commits/{tip.strip()}",
-             "--jq", ".sha"], timeout=120)
+        up_rc, up_tip, up_err = github_api_get(
+            f"repos/{meta}/commits/{tip.strip()}", jq=".sha", timeout=120)
         # A tip upstream HAS is a mirror tip: advancing the pin to it adopts an
         # upstream version, which is a decision, not a stale pin. That is the
         # #23/#25 finding and it must keep answering False.
