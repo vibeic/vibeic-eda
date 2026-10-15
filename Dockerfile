@@ -37,7 +37,7 @@ ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-2a7fcc4-3d3c76
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:66dedd1-12fe07
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:1722396-2552c4
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:90dddf7-5168a4
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:e405abc-9ade1e
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:f6d60e0-de73d5
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:b811e3e-6cd03f
 ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:d69ed4c-0f59d0
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-dbd689
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-26fb34
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9197ff6-1cf4ed
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3180ce5-1d5802
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=0fab6bb4dd25e38495ea91271a1452a362f5dca6  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=a9739be55fa5cefc57bcc753662ae946b925e0fd  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=31d9182533f9c2898fccda6fd7f35b77998b7b7b  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
@@ -168,7 +168,7 @@ ARG PYUVM_REF=8f757eae66f5621d77f6ac0eaae60a9d7de74694  # master tip. Advanced f
 ARG CACE_REPO=https://github.com/vibeic/cace.git
 ARG CACE_REF=0479f0eedd5e72d952e0e8fc4f9a0f1b7004d791  # branch main, the merge of vibeic/cace PR 2 over PR 1 (merge 9136e6d): fossi-foundation/cace main dedb5e0, version 2.13.0, plus .spice-template substitution and the netlist/schematic/NAME.spice fallback (PR 1), plus the rcx fix that drops split substrate-net nodes from the extracted port list and refuses a netlist whose ports still differ from the schematic (PR 2). Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
-ARG SBY_REF=28d59902b0774c81d68df3c27578dc43b187addb  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
+ARG SBY_REF=aaaca9b63411c479070fa3e4e2f3ed1fdd31ae55  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone ${COCOTB_COVERAGE_REPO}  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone ${PYUVM_REPO}            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
