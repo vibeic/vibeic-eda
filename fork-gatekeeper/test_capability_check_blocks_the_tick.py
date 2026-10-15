@@ -156,8 +156,63 @@ def test_zero_closure_exit_without_terminal_evidence_blocks_release(tmp_path):
     script, env = _fleet(tmp_path, OK)
     _stub(script.parent / "vendored_dependency_closure.py", OK)
     p = _authorized_tick(script, env)
-    assert p.returncode == 9, p.stdout[-3000:]
+    assert p.returncode == 10, p.stdout[-3000:]
     assert "zero exit lacked an exact complete sidecar" in p.stdout
+
+
+@pytest.mark.parametrize("closure_rc,terminal", [(0, True), (1, True), (2, True), (0, False)])
+def test_closure_result_keeps_ai_authority_and_reaches_alert_consumer(
+        tmp_path, monkeypatch, closure_rc, terminal):
+    """Run the real producer, outer wrapper and alert decision in sequence.
+
+    External work is stubbed; no image is built and the notifier cannot publish.
+    An authorized tick blocked on closure must retain its distinct failure,
+    while a complete closure remains quiet. Real AI refusal stays covered by
+    test_ai_release_authorization_gate's separate exit-9 control.
+    """
+    import check_release_failed as alert
+    from test_ai_release_authorization_gate import _shell_fleet
+
+    script, env = _fleet(tmp_path / "producer", OK)
+    if terminal:
+        status = "complete" if closure_rc == 0 else "needs_human" if closure_rc == 1 else "unmeasured"
+        body = CLOSURE_OK.replace('"status": "complete"', f'"status": "{status}"')
+        body += f"\nraise SystemExit({closure_rc})\n"
+    else:
+        body = OK
+    _stub(script.parent / "vendored_dependency_closure.py", body)
+    _stub(script.parent / "daily_release.py", '''#!/usr/bin/env python3
+import os
+from pathlib import Path
+Path(os.environ["GK_STATE_DIR"], "candidate-constructed").write_text("called")
+''')
+    produced = _authorized_tick(script, env)
+    blocked = closure_rc != 0 or not terminal
+    assert (Path(env["GK_STATE_DIR"]) / "candidate-constructed").exists() is (not blocked)
+
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    wrapper, outer_env, state = _shell_fleet(consumer, "verified")
+    _stub(wrapper.parent / "run_tick.sh", f"#!/usr/bin/env bash\nexit {produced.returncode}\n")
+    result = subprocess.run(["bash", str(wrapper)], env=outer_env, capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 1  # This fixture deliberately retains SIX=1.
+    captured = json.loads((state / "ll-captured.json").read_text())
+    assert captured["tick_state"] == "ran", captured
+    assert captured["ai"]["status"] == "authorized"
+    assert produced.returncode == (10 if blocked else 0)
+    assert "forced NORECORD" not in (state / "daily_0530.log").read_text()
+
+    escalations = []
+    def notify(summary, body, **kwargs):
+        escalations.append((summary, body, kwargs))
+        return True, "captured at the external notification boundary"
+    monkeypatch.setattr(alert, "_default_escalate", notify)
+    alert_rc = alert.main(["--tick-exit", str(produced.returncode), "--tick-state",
+                           captured["tick_state"], "--round-at", "2026-01-01T05:30:00+00:00",
+                           "--release-json", str(state / "no-release.json")])
+    assert alert_rc == (alert.RC_ESCALATED if blocked else alert.RC_OK)
+    assert len(escalations) == int(blocked)
 
 
 def test_a_lost_capability_stops_the_round(tmp_path):
