@@ -1135,7 +1135,9 @@ rc=$?
 [ "${selftest_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=8
 # A child fork that did not reach its host gitlink is the missing delivery hop
 # between merge and release.  Keep its typed failure distinct from a merge
-# conflict and from a host self-check failure.
-[ "${vendored_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=9
+# conflict and from a host self-check failure. Exit 9 is reserved for rejected
+# AI authorization: run_0530 maps it to NOT CHECKED and suppresses release alerts.
+# Closure failures are blocking outcomes of an authorized tick, so use exit 10.
+[ "${vendored_rc:-0}" != "0" ] && [ "${rc}" = "0" ] && rc=10
 log "[done] gatekeeper tick exit ${rc}"
 exit ${rc}
