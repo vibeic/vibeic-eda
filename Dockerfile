@@ -30,17 +30,17 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:beb6cee-0dcaee
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:ed90fea-de47f0
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:b560caf-dff33f
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:ce18972-7e6b65
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-2a7fcc4-3d3c76
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:cec3b5a-bfeefb
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:66dedd1-12fe07
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:1722396-2552c4
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:02bb7b1-30ef6f
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:da24a7f-7de0b1
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:f6d60e0-de73d5
-ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:d76e6cc-31e800
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:fd809bc-3835c1
+ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:b811e3e-6cd03f
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:d69ed4c-0f59d0
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
@@ -85,8 +85,8 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-224f19
-ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9e5d726-9e884c
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-dbd689
+ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:9197ff6-1cf4ed
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:3180ce5-1d5802
 ARG IMG_FASTERCAP=ghcr.io/vibeic/eda-tool-fastercap:afca8f5-627132d-de03ffe-be0c46
@@ -143,7 +143,7 @@ FROM ${IMG_FASTERCAP} AS img-fastercap
 # ---------------------------------------------------------------------------
 FROM alpine/git AS tb-src
 ARG COCOTB_REPO=https://github.com/vibeic/cocotb.git
-ARG COCOTB_REF=fba40ef0d8746a0555515eb23dc6a5a0cbef4299  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
+ARG COCOTB_REF=0fab6bb4dd25e38495ea91271a1452a362f5dca6  # branch master -- the feature branch this used to track was deleted, leaving the pin reachable from NO branch, so git could garbage-collect the commit the image builds from. master holds the identical tree (0 file diff, measured): hygiene, not a content change.
 ARG COCOTB_COVERAGE_REPO=https://github.com/vibeic/cocotb-coverage.git
 ARG COCOTB_COVERAGE_REF=31d9182533f9c2898fccda6fd7f35b77998b7b7b  # branch master -- vibeic/integration (V15 crv scalability + V36 rank + V10/V11/V35 bins-closure) is merged into master, which holds the identical tree (0 file diff, measured). The image ships our mainline, not a feature branch.
 ARG PYUVM_REPO=https://github.com/vibeic/pyuvm.git
@@ -168,7 +168,7 @@ ARG PYUVM_REF=8f757eae66f5621d77f6ac0eaae60a9d7de74694  # master tip. Advanced f
 ARG CACE_REPO=https://github.com/vibeic/cace.git
 ARG CACE_REF=0479f0eedd5e72d952e0e8fc4f9a0f1b7004d791  # branch main, the merge of vibeic/cace PR 2 over PR 1 (merge 9136e6d): fossi-foundation/cace main dedb5e0, version 2.13.0, plus .spice-template substitution and the netlist/schematic/NAME.spice fallback (PR 1), plus the rcx fix that drops split substrate-net nodes from the extracted port list and refuses a netlist whose ports still differ from the schematic (PR 2). Replaces the unforked base-image cace 2.9.0, which stops every .spice template at its TODO branch.
 ARG SBY_REPO=https://github.com/vibeic/sby.git
-ARG SBY_REF=2c2f04e96154995677fb604d697dc894ac680a69  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
+ARG SBY_REF=28d59902b0774c81d68df3c27578dc43b187addb  # branch main: V23/V24/V26/V30 + V42/V27/V19/V18/V28 + V39/V49/V46/V50/V38/V40, package layout, 11 version-drift reds fixed at root. (This comment used to name branch vibeic/integration, which does not exist on the fork -- measured: git ls-remote --heads lists only main and upstream's own branches. The pin has been main's tip.)
 RUN git clone ${COCOTB_REPO}           /tb/cocotb          && git -C /tb/cocotb          checkout ${COCOTB_REF} \
  && git clone ${COCOTB_COVERAGE_REPO}  /tb/cocotb-coverage && git -C /tb/cocotb-coverage checkout ${COCOTB_COVERAGE_REF} \
  && git clone ${PYUVM_REPO}            /tb/pyuvm           && git -C /tb/pyuvm           checkout ${PYUVM_REF} \
@@ -222,7 +222,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=6b305a712966be72d8908695c04398acdbe273ca  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=08ddc64f89c66b7e8398587d25bbaf55858d1fe5  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
