@@ -31,7 +31,7 @@
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
 ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:8bd304d-60df04
-ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:24dff7b-1db713
+ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:efadecd-8beec4
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-2a7fcc4-3d3c76
@@ -642,7 +642,7 @@ RUN set -e; \
 # spicebind with EQY_REF (test_the_two_pairings_agree_with_the_structural_parser).
 FROM ${BASE_IMAGE} AS eqy-build
 USER root
-ARG EQY_REF=7a92d8441aa442dd1b5543458d6f1060a8f85dd1
+ARG EQY_REF=30ac88205b4fd76272bb8f41dfc206b0467aa09c
 RUN --mount=type=bind,from=img-yosys,source=/foss/tools/yosys,target=/foss/tools/yosys \
     set -e; \
     git clone https://github.com/vibeic/eqy.git /src; \
