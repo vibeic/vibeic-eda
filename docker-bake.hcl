@@ -51,13 +51,13 @@ variable "CIEL_RECIPE" { default = "0b8eff" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "305a91" }
-variable "OPENROAD_RECIPE" { default = "6467cd" }
+variable "OPENROAD_RECIPE" { default = "574b19" }
 variable "YOSYS_RECIPE" { default = "889f1f" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
 variable "LVS_RECIPE" { default = "2a82d3" }
 variable "FASTERCAP_RECIPE" { default = "be0c46" }
-variable "IVERILOG_RECIPE" { default = "ceb9ec" }
+variable "IVERILOG_RECIPE" { default = "fe498e" }
 variable "KLAYOUT_RECIPE" { default = "2552c4" }
 variable "VERILATOR_RECIPE" { default = "804b6b" }
 variable "GTKWAVE_RECIPE" { default = "de73d5" }
@@ -74,7 +74,7 @@ variable "SV_ELAB_RECIPE" { default = "896573" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "8b80bafa2e4e7f462dcbb8092afdade9aa491b3e" }
+variable "OPENROAD_REF"    { default = "b4ff0450c897c278359fcfb73ac1ded220b50019" }
 variable "YOSYS_REF"       { default = "bc4441ba1b038ef6774a2e2a6a1106770fa92791" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
@@ -88,7 +88,7 @@ variable "NETGEN_REF"      { default = "bb7c2da55b0582be7a89c383fac2dd2dcb7a089f
 variable "FASTERCAP_REF"   { default = "afca8f5e55bbc8e19555f65fc29962fb475c8ebb" }
 variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914" }
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
-variable "IVERILOG_REF"    { default = "84055e10f1ab2b1bae708fc596df623f79e34ded" }
+variable "IVERILOG_REF"    { default = "e3d64588d20122fb38b1060f993e3fdf130fb5aa" }
 variable "KLAYOUT_REF"     { default = "17223964c28cf7427da9514d3c2c0bc448ce743e" }
 variable "VERILATOR_REF"   { default = "a94dd35404399352be480a1f0d68bd4fdffa9307" }
 variable "GTKWAVE_REF" { default = "f6d60e01df5bf39d2c9ba46a7b9979cf8ff891cb" }
