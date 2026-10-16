@@ -8,6 +8,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from urllib.parse import quote
 
 import pytest
 
@@ -19,6 +20,13 @@ import daily_merge as M  # noqa: E402
 
 PIN = "a" * 40
 ORIGIN_TIP = "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def no_network_retry_sleep(monkeypatch):
+    # Both the git probe and shared GitHub GET helper use the time module.
+    # Tests still observe every request without waiting through real backoff.
+    monkeypatch.setattr(M.time, "sleep", lambda _seconds: None)
 
 
 def _declared(monkeypatch, branch="master"):
@@ -234,6 +242,118 @@ def test_every_pinned_fork_is_registered():
     assert not missing, (
         f"pinned by the build but not in FORKS.json: {missing} -- add an entry "
         "with its branch and upstream, or daily_merge cannot merge it")
+
+
+def _real_pinned_registry_cases():
+    """Use the checked-in build pins and branch registry, not a parallel list."""
+    pins = M.build_branches(HERE.parent)
+    declarations = {
+        entry["tool"]: entry["branch"]
+        for entry in M._forks_json()["forks"]
+    }
+    cases = [
+        pytest.param(repo, pin, declarations[repo], id=repo)
+        for repo, pin in sorted(pins.items()) if pin
+    ]
+    assert cases, "the real build-pin corpus must not be empty"
+    return cases
+
+
+@pytest.mark.parametrize("repo,pin,declared", _real_pinned_registry_cases())
+@pytest.mark.parametrize("fails_at", ["branches", "compare"])
+def test_real_pin_corpus_recovers_truncated_get_on_declared_branch(
+        monkeypatch, repo, pin, declared, fails_at):
+    """Every real build line survives a blip without changing branch identity."""
+    calls = []
+    failed_endpoint_calls = []
+    tip = "f" * 40 if pin != "f" * 40 else "e" * 40
+    branch_path = f"repos/vibeic/{repo}/branches?per_page=100"
+    compare_path = (f"repos/vibeic/{repo}/compare/"
+                    f"{quote(pin, safe='')}...{quote(declared, safe='')}")
+
+    def answer(cmd, timeout=None, **_kwargs):
+        assert cmd[:2] == ["gh", "api"], "no non-read command is expected"
+        path = next(arg for arg in cmd if arg.startswith("repos/"))
+        assert path in (branch_path, compare_path), cmd
+        call = (list(cmd), timeout)
+        calls.append(call)
+        is_branch = path == branch_path
+        if is_branch == (fails_at == "branches"):
+            failed_endpoint_calls.append(call)
+            if len(failed_endpoint_calls) == 1:
+                # Even plausible output is not evidence after rc1. A partial
+                # listing omits the declared line; a failed compare appears
+                # to refute containment. Neither may become a verdict.
+                partial = (f"orphan-topic {pin}\n" if is_branch
+                           else json.dumps({"status": "diverged"}))
+                return 1, partial, "unexpected end of JSON input"
+        if is_branch:
+            return 0, f"orphan-topic {pin}\n{declared} {tip}\n", ""
+        return 0, json.dumps({"status": "ahead", "total_commits": 1}), ""
+
+    monkeypatch.setattr(M, "_sh", answer)
+    got = M.branch_at_pin(repo, pin)
+
+    assert got.status == M.BRANCH_FOUND, got
+    assert got.branch == declared, got
+    assert "contains pin" in got.detail
+    assert len(failed_endpoint_calls) == 2, failed_endpoint_calls
+    assert failed_endpoint_calls[0] == failed_endpoint_calls[1]
+    assert len(calls) == 3, calls
+    for cmd, timeout in calls:
+        assert cmd[-2:] == ["--method", "GET"]
+        if branch_path in cmd:
+            assert "--paginate" in cmd
+            assert cmd[cmd.index("--jq") + 1] == '.[] | .name + " " + .commit.sha'
+            assert timeout == 180
+        else:
+            assert timeout == 120
+
+
+def test_main_persistent_truncated_listing_is_unknown_and_never_merged(
+        tmp_path, monkeypatch, capsys):
+    """Exercise main plus the real lookup; complete-looking partial rows fail closed."""
+    pins = M.build_branches(HERE.parent)
+    repo, pin = next((name, sha) for name, sha in sorted(pins.items()) if sha)
+    declared = M._declared_branch(repo)
+    assert declared
+    calls = []
+    sleeps = []
+    record = tmp_path / "truncated-daily-merge.json"
+
+    def truncated(cmd, timeout=None, **_kwargs):
+        calls.append((list(cmd), timeout))
+        assert cmd[:2] == ["gh", "api"]
+        assert f"repos/vibeic/{repo}/branches?per_page=100" in cmd
+        # A complete-looking declared branch must still be discarded on rc1.
+        return 1, f"{declared} {pin}\n", "unexpected end of JSON input"
+
+    def must_not_merge(*_args, **_kwargs):
+        raise AssertionError("UNKNOWN branch evidence must not reach merge_one")
+
+    monkeypatch.setattr(M, "_sh", truncated)
+    monkeypatch.setattr(M, "merge_one", must_not_merge)
+    monkeypatch.setattr(M.time, "sleep", sleeps.append)
+    rc = M.main(["--eda-root", str(HERE.parent), "--only", repo,
+                 "--json", str(record)])
+
+    assert rc == M.RC_NEEDS_HUMAN
+    row, = json.loads(record.read_text())["forks"]
+    assert row["repo"] == repo
+    assert row["state"] == "BRANCH_LOOKUP_UNKNOWN", row
+    assert row["branch"] == ""
+    assert row["branch_lookup"] == {
+        "status": M.BRANCH_UNKNOWN, "rc": 1, "pin": pin,
+    }
+    assert row["took"] == 0 and row["checks"] == []
+    assert len(calls) == 3, calls
+    assert all(call == calls[0] for call in calls)
+    assert calls[0][0][-2:] == ["--method", "GET"]
+    assert calls[0][1] == 180
+    assert sleeps == [5.0, 5.0]
+    diagnostics = capsys.readouterr().err + row["detail"]
+    for number in (1, 2, 3):
+        assert f"attempt {number}/3" in diagnostics
 
 
 def test_unknown_is_a_named_json_row_and_blocks_the_round(tmp_path, monkeypatch):

@@ -98,6 +98,7 @@ from typing import Dict, List, Optional
 from urllib.parse import quote
 
 import progress_watchdog as watchdog
+from check_pins_current import github_api_get
 
 RC_OK, RC_NEEDS_HUMAN, RC_NOTHING = 0, 1, 2
 
@@ -244,9 +245,9 @@ def _live_head_with_transport_retry(src: Path):
 
 def _upstream_url(repo: str) -> str:
     """Upstream of a vibeic fork, asked of GitHub rather than hard-coded."""
-    rc, out, _ = _probe_with_transport_retry(
-        ["gh", "api", f"repos/vibeic/{repo}",
-         "--jq", ".parent.full_name // empty"], timeout=120)
+    rc, out, _ = github_api_get(
+        f"repos/vibeic/{repo}", jq=".parent.full_name // empty",
+        timeout=120, run=_sh)
     slug = out.strip() if rc == 0 else ""
     # `gh api` prints the ERROR BODY to stdout on failure, and `--jq` leaves it
     # there when the document has no such field. Without the rc check a missing
@@ -662,10 +663,12 @@ def branch_at_pin(repo: str, pin: str) -> BranchLookup:
     """
     # --paginate + per_page is load-bearing. The unpaginated endpoint returns
     # the first 30 branches, which previously made real build lines disappear.
-    rc, out, err = _probe_with_transport_retry(
-        ["gh", "api", "--paginate",
-         f"repos/vibeic/{repo}/branches?per_page=100",
-         "--jq", ".[] | .name + \" \" + .commit.sha"], timeout=180)
+    # Share the release reader's bounded GET retry: a truncated response is
+    # not a branch verdict, and a failed page must never supply partial rows.
+    rc, out, err = github_api_get(
+        f"repos/vibeic/{repo}/branches?per_page=100",
+        jq=".[] | .name + \" \" + .commit.sha", paginate=True,
+        timeout=180, run=_sh)
     if rc != 0:
         return BranchLookup(
             BRANCH_UNKNOWN, detail=_branch_lookup_error(repo, rc, out, err), rc=rc,
@@ -724,8 +727,7 @@ def branch_at_pin(repo: str, pin: str) -> BranchLookup:
 
     endpoint = (f"repos/vibeic/{repo}/compare/"
                 f"{quote(pin, safe='')}...{quote(declared, safe='')}")
-    crc, cout, cerr = _probe_with_transport_retry(
-        ["gh", "api", endpoint], timeout=120)
+    crc, cout, cerr = github_api_get(endpoint, timeout=120, run=_sh)
     if crc != 0:
         diagnostic = " ".join((cerr or cout).split())
         return BranchLookup(
