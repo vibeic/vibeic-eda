@@ -51,22 +51,22 @@ variable "CIEL_RECIPE" { default = "0b8eff" }
 variable "IHP_OPEN_PDK_REF"    { default = "22d7eb44e3ae509d93c338bd634bbb29dc85351d" }
 variable "IHP_SG13CMOS5L_REF" { default = "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e" }
 variable "IHP_OPEN_PDK_RECIPE" { default = "305a91" }
-variable "OPENROAD_RECIPE" { default = "60df04" }
-variable "YOSYS_RECIPE" { default = "8beec4" }
+variable "OPENROAD_RECIPE" { default = "dd056b" }
+variable "YOSYS_RECIPE" { default = "889f1f" }
 variable "SAT_SOLVERS_RECIPE" { default = "755999" }
 variable "NGSPICE_RECIPE" { default = "1aaa99" }
-variable "LVS_RECIPE" { default = "3d3c76" }
+variable "LVS_RECIPE" { default = "2a82d3" }
 variable "FASTERCAP_RECIPE" { default = "be0c46" }
 variable "IVERILOG_RECIPE" { default = "ceb9ec" }
 variable "KLAYOUT_RECIPE" { default = "2552c4" }
-variable "VERILATOR_RECIPE" { default = "58aef7" }
+variable "VERILATOR_RECIPE" { default = "804b6b" }
 variable "GTKWAVE_RECIPE" { default = "de73d5" }
-variable "XSCHEM_RECIPE" { default = "6cd03f" }
-variable "SLANG_RECIPE" { default = "0f59d0" }
-variable "XYCE_RECIPE" { default = "26fb34" }
-variable "YICES2_RECIPE" { default = "1cf4ed" }
+variable "XSCHEM_RECIPE" { default = "98d95f" }
+variable "SLANG_RECIPE" { default = "e6a074" }
+variable "XYCE_RECIPE" { default = "be0706" }
+variable "YICES2_RECIPE" { default = "6f2536" }
 variable "FAULT_RECIPE" { default = "dfe3bc" }
-variable "SV_ELAB_RECIPE" { default = "b00823" }
+variable "SV_ELAB_RECIPE" { default = "896573" }
 
 
 # One pin per tool: the commit of vibeic/<tool> that built the artefact.
@@ -74,13 +74,13 @@ variable "SV_ELAB_RECIPE" { default = "b00823" }
 # ARG defaults in Dockerfile — `tools/check_pins_agree.py` fails if they drift,
 # because two sources of truth for a version means one of them is wrong and
 # nobody can tell which.
-variable "OPENROAD_REF"    { default = "8bd304d968bf2fb3f4e7c1c21e8d3527353df026" }
-variable "YOSYS_REF"       { default = "efadecdd9268b1c168d0727de36158dafcd45f36" }
+variable "OPENROAD_REF"    { default = "bd861a5a1ce87962a82ecd0d0f17f5ca00a4e22b" }
+variable "YOSYS_REF"       { default = "bc4441ba1b038ef6774a2e2a6a1106770fa92791" }
 variable "KISSAT_REF"      { default = "8af8e56f174b778aef3aa45af9f739b2a5f492c2" }
 variable "CADICAL_REF"     { default = "c60730422e758ef1cebe7aeddf2dda31c996bf04" }
 variable "NGSPICE_REF"     { default = "60e13d3f7a2c59475c084df8f52076c9309e12d4" }
 variable "MAGIC_REF"       { default = "515b88cfbb61899f3e47eb76b81a1228f7a719bd" }
-variable "NETGEN_REF"      { default = "2a7fcc4fd579ac24b64c4d6fbc723b457f41420d" }
+variable "NETGEN_REF"      { default = "bb7c2da55b0582be7a89c383fac2dd2dcb7a089f" }
 # FasterCap is THREE sibling repos, not one: upstream's CMakeLists does
 # add_subdirectory("../LinAlgebra") and "../Geometry", so a build from only the
 # FasterCap checkout cannot configure. All three refs appear in the tag below, so
@@ -90,14 +90,14 @@ variable "LINALGEBRA_REF"  { default = "627132d70bfd7eadd727f930286938a5a01d9914
 variable "GEOMETRY_REF"    { default = "de03ffebfd5013b96102bd60f71c8fe8b73870e2" }
 variable "IVERILOG_REF"    { default = "84055e10f1ab2b1bae708fc596df623f79e34ded" }
 variable "KLAYOUT_REF"     { default = "17223964c28cf7427da9514d3c2c0bc448ce743e" }
-variable "VERILATOR_REF"   { default = "943c4d24a3448623718238f37e282f94f7aee8b5" }
+variable "VERILATOR_REF"   { default = "a94dd35404399352be480a1f0d68bd4fdffa9307" }
 variable "GTKWAVE_REF" { default = "f6d60e01df5bf39d2c9ba46a7b9979cf8ff891cb" }
-variable "XSCHEM_REF" { default = "b811e3ee1e9d52f7f92cc70021f928fcded5f1b1" }
+variable "XSCHEM_REF" { default = "57075189e391c3f8e395309f3450cdbf62443033" }
 variable "FAULT_REF" { default = "1e55e374c9086d4f861ee82ced45ab628e676c22" }
-variable "SLANG_REF" { default = "d69ed4cce64a5bcacfdb8dfe2ff7c4e382e1c61a" }
+variable "SLANG_REF" { default = "54c19b53a4cc1beb875c4529409d9314ba675b76" }
 variable "XYCE_REF" { default = "3fac5ca96deb2f18395668c5f613e8d50b9e8126" }
-variable "YICES2_REF" { default = "9197ff6df655e1d2d982fe74a45a202db183146c" }
-variable "SV_ELAB_REF" { default = "7871aaa09448386fe5b1f3d250a13364b4be1942" }
+variable "YICES2_REF" { default = "560f3b375840560a3decaa27c1d2f2e6503c0ab2" }
+variable "SV_ELAB_REF" { default = "bfca6e4ee0d9c38cc5e957db606eb159e752d56f" }
 
 function "short" {
   params = [ref]
