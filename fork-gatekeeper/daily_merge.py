@@ -24,11 +24,14 @@ own commits are carried by the merge and verified afterwards.
 
 WHAT IT REFUSES TO DO
 =====================
-A conflict is NOT resolved automatically. Merging everything is a policy the
+A conflicting hunk is NOT resolved automatically. Merging everything is a policy the
 owner set; guessing what a conflicting hunk should say is not, and a wrong
-resolution compiles. On conflict this ABORTS the merge, leaves the fork
-untouched, and reports the file list — that fork stays behind until a human
-resolves it, and the report says so rather than reporting success.
+resolution compiles. For pure gitlink conflicts, a missing child graph may be
+supplied from a registered local repository in the private worktree, then native
+Git retries the same two parent commits once. The selected child checkout must
+match Git's resulting gitlink before post-merge checks run. Unresolved conflicts
+or unverifiable preparation discard the candidate, leave the fork untouched,
+and report the original file list rather than reporting success.
 
 It never publishes a non-fast-forward candidate, never touches a build branch
 it did not start from, and never runs in the shared checkout's working tree.
@@ -771,6 +774,201 @@ def branch_for(repo: str, pin: str) -> Optional[str]:
     return branch_at_pin(repo, pin).branch
 
 
+def _retry_with_local_submodule_graph(wt: Path, repo: str, base: str,
+                                     incoming: str, merge_cmd: List[str]):
+    """Supply missing child graphs, never resolve a conflict ourselves.
+
+    A fresh parent worktree has no child repositories. Git consequently cannot
+    recognize that one conflicting gitlink already contains the other. Only
+    pure three-stage gitlink conflicts whose declared, registered child exists
+    locally qualify. No submodule URL is executed, no shared config is edited,
+    and no child ref is fetched. Native Git retries the SAME parent commits once;
+    a real divergence remains a conflict.
+    """
+    from discover_forks import submodule_repo
+
+    receipt = {"outcome": "not_prepared", "base": base, "incoming": incoming,
+               "commands": [], "children": []}
+
+    def run(args, cwd=wt, *, progress=False):
+        result = _sh(args, cwd, progress=progress)
+        receipt["commands"].append({"argv": args, "cwd": str(cwd),
+                                    "rc": result[0], "stdout": result[1],
+                                    "stderr": result[2]})
+        return result
+
+    def refuse(reason):
+        receipt["reason"] = reason
+        return None, receipt
+
+    def safe_path(path):
+        return (isinstance(path, str) and bool(path)
+                and all(part not in {"", ".", "..", ".git"}
+                        for part in path.split("/"))
+                and "\\" not in path and not any(ord(c) < 32 for c in path))
+
+    for ref, expected in (("HEAD", base), ("MERGE_HEAD", incoming)):
+        rc, out, _ = run(["git", "rev-parse", "--verify", ref])
+        if rc != 0 or out.strip() != expected:
+            return refuse("original merge no longer has the exact observed parent pair")
+    rc, out, _ = run(["git", "ls-files", "--unmerged", "-z"])
+    stages = {}
+    if rc != 0 or not out:
+        return refuse("no measurable unmerged gitlinks")
+    for record in out.rstrip("\0").split("\0"):
+        match = re.fullmatch(r"160000 ([0-9a-f]{40}) ([123])\t(.+)", record)
+        if not match or not safe_path(match[3]):
+            return refuse("not exclusively safe three-stage gitlink conflicts")
+        child_stages = stages.setdefault(match[3], {})
+        if match[2] in child_stages:
+            return refuse("duplicate conflict stage")
+        child_stages[match[2]] = match[1]
+    if any(set(s) != {"1", "2", "3"} for s in stages.values()):
+        return refuse("a gitlink lacks one of the three stages")
+
+    registry = _forks_json()
+    entries = registry.get("forks", []) if isinstance(registry, dict) else None
+    if not isinstance(entries, list):
+        return refuse("unreadable child registry")
+    registered = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return refuse("malformed child registry")
+        tool, upstream = entry.get("tool"), entry.get("upstream")
+        if not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", tool) \
+                or tool in {".", ".."}:
+            return refuse("unsafe child registry identity")
+        for slug in (f"vibeic/{tool}", upstream):
+            if isinstance(slug, str) and slug:
+                registered.setdefault(slug, set()).add(tool)
+
+    # Read both immutable trees, not a possibly conflicted worktree file. Git's
+    # parser preserves duplicate keys, unlike a last-value-wins ad-hoc parser.
+    declarations = []
+    for commit in (base, incoming):
+        rc, out, _ = run(["git", "config", f"--blob={commit}:.gitmodules",
+                          "--null", "--get-regexp", r"^submodule\..*\.(path|url)$"])
+        if rc != 0 or not out:
+            return refuse("cannot read immutable .gitmodules declarations")
+        sections = {}
+        for record in out.rstrip("\0").split("\0"):
+            key, sep, value = record.partition("\n")
+            match = re.fullmatch(r"submodule\.(.+)\.(path|url)", key)
+            if not sep or not match:
+                return refuse("malformed .gitmodules declaration")
+            sections.setdefault(match[1], {}).setdefault(match[2], set()).add(value)
+        mapping = {}
+        for name, fields in sections.items():
+            paths, urls = fields.get("path", {name}), fields.get("url", set())
+            if len(paths) != 1 or len(urls) != 1:
+                return refuse("ambiguous .gitmodules declaration")
+            path, url = next(iter(paths)), next(iter(urls))
+            if not safe_path(path):
+                return refuse("unsafe .gitmodules path")
+            if path in stages:
+                slug = submodule_repo(url, f"vibeic/{repo}")
+                tools = registered.get(slug, set())
+                if len(tools) != 1:
+                    return refuse("conflicting child is not uniquely registered")
+                mapping.setdefault(path, set()).update(tools)
+        if any(len(mapping.get(path, set())) != 1 for path in stages):
+            return refuse("missing or ambiguous conflicting child declaration")
+        declarations.append(mapping)
+
+    for path, child_stages in stages.items():
+        if declarations[0][path] != declarations[1][path]:
+            return refuse("the two parent trees name different child repositories")
+        tool = next(iter(declarations[0][path]))
+        source = FORKS_ROOT / tool
+        if source.is_symlink() or not source.is_dir() \
+                or source.resolve().parent != FORKS_ROOT.resolve():
+            return refuse("registered local child is missing or unsafe")
+        # Refuse shallow/partial graph sources rather than accidentally invoking
+        # a lazy network fetch or inventing an ancestry answer from a graft.
+        rc, out, _ = run(["git", "rev-parse", "--show-toplevel"], source)
+        if rc != 0 or Path(out.strip()).resolve() != source.resolve():
+            return refuse("local child is not its own working repository")
+        rc, out, _ = run(["git", "rev-parse", "--is-shallow-repository"], source)
+        if rc != 0 or out.strip() != "false":
+            return refuse("child graph is shallow or unmeasurable")
+        rc, out, _ = run(["git", "config", "--get-regexp",
+                          r"^(extensions\.partialclone|remote\..*\.promisor)$"], source)
+        if rc != 1 or out:
+            return refuse("child graph may require a network fetch")
+        for sha in child_stages.values():
+            if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], source)[0] != 0:
+                return refuse("exact child conflict object is unavailable")
+        target = wt
+        for part in path.split("/"):
+            target = target / part
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                return refuse("unsafe child target")
+        if target.exists() and any(target.iterdir()):
+            return refuse("child target is already populated")
+        receipt["children"].append({"path": path, "tool": tool,
+                                    "source": str(source), "stages": child_stages})
+
+    # No preparation writes until every conflicted child has passed preflight.
+    if run(["git", "merge", "--abort"])[0] != 0:
+        return refuse("could not abort original merge")
+    rc, out, _ = run(["git", "rev-parse", "HEAD"])
+    if rc != 0 or out.strip() != base:
+        return refuse("parent no longer at the exact observed base")
+    if run(["git", "diff", "--quiet"])[0] != 0 \
+            or run(["git", "diff", "--cached", "--quiet"])[0] != 0:
+        return refuse("parent is not clean after abort")
+    for child in receipt["children"]:
+        target = wt / child["path"]
+        rc, _, _ = run(["git", "clone", "--local", "--shared", "--no-checkout",
+                        "--no-recurse-submodules", "--", child["source"], str(target)],
+                       progress=True)
+        if rc != 0:
+            return refuse("private child clone failed")
+        if run(["git", "-c", "submodule.recurse=false", "checkout", "--detach",
+                "--quiet", child["stages"]["2"]], target, progress=True)[0] != 0:
+            return refuse("private child checkout failed")
+    rc, out, _ = run(["git", "status", "--porcelain", "--untracked-files=all"])
+    if rc != 0 or out:
+        return refuse("prepared parent is not clean")
+    rc, out, _ = run(["git", "rev-parse", "HEAD"])
+    if rc != 0 or out.strip() != base:
+        return refuse("prepared parent changed identity")
+    result = run(merge_cmd, progress=True)
+    receipt["outcome"] = "merged" if result[0] == 0 else "native_retry_failed"
+    if result[0] == 0:
+        # Git chooses the gitlink, but a non-recursive parent merge does NOT
+        # update an already populated child's working tree. Post-merge checks
+        # must consume the selected version, never the stage-2 checkout left
+        # over from preparation. This only materializes Git's native choice;
+        # it does not write the index, resolve content, or fetch a child ref.
+        def materialization_failed(reason, failed):
+            receipt.update(outcome="materialization_failed", reason=reason)
+            return (failed[0] or 1, failed[1], failed[2] or reason), receipt
+
+        for child in receipt["children"]:
+            selected = run(["git", "ls-tree", "-z", "HEAD", "--", child["path"]])
+            match = re.fullmatch(r"160000 commit ([0-9a-f]{40})\t"
+                                 + re.escape(child["path"]) + "\0", selected[1])
+            if selected[0] != 0 or not match or match[1] not in {
+                    child["stages"]["2"], child["stages"]["3"]}:
+                return materialization_failed("native selected gitlink is unmeasurable", selected)
+            sha = match[1]
+            child["selected_sha"] = sha
+            target = wt / child["path"]
+            checked = run(["git", "-c", "submodule.recurse=false", "checkout",
+                           "--detach", "--quiet", sha], target, progress=True)
+            if checked[0] != 0:
+                return materialization_failed("native selected child checkout failed", checked)
+            measured = run(["git", "rev-parse", "--verify", "HEAD"], target)
+            if measured[0] != 0 or measured[1].strip() != sha:
+                return materialization_failed("native selected child identity differs", measured)
+            child["materialized_sha"] = sha
+        clean = run(["git", "status", "--porcelain", "--untracked-files=all"])
+        if clean[0] != 0 or clean[1]:
+            return materialization_failed("materialized parent is not clean", clean)
+    return result, receipt
+
+
 def merge_one(repo: str, branch: str, dry: bool = False,
               checks: Optional[List[dict]] = None,
               expected_pin: str = "") -> dict:
@@ -1075,11 +1273,11 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                               f"{len(checks)} post-merge check(s) declared")
             return res
 
-        rc, _, err = _sh(["git", "-c", "user.name=vibeic-fork-gatekeeper",
+        merge_cmd = ["git", "-c", "user.name=vibeic-fork-gatekeeper",
                           "-c", "user.email=fork-gatekeeper@vibeic.ai",
                           "merge", observed_upstream_tip, "-m",
-                          f"Merge upstream/{up} into {branch} (daily, owner ruling 2026-07-29)"],
-                         wt, progress=True)
+                          f"Merge upstream/{up} into {branch} (daily, owner ruling 2026-07-29)"]
+        rc, merge_out, err = _sh(merge_cmd, wt, progress=True)
         if rc != 0:
             if rc == watchdog.RC_STALLED:
                 _sh(["git", "merge", "--abort"], wt)
@@ -1091,14 +1289,42 @@ def merge_one(repo: str, branch: str, dry: bool = False,
                 return res
             _, cf, _ = _sh(["git", "diff", "--name-only", "--diff-filter=U"], wt)
             res["conflicts"] = [c for c in cf.splitlines() if c.strip()]
-            # ABORT, do not guess. Merging everything is the owner's policy;
-            # resolving a conflicting hunk is a judgement, and a wrong one
-            # compiles.
-            _sh(["git", "merge", "--abort"], wt)
-            res.update(state="CONFLICT_NEEDS_HUMAN",
-                       detail=f"{len(res['conflicts'])} file(s) conflicted; merge aborted, "
-                              f"fork left at its previous tip")
-            return res
+            if res["conflicts"]:
+                try:
+                    retry, recovery = _retry_with_local_submodule_graph(
+                        wt, repo, observed_origin_tip, observed_upstream_tip, merge_cmd)
+                except OSError as exc:
+                    retry, recovery = None, {
+                        "outcome": "not_prepared", "reason": f"local I/O failure: {exc}",
+                        "base": observed_origin_tip, "incoming": observed_upstream_tip,
+                    }
+                recovery["initial_merge"] = {"argv": merge_cmd, "rc": rc,
+                                             "stdout": merge_out, "stderr": err,
+                                             "conflicts": res["conflicts"][:]}
+                res["submodule_graph_retry"] = recovery
+                if retry is not None:
+                    rc, merge_out, err = retry
+                    if rc == 0:
+                        res["conflicts"] = []
+                    elif rc == watchdog.RC_STALLED:
+                        _sh(["git", "merge", "--abort"], wt)
+                        res.update(
+                            state="MERGE_STALLED",
+                            detail="native submodule-graph retry/preparation made no output/"
+                                   "process-tree CPU progress; original conflict "
+                                   "evidence retained, no retry verdict formed, "
+                                   "and nothing was pushed",
+                        )
+                        return res
+            if rc != 0:
+                # ABORT, do not guess. Merging everything is the owner's policy;
+                # resolving a conflicting hunk is a judgement, and a wrong one
+                # compiles. Only a successful native retry can continue below.
+                _sh(["git", "merge", "--abort"], wt)
+                res.update(state="CONFLICT_NEEDS_HUMAN",
+                           detail=f"{len(res['conflicts'])} original file conflict(s); candidate discarded, "
+                                  f"fork left at its previous tip")
+                return res
 
         # Our own commits must still be REACHABLE. A merge that exits 0 having
         # dropped them is the failure this check exists for.
