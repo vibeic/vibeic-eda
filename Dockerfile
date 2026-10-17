@@ -503,7 +503,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=fd5c715c119abcadf94452362fa6dd8eb63072b1
+ARG LIBRELANE_REF=c3690f65bb8799072c53468fbc6f94fa9677357f
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
@@ -2229,9 +2229,13 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
              46426c9d996aa057d4d36089e7bf1105ad7aa17c \
              dacb849bd88e37bc9f6cf655c59e51776a05f28b \
              719f0e22a4987f460af797384e612e8983ca58f7 \
-             fd5c715c119abcadf94452362fa6dd8eb63072b1; do \
+             fd5c715c119abcadf94452362fa6dd8eb63072b1 \
+             c3690f65bb8799072c53468fbc6f94fa9677357f; do \
         git merge-base --is-ancestor $c HEAD \
             || { echo "FAIL: librelane $c is not on the pinned fork line" >&2; exit 1; }; \
+        if [ "$c" = c3690f65bb8799072c53468fbc6f94fa9677357f ]; then \
+            python3 -c 'import hashlib,sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.read_text(); assert hashlib.sha256(s.encode()).hexdigest() == "348fefc2e7a8917ee571c6cc14e091ecd347abb54dbecdc4bb0e80de841880e6"; old="    if (new[\"PDK\"].startswith(\"sky130\") or new[\"PDK\"].startswith(\"gf180mcu\")) and (\n        \"LIB\" not in config and \"CELL_LIBS\" not in config\n    ):"; new="    if (\n        new[\"PDK\"].startswith(\"sky130\") or new[\"PDK\"].startswith(\"gf180mcu\")\n    ) and \"LIB\" not in config:"; assert s.count(old) == 1; p.write_text(s.replace(old,new))' "$LLN/config/pdk_compat.py"; \
+        fi; \
         git show --format= $c -- librelane/ > /tmp/ll-$c.diff; \
         test -s /tmp/ll-$c.diff || { echo "FAIL: librelane $c has an empty diff" >&2; exit 1; }; \
         patch --no-backup-if-mismatch -p1 -d /usr/local/lib/python3.12/dist-packages < /tmp/ll-$c.diff; \
@@ -2239,6 +2243,7 @@ RUN --mount=type=bind,from=librelane-src,source=/src,target=/tmp/vibeic-librelan
             || { echo "FAIL: librelane $c did not apply (reverse check)" >&2; exit 1; }; \
         rm -f /tmp/ll-$c.diff; \
     done; \
+    echo '08430eb283933c5949e6282d466e2cf67de03490bc36961bfb30795e1ed807de  '"$LLN/config/pdk_compat.py" | sha256sum -c -; \
     grep -q 'inputs = \[DesignFormat.GDS, DesignFormat.DEF.mkOptional()\]' $LLN/steps/magic.py \
         || { echo "FAIL: WriteLEF DEF-optional (8ec5ecd) is not installed" >&2; exit 1; }; \
     grep -q 'cellname list exists $::env(DESIGN_NAME)' $LLN/scripts/magic/lef.tcl \
