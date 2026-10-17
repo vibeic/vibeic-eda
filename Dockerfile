@@ -30,23 +30,23 @@
 # on the first attempt — the IMG_* args below work for the same reason and I
 # put the new one next to the FROM it feeds instead of next to them.
 ARG BASE_IMAGE=hpretl/iic-osic-tools@sha256:7371bae55da486f492cc270ea6137c4fcf3b11971de7a4506a74f62be143537a
-ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:590f17d-d7c720
+ARG IMG_OPENROAD=ghcr.io/vibeic/eda-tool-openroad:e3981c1-961b45
 ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:77d6666-de98fb
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-bb7c2da-2a82d3
 ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:64d423d-4cc62e
-ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:1722396-2552c4
-ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:d0acf6d-532e95
+ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:451c032-55e1fc
+ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:ca4a362-3dda42
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:f6d60e0-de73d5
 ARG IMG_XSCHEM=ghcr.io/vibeic/eda-tool-xschem:6bbc0e3-378ed7
-ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:6ea0db6-211495
+ARG IMG_SLANG=ghcr.io/vibeic/eda-tool-slang:03acf53-de4636
 # vibeic-eda#60 — three forks the image used to take from the BASE image, so
 # our patches to them could not reach a user. Zero divergence from upstream
 # today, which is exactly why the wiring is cheap now and the first patch
 # would otherwise have shipped nothing.
 ARG IMG_SV2V=ghcr.io/vibeic/eda-tool-sv2v:493a88f-aa2ec6
-ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:d2af9cd-0b8eff
+ARG IMG_CIEL=ghcr.io/vibeic/eda-tool-ciel:e180507-12c22b
 ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 
 # open_pdks — a CONTENTS ASSERTION, not a pin. vibeic-eda#60, #74, #78, #79.
@@ -222,7 +222,7 @@ RUN mkdir -p /vibeic/provenance \
 #   (vibe-ic programs/pdk_registry.json, tapeout_capable=false).
 # ---------------------------------------------------------------------------
 FROM alpine/git AS nangate45-src
-ARG OPENROAD_FLOW_SCRIPTS_REF=c201f0eb5af49904d99d64675081680b3880b9cb  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
+ARG OPENROAD_FLOW_SCRIPTS_REF=7bcaf475c884e15f674e428aa04dbf92bd0426ed  # pinned; branch master -- upstream master tip at 2026-08-05 (was 2026-08-03; the fork was 8 behind and has no commits of ours, so it was fast-forwarded). Mirror with no commits of ours; bumped deliberately, not by daily_release, which correctly declines to move a pure mirror on its own.
 # We carry NO commits of our own on this repo, measured on the fork:
 #   git rev-list --count origin/master ^upstream/master   ->  0
 #   git rev-list --count upstream/master ^origin/master   ->  0
@@ -311,7 +311,7 @@ FROM alpine/git AS asap7-lvs-src
 # committing: `git fetch --depth 1 --filter=blob:none origin <sha>` is accepted,
 # and sparse-checkout still applies, so this keeps the shallow blobless sparse
 # clone the stage was written for.
-ARG ASAP7SC_REF=758ed93a0abf6d05d36fa3ce13ead9ce19f5dce9
+ARG ASAP7SC_REF=cbc1bc4cf91d07c28d2f514041f9cbf98e1b5d92
 ARG ASAP7PDK_REF=58d72c9d291e186a77468586ab0c43d8a21eda6a
 ARG ASAP7KL_REF=ef77f080381cab3993428492a3dcb41044c3f518
 RUN git init -q /a7sc \
@@ -503,7 +503,7 @@ RUN unset PYTHONPATH \
 # destination directories, so the mkdir was never needed.
 FROM ${BASE_IMAGE} AS librelane-src
 USER root
-ARG LIBRELANE_REF=c3690f65bb8799072c53468fbc6f94fa9677357f
+ARG LIBRELANE_REF=04c95b49e91ffa7e625d5c8583d7ce098db64688
 RUN set -e; \
     git clone https://github.com/vibeic/librelane.git /src; \
     cd /src; git checkout ${LIBRELANE_REF}; \
