@@ -35,7 +35,7 @@ ARG IMG_YOSYS=ghcr.io/vibeic/eda-tool-yosys:77d6666-de98fb
 ARG IMG_SAT_SOLVERS=ghcr.io/vibeic/eda-tool-sat-solvers:8af8e56-c607304-755999
 ARG IMG_NGSPICE=ghcr.io/vibeic/eda-tool-ngspice:60e13d3-1aaa99
 ARG IMG_LVS=ghcr.io/vibeic/eda-tool-lvs:515b88c-bb7c2da-2a82d3
-ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:c1260d7-e76478
+ARG IMG_IVERILOG=ghcr.io/vibeic/eda-tool-iverilog:1503f7b-890186
 ARG IMG_KLAYOUT=ghcr.io/vibeic/eda-tool-klayout:451c032-55e1fc
 ARG IMG_VERILATOR=ghcr.io/vibeic/eda-tool-verilator:ca4a362-3dda42
 ARG IMG_GTKWAVE=ghcr.io/vibeic/eda-tool-gtkwave:f6d60e0-de73d5
@@ -85,7 +85,7 @@ ARG IMG_IHP_OPEN_PDK=ghcr.io/vibeic/eda-tool-ihp-open-pdk:22d7eb4-2b1a5e9-305a91
 # remembering. See fork-gatekeeper/pin_kinds.py, which is the single authority
 # for that distinction and corroborates the name against the file's own text.
 ARG OPEN_PDKS_VOLUME_CONTENTS_SHA=b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0
-ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-a76232
+ARG IMG_XYCE=ghcr.io/vibeic/eda-tool-xyce:3fac5ca-5a2e73
 ARG IMG_YICES2=ghcr.io/vibeic/eda-tool-yices2:560f3b3-6f2536
 ARG IMG_FAULT=ghcr.io/vibeic/eda-tool-fault:1e55e37-dfe3bc
 ARG IMG_SV_ELAB=ghcr.io/vibeic/eda-tool-sv-elab:ec9f9d2-dc0350

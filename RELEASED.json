@@ -1,7 +1,7 @@
 {
   "_comment": "What the last PUBLISHED image was built from. A pin set not matching this has never been released, however current the pins look. The fingerprint is measured AFTER every edit this run made, so a later run can reproduce it from the tree that shipped.",
-  "version": "0.4.19",
-  "pins_fingerprint": "e63339b15256",
+  "version": "0.4.20",
+  "pins_fingerprint": "7c262d37aac2",
   "pins": {
     "ALIGN-pdk-sky130": "427b3b94242fdcf8009e418f6bbe14286fc71334",
     "ALIGN-public": "8d3cc2e9aa5511315203eb5cbfd00d2c88fdbd18",
@@ -13,7 +13,7 @@
     "LinAlgebra": "627132d70bfd7eadd727f930286938a5a01d9914",
     "OpenROAD": "5ceb05ee527dcc80f559da3ab4ceb4ce3d3b796d",
     "OpenROAD-flow-scripts": "7bcaf475c884e15f674e428aa04dbf92bd0426ed",
-    "Trilinos": "69359a4f9704b2916f3ed914dcbf1dccdf39c7d7",
+    "Trilinos": "d9141d2869536c22718e65adbeccaf9f59719f26",
     "Xyce": "3fac5ca96deb2f18395668c5f613e8d50b9e8126",
     "asap7_pdk_r1p7": "58d72c9d291e186a77468586ab0c43d8a21eda6a",
     "asap7sc7p5t_28": "cbc1bc4cf91d07c28d2f514041f9cbf98e1b5d92",
@@ -25,7 +25,7 @@
     "eqy": "30ac88205b4fd76272bb8f41dfc206b0467aa09c",
     "gtkwave": "f6d60e01df5bf39d2c9ba46a7b9979cf8ff891cb",
     "ihp-sg13cmos5l": "2b1a5e9b0f2294a796c7d0b15578b7743b24c85e",
-    "iverilog": "c1260d7aa7d2f4f544c9b70d05660a6d26f463b7",
+    "iverilog": "1503f7bdd91403c3c23750dd06cd877bb357bc4a",
     "kissat": "8af8e56f174b778aef3aa45af9f739b2a5f492c2",
     "klayout": "451c032f3aa6bb0e2e866054ee9ce2f5a81929da",
     "librelane": "04c95b49e91ffa7e625d5c8583d7ce098db64688",
@@ -44,13 +44,13 @@
     "yosys": "77d666644ae2651309d9f47891495454d1767dd0"
   },
   "recipes": {
-    "recipe:__compose__": "6491d5",
+    "recipe:__compose__": "dac14c",
     "recipe:ciel": "12c22b",
     "recipe:fastercap": "be0c46",
     "recipe:fault": "dfe3bc",
     "recipe:gtkwave": "de73d5",
     "recipe:ihp-open-pdk": "305a91",
-    "recipe:iverilog": "e76478",
+    "recipe:iverilog": "890186",
     "recipe:klayout": "55e1fc",
     "recipe:lvs": "2a82d3",
     "recipe:ngspice": "1aaa99",
@@ -61,9 +61,9 @@
     "recipe:sv2v": "aa2ec6",
     "recipe:verilator": "3dda42",
     "recipe:xschem": "378ed7",
-    "recipe:xyce": "a76232",
+    "recipe:xyce": "5a2e73",
     "recipe:yices2": "6f2536",
     "recipe:yosys": "de98fb"
   },
-  "manifest_identity": "4263f44d5ba32133b754d7afe82aef29737d9affd4fcab6783e6b631b483fe76"
+  "manifest_identity": "7f59a0a87b684a0a48353d09bd478fe83103b9ef37949345d9f13e48a384c348"
 }
